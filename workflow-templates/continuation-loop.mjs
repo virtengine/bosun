@@ -260,6 +260,18 @@ export const CONTINUATION_LOOP_TEMPLATE = {
       },
     }, { x: 980, y: 1950 }),
 
+    node("end-escalated-budget", "flow.end", "End: Escalated (Retry Limit)", {
+      status: "failed",
+      message: "Continuation loop escalated after exhausting stuck retry budget for task {{taskId}}.",
+      output: {
+        reason: "stuck_escalated_retry_budget",
+        taskId: "{{taskId}}",
+        event: "{{sessionStuckEvent.eventType}}",
+        stuckRetryCount: "{{stuckRetryCount}}",
+        maxStuckAutoRetries: "{{maxStuckAutoRetries}}",
+      },
+    }, { x: 760, y: 2160 }),
+
     node("end-paused", "flow.end", "End: Paused", {
       status: "completed",
       message: "Continuation loop paused due to session-stuck for task {{taskId}}.",
@@ -322,9 +334,9 @@ export const CONTINUATION_LOOP_TEMPLATE = {
     edge("stuck-retry-budget", "stuck-escalate-budget", { condition: "$output?.result !== true", port: "no" }),
     edge("stuck-retry", "increment-stuck-retry-count"),
     edge("increment-stuck-retry-count", "wait-next-turn"),
-    edge("stuck-escalate", "end-escalated"),
-    edge("stuck-escalate-budget", "end-escalated"),
-    edge("stuck-pause", "end-paused"),
+    edge("stuck-escalate", "end-escalated", { port: "default" }),
+    edge("stuck-escalate-budget", "end-escalated-budget", { port: "default" }),
+    edge("stuck-pause", "end-paused", { port: "default" }),
     edge("wait-next-turn", "increment-turn"),
     edge("wait-next-turn-no-stuck", "increment-turn-no-stuck"),
     edge("increment-turn", "poll-task", { backEdge: true, maxIterations: 500 }),

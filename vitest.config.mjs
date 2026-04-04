@@ -45,7 +45,7 @@ if (!process.env.BOSUN_TEST_CHILD_SPAWN_BLOCKED) {
 const detectedParallelism = detectParallelism();
 const windowsSuggestedMaxWorkers = Math.max(
   2,
-  Math.min(6, Math.floor(detectedParallelism / 2) || 2),
+  Math.min(4, Math.floor(detectedParallelism / 2) || 2),
 );
 const windowsSuggestedMinWorkers = Math.max(
   1,
@@ -129,9 +129,10 @@ export default defineConfig({
           ...sharedProjectTestConfig,
           name: "fast",
           pool: "threads",
-          isolate: process.env.BOSUN_VITEST_FAST_ISOLATE === "1",
+          isolate: process.env.BOSUN_VITEST_FAST_ISOLATE !== "0",
           include: ["**/*.test.mjs"],
           exclude: [...sharedTestExcludes, ...isolatedProjectSuites],
+          sequence: { groupOrder: 1 },
         },
       },
       {
@@ -142,6 +143,14 @@ export default defineConfig({
           isolate: true,
           include: isolatedProjectSuites,
           exclude: sharedTestExcludes,
+          // Isolated suites are memory-heavy (workflow-engine, agent-pool, etc.).
+          // Limit concurrency to prevent OOM when each fork can consume 2-4 GB.
+          maxWorkers: Math.min(
+            parseWorkerCount(process.env.BOSUN_VITEST_ISOLATED_MAX_WORKERS, 2),
+            defaultMaxWorkers ?? 2,
+          ),
+          minWorkers: 1,
+          sequence: { groupOrder: 2 },
         },
       },
     ],

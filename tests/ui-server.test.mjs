@@ -4346,7 +4346,9 @@ describeUiServer("ui-server mini app", () => {
       "utf8",
     );
 
-    const harnessTurnExecutor = vi.fn(async ({ stage }) => {
+    let harnessTurnExecutorCallCount = 0;
+    const harnessTurnExecutor = async ({ stage }) => {
+      harnessTurnExecutorCallCount += 1;
       if (stage.id === "plan") {
         return {
           success: false,
@@ -4360,14 +4362,14 @@ describeUiServer("ui-server mini app", () => {
         outcome: "success",
         status: "completed",
       };
-    });
+    };
     let releaseSlowStage = null;
     const slowStageEntered = new Promise((resolve) => {
       releaseSlowStage = resolve;
     });
     let slowRunId = null;
     mod.injectUiDependencies({
-      harnessTurnExecutor: vi.fn(async (context) => {
+      harnessTurnExecutor: async (context) => {
         if (context?.stage?.id === "plan" && String(context?.taskKey || "").includes("live-visibility")) {
           slowRunId = String(context?.taskKey || "").replace("live-visibility:", "").trim() || null;
           releaseSlowStage?.();
@@ -4379,7 +4381,7 @@ describeUiServer("ui-server mini app", () => {
           };
         }
         return harnessTurnExecutor(context);
-      }),
+      },
     });
 
     let server = null;
@@ -4459,7 +4461,7 @@ describeUiServer("ui-server mini app", () => {
           harnessRunId: runJson.runId,
         }),
       });
-      expect(harnessTurnExecutor).toHaveBeenCalledTimes(3);
+      expect(harnessTurnExecutorCallCount).toBe(3);
 
       const taskDetailRes = await fetch(
         `http://127.0.0.1:${port}/api/tasks/detail?taskId=${encodeURIComponent(taskId)}`,
@@ -4615,7 +4617,7 @@ describeUiServer("ui-server mini app", () => {
           harnessRunId: replayJson.runId,
         }),
       });
-      expect(harnessTurnExecutor).toHaveBeenCalledTimes(6);
+      expect(harnessTurnExecutorCallCount).toBe(6);
 
       const replayDetailRes = await fetch(
         `http://127.0.0.1:${port}/api/tasks/detail?taskId=${encodeURIComponent(taskId)}`,
@@ -4651,7 +4653,7 @@ describeUiServer("ui-server mini app", () => {
       expect(dryRunJson.result?.dryRun).toBe(true);
       expect(dryRunJson.result?.history?.every((entry) => entry.dryRun === true)).toBe(true);
       expect(existsSync(dryRunJson.runPath)).toBe(true);
-      expect(harnessTurnExecutor).toHaveBeenCalledTimes(6);
+      expect(harnessTurnExecutorCallCount).toBe(6);
     } finally {
       if (server) {
         await new Promise((resolve) => server.close(resolve));
@@ -8023,6 +8025,24 @@ describeUiServer("ui-server mini app", () => {
     process.env.TELEGRAM_UI_TUNNEL = "disabled";
 
     const cacheDir = mkdtempSync(join(tmpdir(), "bosun-ui-telemetry-runtime-"));
+    const sandboxLogDir = join(process.env.BOSUN_TEST_CACHE_DIR, "agent-work-logs");
+    mkdirSync(sandboxLogDir, { recursive: true });
+    writeFileSync(
+      join(sandboxLogDir, "agent-metrics.jsonl"),
+      `${JSON.stringify({
+        timestamp: "2026-04-05T03:00:00.000Z",
+        executor: "sandbox-executor",
+        metrics: {
+          success: true,
+          duration_ms: 1200,
+          total_tokens: 21,
+          prompt_tokens: 13,
+          completion_tokens: 8,
+          errors: 0,
+        },
+      })}\n`,
+      "utf8",
+    );
     vi.resetModules();
     const runtimeAccumulator = await import("../infra/runtime-accumulator.mjs");
     runtimeAccumulator._resetRuntimeAccumulatorForTests({ cacheDir });
@@ -8097,6 +8117,9 @@ describeUiServer("ui-server mini app", () => {
       }));
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
+      expect(payload.data.total).toBe(1);
+      expect(payload.data.success).toBe(1);
+      expect(payload.data.executors).toEqual({ "sandbox-executor": 1 });
       expect(payload.data.lifetimeTotals).toEqual(expect.objectContaining({
         attemptsCount: Number(baselineTotals.attemptsCount || 0) + 1,
         tokenCount: Number(baselineTotals.tokenCount || 0) + 1_500,

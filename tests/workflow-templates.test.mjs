@@ -1676,11 +1676,12 @@ describe("github template CLI compatibility", () => {
     expect(watchdogTemplate).toBeDefined();
     const fetchNode = watchdogTemplate.nodes.find((n) => n.id === "fetch-and-classify");
     expect(fetchNode).toBeDefined();
-    const cmd = fetchNode.config?.command || "";
+    const cmd = Array.isArray(fetchNode.config?.args) ? String(fetchNode.config.args[1] || "") : "";
     // The script is joined into a single line for `node -e "..."`.
     // Any `//` line comment would comment out all subsequent code on that line,
     // causing SyntaxError: Unexpected end of input.
     expect(cmd).not.toMatch(/\/\/(?!\*)/); // no `//` comments
+    expect(() => new Function(cmd)).not.toThrow();
   });
   it("PR watchdog queues auto-merge after review instead of waiting for a later pass", () => {
     const watchdogTemplate = getTemplate("template-bosun-pr-watchdog");

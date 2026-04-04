@@ -18272,6 +18272,24 @@ function getEffectiveRepoRoot() {
 }
 
 async function readCompletedSessionEntries(maxLines = 100_000) {
+  const explicitTestCacheDir = normalizeCandidatePath(process.env.BOSUN_TEST_CACHE_DIR);
+  if (explicitTestCacheDir && !normalizeCandidatePath(process.env.REPO_ROOT)) {
+    const sessionLogPath = resolve(explicitTestCacheDir, "session-accumulator.jsonl");
+    const entries = await readJsonlTail(sessionLogPath, maxLines, 50_000_000);
+    return {
+      sessionLogPath,
+      entries: entries.filter((entry) => {
+        if (String(entry?.type || "completed_session") !== "completed_session") return false;
+        const dur = Number(entry?.durationMs || 0);
+        const tok = Number(entry?.tokenCount || 0);
+        if (tok <= 0 && dur <= 100) return false;
+        const taskId = String(entry?.taskId || "");
+        if (/^\{\{.*\}\}$/.test(taskId)) return false;
+        return true;
+      }),
+    };
+  }
+
   // Check multiple candidate paths — repoRoot may be the monorepo root
   // while data lives under the bosun subdirectory.
   // When REPO_ROOT is not explicitly set, OR when repoRoot resolves to a
@@ -18636,7 +18654,13 @@ async function buildUsageAnalytics(days) {
 function resolveAgentWorkLogDir() {
   const explicitTestCacheDir = normalizeCandidatePath(process.env.BOSUN_TEST_CACHE_DIR);
   if (explicitTestCacheDir && !normalizeCandidatePath(process.env.REPO_ROOT)) {
-    return resolve(explicitTestCacheDir, "agent-work-logs");
+    const explicitLogDir = resolve(explicitTestCacheDir, "agent-work-logs");
+    try {
+      mkdirSync(explicitLogDir, { recursive: true });
+    } catch {
+      // Best effort: tests should still prefer the sandbox path even if creation fails.
+    }
+    return explicitLogDir;
   }
   // When REPO_ROOT is not explicitly set, OR when repoRoot resolves to a
   // workspace clone (e.g. .bosun/workspaces/<ws>/bosun), the module-relative

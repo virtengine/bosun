@@ -155,7 +155,7 @@ describe("continuation-loop template integration", () => {
     expect(ctx.getNodeOutput("emit-stuck")?.payload?.maxStuckAutoRetries).toBe(1);
     expect(ctx.getNodeOutput("stuck-retry-budget")?.result).toBe(false);
     expect(ctx.getNodeStatus("stuck-escalate-budget")).toBe("completed");
-    expect(ctx.getNodeStatus("end-escalated")).toBe("completed");
+    expect(ctx.getNodeStatus("end-escalated-budget")).toBe("completed");
     expect(launchEphemeralThread.mock.calls.length).toBeGreaterThanOrEqual(3);
   }, 15000);
   it("injects issue-advisor guidance into planner feedback for downstream continuation prompts", async () => {
@@ -187,4 +187,3 @@ describe("continuation-loop template integration", () => {
     expect(ctxLike.data._plannerFeedback.dagStateSummary.counts.failed).toBe(1);
   });
 });
-

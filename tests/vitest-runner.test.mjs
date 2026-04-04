@@ -202,7 +202,7 @@ describe("vitest-runner", () => {
     expect(source).toContain('fsModuleCache: process.env.BOSUN_VITEST_FS_CACHE !== "0"');
     expect(source).toContain('name: "fast"');
     expect(source).toContain('pool: "threads"');
-    expect(source).toContain('isolate: process.env.BOSUN_VITEST_FAST_ISOLATE === "1"');
+    expect(source).toContain('isolate: process.env.BOSUN_VITEST_FAST_ISOLATE !== "0"');
     expect(source).toContain('name: "isolated"');
     expect(source).toContain('pool: "forks"');
     expect(source).toContain('include: isolatedProjectSuites');

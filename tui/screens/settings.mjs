@@ -279,7 +279,12 @@ export default function SettingsScreen({
   );
 
   const contentWidth = Math.max(40, (stdout?.columns || 120) - 4);
-  const resolvedConnectionEndpoint = settingsState.connectionEndpoint || buildFallbackUrl("/").replace(/\/$/, "");
+  const resolvedConnectionEndpoint = settingsState.connectionEndpoint || buildTuiHttpUrl({
+    host: settingsState?.host || "127.0.0.1",
+    port: settingsState?.port || 3080,
+    path: "/",
+    protocol: settingsState?.protocol || "ws",
+  }).replace(/\/$/, "");
 
   return html`
     <${Box} flexDirection="column" paddingY=${1} paddingX=${1}>

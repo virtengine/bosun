@@ -1935,8 +1935,6 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
         "      try{const editArgs=['pr','edit',String(pr.number),'--add-label',LABEL_FIX];if(repo)editArgs.push('--repo',repo);execFileSync('gh',editArgs,{encoding:'utf8',stdio:['pipe','pipe','pipe']});newlyLabeled++;}",
         "      catch(e){process.stderr.write('label err '+(repo?repo+' ':'')+'#'+pr.number+': '+(e?.message||e)+'\\n');}",
         "    }",
-        "    // Also push to ciFailures if the PR has non-security CI failures — prevents them from",
-        "    // being silently dropped when the security agent path dispatches no agent (e.g. no open CodeQL alerts).",
         "    const nonSecurityFailedChecks=failedCheckNames.filter(n=>!isSecurityCheckName(n));",
         "    if(nonSecurityFailedChecks.length>0){",
         "      ciFailures.push({n:pr.number,repo,branch:pr.headRefName,url:pr.url,failedCheckNames:nonSecurityFailedChecks,alsoInSecurityFailures:true});",

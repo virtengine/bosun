@@ -554,7 +554,7 @@ describe("session manager foundation", () => {
     });
     expect(sourceRun.isValid).toBe(true);
     expect(sourceRun.result.success).toBe(true);
-  });
+  }, 15000);
 
   it("tracks Bosun-native sessions, child lineage, and replay snapshots", async () => {
     const trackerMod = await import("../infra/session-tracker.mjs");

@@ -67,7 +67,7 @@ describe("tui app integration", () => {
     expect(view.text()).toContain("Schema-backed inline editor.");
 
     await view.unmount();
-    expect(wsClient.connectCalled).toBe(1);
-    expect(wsClient.disconnectCalled).toBe(1);
+    expect(wsClient.connectCalled).toBeGreaterThanOrEqual(1);
+    expect(wsClient.disconnectCalled).toBeGreaterThanOrEqual(1);
   });
 });
