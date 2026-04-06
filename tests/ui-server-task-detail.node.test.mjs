@@ -61,3 +61,56 @@ test("preserves stored workflow session links while merging summary metadata wit
   assert.equal(payload.details?.runDetailCalls, 0);
   assert.equal(payload.details?.traceCalls, 0);
 });
+
+test("scopes /api/project-summary to the active workspace like /api/tasks", { timeout: 70000 }, async () => {
+  const payload = await runScenario("project-summary-scope", 65000);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.details?.ok, true);
+  assert.equal(payload.details?.taskCount, 3);
+  assert.equal(payload.details?.completedCount, 2);
+});
+
+test("blocks /api/tasks/start when can-start guard fails unless force override is set", { timeout: 70000 }, async () => {
+  const payload = await runScenario("guarded-start", 65000);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.details?.blockedStatus, 409);
+  assert.equal(payload.details?.blockedOk, false);
+  assert.equal(payload.details?.forcedStatus, 200);
+  assert.equal(payload.details?.forcedOk, true);
+  assert.equal(payload.details?.executeTaskCalls, 1);
+});
+
+test("reports guarded lifecycle start without dispatching execution", { timeout: 70000 }, async () => {
+  const payload = await runScenario("guarded-lifecycle", 65000);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.details?.ok, true);
+  assert.equal(payload.details?.started, false);
+  assert.equal(payload.details?.reason, "start_guard_blocked");
+  assert.equal(payload.details?.executeTaskCalls, 0);
+});
+
+test("includes blocked diagnostics on /api/tasks/detail and counts blocked tasks on /api/tasks", { timeout: 70000 }, async () => {
+  const payload = await runScenario("blocked-diagnostics", 65000);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.details?.detailOk, true);
+  assert.equal(payload.details?.listOk, true);
+  assert.equal(payload.details?.blockedCategory, "dependency_blocked");
+  assert.equal(payload.details?.stableCause, "api_error_cooldown");
+});
+
+test("reads task log diagnostics from bounded monitor-log tails on task detail", { timeout: 70000 }, async () => {
+  const payload = await runScenario("log-diagnostics", 65000);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.details?.detailOk, true);
+  assert.equal(payload.details?.listedStatus, "blocked");
+});
+
+test("classifies blocked task rows from workflow-run worktree failure evidence when local logs are quiet", { timeout: 70000 }, async () => {
+  const payload = await runScenario("workflow-run-evidence", 65000);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.details?.listOk, true);
+  assert.equal(payload.details?.category, "worktree_failure");
+  assert.ok(Number(payload.details?.worktreeFailureCount || 0) > 0);
+  assert.equal(payload.details?.runDetailCalls, 0);
+  assert.equal(payload.details?.traceCalls, 0);
+});

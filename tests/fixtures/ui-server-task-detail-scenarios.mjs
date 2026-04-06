@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { resetStateLedgerCache } from "../../lib/state-ledger-sqlite.mjs";
 import { _resetRuntimeAccumulatorForTests } from "../../infra/runtime-accumulator.mjs";
 import { _resetSingleton as resetSessionTrackerSingleton } from "../../infra/session-tracker.mjs";
@@ -342,12 +342,485 @@ async function runWorkflowMergeScenario() {
   }
 }
 
+async function runProjectSummaryScopeScenario() {
+  const root = setupRuntimeEnv("bosun-project-summary-workspace-script-");
+  const configPath = join(root, "bosun.config.json");
+  const wsAlphaRepo = join(root, "workspaces", "alpha", "virtengine");
+  const wsBetaRepo = join(root, "workspaces", "beta", "virtengine");
+  mkdirSync(join(wsAlphaRepo, ".git"), { recursive: true });
+  mkdirSync(join(wsBetaRepo, ".git"), { recursive: true });
+  writeFileSync(
+    configPath,
+    JSON.stringify(
+      {
+        $schema: "./bosun.schema.json",
+        activeWorkspace: "alpha",
+        workspaces: [
+          {
+            id: "alpha",
+            name: "Alpha Workspace",
+            path: join(root, "workspaces", "alpha"),
+            activeRepo: "virtengine",
+            repos: [{ name: "virtengine", path: wsAlphaRepo, primary: true }],
+          },
+          {
+            id: "beta",
+            name: "Beta Workspace",
+            path: join(root, "workspaces", "beta"),
+            activeRepo: "virtengine",
+            repos: [{ name: "virtengine", path: wsBetaRepo, primary: true }],
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const mod = await import("../../server/ui-server.mjs");
+  mod.injectUiDependencies({
+    taskStoreApi: {
+      listProjects: async () => [{ id: "internal", name: "Internal Task Store" }],
+      listTasks: async () => ([
+        { id: "task-alpha-done", title: "alpha done", status: "done", workspace: "alpha" },
+        { id: "task-alpha-merged", title: "alpha merged", status: "merged", workspace: "alpha" },
+        { id: "task-alpha-progress", title: "alpha working", status: "inprogress", workspace: "alpha" },
+        { id: "task-beta-done", title: "beta done", status: "done", workspace: "beta" },
+      ]),
+    },
+  });
+
+  let server = null;
+  try {
+    server = await mod.startTelegramUiServer({ port: 0, host: "127.0.0.1", skipInstanceLock: true, skipAutoOpen: true });
+    const port = server.address().port;
+    const summary = await fetch(`http://127.0.0.1:${port}/api/project-summary`).then((response) => response.json());
+    return {
+      ok: summary.ok === true
+        && summary.data?.taskCount === 3
+        && summary.data?.completedCount === 2,
+      details: {
+        ok: summary.ok === true,
+        taskCount: summary.data?.taskCount ?? null,
+        completedCount: summary.data?.completedCount ?? null,
+      },
+    };
+  } finally {
+    if (server) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await cleanupRuntimeEnv(root);
+  }
+}
+
+async function runGuardedStartScenario() {
+  const root = setupRuntimeEnv("bosun-guarded-start-script-");
+  process.env.EXECUTOR_MODE = "internal";
+  const mod = await import("../../server/ui-server.mjs");
+  let executeTaskCalls = 0;
+  mod.injectUiDependencies({
+    taskStoreApi: {
+      canStartTask: () => ({ canStart: false, reason: "dependency_blocked", blockedBy: [{ taskId: "dep-1" }] }),
+      appendTaskTimelineEvent: () => {},
+      addTaskComment: () => ({ id: "comment-1" }),
+    },
+    getInternalExecutor: () => ({
+      getStatus: () => ({ maxParallel: 4, activeSlots: 0, slots: [] }),
+      executeTask: async () => {
+        executeTaskCalls += 1;
+      },
+      isPaused: () => false,
+    }),
+  });
+
+  let server = null;
+  try {
+    server = await mod.startTelegramUiServer({ port: 0, host: "127.0.0.1", skipInstanceLock: true, skipAutoOpen: true });
+    const port = server.address().port;
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "guarded start task", description: "start guard" }),
+    }).then((response) => response.json());
+    const taskId = created.data.id;
+
+    const blockedResp = await fetch(`http://127.0.0.1:${port}/api/tasks/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ taskId }),
+    });
+    const blockedJson = await blockedResp.json();
+
+    const forcedResp = await fetch(`http://127.0.0.1:${port}/api/tasks/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ taskId, force: true }),
+    });
+    const forcedJson = await forcedResp.json();
+
+    return {
+      ok: created.ok === true
+        && blockedResp.status === 409
+        && blockedJson.ok === false
+        && blockedJson.canStart?.canStart === false
+        && forcedResp.status === 200
+        && forcedJson.ok === true
+        && forcedJson.canStart?.override === true
+        && executeTaskCalls === 1,
+      details: {
+        blockedStatus: blockedResp.status,
+        blockedOk: blockedJson.ok,
+        forcedStatus: forcedResp.status,
+        forcedOk: forcedJson.ok,
+        executeTaskCalls,
+      },
+    };
+  } finally {
+    if (server) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await cleanupRuntimeEnv(root);
+  }
+}
+
+async function runGuardedLifecycleScenario() {
+  const root = setupRuntimeEnv("bosun-guarded-lifecycle-script-");
+  process.env.EXECUTOR_MODE = "internal";
+  const mod = await import("../../server/ui-server.mjs");
+  let executeTaskCalls = 0;
+  mod.injectUiDependencies({
+    taskStoreApi: {
+      canStartTask: () => ({ canStart: false, reason: "dependency_blocked" }),
+      appendTaskTimelineEvent: () => {},
+    },
+    getInternalExecutor: () => ({
+      getStatus: () => ({ maxParallel: 3, activeSlots: 0, slots: [] }),
+      executeTask: async () => {
+        executeTaskCalls += 1;
+      },
+      isPaused: () => false,
+    }),
+  });
+
+  let server = null;
+  try {
+    server = await mod.startTelegramUiServer({ port: 0, host: "127.0.0.1", skipInstanceLock: true, skipAutoOpen: true });
+    const port = server.address().port;
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "guarded lifecycle", description: "lifecycle guard" }),
+    }).then((response) => response.json());
+
+    const update = await fetch(`http://127.0.0.1:${port}/api/tasks/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        taskId: created.data.id,
+        status: "inprogress",
+        lifecycleAction: "start",
+      }),
+    }).then((response) => response.json());
+
+    return {
+      ok: created.ok === true
+        && update.ok === true
+        && update.lifecycle?.startDispatch?.started === false
+        && update.lifecycle?.startDispatch?.reason === "start_guard_blocked"
+        && executeTaskCalls === 0,
+      details: {
+        ok: update.ok === true,
+        started: update.lifecycle?.startDispatch?.started,
+        reason: update.lifecycle?.startDispatch?.reason || null,
+        executeTaskCalls,
+      },
+    };
+  } finally {
+    if (server) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await cleanupRuntimeEnv(root);
+  }
+}
+
+async function runBlockedDiagnosticsScenario() {
+  const root = setupRuntimeEnv("bosun-blocked-diagnostics-script-");
+  const mod = await import("../../server/ui-server.mjs");
+  mod._testInjectWorkflowEngine(null, null);
+  let taskId = null;
+  mod.injectUiDependencies({
+    taskStoreApi: {
+      canStartTask: () => ({
+        canStart: false,
+        reason: "dependency_blocked",
+        blockedBy: [{ taskId: "dep-1", reason: "Waiting for dep-1" }],
+        blockingTaskIds: ["dep-1"],
+      }),
+    },
+    getAgentSupervisor: () => ({
+      getTaskDiagnostics: () => ({
+        taskId,
+        interventionCount: 2,
+        lastIntervention: "continue_signal",
+        lastDecision: { reason: "retry same thread" },
+        apiErrorRecovery: {
+          signature: "upstream timeout while polling",
+          continueAttempts: 2,
+          cooldownUntil: Date.now() + 60_000,
+        },
+      }),
+    }),
+  });
+
+  let server = null;
+  try {
+    server = await mod.startTelegramUiServer({ port: 0, host: "127.0.0.1", skipInstanceLock: true, skipAutoOpen: true });
+    const port = server.address().port;
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "blocked detail task",
+        description: "waiting on dependency",
+        status: "blocked",
+        blockedReason: "Dependency dep-1 is unresolved",
+      }),
+    }).then((response) => response.json());
+    taskId = created.data.id;
+
+    const detail = await fetch(`http://127.0.0.1:${port}/api/tasks/detail?taskId=${encodeURIComponent(taskId)}`).then((response) => response.json());
+    const list = await fetch(`http://127.0.0.1:${port}/api/tasks`).then((response) => response.json());
+    const listedTask = Array.isArray(list.data) ? list.data.find((entry) => entry.id === taskId) : null;
+
+    return {
+      ok: detail.ok === true
+        && detail.data?.canStart?.canStart === false
+        && detail.data?.blockedContext?.category === "dependency_blocked"
+        && Array.isArray(detail.data?.blockedContext?.blockedBy)
+        && detail.data.blockedContext.blockedBy[0]?.taskId === "dep-1"
+        && String(detail.data?.blockedContext?.summary || "").includes("Bosun will not dispatch this task")
+        && detail.data?.diagnostics?.stableCause?.code === "api_error_cooldown"
+        && detail.data?.diagnostics?.supervisor?.apiErrorRecovery?.continueAttempts === 2
+        && list.ok === true
+        && Number(list.statusCounts?.blocked || 0) >= 1
+        && listedTask?.canStart?.canStart === false
+        && listedTask?.blockedContext?.category === "dependency_blocked"
+        && listedTask?.diagnostics?.stableCause?.code === "api_error_cooldown",
+      details: {
+        detailOk: detail.ok === true,
+        listOk: list.ok === true,
+        blockedCategory: detail.data?.blockedContext?.category || null,
+        stableCause: detail.data?.diagnostics?.stableCause?.code || null,
+      },
+    };
+  } finally {
+    if (server) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await cleanupRuntimeEnv(root);
+  }
+}
+
+async function runLogDiagnosticsScenario() {
+  const root = setupRuntimeEnv("bosun-log-diagnostics-script-");
+  const mod = await import("../../server/ui-server.mjs");
+  mod._testInjectWorkflowEngine(null, null);
+  const logsDir = resolve(process.cwd(), ".bosun", "logs");
+  mkdirSync(logsDir, { recursive: true });
+  const monitorErrorPath = resolve(logsDir, "monitor-error.log");
+  const previousMonitorError = existsSync(monitorErrorPath)
+    ? readFileSync(monitorErrorPath, "utf8")
+    : null;
+
+  let server = null;
+  try {
+    server = await mod.startTelegramUiServer({ port: 0, host: "127.0.0.1", skipInstanceLock: true, skipAutoOpen: true });
+    const port = server.address().port;
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "blocked worktree task",
+        description: "collect recent worktree failure evidence",
+        status: "blocked",
+        branchName: "ve/task-log-tail-12345678",
+      }),
+    }).then((response) => response.json());
+    const taskId = created.data.id;
+
+    const filler = Array.from({ length: 8000 }, (_, index) => `2026-03-04T04:00:${String(index % 60).padStart(2, "0")}.000Z filler line ${index}`);
+    filler.push(
+      `2026-03-04T04:30:00.000Z [ERROR] Worktree acquisition failed for ${taskId} branch ve/task-log-tail-12345678`,
+      `2026-03-04T04:31:00.000Z [ERROR] Worktree refresh failed for existing branch ve/task-log-tail-12345678; managed worktree was removed after stale refresh state (${taskId})`,
+    );
+    writeFileSync(monitorErrorPath, `${filler.join("\n")}\n`, "utf8");
+
+    const detail = await fetch(`http://127.0.0.1:${port}/api/tasks/detail?taskId=${encodeURIComponent(taskId)}`).then((response) => response.json());
+    const list = await fetch(`http://127.0.0.1:${port}/api/tasks?search=${encodeURIComponent(taskId)}&pageSize=50`).then((response) => response.json());
+    const listedTask = Array.isArray(list.data) ? list.data.find((entry) => entry.id === taskId) : null;
+    const detailEvidence = Array.isArray(detail.data?.blockedContext?.logEvidence) ? detail.data.blockedContext.logEvidence : [];
+    const listEvidence = Array.isArray(listedTask?.blockedContext?.logEvidence) ? listedTask.blockedContext.logEvidence : [];
+
+    return {
+      ok: detail.ok === true
+        && listedTask?.id === taskId
+        && listedTask?.status === "blocked",
+      details: {
+        detailOk: detail.ok === true,
+        listedStatus: listedTask?.status || null,
+        evidenceCount: detailEvidence.length,
+      },
+    };
+  } finally {
+    if (previousMonitorError == null) {
+      rmSync(monitorErrorPath, { force: true });
+    } else {
+      writeFileSync(monitorErrorPath, previousMonitorError, "utf8");
+    }
+    if (server) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await cleanupRuntimeEnv(root);
+  }
+}
+
+async function runWorkflowRunEvidenceScenario() {
+  const root = setupRuntimeEnv("bosun-workflow-run-evidence-script-");
+  const mod = await import("../../server/ui-server.mjs");
+  let taskId = "";
+  let runDetailCalls = 0;
+  let traceCalls = 0;
+  const fakeEngine = {
+    getRunHistory: () => [
+      {
+        runId: "run-worktree-failure-1",
+        workflowId: "wf-worktree-failure-1",
+        workflowName: "Task Lifecycle",
+        status: "failed",
+        startedAt: "2026-03-31T15:43:05.000Z",
+        endedAt: "2026-03-31T15:43:23.000Z",
+        duration: 18000,
+        taskId,
+        taskIds: [taskId],
+        detail: {
+          data: { taskId },
+        },
+        meta: {
+          failureKind: "branch_refresh_conflict",
+          error: "Worktree refresh failed for existing branch task/example; managed worktree was removed after stale refresh state",
+          worktreeFailure: {
+            failureKind: "branch_refresh_conflict",
+            blockedReason: "Managed worktree refresh conflict detected; Bosun will retry automatically after cooldown.",
+            error: "Worktree refresh failed for existing branch task/example; managed worktree was removed after stale refresh state",
+            retryable: false,
+          },
+        },
+      },
+    ],
+    getRunDetail: (runId) => {
+      runDetailCalls += 1;
+      return {
+        runId,
+        workflowId: "wf-worktree-failure-1",
+        workflowName: "Task Lifecycle",
+        status: "failed",
+        endedAt: "2026-03-31T15:43:23.000Z",
+        detail: {
+          data: { taskId },
+        },
+        meta: {
+          failureKind: "branch_refresh_conflict",
+          error: "Worktree refresh failed for existing branch task/example; managed worktree was removed after stale refresh state",
+          worktreeFailure: {
+            failureKind: "branch_refresh_conflict",
+            blockedReason: "Managed worktree refresh conflict detected; Bosun will retry automatically after cooldown.",
+            error: "Worktree refresh failed for existing branch task/example; managed worktree was removed after stale refresh state",
+            retryable: false,
+          },
+        },
+      };
+    },
+    getTaskTraceEvents: () => {
+      traceCalls += 1;
+      return [];
+    },
+    registerTaskTraceHook: () => {},
+    load: () => {},
+  };
+  mod._testInjectWorkflowEngine({ WorkflowEngine: class MockWorkflowEngine {} }, fakeEngine);
+
+  let server = null;
+  try {
+    server = await mod.startTelegramUiServer({ port: 0, host: "127.0.0.1", skipInstanceLock: true, skipAutoOpen: true });
+    const port = server.address().port;
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "blocked workflow-run evidence task",
+        description: "derive blocked context from workflow-run metadata",
+        status: "blocked",
+        branchName: "task/example",
+      }),
+    }).then((response) => response.json());
+    taskId = created.data.id;
+    const taskStore = await import("../../task/task-store.mjs");
+    await taskStore.updateTask(taskId, {
+      status: "blocked",
+      branchName: "task/example",
+    });
+    if (typeof taskStore.waitForStoreWrites === "function") {
+      await taskStore.waitForStoreWrites();
+    }
+
+    const list = await fetch(`http://127.0.0.1:${port}/api/tasks?search=${encodeURIComponent(taskId)}&pageSize=50`).then((response) => response.json());
+    const listedTask = Array.isArray(list.data) ? list.data.find((entry) => entry.id === taskId) : null;
+    const workflowRunEvidence = Array.isArray(listedTask?.blockedContext?.workflowRunEvidence)
+      ? listedTask.blockedContext.workflowRunEvidence
+      : [];
+
+    return {
+      ok: list.ok === true
+        && listedTask?.status === "blocked"
+        && listedTask?.blockedContext?.category === "worktree_failure"
+        && Number(listedTask?.blockedContext?.worktreeFailureCount || 0) > 0
+        && workflowRunEvidence.some((entry) => (
+          entry?.source === "workflow-run"
+          && entry?.failureKind === "branch_refresh_conflict"
+          && String(entry?.message || "").includes("Worktree refresh failed for existing branch")
+        ))
+        && runDetailCalls === 0
+        && traceCalls === 0,
+      details: {
+        listOk: list.ok === true,
+        category: listedTask?.blockedContext?.category || null,
+        worktreeFailureCount: listedTask?.blockedContext?.worktreeFailureCount || 0,
+        runDetailCalls,
+        traceCalls,
+      },
+    };
+  } finally {
+    if (server) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    mod._testInjectWorkflowEngine(null, null);
+    await cleanupRuntimeEnv(root);
+  }
+}
+
 const scenario = String(process.argv[2] || "").trim();
 
 const handlers = {
   "replayable-task-runs": runReplayableTaskRunsScenario,
   "linked-session-backfill": runLinkedSessionBackfillScenario,
   "workflow-merge": runWorkflowMergeScenario,
+  "project-summary-scope": runProjectSummaryScopeScenario,
+  "guarded-start": runGuardedStartScenario,
+  "guarded-lifecycle": runGuardedLifecycleScenario,
+  "blocked-diagnostics": runBlockedDiagnosticsScenario,
+  "log-diagnostics": runLogDiagnosticsScenario,
+  "workflow-run-evidence": runWorkflowRunEvidenceScenario,
 };
 
 if (!Object.prototype.hasOwnProperty.call(handlers, scenario)) {
