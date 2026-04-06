@@ -140,14 +140,50 @@ describe("vitest-runner", () => {
 
   it("builds full-suite vitest batches without unsupported minWorkers flags", () => {
     expect(
-      buildVitestBatchArgs(["tests/workflow-engine.test.mjs"], { maxWorkers: 1 }),
+      buildVitestBatchArgs(["tests/workflow-engine.test.mjs"], { maxWorkers: 1, project: "isolated" }),
     ).toEqual([
       "run",
       "--config",
       "vitest.config.mjs",
+      "--project",
+      "isolated",
       "--maxWorkers",
       "1",
       "tests/workflow-engine.test.mjs",
+    ]);
+  });
+
+  it("pins grouped and isolated suite batches to their matching Vitest projects", () => {
+    expect(
+      buildVitestBatchArgs(["tests/a.test.mjs", "tests/b.test.mjs"], { project: "fast" }),
+    ).toEqual([
+      "run",
+      "--config",
+      "vitest.config.mjs",
+      "--project",
+      "fast",
+      "tests/a.test.mjs",
+      "tests/b.test.mjs",
+    ]);
+    expect(
+      buildVitestBatchArgs(["tests/ui-server.test.mjs"], { project: "isolated" }),
+    ).toEqual([
+      "run",
+      "--config",
+      "vitest.config.mjs",
+      "--project",
+      "isolated",
+      "tests/ui-server.test.mjs",
+    ]);
+    expect(
+      buildVitestBatchArgs(["tests/gemini-shell.test.mjs"], { project: "fast" }),
+    ).toEqual([
+      "run",
+      "--config",
+      "vitest.config.mjs",
+      "--project",
+      "fast",
+      "tests/gemini-shell.test.mjs",
     ]);
   });
 
@@ -171,6 +207,8 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('BOSUN_PREPUSH_INCLUDE_HEAVY');
     expect(prePushHook).toContain('BOSUN_RUN_HEAVY_TESTS');
     expect(prePushHook).toContain('tests/workflow-templates-e2e.test.mjs)');
+    expect(prePushHook).toContain('tests/workflow-guaranteed.test.mjs');
+    expect(prePushHook).toContain('tests/ui-server.test.mjs');
     expect(prePushHook).toContain('deferring heavyweight local suites to CI/default full runs');
     expect(prePushHook).toContain('tests/*workflow*e2e*.test.mjs)');
     expect(prePushHook).toContain('tests/bosun-mcp-server.test.mjs|tests/ui-server*.test.mjs)');

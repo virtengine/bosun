@@ -366,6 +366,13 @@ should_include_deferred_local_suites() {
 is_deferred_local_suite() {
   local test_file="$1"
   case "$test_file" in
+    tests/ui-server.test.mjs|\
+    tests/workflow-engine.test.mjs|\
+    tests/workflow-guaranteed.test.mjs|\
+    tests/workflow-task-lifecycle.test.mjs|\
+    tests/workflow-templates.test.mjs|\
+    tests/agent-pool.test.mjs|\
+    tests/bosun-native-workflow-nodes.test.mjs|\
     tests/workflow-templates-e2e.test.mjs)
       return 0
       ;;

@@ -25,6 +25,17 @@ const DEFAULT_HEAVY_SUITES = [
   "tests/review-agent.test.mjs",
 ];
 
+const ISOLATED_PROJECT_SUITES = new Set([
+  "tests/ui-server.test.mjs",
+  "tests/workflow-engine.test.mjs",
+  "tests/workflow-guaranteed.test.mjs",
+  "tests/workflow-task-lifecycle.test.mjs",
+  "tests/workflow-templates.test.mjs",
+  "tests/agent-pool.test.mjs",
+  "tests/bosun-native-workflow-nodes.test.mjs",
+  "tests/workflow-templates-e2e.test.mjs",
+]);
+
 function shouldIncludeWorkflowGuaranteedSuite() {
   const explicit = String(process.env.BOSUN_VITEST_INCLUDE_GUARANTEED || "").trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(explicit)) return true;
@@ -78,9 +89,10 @@ export function buildVitestFullSuitePlan({ startDir = process.cwd() } = {}) {
   };
 }
 
-export function buildVitestBatchArgs(files, { maxWorkers } = {}) {
+export function buildVitestBatchArgs(files, { maxWorkers, project } = {}) {
   if (!Array.isArray(files) || files.length === 0) return [];
   const args = ["run", "--config", "vitest.config.mjs"];
+  if (project) args.push("--project", String(project));
   if (maxWorkers) args.push("--maxWorkers", String(maxWorkers));
   args.push(...files);
   return args;
@@ -113,8 +125,12 @@ function resolveSuiteShardCount(suite) {
   return process.platform === "win32" ? 8 : 1;
 }
 
-function runBatch(files, { startDir = process.cwd(), maxWorkers, label, heapMb, envOverrides } = {}) {
-  const args = buildVitestBatchArgs(files, { maxWorkers });
+function resolveSuiteProject(suite) {
+  return ISOLATED_PROJECT_SUITES.has(suite) ? "isolated" : "fast";
+}
+
+function runBatch(files, { startDir = process.cwd(), maxWorkers, label, heapMb, envOverrides, project } = {}) {
+  const args = buildVitestBatchArgs(files, { maxWorkers, project });
   if (args.length === 0) return 0;
   if (label) {
     console.log(`[vitest-full-suite] ${label}: ${files.length} file(s)`);
@@ -182,6 +198,7 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
         maxWorkers: effectiveGroupedMaxWorkers,
         label: batchLabel,
         heapMb: Number.isFinite(groupedHeapMb) && groupedHeapMb >= 2048 ? groupedHeapMb : undefined,
+        project: "fast",
       });
       if (code !== 0) return code;
     }
@@ -196,6 +213,7 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
           maxWorkers: Number.isFinite(isolatedMaxWorkers) && isolatedMaxWorkers > 0 ? isolatedMaxWorkers : 1,
           label: `isolated suite ${suite} shard ${shard}/${suiteShardCount}`,
           heapMb: Number.isFinite(isolatedHeapMb) && isolatedHeapMb >= 2048 ? isolatedHeapMb : undefined,
+          project: resolveSuiteProject(suite),
           envOverrides: {
             VITEST_SHARD: String(shard),
             VITEST_TOTAL_SHARDS: String(suiteShardCount),
@@ -211,6 +229,7 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
       maxWorkers: Number.isFinite(isolatedMaxWorkers) && isolatedMaxWorkers > 0 ? isolatedMaxWorkers : 1,
       label: `isolated suite ${suite}`,
       heapMb: Number.isFinite(isolatedHeapMb) && isolatedHeapMb >= 2048 ? isolatedHeapMb : undefined,
+      project: resolveSuiteProject(suite),
       envOverrides: {
         VITEST_SHARD: null,
         VITEST_TOTAL_SHARDS: null,
