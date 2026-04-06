@@ -119,6 +119,7 @@
     "test:quick": "node tools/vitest-runner.mjs run",
     "test:vitest": "node --max-old-space-size=8192 tools/vitest-full-suite.mjs",
     "test:node": "node --no-warnings=ExperimentalWarning --import ./tests/node-test-bootstrap.mjs --test tests/*.node.test.mjs",
+    "test:workflow-guaranteed": "node --max-old-space-size=8192 tools/run-workflow-guaranteed-suite.mjs",
     "test:all": "npm run test:vitest && npm run test:node",
     "test:e2e": "node --no-warnings=ExperimentalWarning --import ./tests/node-test-bootstrap.mjs --test tests/portal-ui-smoke.node.test.mjs",
     "test:e2e:all": "node --no-warnings=ExperimentalWarning --import ./tests/node-test-bootstrap.mjs --test tests/portal-ui-smoke.node.test.mjs",

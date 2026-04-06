@@ -290,4 +290,79 @@ describe("shared-state scope locks", () => {
     expect(secondClaim.error).toBe("scope_lock_conflict");
     expect(await getClaim("task-2")).toBeNull();
   });
+
+  it("creates explicit execution, stream, and global scope snapshots with inherited state boundaries", async () => {
+    const {
+      createInheritedExecutionStateScopes,
+      getExecutionStateScopeEntry,
+      normalizeExecutionStateScopes,
+      updateExecutionStateScope,
+    } = await import("../workspace/shared-state-manager.mjs");
+
+    let scopes = normalizeExecutionStateScopes({
+      execution: {
+        current: {
+          delegationTransitionResults: {
+            "claim:parent": { type: "claim_task", status: "completed" },
+          },
+        },
+      },
+      stream: {
+        current: {
+          delegationAuditTrail: [{ type: "assign", taskId: "task-1" }],
+          delegationTransitionGuards: {
+            "assign:task-1": { status: "completed" },
+          },
+        },
+      },
+      global: {
+        current: {
+          workflowRootRunId: "run-root",
+          workflowSessionId: "task-1",
+        },
+      },
+    });
+
+    scopes = updateExecutionStateScope(scopes, "execution", (current) => ({
+      ...current,
+      localOnly: true,
+    }), { merge: true });
+
+    const inherited = createInheritedExecutionStateScopes(scopes, {
+      execution: {
+        inherited: {
+          parentExecution: getExecutionStateScopeEntry(scopes, "execution").current,
+        },
+        current: {
+          localOnly: false,
+        },
+      },
+      stream: {
+        current: {
+          delegationAuditTrail: [],
+          delegationTransitionGuards: {},
+        },
+      },
+      global: {
+        current: {
+          workflowSessionId: "task-1:child",
+        },
+        writable: false,
+      },
+    });
+
+    expect(getExecutionStateScopeEntry(inherited, "execution").inherited.parentExecution).toEqual(
+      expect.objectContaining({
+        delegationTransitionResults: {
+          "claim:parent": expect.objectContaining({ type: "claim_task" }),
+        },
+        localOnly: true,
+      }),
+    );
+    expect(getExecutionStateScopeEntry(inherited, "stream").inherited.delegationAuditTrail).toEqual([
+      expect.objectContaining({ type: "assign", taskId: "task-1" }),
+    ]);
+    expect(getExecutionStateScopeEntry(inherited, "global").writable).toBe(false);
+    expect(getExecutionStateScopeEntry(inherited, "global").current.workflowSessionId).toBe("task-1:child");
+  });
 });

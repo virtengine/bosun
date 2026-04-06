@@ -106,6 +106,7 @@ describe("vitest-runner", () => {
     expect(packageJson.scripts["check:native-call-parity"]).toContain("tools/vitest-runner.mjs");
     expect(packageJson.scripts["prepush:check"]).toContain("npm run test:all");
     expect(packageJson.scripts["test:node"]).toContain("--no-warnings=ExperimentalWarning");
+    expect(packageJson.scripts["test:workflow-guaranteed"]).toContain("tools/run-workflow-guaranteed-suite.mjs");
     expect(packageJson.scripts.test).not.toContain("node_modules/vitest/vitest.mjs");
     expect(packageJson.scripts["test:quick"]).not.toContain("node_modules/vitest/vitest.mjs");
     expect(packageJson.scripts["test:vitest"]).not.toContain("node_modules/vitest/vitest.mjs");
@@ -192,6 +193,7 @@ describe("vitest-runner", () => {
     expect(source).toContain('process.env.BOSUN_VITEST_MAX_WORKERS || (process.platform === "win32" ? "4" : "")');
     expect(source).toContain('process.env.BOSUN_VITEST_GROUP_BATCH_SIZE || (process.platform === "win32" ? "12" : "0")');
     expect(source).toContain('process.env.BOSUN_VITEST_WORKFLOW_GUARANTEED_SHARDS || ""');
+    expect(source).toContain('BOSUN_WORKFLOW_GUARANTEED_CHILD');
     expect(source).toContain('VITEST_TOTAL_SHARDS');
   });
 

@@ -414,6 +414,65 @@ function toTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function normalizeRuntimeStatus(value) {
+  const normalized = asText(value);
+  return normalized ? normalized.toLowerCase() : null;
+}
+
+function isTerminalRuntimeStatus(value) {
+  return new Set(["completed", "failed", "cancelled", "canceled", "aborted", "terminated", "skipped"]).has(
+    normalizeRuntimeStatus(value),
+  );
+}
+
+function summarizeLedgerForRestore(ledger = {}) {
+  const events = Array.isArray(ledger?.events) ? ledger.events : [];
+  const latestEvent = events.at(-1) || null;
+  const sessionIdentity = collectSessionIdentityFromLedger(ledger) || {};
+  const taskIdentity = collectTaskIdentityFromLedger(ledger) || {};
+  return cleanObject({
+    runId: ledger?.runId || null,
+    rootRunId: ledger?.rootRunId || ledger?.runId || null,
+    parentRunId: ledger?.parentRunId || null,
+    sessionId: ledger?.sessionId || sessionIdentity.sessionId || null,
+    rootSessionId: sessionIdentity.rootSessionId || ledger?.sessionId || null,
+    parentSessionId: sessionIdentity.parentSessionId || null,
+    threadId: ledger?.threadId || null,
+    workflowId: ledger?.workflowId || null,
+    workflowName: ledger?.workflowName || null,
+    runKind: ledger?.runKind || pickRunKind(ledger) || null,
+    taskId: taskIdentity.taskId || null,
+    rootTaskId: taskIdentity.rootTaskId || null,
+    parentTaskId: taskIdentity.parentTaskId || null,
+    taskTitle: taskIdentity.taskTitle || null,
+    status: ledger?.status || null,
+    startedAt: ledger?.startedAt || null,
+    endedAt: ledger?.endedAt || null,
+    updatedAt: ledger?.updatedAt || latestEvent?.timestamp || ledger?.startedAt || null,
+    eventCount: events.length,
+    latestEventType: latestEvent?.eventType || null,
+    latestEventAt: latestEvent?.timestamp || null,
+    active: Boolean(
+      normalizeRuntimeStatus(ledger?.status)
+      && !isTerminalRuntimeStatus(ledger?.status)
+      && normalizeRuntimeStatus(ledger?.status) !== "idle"
+    ),
+    terminal: isTerminalRuntimeStatus(ledger?.status),
+  });
+}
+
+function matchesRestoreFilter(summary = {}, filter = {}) {
+  const requestedRunId = asText(filter?.runId);
+  const requestedRootRunId = asText(filter?.rootRunId);
+  const requestedSessionId = asText(filter?.sessionId);
+  const requestedWorkflowId = asText(filter?.workflowId);
+  if (requestedRunId && summary.runId !== requestedRunId) return false;
+  if (requestedRootRunId && summary.rootRunId !== requestedRootRunId) return false;
+  if (requestedSessionId && summary.sessionId !== requestedSessionId) return false;
+  if (requestedWorkflowId && summary.workflowId !== requestedWorkflowId) return false;
+  return true;
+}
+
 function trimEdgeDashes(value) {
   let start = 0;
   let end = value.length;
@@ -1140,6 +1199,69 @@ export class WorkflowExecutionLedger {
         removed,
         changed,
       },
+    };
+  }
+
+  buildRestoreState(filter = {}) {
+    const requestedRunId = asText(filter?.runId);
+    const requestedRootRunId = asText(filter?.rootRunId);
+    const eventLimit = Number.isFinite(Number(filter?.eventLimit))
+      ? Math.max(1, Math.trunc(Number(filter.eventLimit)))
+      : 50;
+    let ledgers = requestedRunId
+      ? this.getRunFamily(requestedRunId)
+      : this.listRunLedgers();
+    const runSummaries = ledgers
+      .map((ledger) => summarizeLedgerForRestore(ledger))
+      .filter((summary) => matchesRestoreFilter(summary, {
+        ...filter,
+        ...(requestedRunId && !requestedRootRunId ? { rootRunId: null } : {}),
+      }))
+      .sort((left, right) => {
+        const delta = toTimestamp(right?.updatedAt || right?.latestEventAt) - toTimestamp(left?.updatedAt || left?.latestEventAt);
+        if (delta !== 0) return delta;
+        return String(left?.runId || "").localeCompare(String(right?.runId || ""));
+      });
+
+    if (requestedRootRunId) {
+      ledgers = ledgers.filter((ledger) => String(ledger?.rootRunId || ledger?.runId || "").trim() === requestedRootRunId);
+    } else if (runSummaries.length > 0) {
+      const allowed = new Set(runSummaries.map((entry) => entry.runId));
+      ledgers = ledgers.filter((ledger) => allowed.has(ledger?.runId));
+    }
+
+    const recentEvents = ledgers
+      .flatMap((ledger) => (Array.isArray(ledger?.events) ? ledger.events : []).map((event) => cleanObject({
+        ...event,
+        runId: event?.runId || ledger?.runId || null,
+        rootRunId: event?.rootRunId || ledger?.rootRunId || ledger?.runId || null,
+        parentRunId: event?.parentRunId || ledger?.parentRunId || null,
+        sessionId: event?.sessionId || ledger?.sessionId || null,
+        threadId: event?.threadId || ledger?.threadId || null,
+        workflowId: event?.workflowId || ledger?.workflowId || null,
+        workflowName: event?.workflowName || ledger?.workflowName || null,
+      })))
+      .sort((left, right) => {
+        const delta = toTimestamp(left?.timestamp) - toTimestamp(right?.timestamp);
+        if (delta !== 0) return delta;
+        return String(left?.id || "").localeCompare(String(right?.id || ""));
+      })
+      .slice(-eventLimit);
+
+    const latestRun = runSummaries[0] || null;
+    const latestEvent = recentEvents.at(-1) || null;
+    return {
+      source: "execution-ledger",
+      runCount: runSummaries.length,
+      activeRunCount: runSummaries.filter((entry) => entry.active).length,
+      terminalRunCount: runSummaries.filter((entry) => entry.terminal).length,
+      sessionIds: [...new Set(runSummaries.map((entry) => entry.sessionId).filter(Boolean))],
+      runIds: runSummaries.map((entry) => entry.runId).filter(Boolean),
+      status: latestRun?.status || latestEvent?.status || null,
+      latestRun,
+      latestEvent,
+      runs: runSummaries,
+      recentEvents,
     };
   }
 

@@ -4,6 +4,7 @@ import {
   beginWorkflowLinkedSessionExecution,
   resolveWorkflowSessionManager,
 } from "./harness-session-node.mjs";
+import { buildDelegatedExecutionStateSnapshot } from "./delegation-runtime.mjs";
 
 function normalizeText(value) {
   return String(value ?? "").trim();
@@ -97,6 +98,16 @@ export async function executeHarnessSubagentNode(node, ctx, engine, resolved = {
     ...(Array.isArray(ctx?.data?._delegatedSessionIds) ? ctx.data._delegatedSessionIds : []),
     childSessionId,
   ];
+  childInput._executionStateScopes = buildDelegatedExecutionStateSnapshot(ctx, {
+    workflowId,
+    nodeId: node?.id,
+    childSessionId,
+    parentSessionId,
+    rootSessionId: rootSessionId || parentSessionId || childSessionId,
+    parentRunId: ctx?.id || null,
+    rootRunId: ctx?.data?._workflowRootRunId || ctx?.id || null,
+    delegationDepth: childInput._workflowDelegationDepth,
+  });
 
   if (mode === "dispatch") {
     let dispatched;

@@ -5,10 +5,13 @@ import { describe, expect, it } from "vitest";
 import { WorkflowContext } from "../workflow/workflow-engine.mjs";
 import {
   appendDelegationAuditEvent,
+  buildDelegatedExecutionStateSnapshot,
   buildDelegationWatchdogDecision,
   extractDelegationGuardMap,
+  getExecutionStateScopeView,
   getDelegationAuditTrail,
   normalizeDelegationGuardMap,
+  setDelegationTransitionGuard,
 } from "../workflow/delegation-runtime.mjs";
 
 const workflowNodesSource = readFileSync(
@@ -141,5 +144,86 @@ describe("workflow harness boundaries", () => {
         },
       },
     })).toBeNull();
+  });
+
+  it("creates inherited execution-state snapshots for delegated child workflows", () => {
+    const parentCtx = new WorkflowContext({
+      _workflowSessionId: "task-parent",
+      _workflowRootSessionId: "task-parent",
+      _workflowParentSessionId: "task-parent",
+      _workflowRootRunId: "run-parent",
+      _workflowDelegationDepth: 0,
+      _delegatedSessionIds: ["task-parent"],
+      _delegationAuditTrail: [
+        {
+          type: "assign",
+          transitionKey: "assign:parent",
+          taskId: "task-parent",
+          at: 10,
+          timestamp: "2026-04-06T00:00:10.000Z",
+        },
+      ],
+      _delegationTransitionGuards: {
+        "assign:parent": {
+          transitionKey: "assign:parent",
+          status: "completed",
+        },
+      },
+    });
+    parentCtx.__workflowRuntimeState = {
+      delegationTransitionResults: {
+        "claim:parent": { type: "claim_task", status: "completed" },
+      },
+    };
+
+    const snapshot = buildDelegatedExecutionStateSnapshot(parentCtx, {
+      workflowId: "child-workflow",
+      nodeId: "delegate-node",
+      childSessionId: "task-parent:child",
+      parentSessionId: "task-parent",
+      rootSessionId: "task-parent",
+      parentRunId: "run-parent",
+      rootRunId: "run-parent",
+      delegationDepth: 1,
+    });
+
+    expect(snapshot.global.writable).toBe(false);
+    expect(snapshot.stream.inherited.delegationAuditTrail).toEqual([
+      expect.objectContaining({ type: "assign", taskId: "task-parent" }),
+    ]);
+    expect(snapshot.execution.inherited.parentExecution).toEqual(
+      expect.objectContaining({
+        delegationTransitionResults: {
+          "claim:parent": expect.objectContaining({ type: "claim_task" }),
+        },
+      }),
+    );
+
+    const childCtx = new WorkflowContext({
+      _executionStateScopes: snapshot,
+    });
+    appendDelegationAuditEvent(childCtx, {
+      type: "handoff-complete",
+      transitionKey: "handoff:child",
+      taskId: "task-parent",
+      at: 20,
+      timestamp: "2026-04-06T00:00:20.000Z",
+    });
+    setDelegationTransitionGuard(childCtx, "assign:child", {
+      transitionKey: "assign:child",
+      status: "queued",
+    });
+
+    expect(getExecutionStateScopeView(childCtx, "stream").delegationAuditTrail).toEqual([
+      expect.objectContaining({ type: "assign", taskId: "task-parent" }),
+      expect.objectContaining({ type: "handoff-complete", taskId: "task-parent" }),
+    ]);
+    expect(getExecutionStateScopeView(childCtx, "stream").delegationTransitionGuards).toEqual({
+      "assign:parent": expect.objectContaining({ status: "completed" }),
+      "assign:child": expect.objectContaining({ status: "queued" }),
+    });
+    expect(parentCtx.data._delegationAuditTrail).toEqual([
+      expect.objectContaining({ type: "assign", taskId: "task-parent" }),
+    ]);
   });
 });

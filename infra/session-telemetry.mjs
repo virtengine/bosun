@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
@@ -56,22 +55,6 @@ function isLikelyTestRuntime() {
   if (process.env.NODE_ENV === "test") return true;
   const argv = Array.isArray(process.argv) ? process.argv.join(" ").toLowerCase() : "";
   return argv.includes("vitest") || argv.includes("--test");
-}
-
-function readJsonLines(filePath) {
-  if (!existsSync(filePath)) return [];
-  return readFileSync(filePath, "utf8")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
 }
 
 function normalizeFilterTimestamp(value) {
@@ -157,7 +140,7 @@ export class HarnessObservabilitySpine {
     if (this._loaded) return;
     this._loaded = true;
     if (!this.persist) return;
-    this.runtime.load(readJsonLines(this.paths.eventsPath));
+    this.runtime.restoreFromDisk({ eventsPath: this.paths.eventsPath });
   }
 
   _ingest(event, options = {}) {

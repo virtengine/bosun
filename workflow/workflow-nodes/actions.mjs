@@ -28,6 +28,7 @@ import { buildWorkflowContractPromptBlock } from "../workflow-contract.mjs";
 import { executeHarnessSubagentNode } from "../harness-subagent-node.mjs";
 import { executeHarnessToolNode } from "../harness-tool-node.mjs";
 import {
+  getDelegationTransitionStore,
   getExistingDelegationTransition,
   persistDelegationTransitionGuard,
   recordDelegationAuditEvent,
@@ -2463,7 +2464,7 @@ registerNodeType("action.run_agent", {
             ["assign", node.id, candidate.id, taskIdForDelegate || "task"].join(":");
           const existingAssignTransition =
             getExistingDelegationTransition(ctx, assignTransitionKey) ||
-            engine?.__workflowRuntimeState?.delegationTransitionResults?.[assignTransitionKey] ||
+            getExistingDelegationTransition(engine, assignTransitionKey) ||
             (typeof ctx.getDelegationTransitionGuard === "function"
               ? ctx.getDelegationTransitionGuard(assignTransitionKey)
               : null);
@@ -2694,14 +2695,12 @@ registerNodeType("action.run_agent", {
             childRunId: subRun?.id || null,
             delegatedWorkflowId: candidate.id,
           });
-          engine.__workflowRuntimeState = engine.__workflowRuntimeState || {};
-          engine.__workflowRuntimeState.delegationTransitionResults = engine.__workflowRuntimeState.delegationTransitionResults || {};
-          engine.__workflowRuntimeState.delegationTransitionResults[assignTransitionKey] = {
+          setDelegationTransitionResult(engine, assignTransitionKey, {
             type: "run_agent_delegate",
             result: { ...delegateResult },
             childRunId: subRun?.id || null,
             delegatedWorkflowId: candidate.id,
-          };
+          });
           return delegateResult;
         }
       }
@@ -8021,9 +8020,7 @@ registerNodeType("action.claim_task", {
     }
 
     const runtimeState = getWorkflowRuntimeState(ctx);
-    if (!runtimeState.delegationTransitionResults || typeof runtimeState.delegationTransitionResults !== "object") {
-      runtimeState.delegationTransitionResults = {};
-    }
+    const transitionStore = getDelegationTransitionStore(ctx);
     const delegationTransitionType = String(cfgOrCtx(node, ctx, "delegationTransitionType") || "").trim();
     const delegationTransitionKey = String(cfgOrCtx(node, ctx, "delegationTransitionKey") || "").trim();
     const stableDefaultTransitionKey = [
@@ -8064,7 +8061,7 @@ registerNodeType("action.claim_task", {
     }
 
     const transition = idempotencyKey
-      ? (runtimeState.delegationTransitionResults[idempotencyKey] ||= {
+      ? (transitionStore[idempotencyKey] ||= {
           type: "claim_task",
           transitionKey: idempotencyKey,
           inFlightPromise: null,

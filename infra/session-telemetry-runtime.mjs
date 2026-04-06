@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -29,6 +30,18 @@ const DEFAULT_STATUS = Object.freeze({
   nativeMirrorQueuedEvents: 0,
   nativeMirrorFlushes: 0,
   nativeMirrorFailures: 0,
+  restoredFromDisk: false,
+  restoredEvents: 0,
+  lastRestoreAt: null,
+  lastRestoredEventAt: null,
+  liveSessions: 0,
+  liveRuns: 0,
+  activeSessions: 0,
+  activeRuns: 0,
+  latestSessionId: null,
+  latestRunId: null,
+  latestLiveStatus: null,
+  lastBufferedEventAt: null,
   lastEnqueueAt: null,
   lastDrainAt: null,
   lastPersistAt: null,
@@ -146,6 +159,39 @@ function createStatus(maxInMemoryEvents, maxPersistBatchEvents) {
   };
 }
 
+function asText(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function normalizeStatus(value) {
+  const normalized = asText(value);
+  return normalized ? normalized.toLowerCase() : null;
+}
+
+function isTerminalStatus(value) {
+  return new Set(["completed", "failed", "cancelled", "canceled", "aborted", "terminated", "skipped"]).has(
+    normalizeStatus(value),
+  );
+}
+
+function readJsonLines(filePath) {
+  if (!filePath || !existsSync(filePath)) return [];
+  return readFileSync(filePath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 export class HarnessTelemetryRuntime {
   constructor(options = {}) {
     this.persist = options.persist === true;
@@ -173,6 +219,31 @@ export class HarnessTelemetryRuntime {
     this.status = createStatus(this.maxInMemoryEvents, this.maxPersistBatchEvents);
   }
 
+  _syncProjectionStatus() {
+    const snapshot = typeof this.projector?.getSnapshot === "function"
+      ? this.projector.getSnapshot()
+      : {};
+    const sessions = Array.isArray(snapshot?.sessions) ? snapshot.sessions : [];
+    const runs = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
+    const latestSession = sessions[0] || null;
+    const latestRun = runs[0] || null;
+    const latestBufferedEvent = this.events.toArray().at(-1) || null;
+    this.status.liveSessions = sessions.length;
+    this.status.liveRuns = runs.length;
+    this.status.activeSessions = sessions.filter((entry) => {
+      const status = normalizeStatus(entry?.status);
+      return Boolean(status) && !isTerminalStatus(status) && status !== "idle";
+    }).length;
+    this.status.activeRuns = runs.filter((entry) => {
+      const status = normalizeStatus(entry?.status);
+      return Boolean(status) && !isTerminalStatus(status) && status !== "idle";
+    }).length;
+    this.status.latestSessionId = asText(latestSession?.sessionId) || null;
+    this.status.latestRunId = asText(latestRun?.runId) || null;
+    this.status.latestLiveStatus = normalizeStatus(latestSession?.status || latestRun?.status) || null;
+    this.status.lastBufferedEventAt = asText(latestBufferedEvent?.timestamp) || null;
+  }
+
   _appendEvent(normalized, { persist = false } = {}) {
     this.status.droppedEvents += this.events.push(normalized);
     this.status.inMemoryEvents = this.events.size;
@@ -194,12 +265,30 @@ export class HarnessTelemetryRuntime {
     this.status.nativeMirrorQueuedEvents = nativeQueuedEvents;
   }
 
-  load(entries = []) {
+  load(entries = [], options = {}) {
     for (const entry of entries) {
       this._appendEvent(entry, { persist: false });
     }
     this.flushForeground();
     this._scheduleNativeMirrorFlush();
+    if (options?.source === "disk") {
+      this.status.restoredFromDisk = true;
+      this.status.restoredEvents += entries.length;
+      this.status.lastRestoreAt = new Date().toISOString();
+      this.status.lastRestoredEventAt = asText(entries.at(-1)?.timestamp) || this.status.lastRestoredEventAt;
+    }
+    return {
+      restoredFromDisk: options?.source === "disk",
+      restoredEvents: entries.length,
+      liveSessions: this.status.liveSessions,
+      liveRuns: this.status.liveRuns,
+      activeSessions: this.status.activeSessions,
+      activeRuns: this.status.activeRuns,
+      latestSessionId: this.status.latestSessionId,
+      latestRunId: this.status.latestRunId,
+      latestLiveStatus: this.status.latestLiveStatus,
+      lastEventAt: this.status.lastBufferedEventAt,
+    };
   }
 
   record(normalized) {
@@ -334,6 +423,27 @@ export class HarnessTelemetryRuntime {
 
   flushForeground() {
     this._drainAnalyticsFully();
+    this._syncProjectionStatus();
+  }
+
+  restoreFromDisk(options = {}) {
+    const entries = readJsonLines(options?.eventsPath || this.paths?.eventsPath);
+    if (entries.length === 0) {
+      this.flushForeground();
+      return {
+        restoredFromDisk: false,
+        restoredEvents: 0,
+        liveSessions: this.status.liveSessions,
+        liveRuns: this.status.liveRuns,
+        activeSessions: this.status.activeSessions,
+        activeRuns: this.status.activeRuns,
+        latestSessionId: this.status.latestSessionId,
+        latestRunId: this.status.latestRunId,
+        latestLiveStatus: this.status.latestLiveStatus,
+        lastEventAt: this.status.lastBufferedEventAt,
+      };
+    }
+    return this.load(entries, { source: "disk" });
   }
 
   async flush() {

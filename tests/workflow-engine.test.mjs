@@ -11,7 +11,7 @@ import {
   getWorkflowEngine,
   resetWorkflowEngine,
 } from "../workflow/workflow-engine.mjs";
-import { getBosunSessionManager } from "../agent/session-manager.mjs";
+import { createHarnessSessionManager, getBosunSessionManager } from "../agent/session-manager.mjs";
 import {
   registerNodeType,
   getNodeType,
@@ -6081,6 +6081,70 @@ describe("Session chaining - action.run_agent", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
     resetSessionTracker({ persistDir: null });
   });
+
+  it("keeps a workflow overseer session stable while swapping run workers across executions", async () => {
+    const sessionManager = createHarnessSessionManager();
+    engine = new WorkflowEngine({
+      workflowDir: join(tmpDir, "workflows"),
+      runsDir: join(tmpDir, "runs"),
+      services: { sessionManager },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        {
+          id: "end",
+          type: "flow.end",
+          label: "End",
+          config: {
+            status: "completed",
+            output: { ok: true },
+          },
+        },
+      ],
+      [{ id: "edge-1", source: "trigger", target: "end" }],
+      {
+        id: "workflow-overseer-reuse",
+        name: "Workflow Overseer Reuse",
+      },
+    );
+
+    engine.save(wf);
+    const first = await engine.execute(wf.id, {
+      taskId: "TASK-OVERSEER-REUSE",
+      task: { id: "TASK-OVERSEER-REUSE", title: "Overseer reuse" },
+    });
+    const second = await engine.execute(wf.id, {
+      taskId: "TASK-OVERSEER-REUSE",
+      task: { id: "TASK-OVERSEER-REUSE", title: "Overseer reuse" },
+    });
+
+    const overseer = sessionManager.getSession("TASK-OVERSEER-REUSE");
+    const replay = sessionManager.getReplaySnapshot("TASK-OVERSEER-REUSE");
+
+    expect(first.data._workflowSessionId).toBe("TASK-OVERSEER-REUSE");
+    expect(second.data._workflowSessionId).toBe("TASK-OVERSEER-REUSE");
+    expect(first.data._workflowRootSessionId).toBe("TASK-OVERSEER-REUSE");
+    expect(second.data._workflowRootSessionId).toBe("TASK-OVERSEER-REUSE");
+    expect(overseer).toMatchObject({
+      sessionId: "TASK-OVERSEER-REUSE",
+      sessionType: "workflow-overseer",
+      scope: "workflow-task",
+      status: "completed",
+      activeWorkerId: null,
+      activeWorker: null,
+      executionCount: 2,
+      workerGeneration: 2,
+      workerSwapCount: 1,
+      rootSessionId: "TASK-OVERSEER-REUSE",
+    });
+    expect(overseer.workerHistory).toHaveLength(2);
+    expect(new Set(overseer.workerHistory.map((entry) => entry.threadId)).size).toBe(2);
+    expect(overseer.workerHistory.every((entry) => entry.status === "completed")).toBe(true);
+    expect(replay.workerHistory).toHaveLength(2);
+  });
+
   it("propagates threadId to context and streams agent events into run logs", async () => {
     const handler = getNodeType("action.run_agent");
     expect(handler).toBeDefined();

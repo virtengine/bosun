@@ -134,6 +134,12 @@ function buildSessionRecord(compiledProfile, options = {}, parentRecord = null) 
     profileName: toTrimmedString(compiledProfile?.name || compiledProfile?.agentId || compiledProfile?.taskKey || "harness-session"),
     entryStageId: toTrimmedString(compiledProfile?.entryStageId || ""),
     replayCursor: null,
+    executionCount: 0,
+    workerGeneration: 0,
+    workerSwapCount: 0,
+    activeWorkerId: null,
+    activeWorker: null,
+    workerHistory: [],
     metadata: {
       ...(toPlainObject(compiledProfile?.metadata)),
       ...(toPlainObject(options.metadata)),
@@ -147,6 +153,9 @@ function mergeSessionRecord(record, patch = {}) {
     ...toPlainObject(patch),
     updatedAt: nowIso(),
   };
+  const hasActiveWorkerIdPatch = Object.prototype.hasOwnProperty.call(patch, "activeWorkerId");
+  const hasActiveWorkerPatch = Object.prototype.hasOwnProperty.call(patch, "activeWorker");
+  const hasWorkerHistoryPatch = Object.prototype.hasOwnProperty.call(patch, "workerHistory");
   next.status = normalizeStatus(next.status || record.status);
   next.threadIds = uniqueStrings([...(record.threadIds || []), ...(next.threadIds || [])]);
   next.childSessionIds = uniqueStrings([...(record.childSessionIds || []), ...(next.childSessionIds || [])]);
@@ -158,8 +167,82 @@ function mergeSessionRecord(record, patch = {}) {
     ...(toPlainObject(record.metadata)),
     ...(toPlainObject(next.metadata)),
   };
+  next.executionCount = Math.max(0, Number.isFinite(Number(next.executionCount)) ? Math.trunc(Number(next.executionCount)) : Number(record.executionCount || 0));
+  next.workerGeneration = Math.max(0, Number.isFinite(Number(next.workerGeneration)) ? Math.trunc(Number(next.workerGeneration)) : Number(record.workerGeneration || 0));
+  next.workerSwapCount = Math.max(0, Number.isFinite(Number(next.workerSwapCount)) ? Math.trunc(Number(next.workerSwapCount)) : Number(record.workerSwapCount || 0));
+  next.activeWorkerId = hasActiveWorkerIdPatch
+    ? (toTrimmedString(patch.activeWorkerId || "") || null)
+    : (toTrimmedString(next.activeWorkerId || record.activeWorkerId || "") || null);
+  next.activeWorker = hasActiveWorkerPatch
+    ? (patch.activeWorker && typeof patch.activeWorker === "object" ? cloneValue(patch.activeWorker) : null)
+    : (next.activeWorker && typeof next.activeWorker === "object"
+      ? cloneValue(next.activeWorker)
+      : (record.activeWorker && typeof record.activeWorker === "object" ? cloneValue(record.activeWorker) : null));
+  next.workerHistory = hasWorkerHistoryPatch
+    ? (Array.isArray(patch.workerHistory) ? patch.workerHistory.map((entry) => cloneValue(entry)) : [])
+    : (Array.isArray(next.workerHistory)
+      ? next.workerHistory.map((entry) => cloneValue(entry))
+      : (Array.isArray(record.workerHistory) ? record.workerHistory.map((entry) => cloneValue(entry)) : []));
   next.lastActiveAt = toTrimmedString(next.lastActiveAt || record.lastActiveAt || next.updatedAt) || next.updatedAt;
   return next;
+}
+
+function normalizeWorkerDescriptor(value = {}) {
+  const metadata = toPlainObject(value.metadata);
+  const workerId = toTrimmedString(value.workerId || "");
+  const threadId = toTrimmedString(value.threadId || "");
+  const providerSelection = toTrimmedString(
+    value.providerSelection
+    || metadata.providerSelection
+    || "",
+  ) || null;
+  const adapterName = toTrimmedString(
+    value.adapterName
+    || metadata.adapterName
+    || providerSelection
+    || "",
+  ) || providerSelection;
+  const profileName = toTrimmedString(
+    value.profileName
+    || metadata.profileName
+    || metadata.workerProfileName
+    || "",
+  ) || null;
+  const entryStageId = toTrimmedString(
+    value.entryStageId
+    || metadata.entryStageId
+    || "",
+  ) || null;
+  return {
+    workerId: workerId || null,
+    threadId: threadId || null,
+    status: normalizeStatus(value.status || "running"),
+    source: toTrimmedString(value.source || metadata.source || "") || null,
+    scope: toTrimmedString(value.scope || metadata.scope || "") || null,
+    sessionType: toTrimmedString(value.sessionType || metadata.sessionType || "") || null,
+    providerSelection,
+    adapterName,
+    profileName,
+    entryStageId,
+    attachedAt: toTrimmedString(value.attachedAt || "") || null,
+    detachedAt: toTrimmedString(value.detachedAt || "") || null,
+    lastError: toTrimmedString(value.lastError || value.error || "") || null,
+    result: value.result ? cloneValue(value.result) : null,
+    metadata,
+  };
+}
+
+function createWorkerFingerprint(worker = {}) {
+  const normalized = normalizeWorkerDescriptor(worker);
+  return [
+    normalized.threadId || "",
+    normalized.providerSelection || "",
+    normalized.adapterName || "",
+    normalized.profileName || "",
+    normalized.entryStageId || "",
+    normalized.scope || "",
+    normalized.sessionType || "",
+  ].join("|");
 }
 
 function createLifecyclePatch(event = {}, sessionRecord = {}) {
@@ -224,7 +307,7 @@ function createInternalSessionManager(defaultOptions = {}) {
   const sessionControllers = new Map();
   let managerApi = null;
   const threadRegistry = defaultOptions.threadRegistry || createThreadRegistry();
-  const replayStore = defaultOptions.replayStore || createSessionReplayStore();
+  const replayStore = defaultOptions.replayStore || createSessionReplayStore(defaultOptions);
   const subagentControl = defaultOptions.subagentControl || createSubagentControl({ threadRegistry });
   const subagentPool = defaultOptions.subagentPool || createSubagentPool({
     onEvent: defaultOptions.onEvent,
@@ -244,6 +327,125 @@ function createInternalSessionManager(defaultOptions = {}) {
     const next = mergeSessionRecord(record, patch);
     sessions.set(next.sessionId, next);
     return next;
+  }
+
+  function replaceWorkerHistoryEntry(workerHistory = [], workerId, nextWorker) {
+    const normalizedWorkerId = toTrimmedString(workerId);
+    const normalizedNext = normalizeWorkerDescriptor(nextWorker);
+    const entries = Array.isArray(workerHistory) ? workerHistory : [];
+    let replaced = false;
+    const nextHistory = entries.map((entry) => {
+      if (toTrimmedString(entry?.workerId || "") !== normalizedWorkerId) {
+        return cloneValue(entry);
+      }
+      replaced = true;
+      return normalizedNext;
+    });
+    if (!replaced && normalizedNext.workerId) {
+      nextHistory.push(normalizedNext);
+    }
+    return nextHistory;
+  }
+
+  function finalizeActiveWorkerRecord(sessionRecord, options = {}) {
+    if (!sessionRecord?.activeWorker || !sessionRecord.activeWorkerId) {
+      return sessionRecord;
+    }
+    const currentWorker = normalizeWorkerDescriptor(sessionRecord.activeWorker);
+    const detachedAt = toTrimmedString(options.detachedAt || "") || nowIso();
+    const finalizedWorker = {
+      ...currentWorker,
+      status: normalizeStatus(options.status || currentWorker.status || sessionRecord.status || "completed"),
+      detachedAt,
+      lastError: toTrimmedString(options.lastError || currentWorker.lastError || "") || null,
+      result: options.result ? cloneValue(options.result) : currentWorker.result,
+      metadata: {
+        ...(toPlainObject(currentWorker.metadata)),
+        ...(toPlainObject(options.metadata)),
+      },
+    };
+    return storeSession(sessionRecord, {
+      activeWorkerId: null,
+      activeWorker: null,
+      workerHistory: replaceWorkerHistoryEntry(
+        sessionRecord.workerHistory,
+        currentWorker.workerId,
+        finalizedWorker,
+      ),
+      lastActiveAt: detachedAt,
+    });
+  }
+
+  function attachExecutionWorker(sessionRecord, execution = {}) {
+    if (!sessionRecord) return null;
+    const normalizedExecution = normalizeWorkerDescriptor({
+      ...execution,
+      metadata: {
+        ...(toPlainObject(sessionRecord.metadata)),
+        ...(toPlainObject(execution.metadata)),
+      },
+    });
+    if (!normalizedExecution.threadId) {
+      return {
+        sessionRecord,
+        worker: sessionRecord.activeWorker ? normalizeWorkerDescriptor(sessionRecord.activeWorker) : null,
+        attached: false,
+        swapped: false,
+      };
+    }
+    const previousWorker = sessionRecord.activeWorker
+      ? normalizeWorkerDescriptor(sessionRecord.activeWorker)
+      : null;
+    const lastHistoricalWorker = Array.isArray(sessionRecord.workerHistory) && sessionRecord.workerHistory.length > 0
+      ? normalizeWorkerDescriptor(sessionRecord.workerHistory[sessionRecord.workerHistory.length - 1])
+      : null;
+    const comparisonWorker = previousWorker || lastHistoricalWorker;
+    const previousFingerprint = comparisonWorker ? createWorkerFingerprint(comparisonWorker) : "";
+    const nextFingerprint = createWorkerFingerprint(normalizedExecution);
+    const shouldSwap = Boolean(comparisonWorker && previousFingerprint !== nextFingerprint);
+    let nextSessionRecord = sessionRecord;
+    if (shouldSwap) {
+      nextSessionRecord = finalizeActiveWorkerRecord(nextSessionRecord, {
+        status: "swapped",
+        detachedAt: nowIso(),
+        metadata: {
+          reason: "worker_swap",
+        },
+      });
+    }
+    const generation = Math.max(0, Number(nextSessionRecord.workerGeneration || 0)) + 1;
+    const attachedAt = nowIso();
+    const worker = {
+      ...normalizedExecution,
+      workerId: normalizedExecution.workerId || `${nextSessionRecord.sessionId}:worker:${generation}`,
+      attachedAt,
+      detachedAt: null,
+      status: normalizeStatus(execution.status || nextSessionRecord.status || "running"),
+      metadata: {
+        ...(toPlainObject(nextSessionRecord.metadata)),
+        ...(toPlainObject(normalizedExecution.metadata)),
+      },
+    };
+    nextSessionRecord = storeSession(nextSessionRecord, {
+      activeWorkerId: worker.workerId,
+      activeWorker: worker,
+      activeThreadId: worker.threadId || nextSessionRecord.activeThreadId,
+      threadIds: worker.threadId ? [worker.threadId] : nextSessionRecord.threadIds,
+      executionCount: Math.max(0, Number(nextSessionRecord.executionCount || 0)) + 1,
+      workerGeneration: generation,
+      workerSwapCount: Math.max(0, Number(nextSessionRecord.workerSwapCount || 0)) + (shouldSwap ? 1 : 0),
+      workerHistory: [
+        ...(Array.isArray(nextSessionRecord.workerHistory) ? nextSessionRecord.workerHistory.map((entry) => cloneValue(entry)) : []),
+        worker,
+      ],
+      lastActiveAt: attachedAt,
+    });
+    return {
+      sessionRecord: nextSessionRecord,
+      worker,
+      attached: true,
+      swapped: shouldSwap,
+    };
   }
 
   function setSessionController(sessionId, controller = null) {
@@ -842,6 +1044,12 @@ function createInternalSessionManager(defaultOptions = {}) {
         profileName: toTrimmedString(input.scope || input.sessionType || "session") || "session",
         entryStageId: "",
         replayCursor: null,
+        executionCount: 0,
+        workerGeneration: 0,
+        workerSwapCount: 0,
+        activeWorkerId: null,
+        activeWorker: null,
+        workerHistory: [],
         metadata: {
           ...(toPlainObject(input.metadata)),
           cwd: input.cwd || "",
@@ -938,13 +1146,13 @@ function createInternalSessionManager(defaultOptions = {}) {
           scope: execution.scope || "default",
         },
       });
-      const next = storeSession(sessions.get(existing.sessionId) || existing, {
+      let next = storeSession(sessions.get(existing.sessionId) || existing, {
         status: normalizeStatus(execution.status || existing.status || "active"),
-        activeThreadId: toTrimmedString(execution.threadId || existing.activeThreadId || "") || null,
-        threadIds: execution.threadId ? [execution.threadId] : existing.threadIds,
         lastError: toTrimmedString(execution.error || existing.lastError || "") || null,
         lastActiveAt: nowIso(),
       });
+      const workerAttachment = attachExecutionWorker(next, execution);
+      next = workerAttachment?.sessionRecord || next;
       if (next.activeThreadId) {
         threadRegistry.registerThread({
           threadId: next.activeThreadId,
@@ -966,6 +1174,9 @@ function createInternalSessionManager(defaultOptions = {}) {
         status: next.status,
         threadId: next.activeThreadId,
         meta: {
+          workerId: workerAttachment?.worker?.workerId || next.activeWorkerId || null,
+          workerAttached: workerAttachment?.attached === true,
+          workerSwapped: workerAttachment?.swapped === true,
           providerSelection: execution.providerSelection || "",
           adapterName: execution.adapterName || "",
         },
@@ -1040,17 +1251,41 @@ function createInternalSessionManager(defaultOptions = {}) {
         execution.status || (execution.success === false ? "failed" : "completed"),
         execution.success === false ? "failed" : "completed",
       );
-      return applyLifecycleState(normalizedSessionId, nextStatus, {
+      let finalizedWorkerSession = finalizeActiveWorkerRecord(managed, {
+        status: nextStatus,
+        detachedAt: nowIso(),
+        lastError: execution.success === false
+          ? toTrimmedString(execution.error || managed.lastError || "execution_failed") || "execution_failed"
+          : null,
+        result: execution.result || null,
+        metadata: {
+          completionStatus: nextStatus,
+        },
+      });
+      if (!finalizedWorkerSession) {
+        finalizedWorkerSession = managed;
+      }
+      const next = applyLifecycleState(normalizedSessionId, nextStatus, {
         activeThreadId: toTrimmedString(execution.threadId || managed.activeThreadId || "") || managed.activeThreadId,
-        threadIds: execution.threadId ? [execution.threadId] : managed.threadIds,
+        threadIds: execution.threadId ? [execution.threadId] : finalizedWorkerSession.threadIds,
         completedAt: isTerminalSessionStatus(nextStatus) ? nowIso() : managed.completedAt,
         lastError: execution.success === false ? toTrimmedString(execution.error || managed.lastError || "execution_failed") || "execution_failed" : null,
         lastActiveAt: nowIso(),
+        activeWorkerId: null,
+        activeWorker: null,
+        workerHistory: finalizedWorkerSession.workerHistory,
+        executionCount: finalizedWorkerSession.executionCount,
+        workerGeneration: finalizedWorkerSession.workerGeneration,
+        workerSwapCount: finalizedWorkerSession.workerSwapCount,
       }, {
         action: execution.success === false ? "external_execution_failed" : "external_execution_completed",
         summary: execution.error || execution.status || null,
         result: execution.result || null,
+        meta: {
+          workerId: managed.activeWorkerId || null,
+        },
       });
+      return next;
     },
     waitForSubagent(childSessionIdOrSpawnId, options = {}) {
       return subagentControl.waitForSubagent(childSessionIdOrSpawnId, options);
@@ -1141,6 +1376,8 @@ function createInternalSessionManager(defaultOptions = {}) {
         lastActiveAt: session?.lastActiveAt || tracked?.lastActiveAt || null,
         replayable: true,
         thread,
+        activeWorker: session?.activeWorker ? cloneValue(session.activeWorker) : null,
+        workerHistory: Array.isArray(session?.workerHistory) ? session.workerHistory.map((entry) => cloneValue(entry)) : [],
         lineage: {
           parentSessionId: session?.parentSessionId || null,
           childSessionIds: childSessions

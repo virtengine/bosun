@@ -9,8 +9,13 @@ import {
   exportHarnessTelemetryTraceAsync,
   flushHarnessTelemetryRuntimeForTests,
   resetHarnessObservabilitySpinesForTests,
+  resolveHarnessTelemetryPaths,
 } from "../infra/session-telemetry.mjs";
+import { LiveEventProjector } from "../infra/live-event-projector.mjs";
+import { RuntimeMetrics } from "../infra/runtime-metrics.mjs";
+import { ProviderUsageLedger } from "../infra/provider-usage-ledger.mjs";
 import { createReplayReader } from "../infra/replay-reader.mjs";
+import { createHarnessTelemetryRuntime } from "../infra/session-telemetry-runtime.mjs";
 import {
   configureBosunHotPathRuntimeForTests,
   resetBosunHotPathRuntimeForTests,
@@ -405,6 +410,87 @@ describe("session telemetry spine", () => {
       runId: "run-replay-1",
       rootRunId: "run-root-1",
     }));
+  });
+
+  it("rehydrates buffered events and live status directly from persisted telemetry logs", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "bosun-telemetry-runtime-restore-"));
+    tempDirs.push(configDir);
+    const spine = createHarnessObservabilitySpine({
+      persist: true,
+      configDir,
+      maxPersistBatchEvents: 2,
+    });
+
+    spine.recordEvent({
+      timestamp: "2026-04-04T10:00:00.000Z",
+      eventType: "provider.turn.completed",
+      source: "agent-event-bus",
+      taskId: "task-runtime-restore-1",
+      sessionId: "session-runtime-restore-1",
+      threadId: "thread-runtime-restore-1",
+      runId: "run-runtime-restore-1",
+      providerId: "openai-api",
+      modelId: "gpt-5.4",
+      status: "running",
+      tokenUsage: {
+        inputTokens: 12,
+        outputTokens: 8,
+        totalTokens: 20,
+      },
+    });
+    spine.recordEvent({
+      timestamp: "2026-04-04T10:00:01.000Z",
+      eventType: "approval.requested",
+      source: "workflow-execution-ledger",
+      taskId: "task-runtime-restore-1",
+      sessionId: "session-runtime-restore-1",
+      threadId: "thread-runtime-restore-1",
+      runId: "run-runtime-restore-1",
+      approvalId: "approval-runtime-restore-1",
+      toolName: "push_branch",
+      status: "pending",
+    });
+
+    await flushHarnessTelemetryRuntimeForTests();
+    resetHarnessObservabilitySpinesForTests();
+
+    const runtime = createHarnessTelemetryRuntime({
+      persist: true,
+      paths: resolveHarnessTelemetryPaths(configDir),
+      projector: new LiveEventProjector(),
+      metrics: new RuntimeMetrics(),
+      providerUsage: new ProviderUsageLedger(),
+    });
+
+    const restored = runtime.restoreFromDisk();
+    const status = runtime.getStatus();
+    const events = runtime.getEvents();
+
+    expect(restored).toEqual(expect.objectContaining({
+      restoredFromDisk: true,
+      restoredEvents: 2,
+      liveSessions: 1,
+      liveRuns: 1,
+      activeSessions: 1,
+      activeRuns: 1,
+      latestSessionId: "session-runtime-restore-1",
+      latestRunId: "run-runtime-restore-1",
+      latestLiveStatus: "pending",
+    }));
+    expect(status).toEqual(expect.objectContaining({
+      restoredFromDisk: true,
+      restoredEvents: 2,
+      liveSessions: 1,
+      liveRuns: 1,
+      activeSessions: 1,
+      activeRuns: 1,
+      latestSessionId: "session-runtime-restore-1",
+      latestRunId: "run-runtime-restore-1",
+      latestLiveStatus: "pending",
+      lastRestoredEventAt: "2026-04-04T10:00:01.000Z",
+      lastBufferedEventAt: "2026-04-04T10:00:01.000Z",
+    }));
+    expect(events).toHaveLength(2);
   });
 
   it("can use native telemetry export acceleration without changing canonical event storage", async () => {

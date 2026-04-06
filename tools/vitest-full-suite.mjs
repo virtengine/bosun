@@ -125,6 +125,14 @@ function resolveSuiteShardCount(suite) {
   return process.platform === "win32" ? 8 : 1;
 }
 
+function buildSuiteEnvOverrides(suite, extra = {}) {
+  const envOverrides = { ...extra };
+  if (suite === "tests/workflow-guaranteed.test.mjs") {
+    envOverrides.BOSUN_WORKFLOW_GUARANTEED_CHILD = "1";
+  }
+  return envOverrides;
+}
+
 function resolveSuiteProject(suite) {
   return ISOLATED_PROJECT_SUITES.has(suite) ? "isolated" : "fast";
 }
@@ -214,10 +222,10 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
           label: `isolated suite ${suite} shard ${shard}/${suiteShardCount}`,
           heapMb: Number.isFinite(isolatedHeapMb) && isolatedHeapMb >= 2048 ? isolatedHeapMb : undefined,
           project: resolveSuiteProject(suite),
-          envOverrides: {
+          envOverrides: buildSuiteEnvOverrides(suite, {
             VITEST_SHARD: String(shard),
             VITEST_TOTAL_SHARDS: String(suiteShardCount),
-          },
+          }),
         });
         if (code !== 0) return code;
       }
@@ -230,10 +238,10 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
       label: `isolated suite ${suite}`,
       heapMb: Number.isFinite(isolatedHeapMb) && isolatedHeapMb >= 2048 ? isolatedHeapMb : undefined,
       project: resolveSuiteProject(suite),
-      envOverrides: {
+      envOverrides: buildSuiteEnvOverrides(suite, {
         VITEST_SHARD: null,
         VITEST_TOTAL_SHARDS: null,
-      },
+      }),
     });
     if (code !== 0) return code;
   }

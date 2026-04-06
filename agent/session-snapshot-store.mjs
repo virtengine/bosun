@@ -26,6 +26,7 @@ function normalizeStoreShape(snapshot = {}) {
   return {
     snapshots: snapshot?.snapshots && typeof snapshot.snapshots === "object" ? cloneValue(snapshot.snapshots) : {},
     events: snapshot?.events && typeof snapshot.events === "object" ? cloneValue(snapshot.events) : {},
+    checkpoints: snapshot?.checkpoints && typeof snapshot.checkpoints === "object" ? cloneValue(snapshot.checkpoints) : {},
   };
 }
 
@@ -69,6 +70,7 @@ export function createSessionSnapshotStore(options = {}) {
     return {
       snapshots: cloneValue(state.snapshots[normalizedSessionId] || []),
       events: cloneValue(state.events[normalizedSessionId] || []),
+      checkpoint: cloneValue(state.checkpoints[normalizedSessionId] || null),
     };
   }
 
@@ -78,6 +80,11 @@ export function createSessionSnapshotStore(options = {}) {
     if (!normalizedSessionId) throw new Error("sessionId is required");
     state.snapshots[normalizedSessionId] = sortByCreatedAt(payload.snapshots || []).slice(-maxSnapshotsPerSession);
     state.events[normalizedSessionId] = cloneValue(payload.events || []).slice(-maxEventsPerSession);
+    if (Object.prototype.hasOwnProperty.call(payload, "checkpoint")) {
+      state.checkpoints[normalizedSessionId] = cloneValue(payload.checkpoint || null);
+    } else if (!Object.prototype.hasOwnProperty.call(state.checkpoints, normalizedSessionId)) {
+      state.checkpoints[normalizedSessionId] = null;
+    }
     persist();
     return readSession(normalizedSessionId);
   }
@@ -95,6 +102,7 @@ export function createSessionSnapshotStore(options = {}) {
       return writeSession(normalizedSessionId, {
         snapshots: nextSnapshots,
         events: existing.events,
+        checkpoint: snapshot?.checkpoint ?? existing.checkpoint ?? null,
       }).snapshots.slice(-1)[0] || cloneValue(snapshot);
     },
     appendEvent(sessionId, event = {}) {
@@ -107,6 +115,7 @@ export function createSessionSnapshotStore(options = {}) {
       return writeSession(normalizedSessionId, {
         snapshots: existing.snapshots,
         events: nextEvents,
+        checkpoint: event?.checkpoint ?? existing.checkpoint ?? null,
       }).events.slice(-1)[0] || cloneValue(event);
     },
     list(sessionId, options_ = {}) {
@@ -125,6 +134,21 @@ export function createSessionSnapshotStore(options = {}) {
       const snapshots = this.list(sessionId);
       return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
     },
+    getCheckpoint(sessionId) {
+      return this.readSession(sessionId)?.checkpoint || null;
+    },
+    writeCheckpoint(sessionId, checkpoint = null) {
+      const normalizedSessionId = toTrimmedString(sessionId);
+      if (!normalizedSessionId) {
+        throw new Error("sessionId is required");
+      }
+      const existing = readSession(normalizedSessionId) || { snapshots: [], events: [], checkpoint: null };
+      return writeSession(normalizedSessionId, {
+        snapshots: existing.snapshots,
+        events: existing.events,
+        checkpoint,
+      }).checkpoint || cloneValue(checkpoint);
+    },
     readSession,
     writeSession,
     deleteSession(sessionId) {
@@ -133,6 +157,7 @@ export function createSessionSnapshotStore(options = {}) {
       if (!normalizedSessionId) return false;
       delete state.snapshots[normalizedSessionId];
       delete state.events[normalizedSessionId];
+      delete state.checkpoints[normalizedSessionId];
       persist();
       return true;
     },
@@ -141,6 +166,7 @@ export function createSessionSnapshotStore(options = {}) {
       return [...new Set([
         ...Object.keys(state.snapshots || {}),
         ...Object.keys(state.events || {}),
+        ...Object.keys(state.checkpoints || {}),
       ])];
     },
     snapshot() {

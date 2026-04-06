@@ -30,14 +30,25 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vite
 import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { PassThrough } from "node:stream";
+import { WORKFLOW_TEMPLATES, getTemplate } from "../workflow/workflow-templates.mjs";
 
-import { TEMPLATE_FIXTURES } from "./sandbox/fixtures.mjs";
-import { createExecSandbox  } from "./sandbox/exec-sandbox.mjs";
-import {
-  createTemplateHarness,
-  ensureExperimentalNodeTypes,
-} from "./sandbox/template-harness.mjs";
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
+
+const runGuaranteedInVitest = String(process.env.BOSUN_WORKFLOW_GUARANTEED_CHILD || "").trim() === "1";
+const guaranteedDescribe = runGuaranteedInVitest ? describe : describe.skip;
+
+let TEMPLATE_FIXTURES = {};
+let createExecSandbox = () => ({ dispatch: () => "", calls: [], callsMatching: () => [] });
+let createTemplateHarness = () => {
+  throw new Error("workflow-guaranteed harness is disabled outside the sharded runner");
+};
+let ensureExperimentalNodeTypes = () => {};
+
+if (runGuaranteedInVitest) {
+  ({ TEMPLATE_FIXTURES } = await import("./sandbox/fixtures.mjs"));
+  ({ createExecSandbox } = await import("./sandbox/exec-sandbox.mjs"));
+  ({ createTemplateHarness, ensureExperimentalNodeTypes } = await import("./sandbox/template-harness.mjs"));
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  Mutable sandbox dispatch — the vi.mock captures this reference so that
@@ -173,8 +184,6 @@ vi.setConfig({ testTimeout: 90_000 });
 //  VITEST_SHARD=1  VITEST_TOTAL_SHARDS=4  → run first ¼ of templates
 // ══════════════════════════════════════════════════════════════════════════
 
-import { WORKFLOW_TEMPLATES, getTemplate } from "../workflow/workflow-templates.mjs";
-
 function getShardedTemplates() {
   const shard  = Number(process.env.VITEST_SHARD ?? "0");
   const total  = Number(process.env.VITEST_TOTAL_SHARDS ?? "0");
@@ -230,7 +239,7 @@ afterEach(() => {
 //  Suite 1 — Parametric: every template runs clean with correct fixtures
 // ══════════════════════════════════════════════════════════════════════════
 
-describe("guaranteed: all templates execute without engine errors", () => {
+guaranteedDescribe("guaranteed: all templates execute without engine errors", () => {
   for (const template of TEMPLATES_TO_TEST) {
     const { id } = template;
     const fixtures = TEMPLATE_FIXTURES[id] ?? { scenario: {}, inputVars: {} };
@@ -255,7 +264,7 @@ describe("guaranteed: all templates execute without engine errors", () => {
 //  Suite 2 — Template installs with correct metadata
 // ══════════════════════════════════════════════════════════════════════════
 
-describe("guaranteed: template installation metadata", () => {
+guaranteedDescribe("guaranteed: template installation metadata", () => {
   for (const template of TEMPLATES_TO_TEST) {
     const { id } = template;
 
@@ -279,7 +288,7 @@ describe("guaranteed: template installation metadata", () => {
 // ══════════════════════════════════════════════════════════════════════════
 
 if (REPEAT_COUNT > 1) {
-  describe(`guaranteed: flakiness detection (${REPEAT_COUNT} runs per template)`, () => {
+  guaranteedDescribe(`guaranteed: flakiness detection (${REPEAT_COUNT} runs per template)`, () => {
     for (const template of TEMPLATES_TO_TEST) {
       const { id } = template;
       const fixtures = TEMPLATE_FIXTURES[id] ?? { scenario: {}, inputVars: {} };
@@ -319,7 +328,7 @@ if (REPEAT_COUNT > 1) {
 //  Suite 4 — Behavioral contracts (per-template focused tests)
 // ══════════════════════════════════════════════════════════════════════════
 
-describe("guaranteed: behavioral contracts", () => {
+guaranteedDescribe("guaranteed: behavioral contracts", () => {
 
   // ── GitHub templates ──────────────────────────────────────────────────
 
@@ -795,7 +804,7 @@ describe("guaranteed: behavioral contracts", () => {
 //  Verify the gh CLI sandbox returns correct data for specific commands.
 // ══════════════════════════════════════════════════════════════════════════
 
-describe("sandbox: gh CLI command contracts", () => {
+guaranteedDescribe("sandbox: gh CLI command contracts", () => {
   const { prs, issues, releases } = {
     prs:      [{ number: 42, id: 242042, title: "PR #42", body: "", state: "open", draft: false, html_url: "https://github.com/virtengine/bosun/pull/42", head: { ref: "feat/login", sha: "abc123" }, base: { ref: "main", sha: "base123" }, user: { login: "dev-user" }, labels: [], mergeable: "MERGEABLE", mergeable_state: "clean", merged: false, created_at: "2026-01-01T00:00:00Z", additions: 10, deletions: 2, changed_files: 1, commits: 1 }],
     issues:   [{ number: 1, id: 100001, title: "Issue #1", body: "", state: "open", html_url: "https://github.com/virtengine/bosun/issues/1", user: { login: "dev-user" }, labels: [], created_at: "2026-01-01T00:00:00Z" }],
@@ -885,7 +894,7 @@ describe("sandbox: gh CLI command contracts", () => {
 //  Suite 6 — Fixture registry completeness
 // ══════════════════════════════════════════════════════════════════════════
 
-describe("guaranteed: fixture registry covers all templates", () => {
+guaranteedDescribe("guaranteed: fixture registry covers all templates", () => {
   it("every template has an entry in TEMPLATE_FIXTURES", () => {
     const missing = [];
     for (const template of WORKFLOW_TEMPLATES) {

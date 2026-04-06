@@ -178,6 +178,74 @@ function normalizeWorkflowIdentityText(value) {
   return normalized;
 }
 
+function resolveWorkflowRunTaskId(data = {}) {
+  return normalizeWorkflowIdentityText(
+    data?.taskId
+    || data?.task?.id
+    || data?.taskDetail?.id
+    || "",
+  ) || null;
+}
+
+function resolveWorkflowRunTaskTitle(data = {}) {
+  return normalizeWorkflowIdentityText(
+    data?.taskTitle
+    || data?.task?.title
+    || data?.taskDetail?.title
+    || "",
+  ) || null;
+}
+
+function resolveWorkflowRunSessionScope(data = {}) {
+  return resolveWorkflowRunTaskId(data) ? "workflow-task" : "workflow-flow";
+}
+
+function resolveWorkflowRunSessionBinding({ ctx, workflowId, workflowName } = {}) {
+  const data = ctx?.data || {};
+  const taskId = resolveWorkflowRunTaskId(data);
+  const taskTitle = resolveWorkflowRunTaskTitle(data);
+  const explicitSessionId = normalizeWorkflowIdentityText(
+    data._workflowSessionId
+    || data.sessionId
+    || "",
+  );
+  const rootSessionId = normalizeWorkflowIdentityText(
+    data._workflowRootSessionId
+    || explicitSessionId
+    || taskId
+    || ctx?.id
+    || "",
+  ) || null;
+  const sessionId = explicitSessionId || taskId || `workflow:${workflowId}:${ctx?.id || "run"}`;
+  const parentSessionId = normalizeWorkflowIdentityText(
+    data._workflowParentSessionId
+    || (sessionId !== rootSessionId ? rootSessionId : "")
+    || "",
+  ) || null;
+  return {
+    sessionId,
+    rootSessionId: rootSessionId || sessionId,
+    parentSessionId,
+    taskId,
+    taskTitle,
+    scope: resolveWorkflowRunSessionScope(data),
+    cwd: normalizeWorkflowRunText(
+      data.worktreePath
+      || data.repoRoot
+      || process.cwd(),
+    ).trim() || process.cwd(),
+    workflowId: normalizeWorkflowIdentityText(workflowId),
+    workflowName: normalizeWorkflowIdentityText(workflowName),
+  };
+}
+
+let _harnessSessionNodeMod = null;
+async function loadHarnessSessionNodeModule() {
+  if (_harnessSessionNodeMod) return _harnessSessionNodeMod;
+  _harnessSessionNodeMod = await import("./harness-session-node.mjs");
+  return _harnessSessionNodeMod;
+}
+
 function hasUnresolvedWorkflowTemplateToken(value) {
   return UNRESOLVED_WORKFLOW_TEMPLATE_TOKEN_RE.test(String(value || ""));
 }
@@ -3851,6 +3919,16 @@ export class WorkflowEngine extends EventEmitter {
       ...(opts._decisionReason ? { _retryDecisionReason: opts._decisionReason } : {}),
       ...(opts._parentExecutionId ? { _workflowParentExecutionId: opts._parentExecutionId } : {}),
     });
+    const workflowRunSession = resolveWorkflowRunSessionBinding({
+      ctx,
+      workflowId,
+      workflowName: def.name,
+    });
+    ctx.data._workflowSessionId = workflowRunSession.sessionId;
+    ctx.data._workflowRootSessionId = workflowRunSession.rootSessionId;
+    ctx.data._workflowParentSessionId = workflowRunSession.parentSessionId;
+    ctx.data._workflowSessionScope = workflowRunSession.scope;
+    ctx.data._workflowTaskId = workflowRunSession.taskId;
     ctx.variables = { ...def.variables };
     this._initializeDagState(def, ctx, {
       rootRunId:
@@ -3868,6 +3946,7 @@ export class WorkflowEngine extends EventEmitter {
     });
 
     const runId = ctx.id;
+    ctx.data._workflowRunThreadId = runId;
     this._adoptRunSlotRootId(opts?._slotLease, runId);
     this._activeRuns.set(runId, {
       workflowId,
@@ -3876,6 +3955,37 @@ export class WorkflowEngine extends EventEmitter {
       startedAt: ctx.startedAt,
       status: WorkflowStatus.RUNNING,
     });
+    const harnessSessionNode = await loadHarnessSessionNodeModule();
+    const workflowSessionLink = harnessSessionNode.beginWorkflowLinkedSessionExecution(
+      ctx,
+      {
+        id: "workflow-run",
+        label: def.name,
+      },
+      this,
+      {
+        sessionId: workflowRunSession.sessionId,
+        threadId: runId,
+        parentSessionId: workflowRunSession.parentSessionId,
+        rootSessionId: workflowRunSession.rootSessionId,
+        taskId: workflowRunSession.taskId,
+        taskTitle: workflowRunSession.taskTitle,
+        taskKey: workflowRunSession.taskId || workflowRunSession.sessionId,
+        cwd: workflowRunSession.cwd,
+        status: "running",
+        sessionType: "workflow-overseer",
+        scope: workflowRunSession.scope,
+        runtimeRole: "overseer",
+        source: "workflow-engine-run",
+        metadata: {
+          workflowRunId: runId,
+          workflowId,
+          workflowName: def.name,
+          runtimeRole: "overseer",
+        },
+        deferWorkerAttachment: false,
+      },
+    );
 
     // ── Persist run immediately so it survives process restarts ──────
     this._persistActiveRunState(runId, workflowId, def.name, ctx);
@@ -3887,7 +3997,7 @@ export class WorkflowEngine extends EventEmitter {
         rootRunId: ctx.data?._workflowRootRunId || runId,
         parentRunId: ctx.data?._workflowParentRunId || null,
         sessionId: ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
-        threadId: ctx.data?._workflowSessionId || ctx.data?.threadId || null,
+        threadId: ctx.data?._workflowRunThreadId || ctx.data?.threadId || ctx.data?._workflowSessionId || null,
         retryOf: ctx.data?._retryOf || null,
         retryMode: opts._retryMode || null,
         startedAt: new Date(ctx.startedAt).toISOString(),
@@ -3917,7 +4027,7 @@ export class WorkflowEngine extends EventEmitter {
       rootRunId: ctx.data?._workflowRootRunId || runId,
       parentRunId: ctx.data?._workflowParentRunId || null,
       sessionId: ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
-      threadId: ctx.data?._workflowSessionId || ctx.data?.threadId || null,
+      threadId: ctx.data?._workflowRunThreadId || ctx.data?.threadId || ctx.data?._workflowSessionId || null,
       rootSessionId: ctx.data?._workflowRootSessionId || ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
       parentSessionId: ctx.data?._workflowParentSessionId || null,
       delegationDepth: ctx.data?._workflowDelegationDepth ?? 0,
@@ -3987,7 +4097,7 @@ export class WorkflowEngine extends EventEmitter {
         rootRunId: ctx.data?._workflowRootRunId || runId,
         parentRunId: ctx.data?._workflowParentRunId || null,
         sessionId: ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
-        threadId: ctx.data?._workflowSessionId || ctx.data?.threadId || null,
+        threadId: ctx.data?._workflowRunThreadId || ctx.data?.threadId || ctx.data?._workflowSessionId || null,
         rootSessionId: ctx.data?._workflowRootSessionId || ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
         parentSessionId: ctx.data?._workflowParentSessionId || null,
         delegationDepth: ctx.data?._workflowDelegationDepth ?? 0,
@@ -4008,6 +4118,20 @@ export class WorkflowEngine extends EventEmitter {
         workflowName: def.name,
         status,
         durationMs: Date.now() - ctx.startedAt,
+      });
+      harnessSessionNode.finalizeWorkflowLinkedSessionExecution(workflowSessionLink, {
+        sessionId: workflowRunSession.sessionId,
+        threadId: runId,
+        success: status !== WorkflowStatus.FAILED,
+        status: status === WorkflowStatus.FAILED ? "failed" : "completed",
+        result: {
+          runId,
+          workflowId,
+          workflowName: def.name,
+          status,
+        },
+        output: ctx.data?._workflowTerminalOutput || null,
+        error: status === WorkflowStatus.FAILED ? terminalError || "workflow_failed" : null,
       });
     } catch (err) {
       ctx.error("_engine", err);
@@ -4031,7 +4155,7 @@ export class WorkflowEngine extends EventEmitter {
         rootRunId: ctx.data?._workflowRootRunId || runId,
         parentRunId: ctx.data?._workflowParentRunId || null,
         sessionId: ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
-        threadId: ctx.data?._workflowSessionId || ctx.data?.threadId || null,
+        threadId: ctx.data?._workflowRunThreadId || ctx.data?.threadId || ctx.data?._workflowSessionId || null,
         rootSessionId: ctx.data?._workflowRootSessionId || ctx.data?._workflowSessionId || ctx.data?.sessionId || null,
         parentSessionId: ctx.data?._workflowParentSessionId || null,
         delegationDepth: ctx.data?._workflowDelegationDepth ?? 0,
@@ -4054,6 +4178,19 @@ export class WorkflowEngine extends EventEmitter {
         status: WorkflowStatus.FAILED,
         error: err?.message || String(err),
         durationMs: Date.now() - ctx.startedAt,
+      });
+      harnessSessionNode.finalizeWorkflowLinkedSessionExecution(workflowSessionLink, {
+        sessionId: workflowRunSession.sessionId,
+        threadId: runId,
+        success: false,
+        status: "failed",
+        result: {
+          runId,
+          workflowId,
+          workflowName: def.name,
+          status: WorkflowStatus.FAILED,
+        },
+        error: err?.message || String(err),
       });
     }
 

@@ -38,12 +38,13 @@ export function buildWorkflowHarnessSessionBinding(ctx, node, options = {}) {
   });
   return {
     sessionId: normalizeText(options.sessionId) || null,
-    threadId: normalizeText(options.threadId || options.sessionId) || null,
+    threadId: normalizeText(options.threadId) || null,
     taskKey: normalizeText(options.taskKey || options.sessionId || ctx?.id) || null,
     cwd: normalizeText(options.cwd) || null,
     status: normalizeText(options.status || "running") || "running",
     sessionType: normalizeText(options.sessionType || "workflow-agent") || "workflow-agent",
     scope: normalizeText(options.scope || (lineage.taskId ? "workflow-task" : "workflow-flow")) || "workflow-flow",
+    runtimeRole: normalizeText(options.runtimeRole || "worker") || "worker",
     lineage,
     metadata: {
       source: normalizeText(options.source || "workflow-harness-session") || "workflow-harness-session",
@@ -54,6 +55,7 @@ export function buildWorkflowHarnessSessionBinding(ctx, node, options = {}) {
       workflowNodeLabel: lineage.nodeLabel,
       taskId: lineage.taskId,
       taskTitle: lineage.taskTitle,
+      runtimeRole: normalizeText(options.runtimeRole || "worker") || "worker",
       ...(options.metadata && typeof options.metadata === "object" ? options.metadata : {}),
     },
   };
@@ -103,7 +105,7 @@ export function beginWorkflowLinkedSessionExecution(ctx, node, engine, options =
   }
   const session = sessionManager.beginExternalSession({
     sessionId: binding.sessionId,
-    threadId: binding.threadId,
+    threadId: binding.runtimeRole === "overseer" ? binding.threadId || binding.sessionId : null,
     parentSessionId,
     scope: binding.scope,
     sessionType: binding.sessionType,
@@ -112,10 +114,13 @@ export function beginWorkflowLinkedSessionExecution(ctx, node, engine, options =
     metadata: binding.metadata,
     source: binding.metadata.source,
   });
+  const shouldDeferWorkerAttachment =
+    binding.runtimeRole !== "overseer"
+    && (options.deferWorkerAttachment !== false);
   sessionManager.registerExecution(binding.sessionId, {
     sessionType: binding.sessionType,
     taskKey: binding.taskKey,
-    threadId: binding.threadId,
+    threadId: shouldDeferWorkerAttachment ? null : binding.threadId,
     cwd: binding.cwd,
     status: binding.status,
     metadata: binding.metadata,
