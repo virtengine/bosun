@@ -23,6 +23,7 @@ import {
   evaluateToolNetworkPolicy,
 } from "../agent/tool-network-policy.mjs";
 import {
+  materializeTruncatedToolOutput,
   truncateText,
   truncateToolOutput,
 } from "../agent/tool-output-truncation.mjs";
@@ -287,6 +288,30 @@ describe("tool governance support", () => {
     }));
     expect(text).toEqual(truncateCompactedPreviewText("x".repeat(120), { maxChars: 48, tailChars: 8 }));
     expect(structured).toEqual(truncateCompactedToolOutput(payload, options));
+  });
+
+  it("materializes truncated previews with spill-to-disk pointers", async () => {
+    const payload = {
+      lines: Array.from({ length: 48 }, (_, index) => `line-${index}-${"z".repeat(18)}`),
+    };
+    const truncated = truncateToolOutput(payload, { maxChars: 96, tailChars: 16 });
+    const materialized = await materializeTruncatedToolOutput(payload, truncated, {
+      maxChars: 96,
+      tailChars: 16,
+      toolName: "collect_logs",
+    });
+
+    expect(materialized.spillPointer).toEqual(expect.objectContaining({
+      kind: "tool-log",
+      stage: "tool_output_truncation",
+      retrieveCommand: expect.stringMatching(/^bosun --tool-log \d+$/),
+    }));
+    expect(materialized.preview).toContain("Full output spilled to disk");
+    expect(materialized.data).toEqual(expect.objectContaining({
+      spillPointer: expect.objectContaining({
+        logId: materialized.spillPointer.logId,
+      }),
+    }));
   });
 
   it("reports in-process hot-path truncation metadata through the orchestrator", async () => {

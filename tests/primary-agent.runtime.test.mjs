@@ -48,6 +48,27 @@ const mockGetOpencodeSessionId = vi.hoisted(() => vi.fn(() => null));
 const mockListOpencodeSessions = vi.hoisted(() => vi.fn(async () => []));
 const mockSwitchOpencodeSession = vi.hoisted(() => vi.fn(async () => {}));
 const mockCreateOpencodeSession = vi.hoisted(() => vi.fn(async (id) => ({ id, serverSessionId: null })));
+const mockExecOpenAINative = vi.hoisted(() => vi.fn(async () => ({ finalResponse: "openai-native-ok", items: [], usage: null })));
+const mockIsOpenAINativeBusy = vi.hoisted(() => vi.fn(() => false));
+const mockGetOpenAINativeInfo = vi.hoisted(() => vi.fn(() => ({ busy: false })));
+const mockInitOpenAINative = vi.hoisted(() => vi.fn(async () => true));
+const mockResetOpenAINative = vi.hoisted(() => vi.fn(() => {}));
+const mockListOpenAINativeSessions = vi.hoisted(() => vi.fn(() => []));
+const mockGetOpenAINativeSessionMessages = vi.hoisted(() => vi.fn(() => []));
+const mockExecAnthropicNative = vi.hoisted(() => vi.fn(async () => ({ finalResponse: "anthropic-native-ok", items: [], usage: null })));
+const mockIsAnthropicNativeBusy = vi.hoisted(() => vi.fn(() => false));
+const mockGetAnthropicNativeInfo = vi.hoisted(() => vi.fn(() => ({ busy: false })));
+const mockInitAnthropicNative = vi.hoisted(() => vi.fn(async () => true));
+const mockResetAnthropicNative = vi.hoisted(() => vi.fn(() => {}));
+const mockListAnthropicNativeSessions = vi.hoisted(() => vi.fn(() => []));
+const mockGetAnthropicNativeSessionMessages = vi.hoisted(() => vi.fn(() => []));
+const mockExecGeminiNative = vi.hoisted(() => vi.fn(async () => ({ finalResponse: "gemini-native-ok", items: [], usage: null })));
+const mockIsGeminiNativeBusy = vi.hoisted(() => vi.fn(() => false));
+const mockGetGeminiNativeInfo = vi.hoisted(() => vi.fn(() => ({ busy: false })));
+const mockInitGeminiNative = vi.hoisted(() => vi.fn(async () => true));
+const mockResetGeminiNative = vi.hoisted(() => vi.fn(() => {}));
+const mockListGeminiNativeSessions = vi.hoisted(() => vi.fn(() => []));
+const mockGetGeminiNativeSessionMessages = vi.hoisted(() => vi.fn(() => []));
 
 vi.mock("../config/config.mjs", () => ({
   loadConfig: () => mockConfigState.current,
@@ -130,6 +151,65 @@ vi.mock("../shell/opencode-shell.mjs", () => ({
   createSession: mockCreateOpencodeSession,
 }));
 
+vi.mock("../shell/openai-native-adapter.mjs", () => {
+  const adapter = {
+    name: "openai-native",
+    provider: "OPENAI_NATIVE",
+    displayName: "OpenAI Native",
+    exec: mockExecOpenAINative,
+    isBusy: mockIsOpenAINativeBusy,
+    getInfo: mockGetOpenAINativeInfo,
+    init: mockInitOpenAINative,
+    reset: mockResetOpenAINative,
+    listSessions: mockListOpenAINativeSessions,
+    getSessionMessages: mockGetOpenAINativeSessionMessages,
+  };
+  return {
+    openaiNativeAdapter: adapter,
+    default: adapter,
+  };
+});
+
+vi.mock("../shell/anthropic-native-adapter.mjs", () => {
+  const adapter = {
+    name: "anthropic-native",
+    provider: "ANTHROPIC_NATIVE",
+    displayName: "Anthropic Native",
+    acceptsTurnPayload: true,
+    exec: mockExecAnthropicNative,
+    isBusy: mockIsAnthropicNativeBusy,
+    getInfo: mockGetAnthropicNativeInfo,
+    init: mockInitAnthropicNative,
+    reset: mockResetAnthropicNative,
+    listSessions: mockListAnthropicNativeSessions,
+    getSessionMessages: mockGetAnthropicNativeSessionMessages,
+  };
+  return {
+    anthropicNativeAdapter: adapter,
+    default: adapter,
+  };
+});
+
+vi.mock("../shell/gemini-native-adapter.mjs", () => {
+  const adapter = {
+    name: "gemini-native",
+    provider: "GEMINI_NATIVE",
+    displayName: "Gemini Native",
+    acceptsTurnPayload: true,
+    exec: mockExecGeminiNative,
+    isBusy: mockIsGeminiNativeBusy,
+    getInfo: mockGetGeminiNativeInfo,
+    init: mockInitGeminiNative,
+    reset: mockResetGeminiNative,
+    listSessions: mockListGeminiNativeSessions,
+    getSessionMessages: mockGetGeminiNativeSessionMessages,
+  };
+  return {
+    geminiNativeAdapter: adapter,
+    default: adapter,
+  };
+});
+
 vi.mock("../agent/agent-pool.mjs", () => ({
   execPooledPrompt: mockExecPooledPrompt,
 }));
@@ -142,6 +222,8 @@ describe("primary-agent runtime safeguards", () => {
     delete process.env.CODEX_SDK_DISABLED;
     delete process.env.COPILOT_SDK_DISABLED;
     delete process.env.CLAUDE_SDK_DISABLED;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GEMINI_API_KEY;
     delete process.env.GEMINI_SDK_DISABLED;
     delete process.env.OPENCODE_SDK_DISABLED;
     delete process.env.PRIMARY_AGENT_RECOVERY_RETRY_ATTEMPTS;
@@ -154,6 +236,9 @@ describe("primary-agent runtime safeguards", () => {
       isBusy: false,
     });
     mockExecOpencodePrompt.mockResolvedValue({ finalResponse: "opencode stub", items: [], usage: null });
+    mockExecOpenAINative.mockResolvedValue({ finalResponse: "openai-native-ok", items: [], usage: null });
+    mockExecAnthropicNative.mockResolvedValue({ finalResponse: "anthropic-native-ok", items: [], usage: null });
+    mockExecGeminiNative.mockResolvedValue({ finalResponse: "gemini-native-ok", items: [], usage: null });
   });
 
   it("keeps shell adapter parity in the shell-owned adapter registry", async () => {
@@ -475,6 +560,131 @@ describe("primary-agent runtime safeguards", () => {
       }),
     }));
   });
+
+  it("prefers the native adapter for harness-managed OpenAI providers", async () => {
+    mockConfigState.current = {
+      agentRuntime: "harness",
+      providers: {
+        defaultProvider: "openai-compatible",
+        openaiCompatible: {
+          enabled: true,
+          defaultModel: "qwen2.5-coder:latest",
+          baseUrl: "http://127.0.0.1:11434/v1",
+        },
+      },
+    };
+
+    vi.resetModules();
+    const primaryAgent = await import("../agent/primary-agent.mjs");
+
+    await primaryAgent.initPrimaryAgent();
+    await primaryAgent.execPrimaryPrompt("route through the native harness", {
+      sessionId: "native-harness-session",
+    });
+
+    expect(primaryAgent.getPrimaryAgentName()).toBe("openai-native");
+    expect(primaryAgent.getPrimaryAgentSelection()).toBe("openai-compatible");
+    expect(mockInitOpenAINative).toHaveBeenCalled();
+    const [message, options] = mockExecOpenAINative.mock.calls[0];
+    expect(message).toContain("route through the native harness");
+    expect(options).toEqual(expect.objectContaining({
+      provider: "openai-compatible",
+      providerConfig: expect.objectContaining({
+        providerId: "openai-compatible",
+        provider: "openai-compatible",
+        baseUrl: "http://127.0.0.1:11434/v1",
+      }),
+    }));
+    expect(String(options.providerConfig?.model || "").trim()).not.toBe("");
+  }, 15000);
+
+  it("prefers the native adapter for harness-managed Anthropic providers", async () => {
+    mockConfigState.current = {
+      agentRuntime: "harness",
+      providers: {
+        defaultProvider: "anthropic-messages",
+        anthropic: {
+          enabled: true,
+          defaultModel: "claude-sonnet-4",
+        },
+      },
+    };
+    process.env.ANTHROPIC_API_KEY = "anthropic-secret";
+
+    vi.resetModules();
+    const primaryAgent = await import("../agent/primary-agent.mjs");
+
+    await primaryAgent.initPrimaryAgent();
+    await primaryAgent.execPrimaryPrompt("route through the Anthropic native harness", {
+      sessionId: "anthropic-native-harness-session",
+    });
+
+    expect(primaryAgent.getPrimaryAgentName()).toBe("anthropic-native");
+    expect(primaryAgent.getPrimaryAgentSelection()).toBe("anthropic-messages");
+    expect(mockInitAnthropicNative).toHaveBeenCalled();
+    const [payload, options] = mockExecAnthropicNative.mock.calls[0];
+    expect(payload).toEqual(expect.objectContaining({
+      providerId: "anthropic-messages",
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          text: expect.stringContaining("route through the Anthropic native harness"),
+        }),
+      ],
+    }));
+    expect(options).toEqual(expect.objectContaining({
+      provider: "anthropic-messages",
+      providerConfig: expect.objectContaining({
+        providerId: "anthropic-messages",
+        provider: "anthropic-messages",
+      }),
+    }));
+    expect(String(options.providerConfig?.model || "").trim()).not.toBe("");
+  }, 15000);
+
+  it("prefers the native adapter for harness-managed Gemini providers", async () => {
+    mockConfigState.current = {
+      agentRuntime: "harness",
+      providers: {
+        defaultProvider: "gemini-generate-content",
+        gemini: {
+          enabled: true,
+          defaultModel: "gemini-2.5-pro",
+        },
+      },
+    };
+    process.env.GEMINI_API_KEY = "gemini-secret";
+
+    vi.resetModules();
+    const primaryAgent = await import("../agent/primary-agent.mjs");
+
+    await primaryAgent.initPrimaryAgent();
+    await primaryAgent.execPrimaryPrompt("route through the Gemini native harness", {
+      sessionId: "gemini-native-harness-session",
+    });
+
+    expect(primaryAgent.getPrimaryAgentName()).toBe("gemini-native");
+    expect(primaryAgent.getPrimaryAgentSelection()).toBe("gemini-generate-content");
+    expect(mockInitGeminiNative).toHaveBeenCalled();
+    const [payload, options] = mockExecGeminiNative.mock.calls[0];
+    expect(payload).toEqual(expect.objectContaining({
+      providerId: "gemini-generate-content",
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          text: expect.stringContaining("route through the Gemini native harness"),
+        }),
+      ],
+    }));
+    expect(options).toEqual(expect.objectContaining({
+      provider: "gemini-generate-content",
+      providerConfig: expect.objectContaining({
+        providerId: "gemini-generate-content",
+        provider: "gemini-generate-content",
+      }),
+    }));
+    expect(String(options.providerConfig?.model || "").trim()).not.toBe("");
+  }, 15000);
 
   it("retries codex locally before any failover", async () => {
     process.env.PRIMARY_AGENT_RECOVERY_RETRY_ATTEMPTS = "1";

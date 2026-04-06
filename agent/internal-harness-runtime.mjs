@@ -435,6 +435,10 @@ export function createInternalHarnessRuntime(compiledProfile, options = {}) {
       sessionType: stageRuntime.sessionType || toTrimmedString(stage.sessionType || profile.sessionType || options.sessionType || "harness") || "harness",
       cwd: stageRuntime.cwd || toTrimmedString(stage.cwd || profile.cwd || options.cwd || ""),
       model: stageRuntime.model || toTrimmedString(stage.model || profile.model || options.model || ""),
+      toolPolicy: stageRuntime.toolPolicy || {},
+      allowedTools: stageRuntime.toolPolicy?.allowedTools || [],
+      deniedTools: stageRuntime.toolPolicy?.deniedTools || [],
+      subagentContract: options.subagentContract || null,
     });
   }
 

@@ -20,7 +20,10 @@ import {
   resolveToolRetryPolicy,
   shouldRetryToolExecution,
 } from "./tool-retry-policy.mjs";
-import { truncateToolOutput } from "./tool-output-truncation.mjs";
+import {
+  materializeTruncatedToolOutput,
+  truncateToolOutput,
+} from "./tool-output-truncation.mjs";
 import {
   getBosunHotPathStatus,
   truncateWithBosunHotPathExec,
@@ -28,6 +31,49 @@ import {
 
 function toTrimmedString(value) {
   return String(value ?? "").trim();
+}
+
+function normalizeToolNameSet(values) {
+  return new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((entry) => toTrimmedString(entry).toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function resolveContextToolPolicy(context = {}) {
+  const contract = context.subagentContract && typeof context.subagentContract === "object"
+    ? context.subagentContract
+    : {};
+  const contractToolPolicy = contract.toolPolicy && typeof contract.toolPolicy === "object"
+    ? contract.toolPolicy
+    : {};
+  const toolPolicy = context.toolPolicy && typeof context.toolPolicy === "object"
+    ? context.toolPolicy
+    : {};
+  return {
+    allowedTools: [
+      ...(Array.isArray(context.allowedTools) ? context.allowedTools : []),
+      ...(Array.isArray(toolPolicy.allowedTools) ? toolPolicy.allowedTools : []),
+      ...(Array.isArray(contractToolPolicy.allowedTools) ? contractToolPolicy.allowedTools : []),
+    ],
+    deniedTools: [
+      ...(Array.isArray(context.deniedTools) ? context.deniedTools : []),
+      ...(Array.isArray(toolPolicy.deniedTools) ? toolPolicy.deniedTools : []),
+      ...(Array.isArray(contractToolPolicy.deniedTools) ? contractToolPolicy.deniedTools : []),
+    ],
+  };
+}
+
+function isToolAllowedForContext(toolName, context = {}) {
+  const normalized = toTrimmedString(toolName).toLowerCase();
+  if (!normalized) return false;
+  const policy = resolveContextToolPolicy(context);
+  const allowed = normalizeToolNameSet(policy.allowedTools);
+  const denied = normalizeToolNameSet(policy.deniedTools);
+  if (denied.has(normalized)) return false;
+  if (allowed.size > 0) return allowed.has(normalized);
+  return true;
 }
 
 function buildToolError(message, detail = {}) {
@@ -120,7 +166,8 @@ export function createToolOrchestrator(options = {}) {
       const agentProfileId = toTrimmedString(context.agentProfileId || options.agentProfileId);
       const configured = listAvailableTools(rootDir, agentProfileId || "__default__");
       const registryTools = registry.listTools();
-      return registryTools.length > 0 ? registryTools : configured;
+      const tools = registryTools.length > 0 ? registryTools : configured;
+      return tools.filter((tool) => isToolAllowedForContext(tool?.id || tool?.name || tool, context));
     },
     async execute(toolName, args = {}, context = {}) {
       const executeTool = typeof options.executeTool === "function"
@@ -132,6 +179,15 @@ export function createToolOrchestrator(options = {}) {
         throw new Error("Tool orchestrator executeTool hook is not configured");
       }
       const toolDefinition = registry.getTool(toolName) || { id: toTrimmedString(toolName) };
+      if (!isToolAllowedForContext(toolDefinition?.id || toolName, context)) {
+        throw buildToolError(
+          `Tool ${toTrimmedString(toolName) || "unknown"} is not allowed in this subagent contract.`,
+          {
+            code: "tool_not_allowed",
+            toolName: toTrimmedString(toolName) || null,
+          },
+        );
+      }
       const envelope = buildToolExecutionEnvelope(toolName, args, context, {
         cwd: toTrimmedString(options.cwd),
         repoRoot: toTrimmedString(options.repoRoot),
@@ -241,7 +297,11 @@ export function createToolOrchestrator(options = {}) {
             result,
             options.truncation || {},
           );
-          const truncated = hotPathTruncated || truncateToolOutput(result, options.truncation || {});
+          const truncated = await materializeTruncatedToolOutput(
+            result,
+            hotPathTruncated || truncateToolOutput(result, options.truncation || {}),
+            options.truncation || {},
+          );
           const truncation = {
             truncated: truncated.truncated,
             originalBytes: truncated.originalBytes,

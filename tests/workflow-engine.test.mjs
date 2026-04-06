@@ -1248,6 +1248,56 @@ describe("WorkflowEngine - source port routing", () => {
     expect(visited.sort()).toEqual(["audit", "left"]);
   });
 
+  it("falls back to default edges when a node emits an unmatched custom port", async () => {
+    const visited = [];
+
+    registerNodeType("test.unmatched_port_source", {
+      describe: () => "Emit a non-default port without a matching edge",
+      schema: { type: "object", properties: {} },
+      outputs: [
+        { name: "default", type: "Any" },
+        { name: "error", type: "JSON" },
+      ],
+      async execute() {
+        visited.push("source");
+        return {
+          ok: false,
+          matchedPort: "error",
+          port: "error",
+        };
+      },
+    });
+
+    registerNodeType("test.unmatched_port_fallback", {
+      describe: () => "Capture fallback routing from default edges",
+      schema: { type: "object", properties: {} },
+      async execute() {
+        visited.push("fallback");
+        return { ok: true };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "source", type: "test.unmatched_port_source", label: "Source", config: {} },
+        { id: "fallback", type: "test.unmatched_port_fallback", label: "Fallback", config: {} },
+      ],
+      [
+        { id: "start", source: "trigger", target: "source" },
+        { id: "default-fallback", source: "source", target: "fallback" },
+      ],
+      { name: "Unmatched Custom Port Fallback Workflow" },
+    );
+
+    engine.save(wf);
+    const result = await engine.execute(wf.id, {});
+
+    expect(result.errors).toEqual([]);
+    expect(visited).toEqual(["source", "fallback"]);
+    expect(result.getNodeStatus("fallback")).toBe(NodeStatus.COMPLETED);
+  });
+
   it("rejects unknown explicit source and target ports before execution", () => {
     registerNodeType("test.port_source", {
       describe: () => "Source node with explicit ports",
@@ -4349,6 +4399,7 @@ describe("New node types", () => {
     const result = await handler.execute(node, ctx, engine);
     expect(result.gateOpened).toBe(true);
     expect(result.mode).toBe("condition");
+    expect(result.judgment).toBe("ACCEPT");
     expect(result.waited).toBeLessThan(1000);
   });
 
@@ -4363,6 +4414,7 @@ describe("New node types", () => {
     };
     const result = await handler.execute(node, ctx, engine);
     expect(result.gateOpened).toBe(true);
+    expect(result.judgment).toBe("ACCEPT");
     expect(result.waited).toBe(50);
   });
 
@@ -4410,11 +4462,13 @@ describe("New node types", () => {
     expect(result.gateOpened).toBe(true);
     expect(result.mode).toBe("manual");
     expect(result.approvalState).toBe("approved");
+    expect(result.judgment).toBe("ACCEPT");
     expect(result.approvalRequestId).toBe(`workflow-gate:${approvalScopeId}`);
     const resolvedRequest = getApprovalRequest("workflow-gate", approvalScopeId, { repoRoot });
     expect(resolvedRequest).toMatchObject({
       requestId: `workflow-gate:${approvalScopeId}`,
       status: "approved",
+      judgment: "ACCEPT",
       nodeId: "gate-manual-1",
       workflowId: "wf-manual-gate",
     });

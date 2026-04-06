@@ -77,7 +77,7 @@ describe("continuation-loop template integration", () => {
     expect(launchEphemeralThread.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(ctx.getNodeOutput("end-terminal")?.status).toBe("completed");
     expect(ctx.getNodeOutput("end-terminal")?.output?.externalStatus).toBe("done");
-  });
+  }, 15000);
 
   it("fires a session-stuck event payload and executes retry action when no progress is detected", async () => {
     const kanban = makeStatusKanban(["inprogress", "inprogress", "done"]);

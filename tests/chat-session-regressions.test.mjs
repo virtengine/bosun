@@ -20,6 +20,10 @@ describe("chat session regressions", () => {
   it("routes session list/detail calls through workspace-aware session API paths", () => {
     const source = read("ui/components/session-list.js");
     expect(source).toContain("buildSessionApiPath");
+    expect(source).toContain("getSessionHistoryState");
+    expect(source).toContain("deleteSessionHistory");
+    expect(source).toContain("revealSessionFolder");
+    expect(source).toContain("reopenSessionHistory");
     expect(source).toContain("resolveSessionWorkspaceHint");
     expect(source).toContain("sessionPath(id, action = \"\")");
     expect(source).toContain("buildSessionApiPath(id, \"\", { workspace: \"all\" })");
@@ -31,6 +35,10 @@ describe("chat session regressions", () => {
     expect(source).toContain('workspaceScope !== "all"');
     expect(source).toContain("selectedSessionId.value = selectedSessionStillExists ? currentSelectedSessionId : null;");
     expect(source).toContain("clearUnavailableSelectedSession(targetSessionId);");
+    expect(source).toContain("History ready:");
+    expect(source).toContain("Reveal folder");
+    expect(source).toContain("deleteLabel");
+    expect(source).toContain("Open transcript");
 
     const loadMessagesPattern = /export async function loadSessionMessages[\s\S]*?\n}\n\nfunction normalizePreview/;
     const loadMessagesBlock = loadMessagesPattern.exec(source)?.[0] || "";
@@ -173,13 +181,31 @@ describe("chat session regressions", () => {
     expect(source).toContain("sessionSurface=${sessionSurface}");
     expect(source).toContain("sessionWorkspace=${sessionWorkspaceScope}");
     expect(source).toContain("onSessionUpdated=${handleSessionSurfaceUpdated}");
+    expect(source).toContain("getSessionHistoryState");
+    expect(source).toContain("const sessionHistory = getSessionHistoryState(activeSession);");
+    expect(source).toContain("Reveal Folder");
+    expect(source).toContain("Delete History");
+    expect(source).toContain("Resume Work");
     expect(source).not.toContain("yolo:");
     expect(siteSource).toContain("replaceSessionInList");
     expect(siteSource).toContain("const sessionSurface = activeSession?.surface || null;");
     expect(siteSource).toContain("sessionSurface=${sessionSurface}");
     expect(siteSource).toContain("sessionWorkspace=${sessionWorkspaceScope}");
     expect(siteSource).toContain("onSessionUpdated=${handleSessionSurfaceUpdated}");
+    expect(siteSource).toContain("getSessionHistoryState");
+    expect(siteSource).toContain("const sessionHistory = getSessionHistoryState(activeSession);");
+    expect(siteSource).toContain("Reveal Folder");
+    expect(siteSource).toContain("Delete History");
+    expect(siteSource).toContain("Resume Work");
     expect(siteSource).not.toContain("yolo:");
+  });
+
+  it("adds explicit session-history routes for reveal and delete-history actions", () => {
+    const source = read("server/routes/harness-sessions.mjs");
+    expect(source).toContain('if (action === "reveal" && req.method === "POST")');
+    expect(source).toContain('action === "delete-history"');
+    expect(source).toContain("resolveSessionHistoryRevealPath");
+    expect(source).toContain("session-history-deleted");
   });
 
   it("renders a visible context tracker in the chat header and toolbar from structured session surface metrics", () => {

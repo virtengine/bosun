@@ -551,6 +551,55 @@ export function getSessionRuntimeState(session, options = {}) {
   return buildSessionRecencyRuntimeState(session, lifecycle, options, "recency");
 }
 
+export function getSessionHistoryState(session, options = {}) {
+  const lifecycle = getSessionLifecycleState(session);
+  const runtime = getSessionRuntimeState(session, options);
+  const inProgress =
+    lifecycle.isActive
+    && (runtime.isLive || runtime.key === "running" || runtime.key === "queued");
+  const isArchived = lifecycle.key === "archived";
+  const isHistoric = !inProgress;
+  const folderPath = String(
+    session?.surface?.repository?.selected?.path
+    || session?.workspaceDir
+    || session?.workspacePath
+    || session?.metadata?.selectedRepoPath
+    || session?.metadata?.workspaceDir
+    || session?.metadata?.workspacePath
+    || "",
+  ).trim() || null;
+
+  let label = "Live session";
+  let tone = "default";
+  if (isArchived) {
+    label = "Archived history";
+    tone = "default";
+  } else if (isHistoric) {
+    label = "Cold reopen ready";
+    tone = runtime.isStale ? "warning" : "info";
+  } else if (runtime.key === "running" || runtime.key === "queued") {
+    label = "Live session";
+    tone = "success";
+  }
+
+  return {
+    key: isArchived ? "archived" : (isHistoric ? "historic" : "live"),
+    label,
+    tone,
+    isHistoric,
+    isArchived,
+    isLive: inProgress,
+    canReopenTranscript: Boolean(session && (session.id || session.taskId)),
+    canResumeWork: isArchived || lifecycle.key === "paused",
+    canDeleteHistory: isHistoric,
+    canRevealFolder: Boolean(folderPath),
+    folderPath,
+    reopenLabel: isHistoric ? "Reopen transcript" : "Open session",
+    resumeLabel: isArchived || lifecycle.key === "paused" ? "Resume work" : "",
+    deleteLabel: isHistoric ? "Delete history" : "Delete session",
+  };
+}
+
 export function resolveSessionWorkspaceHint(session, fallback = "active") {
   const direct = String(session?.workspaceId || session?.workspace || "").trim();
   if (direct) return normalizeWorkspaceHint(direct);

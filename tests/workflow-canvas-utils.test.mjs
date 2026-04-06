@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDraftFlowchartMap,
+  buildDraftFlowchartMetadata,
   buildCollapsedGraph,
   convertSelectionToSubworkflow,
   createHistoryState,
@@ -353,6 +355,70 @@ describe("workflow canvas history", () => {
       },
     ]);
     expect(parsed.groups).toEqual(groups);
+  });
+
+  it("builds a draft flowchart map that keeps grouped design steps linked to runtime nodes", () => {
+    const nodes = [makeNode("start", 20, 40), makeNode("fetch", 240, 40), makeNode("notify", 460, 40)];
+    const edges = [
+      { id: "edge-1", source: "start", target: "fetch" },
+      { id: "edge-2", source: "fetch", target: "notify" },
+    ];
+    const groups = [{ id: "group-a", label: "Research", color: "#60a5fa", nodeIds: ["start", "fetch"], collapsed: false }];
+
+    const flowchart = buildDraftFlowchartMap({ nodes, edges, groups });
+
+    expect(flowchart.steps).toEqual([
+      expect.objectContaining({
+        id: "group:group-a",
+        label: "Research",
+        runtimeNodeIds: ["start", "fetch"],
+        runtimeNodeCount: 2,
+      }),
+      expect.objectContaining({
+        id: "node:notify",
+        runtimeNodeIds: ["notify"],
+        runtimeNodeCount: 1,
+      }),
+    ]);
+    expect(flowchart.runtimeNodeToStepId).toEqual({
+      start: "group:group-a",
+      fetch: "group:group-a",
+      notify: "node:notify",
+    });
+    expect(flowchart.links).toEqual([
+      expect.objectContaining({
+        sourceStepId: "group:group-a",
+        targetStepId: "node:notify",
+        edgeIds: ["edge-2"],
+      }),
+    ]);
+  });
+
+  it("normalizes saved draft flowchart metadata and supplements missing runtime bindings", () => {
+    const nodes = [makeNode("n1", 20, 40), makeNode("n2", 240, 40)];
+    const edges = [{ id: "edge-n1-n2", source: "n1", target: "n2" }];
+    const metadata = buildDraftFlowchartMetadata({
+      nodes,
+      edges,
+      metadata: {
+        flowchart: {
+          version: 1,
+          source: "user",
+          steps: [{ id: "plan-step", label: "Start", runtimeNodeIds: ["n1"] }],
+          links: [],
+        },
+      },
+    });
+
+    const flowchart = buildDraftFlowchartMap({ nodes, edges, metadata: { flowchart: metadata } });
+
+    expect(flowchart.steps).toEqual([
+      expect.objectContaining({ id: "plan-step", runtimeNodeIds: ["n1"] }),
+      expect.objectContaining({ id: "node:n2", runtimeNodeIds: ["n2"] }),
+    ]);
+    expect(flowchart.links).toEqual([
+      expect.objectContaining({ sourceStepId: "plan-step", targetStepId: "node:n2" }),
+    ]);
   });
 
   it("creates groups, collapses them into a proxy node, and moves children together", () => {

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { listPromotedStrategiesFromStateLedger, resolveStateLedgerPath } from "../lib/state-ledger-sqlite.mjs";
@@ -413,6 +413,88 @@ export function resolveSkillbookPath(options = {}) {
   const repoRoot = normalizeText(options.repoRoot || process.cwd()) || process.cwd();
   const explicit = normalizeText(options.skillbookPath || options.path || "");
   return resolve(repoRoot, explicit || DEFAULT_SKILLBOOK_FILE);
+}
+
+export function loadSkillbookSync(options = {}) {
+  const skillbookPath = resolveSkillbookPath(options);
+  if (!existsSync(skillbookPath)) {
+    return createEmptySkillbook();
+  }
+  try {
+    const raw = JSON.parse(readFileSync(skillbookPath, "utf8"));
+    const strategies = Array.isArray(raw?.strategies)
+      ? raw.strategies.map((entry) => normalizeSkillbookEntry(entry)).filter(Boolean)
+      : [];
+    strategies.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    return {
+      version: normalizeText(raw?.version) || SKILLBOOK_VERSION,
+      updatedAt: normalizeTimestamp(raw?.updatedAt),
+      strategies,
+    };
+  } catch {
+    return createEmptySkillbook();
+  }
+}
+
+function buildSkillbookProtocolTitle(entry = {}) {
+  return normalizeNullable(entry.recommendation)
+    || normalizeNullable(entry.strategyId)
+    || "Reusable strategy guidance";
+}
+
+function buildSkillbookProtocolTags(entry = {}) {
+  return normalizeStringList([
+    ...(Array.isArray(entry.tags) ? entry.tags : []),
+    ...(Array.isArray(entry.provenance) ? entry.provenance : []),
+    ...(Array.isArray(entry.evidence) ? entry.evidence : []),
+    entry.category,
+    entry.decision,
+    entry.scope,
+  ], { maxItems: 16, maxLength: 80 });
+}
+
+export function listSkillbookStrategyProtocolsSync(options = {}) {
+  const skillbook = loadSkillbookSync(options);
+  return (Array.isArray(skillbook.strategies) ? skillbook.strategies : []).map((entry) => ({
+    id: `skillbook-${normalizeText(entry.strategyId).replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`,
+    strategyId: normalizeText(entry.strategyId),
+    title: buildSkillbookProtocolTitle(entry),
+    description: normalizeNullable(entry.rationale) || normalizeNullable(entry.recommendation) || "",
+    tags: buildSkillbookProtocolTags(entry),
+    important: String(entry.status || "").toLowerCase() === "promoted" || (normalizeConfidence(entry.confidence) ?? 0) >= 0.75,
+    updatedAt: normalizeTimestamp(entry.updatedAt),
+    recommendation: normalizeNullable(entry.recommendation),
+    rationale: normalizeNullable(entry.rationale),
+    relatedPaths: normalizePathList(entry.relatedPaths || []),
+    status: normalizeNullable(entry.status) || "promoted",
+    confidence: normalizeConfidence(entry.confidence),
+  }));
+}
+
+export function buildSkillbookProtocolMarkdown(entry = {}) {
+  const title = buildSkillbookProtocolTitle(entry);
+  const tags = buildSkillbookProtocolTags(entry);
+  const relatedPaths = normalizePathList(entry.relatedPaths || []);
+  const lines = [
+    `# Skill: ${title}`,
+    "",
+  ];
+  if (normalizeNullable(entry.recommendation)) {
+    lines.push(`- Recommendation: ${normalizeNullable(entry.recommendation)}`);
+  }
+  if (normalizeNullable(entry.rationale)) {
+    lines.push(`- Rationale: ${normalizeNullable(entry.rationale)}`);
+  }
+  if (tags.length > 0) {
+    lines.push(`- Tags: ${tags.slice(0, 6).join(", ")}`);
+  }
+  if (relatedPaths.length > 0) {
+    lines.push(`- Related Paths: ${relatedPaths.slice(0, 4).join(", ")}`);
+  }
+  if (normalizeConfidence(entry.confidence) != null) {
+    lines.push(`- Confidence: ${normalizeConfidence(entry.confidence).toFixed(2)}`);
+  }
+  return lines.join("\n").trim();
 }
 
 export async function loadSkillbook(options = {}) {

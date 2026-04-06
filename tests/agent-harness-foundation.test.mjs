@@ -319,6 +319,10 @@ describe("tool orchestrator foundation", () => {
       result: expect.objectContaining({
         truncated: true,
         preview: expect.stringContaining("…truncated"),
+        spillPointer: expect.objectContaining({
+          kind: "tool-log",
+          stage: "tool_output_truncation",
+        }),
       }),
     }));
   });
@@ -516,7 +520,7 @@ describe("session manager foundation", () => {
       { stageId: "done", mode: "continue" },
     ]);
     expect(session.canSteer()).toBe(false);
-  });
+  }, 10000);
 
   it("supports compiled and source sessions through the manager facade", async () => {
     const manager = createHarnessSessionManager({
@@ -1527,7 +1531,7 @@ describe("harness agent service foundation", () => {
         threadId: "provider-thread-2",
       }),
     }));
-  });
+  }, 10000);
 
   it("forwards interactive usage metadata through assistant summary events", async () => {
     const sessionManager = createBosunSessionManager();

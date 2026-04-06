@@ -1051,10 +1051,14 @@ describeUiServer("ui-server mini app", () => {
 
   it("returns provider inventory with auth state, capabilities, and model catalogs", async () => {
     const savedOpenAiApiKey = process.env.OPENAI_API_KEY;
+    const savedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedGeminiApiKey = process.env.GEMINI_API_KEY;
     const savedDefaultProvider = process.env.BOSUN_PROVIDER_DEFAULT;
     const savedOllamaEnabled = process.env.BOSUN_PROVIDER_OLLAMA_ENABLED;
     const savedOllamaBaseUrl = process.env.BOSUN_PROVIDER_OLLAMA_BASE_URL;
     process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+    process.env.GEMINI_API_KEY = "test-gemini-key";
     process.env.BOSUN_PROVIDER_DEFAULT = "openai-responses";
     process.env.BOSUN_PROVIDER_OLLAMA_ENABLED = "true";
     process.env.BOSUN_PROVIDER_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
@@ -1078,6 +1082,8 @@ describeUiServer("ui-server mini app", () => {
 
       const openaiProvider = json.items.find((entry) => entry.providerId === "openai-responses");
       expect(openaiProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         enabled: true,
         capabilities: expect.objectContaining({
           apiKey: true,
@@ -1095,6 +1101,8 @@ describeUiServer("ui-server mini app", () => {
 
       const ollamaProvider = json.items.find((entry) => entry.providerId === "ollama");
       expect(ollamaProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         enabled: true,
         advanced: true,
         auth: expect.objectContaining({
@@ -1105,10 +1113,52 @@ describeUiServer("ui-server mini app", () => {
           defaultModel: "qwen2.5-coder:latest",
         }),
       }));
+
+      const anthropicProvider = json.items.find((entry) => entry.providerId === "anthropic-messages");
+      expect(anthropicProvider).toEqual(expect.objectContaining({
+        adapterId: "anthropic-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        capabilities: expect.objectContaining({
+          apiKey: true,
+          tools: true,
+        }),
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+        modelCatalog: expect.objectContaining({
+          defaultModel: "claude-opus-4.1",
+        }),
+      }));
+
+      const geminiProvider = json.items.find((entry) => entry.providerId === "gemini-generate-content");
+      expect(geminiProvider).toEqual(expect.objectContaining({
+        adapterId: "gemini-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        capabilities: expect.objectContaining({
+          apiKey: true,
+          tools: true,
+        }),
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+        modelCatalog: expect.objectContaining({
+          defaultModel: "gemini-2.5-pro",
+        }),
+      }));
     } finally {
       await new Promise((resolve) => server.close(resolve));
       if (savedOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = savedOpenAiApiKey;
+      if (savedAnthropicApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedAnthropicApiKey;
+      if (savedGeminiApiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = savedGeminiApiKey;
       if (savedDefaultProvider === undefined) delete process.env.BOSUN_PROVIDER_DEFAULT;
       else process.env.BOSUN_PROVIDER_DEFAULT = savedDefaultProvider;
       if (savedOllamaEnabled === undefined) delete process.env.BOSUN_PROVIDER_OLLAMA_ENABLED;
@@ -1189,6 +1239,8 @@ describeUiServer("ui-server mini app", () => {
       expect(agentsJson.agents.map((entry) => entry.id)).toEqual(["azure-us", "codex-oauth"]);
       expect(agentsJson.agents.find((entry) => entry.id === "azure-us")).toEqual(expect.objectContaining({
         providerId: "azure-openai-responses",
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         providerLabel: "Azure OpenAI Responses",
         runtimeKind: "harness",
         models: ["gpt-5.4", "gpt-5.4-mini"],
@@ -1439,6 +1491,8 @@ describeUiServer("ui-server mini app", () => {
       ]);
       expect(executorsJson.executors.find((entry) => entry.id === "azure-us")).toEqual(expect.objectContaining({
         providerId: "azure-openai-responses",
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         weight: 120,
         authBindings: expect.objectContaining({
           apiKeyEnv: "AZURE_US_API_KEY",
@@ -1450,6 +1504,8 @@ describeUiServer("ui-server mini app", () => {
       }));
       expect(executorsJson.executors.find((entry) => entry.id === "azure-sweden")).toEqual(expect.objectContaining({
         providerId: "azure-openai-responses",
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         weight: 60,
         authBindings: expect.objectContaining({
           apiKeyEnv: "AZURE_SWEDEN_API_KEY",
@@ -1470,6 +1526,8 @@ describeUiServer("ui-server mini app", () => {
       ]);
       expect(agentsJson.agents.find((entry) => entry.id === "azure-sweden")).toEqual(expect.objectContaining({
         providerId: "azure-openai-responses",
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         runtimeKind: "harness",
         available: true,
         weight: 60,
@@ -1484,6 +1542,8 @@ describeUiServer("ui-server mini app", () => {
       }));
       expect(agentsJson.agents.find((entry) => entry.id === "openai-prod")).toEqual(expect.objectContaining({
         providerId: "openai-responses",
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
         available: true,
         weight: 20,
         modelEntries: [
@@ -1503,6 +1563,90 @@ describeUiServer("ui-server mini app", () => {
       else process.env.AZURE_SWEDEN_API_KEY = savedAzureSwedenApiKey;
       if (savedOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = savedOpenAiApiKey;
+      await removeDirWithRetries(tmpDir);
+    }
+  }, 15000);
+
+  it("supports Gemini Harness executors with provider-specific auth bindings and endpoint persistence", async () => {
+    const mod = await import("../server/ui-server.mjs");
+    const tmpDir = mkdtempSync(join(tmpdir(), "bosun-harness-gemini-instance-"));
+    const configPath = join(tmpDir, "bosun.config.json");
+    const savedConfigPath = process.env.BOSUN_CONFIG_PATH;
+    const savedGeminiApiKey = process.env.GEMINI_API_KEY;
+    const savedGeminiRegionalKey = process.env.GEMINI_REGIONAL_KEY;
+    process.env.BOSUN_CONFIG_PATH = configPath;
+    process.env.GEMINI_API_KEY = "";
+    process.env.GEMINI_REGIONAL_KEY = "gemini-regional-secret";
+    writeFileSync(configPath, JSON.stringify({
+      $schema: "./bosun.schema.json",
+      agentRuntime: "harness",
+      harness: {
+        primaryExecutor: "gemini-regional",
+        routingMode: "fallback",
+        executors: [
+          {
+            id: "gemini-regional",
+            name: "Gemini Regional",
+            providerId: "gemini-generate-content",
+            enabled: true,
+            defaultModel: "gemini-2.5-pro",
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            authBindings: {
+              apiKeyEnv: "GEMINI_REGIONAL_KEY",
+            },
+            models: [
+              { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+            ],
+          },
+        ],
+      },
+    }, null, 2));
+
+    const server = await mod.startTelegramUiServer({
+      port: await getFreePort(),
+      host: "127.0.0.1",
+      skipInstanceLock: true,
+      skipAutoOpen: true,
+    });
+
+    try {
+      const port = server.address().port;
+      const [executorsResponse, agentsResponse] = await Promise.all([
+        fetch(`http://127.0.0.1:${port}/api/harness/executors`),
+        fetch(`http://127.0.0.1:${port}/api/agents/available`),
+      ]);
+      const executorsJson = await executorsResponse.json();
+      const agentsJson = await agentsResponse.json();
+
+      expect(executorsJson.executors.find((entry) => entry.id === "gemini-regional")).toEqual(expect.objectContaining({
+        providerId: "gemini-generate-content",
+        adapterId: "gemini-native",
+        runtimeOwnership: "native",
+        authBindings: expect.objectContaining({
+          apiKeyEnv: "GEMINI_REGIONAL_KEY",
+        }),
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+        }),
+      }));
+
+      expect(agentsJson.agents.find((entry) => entry.id === "gemini-regional")).toEqual(expect.objectContaining({
+        providerId: "gemini-generate-content",
+        adapterId: "gemini-native",
+        runtimeOwnership: "native",
+        runtimeKind: "harness",
+        available: true,
+        defaultModel: "gemini-2.5-pro",
+      }));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      if (savedConfigPath === undefined) delete process.env.BOSUN_CONFIG_PATH;
+      else process.env.BOSUN_CONFIG_PATH = savedConfigPath;
+      if (savedGeminiApiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = savedGeminiApiKey;
+      if (savedGeminiRegionalKey === undefined) delete process.env.GEMINI_REGIONAL_KEY;
+      else process.env.GEMINI_REGIONAL_KEY = savedGeminiRegionalKey;
       await removeDirWithRetries(tmpDir);
     }
   }, 15000);
@@ -9911,6 +10055,11 @@ describeUiServer("ui-server mini app", () => {
       ]));
       expect(listed?.surface?.permissionMode?.selected?.id).toBe("full_access");
       expect(listed?.surface?.executionTarget?.selected?.id).toBe("connect_codex_web");
+      expect(listed?.surface?.phase).toEqual(expect.objectContaining({
+        id: "planning",
+        label: "Planning",
+        tone: "info",
+      }));
 
       const detailJson = await fetch(
         `http://127.0.0.1:${port}/api/sessions/${encodeURIComponent(sessionId)}?workspace=all&full=1`,
@@ -9919,6 +10068,12 @@ describeUiServer("ui-server mini app", () => {
       expect(detailJson.session.surface.repository.available).toHaveLength(2);
       expect(detailJson.session.surface.branch.selected).toBe("feature/session-surface");
       expect(detailJson.session.surface.branch.repoPath).toBe(repoSelected);
+      expect(detailJson.session.surface.phase).toEqual(expect.objectContaining({
+        id: "planning",
+        label: "Planning",
+        promptRule: expect.stringContaining("plan-first"),
+        toolRule: expect.stringContaining("discovery"),
+      }));
       expect(detailJson.session.surface.tokenUsage).toEqual(expect.objectContaining({
         totalTokens: 300,
         inputTokens: 210,

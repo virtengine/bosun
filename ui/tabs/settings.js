@@ -1037,6 +1037,7 @@ const HARNESS_EXECUTOR_ENDPOINT_PROVIDER_IDS = new Set([
   "openai-responses",
   "openai-compatible",
   "ollama",
+  "gemini-generate-content",
 ]);
 
 const HARNESS_EXECUTOR_CONFIGURABLE_API_STYLE_PROVIDER_IDS = new Set([
@@ -1208,6 +1209,15 @@ function describeHarnessExecutorAuthBindings(entry = {}) {
     bindings.oauthTokenEnv ? `OAuth: ${bindings.oauthTokenEnv}` : "",
     bindings.subscriptionEnv ? `Subscription: ${bindings.subscriptionEnv}` : "",
   ].filter(Boolean).join(" · ");
+}
+
+function formatHarnessRuntimeOwnershipLabel(entry = {}, providerInfo = null) {
+  const runtimeLabel = String(entry?.runtimeLabel || providerInfo?.runtimeLabel || "").trim();
+  if (runtimeLabel) return runtimeLabel;
+  const adapterId = String(entry?.adapterId || providerInfo?.adapterId || "").trim().toLowerCase();
+  if (adapterId === "openai-native") return "Bosun-native";
+  if (adapterId.endsWith("-sdk")) return "External SDK";
+  return "Runtime-managed";
 }
 
 function HarnessExecutorsEditor() {
@@ -1676,6 +1686,7 @@ function HarnessExecutorsEditor() {
         const routingLabel = deriveHarnessExecutorRoutingLabel(entry, primaryExecutor, routingMode);
         const endpointSummary = describeHarnessExecutorEndpoint(entry);
         const authBindingSummary = describeHarnessExecutorAuthBindings(entry);
+        const runtimeOwnershipLabel = formatHarnessRuntimeOwnershipLabel(entry, providerInfo);
         return html`
           <div key=${entry._id} style="border:1px solid var(--border-primary);border-radius:var(--radius-sm);padding:12px;margin-bottom:10px">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
@@ -1694,6 +1705,7 @@ function HarnessExecutorsEditor() {
               ${isPrimary && html`<${Chip} size="small" color="primary" label="Primary" />`}
               <${Chip} size="small" variant="outlined" label=${routingLabel} />
               <${Chip} size="small" variant="outlined" label=${formatHarnessProviderStatus(authState)} />
+              <${Chip} size="small" variant="outlined" label=${runtimeOwnershipLabel} />
               <${Chip} size="small" variant="outlined" label=${(apiStyleOptions.find((option) => option.value === (entry.apiStyle || "provider-default")) || HARNESS_EXECUTOR_API_STYLE_OPTIONS[0])?.label || "Provider default"} />
               ${routingMode === "spread" && html`<${Chip} size="small" variant="outlined" label=${`Weight ${normalizeHarnessExecutorWeight(entry.weight, 100)}`} />`}
               ${authState.preferredMode && html`<${Chip} size="small" variant="outlined" label=${formatHarnessAuthModeLabel(authState.preferredMode)} />`}
@@ -1930,6 +1942,7 @@ function HarnessExecutorsEditor() {
               Provider auth: <strong>${authState.status || "unknown"}</strong>
               ${authState.authenticated ? " · connected" : authState.requiresAction ? " · needs auth" : ""}
               ${authState.canRun ? " · runnable" : ""}
+              ${runtimeOwnershipLabel ? ` · ${runtimeOwnershipLabel.toLowerCase()}` : ""}
               ${authBindingSummary ? ` · bindings ${authBindingSummary}` : ""}
               ${authState.connection?.accountId ? ` · account ${authState.connection.accountId}` : ""}
               ${authState.preferredMode ? ` · ${authState.preferredMode}` : ""}

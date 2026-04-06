@@ -6549,9 +6549,10 @@ export class WorkflowEngine extends EventEmitter {
         sourceOutput?.matchedPort ??
         sourceOutput?.port ??
         (inferredConditionPort && explicitEdgePorts.has(inferredConditionPort) ? inferredConditionPort : null);
-      return typeof selectedPortRaw === "string" && selectedPortRaw.trim()
-        ? selectedPortRaw.trim()
-        : null;
+      if (typeof selectedPortRaw !== "string" || !selectedPortRaw.trim()) return null;
+      const selectedPort = selectedPortRaw.trim();
+      if (selectedPort === "default") return "default";
+      return explicitEdgePorts.has(selectedPort) ? selectedPort : null;
     };
 
     const propagateResumeSkip = (skippedNodeId) => {

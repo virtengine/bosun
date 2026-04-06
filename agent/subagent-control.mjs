@@ -28,6 +28,111 @@ function uniqueStrings(values) {
   )];
 }
 
+function normalizeStringArray(values) {
+  return uniqueStrings(Array.isArray(values) ? values : [values]);
+}
+
+function extractContractInput(input = {}) {
+  return toPlainObject(
+    input.contract
+    || input.subagentContract
+    || input.metadata?.subagentContract,
+  );
+}
+
+function normalizeToolPolicy(input = {}, fallback = {}) {
+  const source = {
+    ...toPlainObject(fallback),
+    ...toPlainObject(input),
+  };
+  return {
+    allowedTools: normalizeStringArray(source.allowedTools),
+    deniedTools: normalizeStringArray(source.deniedTools),
+    allowNestedDelegation: source.allowNestedDelegation === true,
+  };
+}
+
+function normalizeMemoryPolicy(input = {}, fallback = {}) {
+  const source = {
+    ...toPlainObject(fallback),
+    ...toPlainObject(input),
+  };
+  return {
+    mode: toTrimmedString(source.mode || "read_only") || "read_only",
+    inheritedState: cloneValue(toPlainObject(source.inheritedState)),
+  };
+}
+
+function normalizeReportingPolicy(input = {}, fallback = {}) {
+  const source = {
+    ...toPlainObject(fallback),
+    ...toPlainObject(input),
+  };
+  return {
+    mode: toTrimmedString(source.mode || "one_way_progress") || "one_way_progress",
+    progressOnly: source.progressOnly !== false,
+  };
+}
+
+function normalizeEscalationPolicy(input = {}, fallback = {}) {
+  const source = {
+    ...toPlainObject(fallback),
+    ...toPlainObject(input),
+  };
+  return {
+    mode: toTrimmedString(source.mode || "none") || "none",
+    waitForResponse: source.waitForResponse === true,
+  };
+}
+
+function normalizeSubagentContract(input = {}, fallback = {}) {
+  const source = {
+    ...toPlainObject(fallback),
+    ...extractContractInput(input),
+  };
+  return {
+    schemaVersion: Number(source.schemaVersion) || 2,
+    freshConversation: source.freshConversation !== false,
+    toolPolicy: normalizeToolPolicy(source.toolPolicy, fallback.toolPolicy),
+    memoryPolicy: normalizeMemoryPolicy(source.memoryPolicy, fallback.memoryPolicy),
+    reportingPolicy: normalizeReportingPolicy(source.reportingPolicy, fallback.reportingPolicy),
+    escalationPolicy: normalizeEscalationPolicy(source.escalationPolicy, fallback.escalationPolicy),
+  };
+}
+
+function normalizeProgressEntry(input = {}, existing = []) {
+  const source = toPlainObject(input);
+  const next = {
+    status: normalizeStatus(source.status || "running", "running"),
+    message: toTrimmedString(source.message || source.summary || "") || null,
+    timestamp: toTrimmedString(source.timestamp || source.createdAt || source.updatedAt || "") || nowIso(),
+    details: cloneValue(toPlainObject(source.details || source.output)),
+  };
+  const sequence = Number(source.sequence);
+  next.sequence = Number.isFinite(sequence) && sequence > 0 ? Math.trunc(sequence) : existing.length + 1;
+  return next;
+}
+
+function normalizeEscalationState(input = {}, fallback = {}) {
+  const source = {
+    ...toPlainObject(fallback),
+    ...toPlainObject(input),
+  };
+  const type = toTrimmedString(source.type || "") || null;
+  if (!type && source.waitForResponse !== true && !toTrimmedString(source.message || source.reason || "")) {
+    return null;
+  }
+  return {
+    type: type || (source.waitForResponse === true ? "wait_for_response" : "escalation"),
+    status: toTrimmedString(source.status || "waiting") || "waiting",
+    waitForResponse: source.waitForResponse === true || type === "wait_for_response",
+    message: toTrimmedString(source.message || source.reason || "") || null,
+    details: cloneValue(toPlainObject(source.details || source.output)),
+    requestedAt: toTrimmedString(source.requestedAt || source.timestamp || "") || nowIso(),
+    resolvedAt: toTrimmedString(source.resolvedAt || "") || null,
+  };
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -54,6 +159,16 @@ function createEventEmitter(hooks = []) {
 
 function buildSubagentRecord(input = {}) {
   const createdAt = nowIso();
+  const contract = normalizeSubagentContract(input);
+  const latestProgress = input.latestProgress
+    ? normalizeProgressEntry(input.latestProgress)
+    : null;
+  const progressHistory = Array.isArray(input.progressHistory)
+    ? input.progressHistory.map((entry, index, items) => normalizeProgressEntry({
+      ...toPlainObject(entry),
+      sequence: entry?.sequence ?? index + 1,
+    }, items.slice(0, index)))
+    : (latestProgress ? [latestProgress] : []);
   return {
     spawnId: toTrimmedString(input.spawnId || "") || createSpawnId(),
     parentSessionId: toTrimmedString(input.parentSessionId || "") || null,
@@ -69,6 +184,10 @@ function buildSubagentRecord(input = {}) {
     lastError: toTrimmedString(input.lastError || "") || null,
     metadata: toPlainObject(input.metadata),
     lastEventType: toTrimmedString(input.lastEventType || "") || null,
+    contract,
+    latestProgress,
+    progressHistory,
+    escalation: normalizeEscalationState(input.escalation),
   };
 }
 
@@ -92,6 +211,26 @@ function mergeSubagentRecord(record, patch = {}) {
     ...(toPlainObject(record.metadata)),
     ...(toPlainObject(next.metadata)),
   };
+  next.contract = normalizeSubagentContract(next, record.contract);
+  next.latestProgress = next.latestProgress
+    ? normalizeProgressEntry(next.latestProgress, Array.isArray(record.progressHistory) ? record.progressHistory : [])
+    : (record.latestProgress ? cloneValue(record.latestProgress) : null);
+  const incomingHistory = Array.isArray(next.progressHistory) ? next.progressHistory : null;
+  next.progressHistory = incomingHistory
+    ? incomingHistory.map((entry, index) => normalizeProgressEntry(entry, incomingHistory.slice(0, index)))
+    : (Array.isArray(record.progressHistory) ? cloneValue(record.progressHistory) : []);
+  if (next.latestProgress) {
+    const lastSequence = Number(next.progressHistory[next.progressHistory.length - 1]?.sequence || 0);
+    if (!next.progressHistory.some((entry) => Number(entry?.sequence || 0) === Number(next.latestProgress.sequence || 0))) {
+      next.latestProgress.sequence = Number(next.latestProgress.sequence || 0) > lastSequence
+        ? Number(next.latestProgress.sequence || 0)
+        : lastSequence + 1;
+      next.progressHistory = [...next.progressHistory, cloneValue(next.latestProgress)].slice(-25);
+    }
+  }
+  next.escalation = Object.prototype.hasOwnProperty.call(next, "escalation")
+    ? normalizeEscalationState(next.escalation, record.escalation)
+    : (record.escalation ? cloneValue(record.escalation) : null);
   if (["completed", "failed", "aborted"].includes(next.status)) {
     next.completedAt = toTrimmedString(next.completedAt || record.completedAt || "") || next.updatedAt;
   } else {
@@ -129,6 +268,19 @@ function notifyActiveSessionListeners(event, taskKey) {
   }
 }
 
+function normalizeWaitTargets(options_ = {}) {
+  const requested = normalizeStringArray(options_.returnOn);
+  return requested.length > 0 ? requested.map((entry) => normalizeStatus(entry, entry)) : ["completed", "failed", "aborted"];
+}
+
+function shouldResolveWaiter(record, returnOn = []) {
+  const targets = new Set(normalizeWaitTargets({ returnOn }));
+  const status = normalizeStatus(record?.status || "pending");
+  if (targets.has(status)) return true;
+  if (targets.has("waiting") && normalizeStatus(record?.escalation?.status || "") === "waiting") return true;
+  return false;
+}
+
 export function createSubagentControl(options = {}) {
   const records = new Map();
   const waiters = new Map();
@@ -143,11 +295,17 @@ export function createSubagentControl(options = {}) {
     for (const key of keys) {
       const bucket = waiters.get(key);
       if (!bucket) continue;
-      waiters.delete(key);
+      const remaining = [];
       for (const waiter of bucket) {
+        if (!shouldResolveWaiter(record, waiter?.returnOn)) {
+          remaining.push(waiter);
+          continue;
+        }
         if (waiter?.timer) clearTimeout(waiter.timer);
         waiter.resolve(cloneValue(record));
       }
+      if (remaining.length > 0) waiters.set(key, remaining);
+      else waiters.delete(key);
     }
   }
 
@@ -161,8 +319,11 @@ export function createSubagentControl(options = {}) {
       childThreadId: record.childThreadId,
       status: record.status,
       timestamp: record.updatedAt,
+      contract: cloneValue(record.contract),
+      latestProgress: cloneValue(record.latestProgress),
+      escalation: cloneValue(record.escalation),
     });
-    if (isTerminalSubagentStatus(record.status)) {
+    if (isTerminalSubagentStatus(record.status) || normalizeStatus(record.status) === "waiting") {
       resolveWaiters(record);
     }
     return cloneValue(record);
@@ -280,6 +441,7 @@ export function createSubagentControl(options = {}) {
       status: "completed",
       completedAt: patch.completedAt || nowIso(),
       lastError: null,
+      escalation: null,
     });
   }
 
@@ -301,17 +463,63 @@ export function createSubagentControl(options = {}) {
     });
   }
 
+  function recordSubagentProgress(childSessionIdOrSpawnId, progress = {}) {
+    const existing = getSubagent(childSessionIdOrSpawnId);
+    if (!existing) return null;
+    return updateSubagent(childSessionIdOrSpawnId, {
+      status: progress.status || existing.status || "running",
+      latestProgress: normalizeProgressEntry(progress, existing.progressHistory),
+      lastEventType: toTrimmedString(progress.eventType || "subagent:progress") || "subagent:progress",
+    });
+  }
+
+  function escalateSubagent(childSessionIdOrSpawnId, escalation = {}) {
+    const existing = getSubagent(childSessionIdOrSpawnId);
+    if (!existing) return null;
+    const normalized = normalizeEscalationState(escalation, existing.escalation);
+    return updateSubagent(childSessionIdOrSpawnId, {
+      status: "waiting",
+      escalation: normalized,
+      latestProgress: normalizeProgressEntry({
+        status: "waiting",
+        message: normalized?.message || "Subagent requested operator input.",
+        details: normalized?.details || {},
+      }, existing.progressHistory),
+      lastEventType: "subagent:escalated",
+    });
+  }
+
+  function resumeSubagent(childSessionIdOrSpawnId, patch = {}) {
+    const existing = getSubagent(childSessionIdOrSpawnId);
+    if (!existing) return null;
+    const resolvedAt = nowIso();
+    return updateSubagent(childSessionIdOrSpawnId, {
+      ...patch,
+      status: patch.status || "running",
+      escalation: existing.escalation
+        ? { ...existing.escalation, status: "resolved", resolvedAt }
+        : null,
+      latestProgress: patch.latestProgress || {
+        status: patch.status || "running",
+        message: toTrimmedString(patch.message || "Subagent resumed."),
+        details: toPlainObject(patch.details),
+      },
+      lastEventType: toTrimmedString(patch.lastEventType || "subagent:resumed") || "subagent:resumed",
+    });
+  }
+
   function waitForSubagent(childSessionIdOrSpawnId, options_ = {}) {
     const key = buildWaitKey(childSessionIdOrSpawnId);
     if (!key) {
       return Promise.reject(new Error("waitForSubagent requires a child session id or spawn id"));
     }
     const existing = getSubagent(key);
-    if (existing && isTerminalSubagentStatus(existing.status)) {
+    const returnOn = normalizeWaitTargets(options_);
+    if (existing && shouldResolveWaiter(existing, returnOn)) {
       return Promise.resolve(existing);
     }
     return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject, timer: null };
+      const waiter = { resolve, reject, timer: null, returnOn };
       if (!waiters.has(key)) {
         waiters.set(key, []);
       }
@@ -348,6 +556,9 @@ export function createSubagentControl(options = {}) {
     planSubagentSpawn,
     registerSubagent,
     updateSubagent,
+    recordSubagentProgress,
+    escalateSubagent,
+    resumeSubagent,
     completeSubagent,
     failSubagent,
     abortSubagent,

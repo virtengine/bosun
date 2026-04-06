@@ -17,6 +17,8 @@ import { ICONS } from "../modules/icons.js";
 import { resolveIcon } from "../modules/icon-utils.js";
 import { formatDate, formatDuration, formatRelative } from "../modules/utils.js";
 import {
+  buildDraftFlowchartMap,
+  buildDraftFlowchartMetadata,
   HISTORY_LIMIT,
   HISTORY_COMMIT_DEBOUNCE_MS,
   buildCollapsedGraph,
@@ -1182,7 +1184,13 @@ async function saveWorkflow(def, options = {}) {
 async function exportWorkflow(workflow) {
   if (!workflow) return;
   try {
-    const content = JSON.stringify(workflow, null, 2);
+    const content = JSON.stringify({
+      ...workflow,
+      metadata: {
+        ...(workflow?.metadata || {}),
+        flowchart: buildDraftFlowchartMetadata(workflow),
+      },
+    }, null, 2);
     try {
       await navigator?.clipboard?.writeText(content);
       showToast("Workflow JSON copied to clipboard", "success");
@@ -3025,6 +3033,12 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
   }, [liveHighlightEnabled, workflow?.id, workflow?.name]);
 
   const renderGraph = useMemo(() => buildCollapsedGraph({ nodes, edges, groups }), [nodes, edges, groups]);
+  const draftFlowchart = useMemo(() => buildDraftFlowchartMap({
+    nodes,
+    edges,
+    groups,
+    metadata: workflow?.metadata || {},
+  }), [edges, groups, nodes, workflow?.metadata]);
   const renderNodes = renderGraph.visibleNodes || [];
   const renderEdges = renderGraph.visibleEdges || [];
   const activeGroup = useMemo(() => {
@@ -3041,6 +3055,26 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
   const NODE_W = 220;
   const NODE_H = 118;
   const PORT_R = 8;
+
+  const focusDraftFlowchartStep = useCallback((step) => {
+    if (!step) return;
+    const runtimeNodeIds = Array.isArray(step.runtimeNodeIds) ? step.runtimeNodeIds.filter(Boolean) : [];
+    if (step.groupId && (groupsRef.current || []).some((group) => group.id === step.groupId)) {
+      setSelectedGroupId(step.groupId);
+      setSelectedNodeIds(new Set(runtimeNodeIds));
+      selectedNodeId.value = runtimeNodeIds[0] || null;
+      selectedEdgeId.value = null;
+      setEditingNode(null);
+      return;
+    }
+    const targetNodeId = runtimeNodeIds[0] || step.primaryNodeId || "";
+    if (!targetNodeId) return;
+    setSelectedGroupId(null);
+    setSelectedNodeIds(new Set([targetNodeId]));
+    selectedNodeId.value = targetNodeId;
+    selectedEdgeId.value = null;
+    setEditingNode(null);
+  }, []);
 
   const toCanvas = useCallback((clientX, clientY) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -3080,20 +3114,44 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
     }, HISTORY_COMMIT_DEBOUNCE_MS);
   }, [setHistory]);
 
+  const buildPersistedWorkflowDefinition = useCallback((baseWorkflow, nextNodes, nextEdges, nextGroups = groupsRef.current || []) => {
+    if (!baseWorkflow) return null;
+    const normalizedNodes = normalizeNodesForCanvas(nextNodes);
+    const normalizedEdges = normalizeEdgesForCanvas(nextEdges, normalizedNodes);
+    const safeGroups = Array.isArray(nextGroups) ? nextGroups : [];
+    return {
+      ...baseWorkflow,
+      metadata: {
+        ...(baseWorkflow?.metadata || {}),
+        flowchart: buildDraftFlowchartMetadata({
+          ...baseWorkflow,
+          nodes: normalizedNodes,
+          edges: normalizedEdges,
+          groups: safeGroups,
+          metadata: baseWorkflow?.metadata || {},
+        }),
+      },
+      nodes: normalizedNodes,
+      edges: normalizedEdges,
+      groups: safeGroups,
+    };
+  }, [normalizeEdgesForCanvas, normalizeNodesForCanvas]);
+
   const scheduleSave = useCallback((nextNodes, nextEdges, nextGroups = groupsRef.current || []) => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     const snapshot = serializeGraphSnapshot(normalizeNodesForCanvas(nextNodes), normalizeEdgesForCanvas(nextEdges, nextNodes), groupsRef.current || []);
     saveTimer.current = setTimeout(() => {
       if (!workflow?.id) return;
       const latest = parseGraphSnapshot(snapshot);
-      saveWorkflow({
-        ...workflow,
-        nodes: normalizeNodesForCanvas(latest.nodes),
-        edges: normalizeEdgesForCanvas(latest.edges, latest.nodes),
-        groups: latest.groups || nextGroups,
-      });
+      const persistedWorkflow = buildPersistedWorkflowDefinition(
+        workflow,
+        latest.nodes,
+        latest.edges,
+        latest.groups || nextGroups,
+      );
+      if (persistedWorkflow) saveWorkflow(persistedWorkflow);
     }, 1500);
-  }, [normalizeEdgesForCanvas, normalizeNodesForCanvas, workflow]);
+  }, [buildPersistedWorkflowDefinition, normalizeEdgesForCanvas, normalizeNodesForCanvas, workflow]);
 
   const applyGraphChange = useCallback((updater, options = {}) => {
     const currentNodes = nodesRef.current;
@@ -3984,7 +4042,13 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
       executeNodeId: `execute-sub-${Date.now()}`,
       executeNodeLabel: childName,
     });
-    const savedChild = await saveWorkflow(converted.childWorkflow, { activate: false, suppressToast: true });
+    const persistedChild = buildPersistedWorkflowDefinition(
+      converted.childWorkflow,
+      converted.childWorkflow?.nodes || [],
+      converted.childWorkflow?.edges || [],
+      converted.childWorkflow?.groups || [],
+    );
+    const savedChild = await saveWorkflow(persistedChild || converted.childWorkflow, { activate: false, suppressToast: true });
     if (!savedChild?.id) return;
     const parentWithSavedId = {
       ...converted.parentWorkflow,
@@ -3994,13 +4058,19 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
           : node
       )),
     };
-    const savedParent = await saveWorkflow(parentWithSavedId, { toastMessage: "Sub-workflow created" });
+    const persistedParent = buildPersistedWorkflowDefinition(
+      parentWithSavedId,
+      parentWithSavedId?.nodes || [],
+      parentWithSavedId?.edges || [],
+      parentWithSavedId?.groups || [],
+    );
+    const savedParent = await saveWorkflow(persistedParent || parentWithSavedId, { toastMessage: "Sub-workflow created" });
     if (savedParent) {
       setSelectedNodeIds(new Set([converted.executeNode.id]));
       selectedNodeId.value = converted.executeNode.id;
       setSelectedGroupId(null);
     }
-  }, [convertSelectionToSubworkflow, edges, groups, nodes, selectedNodeIds, workflow]);
+  }, [buildPersistedWorkflowDefinition, convertSelectionToSubworkflow, edges, groups, nodes, selectedNodeIds, workflow]);
 
   const handleExpandInline = useCallback(async () => {
     const selectedId = String(selectedNodeId.value || "").trim();
@@ -4078,12 +4148,13 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
         <${Button} variant="outlined" size="small" onClick=${() => {
           if (!workflow) return;
           if (reportEdgeValidationIssues()) return;
-          saveWorkflow({
-            ...workflow,
-            nodes: normalizeNodesForCanvas(nodesRef.current),
-            edges: normalizeEdgesForCanvas(edgesRef.current, nodesRef.current),
-            groups: groupsRef.current,
-          });
+          const persistedWorkflow = buildPersistedWorkflowDefinition(
+            workflow,
+            nodesRef.current,
+            edgesRef.current,
+            groupsRef.current,
+          );
+          if (persistedWorkflow) saveWorkflow(persistedWorkflow);
         }}>
           <span class="btn-icon">${resolveIcon("save")}</span>
           Save
@@ -4191,7 +4262,7 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
         <${Button} variant="text" size="small" onClick=${returnToWorkflowList}>← Back to Workflows<//>
       </div>
 
-      <div style="position: absolute; top: 64px; right: 12px; z-index: 18; width: min(340px, calc(100vw - 24px)); pointer-events: none;">
+      <div style="position: absolute; top: 64px; right: 12px; z-index: 18; width: min(340px, calc(100vw - 24px)); pointer-events: none; display: flex; flex-direction: column; gap: 12px;">
         <div style="pointer-events: auto; background: var(--bg-card, #2b2a27); border: 1px solid var(--color-border, #2a3040); border-radius: 12px; backdrop-filter: blur(8px); box-shadow: var(--shadow-lg, 0 10px 30px rgba(0,0,0,0.28)); overflow: hidden; color: var(--color-text, #e8eaf0);">
           <div style="display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom: 1px solid var(--color-border, #2a3040);">
             <span class="icon-inline">${resolveIcon("chart")}</span>
@@ -4236,6 +4307,64 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
               })}
             </div>
           `}
+        </div>
+        <div style="pointer-events: auto; background: var(--bg-card, #2b2a27); border: 1px solid var(--color-border, #2a3040); border-radius: 12px; backdrop-filter: blur(8px); box-shadow: var(--shadow-lg, 0 10px 30px rgba(0,0,0,0.28)); overflow: hidden; color: var(--color-text, #e8eaf0);">
+          <div style="display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom: 1px solid var(--color-border, #2a3040);">
+            <span class="icon-inline">${resolveIcon("git-branch") || ICONS.dot}</span>
+            <div style="font-size: 12px; font-weight: 700; letter-spacing: 0.02em; flex:1;">Draft Flowchart</div>
+            <span class="wf-badge" style="font-size: 10px; background: var(--bg-secondary, #1f2937); color: var(--text-secondary, #cbd5e1);">${draftFlowchart.steps.length} step${draftFlowchart.steps.length === 1 ? "" : "s"}</span>
+            <span class="wf-badge" style="font-size: 10px; background: ${draftFlowchart.source === "derived" ? "rgba(245,158,11,0.18)" : "rgba(96,165,250,0.18)"}; color: ${draftFlowchart.source === "derived" ? "#fbbf24" : "#93c5fd"};">${draftFlowchart.source === "derived" ? "Derived" : "Saved"}</span>
+          </div>
+          <div style="padding: 10px 10px 12px; display:flex; flex-direction:column; gap:10px;">
+            <div style="font-size: 12px; color: var(--color-text-secondary, #8b95a5);">
+              Flowchart Map keeps the design view linked to built runtime nodes so we can inspect the plan and execution shape together.
+            </div>
+            ${draftFlowchart.steps.length === 0 && html`
+              <div style="font-size: 12px; color: var(--color-text-secondary, #8b95a5);">
+                Add nodes or groups to start building a linked flowchart view.
+              </div>
+            `}
+            ${draftFlowchart.steps.length > 0 && html`
+              <div style="display:flex; flex-direction:column; gap:8px; max-height: 300px; overflow:auto;">
+                ${draftFlowchart.steps.map((step, index) => html`
+                  <button
+                    key=${step.id}
+                    type="button"
+                    onClick=${() => focusDraftFlowchartStep(step)}
+                    style="text-align:left; width:100%; border:1px solid ${selectedNodeIds.has(step.primaryNodeId) || selectedGroupId === step.groupId ? 'var(--accent, #60a5fa)' : 'var(--color-border, #2a3040)'}; border-radius:10px; background:var(--bg-secondary, #111827); color:inherit; padding:10px; display:flex; gap:10px; cursor:pointer;"
+                  >
+                    <div style="display:flex; flex-direction:column; align-items:center; gap:4px; min-width:26px;">
+                      <span style="font-size:11px; color: var(--color-text-secondary, #94a3b8);">#${index + 1}</span>
+                      <span class="wf-badge" style="font-size:10px; background:${step.kind === "group" ? "rgba(16,185,129,0.18)" : "rgba(148,163,184,0.18)"}; color:${step.kind === "group" ? "#6ee7b7" : "#cbd5e1"};">${step.kind}</span>
+                    </div>
+                    <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;">
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text, #e5e7eb); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${step.label}</div>
+                      <div style="font-size:11px; color: var(--color-text-secondary, #8b95a5);">
+                        ${step.runtimeNodeCount} runtime node${step.runtimeNodeCount === 1 ? "" : "s"}
+                        ${step.groupId ? ` · group ${step.groupId}` : ""}
+                      </div>
+                      <div style="font-size:11px; color: var(--color-text-secondary, #94a3b8); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                        Runtime: ${(step.runtimeNodeLabels || []).join(" · ") || step.runtimeNodeIds.join(" · ") || "No runtime nodes linked"}
+                      </div>
+                    </div>
+                  </button>
+                `)}
+              </div>
+            `}
+            ${draftFlowchart.links.length > 0 && html`
+              <div style="display:flex; flex-direction:column; gap:6px;">
+                <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.02em; color: var(--color-text-secondary, #8b95a5);">Flowchart Links</div>
+                <div style="display:flex; flex-direction:column; gap:4px; max-height: 120px; overflow:auto;">
+                  ${draftFlowchart.links.map((link) => html`
+                    <div key=${link.id} style="font-size:11px; color: var(--color-text-secondary, #cbd5e1); border:1px solid var(--color-border, #243041); border-radius:8px; padding:6px 8px; background:rgba(15,23,42,0.45);">
+                      ${(link.sourceStep?.label || link.sourceStepId)} → ${(link.targetStep?.label || link.targetStepId)}
+                      ${link.edgeIds?.length ? ` · ${link.edgeIds.length} runtime edge${link.edgeIds.length === 1 ? "" : "s"}` : ""}
+                    </div>
+                  `)}
+                </div>
+              </div>
+            `}
+          </div>
         </div>
       </div>
 

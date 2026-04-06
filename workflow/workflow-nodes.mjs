@@ -35,6 +35,10 @@ export {
   CALIBRATED_MAX_RISK_WITHOUT_HUMAN,
   normalizePlannerAreaKey,
 } from "./workflow-nodes/agent.mjs";
+export {
+  buildWorkflowDraftFlowchart,
+  normalizeWorkflowFlowchartMetadata,
+} from "./workflow-serializer.mjs";
 export { classifyAcquireWorktreeFailure } from "./workflow-nodes/actions.mjs";
 export {
   CUSTOM_NODE_DIR_NAME,

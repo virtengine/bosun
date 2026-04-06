@@ -14,6 +14,7 @@ import {
   createSessionLoadMeta,
   deriveSessionStaleReason,
   formatSessionFreshnessTimestamp,
+  getSessionHistoryState,
   getSessionLifecycleState,
   getSessionManualRetryState,
   getSessionListState,
@@ -26,6 +27,7 @@ import {
 } from "../modules/session-api.js";
 import { formatDate, formatRelative, truncate } from "../modules/utils.js";
 import { resolveIcon } from "../modules/icon-utils.js";
+import { showToast } from "../modules/state.js";
 import {
   List, ListItem, ListItemButton, ListItemText, ListItemIcon,
   ListItemSecondaryAction, Typography, Box, Stack, IconButton,
@@ -586,6 +588,21 @@ export async function deleteSession(id) {
   }
 }
 
+export async function deleteSessionHistory(id) {
+  try {
+    const historyUrl = sessionPath(id, "delete-history");
+    const fallbackUrl = sessionPath(id, "delete");
+    const url = historyUrl || fallbackUrl;
+    if (!url) return false;
+    await apiFetch(url, { method: "POST" });
+    clearUnavailableSelectedSession(id);
+    await loadSessions(_lastLoadFilter);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function resumeSession(id) {
   try {
     const url = sessionPath(id, "resume");
@@ -596,6 +613,27 @@ export async function resumeSession(id) {
   } catch {
     return false;
   }
+}
+
+export async function revealSessionFolder(id) {
+  try {
+    const url = sessionPath(id, "reveal");
+    if (!url) return null;
+    const response = await apiFetch(url, { method: "POST" });
+    return response?.path || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function reopenSessionHistory(id, opts = {}) {
+  const normalizedId = String(id || "").trim();
+  if (!normalizedId) return false;
+  selectedSessionId.value = normalizedId;
+  const loadResult = await loadSessionMessages(normalizedId, {
+    limit: Number.isFinite(Number(opts?.limit)) ? Number(opts.limit) : DEFAULT_SESSION_PAGE_SIZE,
+  });
+  return loadResult?.ok !== false;
 }
 
 /* ─── Helpers ─── */
@@ -663,17 +701,28 @@ function SwipeableSessionItem({
 
   const lifecycleState = getSessionLifecycleState(s);
   const runtimeState = getSessionRuntimeState(s);
+  const historyState = getSessionHistoryState(s);
   const recencyAt = getSessionRecencyTimestamp(s);
   const typeLabel = String(s.type || "session").trim().replace(/[-_]+/g, " ");
   const typeSummary = typeLabel
     ? typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)
     : "Session";
+  const workspaceLabel = String(
+    s?.surface?.repository?.selected?.displayName
+    || s?.surface?.repository?.selected?.name
+    || s?.metadata?.selectedRepoName
+    || s?.metadata?.workspaceDir
+    || s?.workspaceDir
+    || "",
+  ).trim();
   const dotColor = STATUS_TONE_COLOR_MAP[runtimeState.tone] || STATUS_TONE_COLOR_MAP[lifecycleState.tone] || "var(--text-hint)";
   const preview = s.lastMessage && !isArchived ? truncate(s.lastMessage, 36) : "";
   const metaSummary = [
     `Type: ${typeSummary}`,
     `Lifecycle: ${lifecycleState.label}`,
     `Runtime: ${runtimeState.label}`,
+    historyState.isHistoric ? `History: ${historyState.label}` : "",
+    workspaceLabel ? `Folder: ${truncate(workspaceLabel, 28)}` : "",
     preview || "",
   ]
     .filter(Boolean)
@@ -1032,6 +1081,8 @@ export function SessionList({
   const allCount = archivedFiltered.length;
   const activeCount = archivedFiltered.filter((s) => isInProgressSession(s)).length;
   const historicCount = archivedFiltered.filter((s) => isHistoricSession(s)).length;
+  const reopenableHistoryCount = archivedFiltered.filter((s) => getSessionHistoryState(s).canReopenTranscript).length;
+  const revealableHistoryCount = archivedFiltered.filter((s) => getSessionHistoryState(s).canRevealFolder).length;
 
   const handleSelect = useCallback(
     (id) => {
@@ -1079,6 +1130,39 @@ export function SessionList({
     await resumeSession(id);
   }, []);
 
+  const handleReopenHistory = useCallback(async (id) => {
+    setRevealedActions(null);
+    setContextMenu(null);
+    const reopened = await reopenSessionHistory(id);
+    if (!reopened) {
+      showToast("Could not reopen session history", "error");
+      return;
+    }
+    if (onSelect) onSelect(id);
+  }, [onSelect]);
+
+  const handleRevealFolder = useCallback(async (id) => {
+    setRevealedActions(null);
+    setContextMenu(null);
+    const revealedPath = await revealSessionFolder(id);
+    if (!revealedPath) {
+      showToast("Session folder is not available", "error");
+      return;
+    }
+    showToast("Opened session folder", "success");
+  }, []);
+
+  const handleDeleteHistory = useCallback(async (id) => {
+    setRevealedActions(null);
+    setContextMenu(null);
+    const deleted = await deleteSessionHistory(id);
+    if (!deleted) {
+      showToast("Could not delete session history", "error");
+      return;
+    }
+    showToast("Session history deleted", "success");
+  }, []);
+
   const handleContextMenu = useCallback((id, event) => {
     setRevealedActions(null);
     setContextMenu({
@@ -1099,9 +1183,15 @@ export function SessionList({
       return;
     }
     const currentSession = (sessionsData.value || []).find((item) => item.id === targetId);
+    const historyState = getSessionHistoryState(currentSession);
     if (action === "open") {
       handleSelect(targetId);
       closeContextMenu();
+      return;
+    }
+    if (action === "reopen") {
+      closeContextMenu();
+      await handleReopenHistory(targetId);
       return;
     }
     if (action === "rename") {
@@ -1123,6 +1213,16 @@ export function SessionList({
       await handleDelete(targetId);
       return;
     }
+    if (action === "reveal") {
+      closeContextMenu();
+      await handleRevealFolder(targetId);
+      return;
+    }
+    if (action === "delete-history") {
+      closeContextMenu();
+      await handleDeleteHistory(targetId);
+      return;
+    }
     if (action === "copy-id") {
       closeContextMenu();
       try {
@@ -1138,6 +1238,9 @@ export function SessionList({
     contextMenu?.id,
     handleArchive,
     handleDelete,
+    handleDeleteHistory,
+    handleRevealFolder,
+    handleReopenHistory,
     handleResume,
     handleSelect,
     onStartRename,
@@ -1367,6 +1470,12 @@ export function SessionList({
         />
       </${Stack}>
 
+      <${Box} sx=${{ px: 1.5, pb: 1 }}>
+        <${Typography} variant="caption" color="text.secondary">
+          History ready: ${reopenableHistoryCount} reopenable sessions · ${revealableHistoryCount} folders available
+        </${Typography}>
+      </${Box}>
+
       <${Divider} />
 
       <!-- Session list scroll area -->
@@ -1454,21 +1563,55 @@ export function SessionList({
         anchorReference="anchorPosition"
         anchorPosition=${contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
       >
-        <${MenuItem} onClick=${() => handleContextAction("open")}>${resolveIcon(":chat:")} Open</${MenuItem}>
+        <${MenuItem} onClick=${() => handleContextAction("open")}>
+          ${resolveIcon(":chat:")}
+          ${(() => {
+            const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
+            const historyState = getSessionHistoryState(target);
+            return historyState.isHistoric ? " Open transcript" : " Open";
+          })()}
+        </${MenuItem}>
+        ${(() => {
+          const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
+          const historyState = getSessionHistoryState(target);
+          return historyState.isHistoric
+            ? html`<${MenuItem} onClick=${() => handleContextAction("reopen")}>${resolveIcon(":history:")} ${historyState.reopenLabel}</${MenuItem}>`
+            : null;
+        })()}
         <${MenuItem} onClick=${() => handleContextAction("rename")}>${resolveIcon(":edit:")} Edit title</${MenuItem}>
         <${MenuItem} onClick=${() => handleContextAction("archive")}>
           ${(() => {
             const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
             return target?.status === "archived"
-              ? html`${resolveIcon(":workflow:")} Unarchive`
+              ? html`${resolveIcon(":workflow:")} Resume work`
               : html`${resolveIcon(":box:")} Archive`;
           })()}
         </${MenuItem}>
+        ${(() => {
+          const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
+          const historyState = getSessionHistoryState(target);
+          return historyState.canRevealFolder
+            ? html`<${MenuItem} onClick=${() => handleContextAction("reveal")}>${resolveIcon(":folder:")} Reveal folder</${MenuItem}>`
+            : null;
+        })()}
         <${MenuItem} onClick=${() => handleContextAction("copy-id")}>${resolveIcon(":copy:")} Copy ID</${MenuItem}>
         <${Divider} />
-        <${MenuItem} onClick=${() => handleContextAction("delete")} sx=${{ color: "error.main" }}>
-          ${resolveIcon(":trash:")} Delete
-        </${MenuItem}>
+        ${(() => {
+          const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
+          const historyState = getSessionHistoryState(target);
+          if (historyState.canDeleteHistory) {
+            return html`
+              <${MenuItem} onClick=${() => handleContextAction("delete-history")} sx=${{ color: "error.main" }}>
+                ${resolveIcon(":trash:")} ${historyState.deleteLabel}
+              </${MenuItem}>
+            `;
+          }
+          return html`
+            <${MenuItem} onClick=${() => handleContextAction("delete")} sx=${{ color: "error.main" }}>
+              ${resolveIcon(":trash:")} Delete session
+            </${MenuItem}>
+          `;
+        })()}
       </${Menu}>
     </${Paper}>
   `;

@@ -82,3 +82,4 @@ output/playwright
 _docs/internal-harness-v2/*
 output/playwright
 native/**/target/
+.cache-test-tool-logs/*

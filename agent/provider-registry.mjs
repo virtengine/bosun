@@ -19,15 +19,57 @@ function toTrimmedString(value) {
   return String(value ?? "").trim();
 }
 
+function lookupEnvValue(envInput = {}, key = "") {
+  const normalizedKey = toTrimmedString(key);
+  if (!normalizedKey) return "";
+  const env = envInput && typeof envInput === "object" ? envInput : process.env;
+  const directValue = toTrimmedString(env?.[normalizedKey]);
+  if (directValue) return directValue;
+  const lowerKey = normalizedKey.toLowerCase();
+  for (const [candidateKey, candidateValue] of Object.entries(env || {})) {
+    if (String(candidateKey || "").trim().toLowerCase() !== lowerKey) continue;
+    const resolvedValue = toTrimmedString(candidateValue);
+    if (resolvedValue) return resolvedValue;
+  }
+  return "";
+}
+
+function looksLikeCanonicalEnvBinding(value = "") {
+  return /^[A-Z_][A-Z0-9_]*$/.test(toTrimmedString(value));
+}
+
+function resolveBoundCredentialValue(envInput = {}, bindingRef = "") {
+  const normalizedBindingRef = toTrimmedString(bindingRef);
+  if (!normalizedBindingRef) return "";
+  const envValue = lookupEnvValue(envInput, normalizedBindingRef);
+  if (envValue) return envValue;
+  if (!looksLikeCanonicalEnvBinding(normalizedBindingRef)) {
+    return normalizedBindingRef;
+  }
+  return "";
+}
+
 function envFlagEnabled(value) {
   const raw = String(value ?? "").trim().toLowerCase();
   return ["1", "true", "yes", "on", "y"].includes(raw);
 }
 
+const NATIVE_PROVIDER_ADAPTERS = new Map([
+  ["openai-responses", "openai-native"],
+  ["azure-openai-responses", "openai-native"],
+  ["openai-compatible", "openai-native"],
+  ["ollama", "openai-native"],
+  ["anthropic-messages", "anthropic-native"],
+  ["gemini-generate-content", "gemini-native"],
+]);
+
 export function normalizeProviderAdapterName(value) {
   const adapterId = resolveProviderAdapterId(value);
   if (adapterId) return adapterId;
   const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "anthropic-native") return "anthropic-native";
+  if (normalized === "gemini-native") return "gemini-native";
+  if (normalized === "openai-native") return "openai-native";
   if (normalized === "github-copilot") return "copilot-sdk";
   if (normalized === "claude_code" || normalized === "claude-code") return "claude-sdk";
   if (normalized === "google-gemini" || normalized === "gemini" || normalized === "gemini-sdk") return "gemini-sdk";
@@ -69,6 +111,23 @@ function buildCapabilities(adapter, providerId, getAdapterCapabilities) {
   };
 }
 
+function resolveRuntimeAdapterId(providerId, definition, options = {}, entry = null) {
+  const explicitAdapterId = toTrimmedString(entry?.adapterId || "");
+  if (explicitAdapterId) {
+    return normalizeProviderAdapterName(explicitAdapterId);
+  }
+  const normalizedProviderId = normalizeProviderDefinitionId(providerId, "") || providerId;
+  const preferredNativeAdapterId = NATIVE_PROVIDER_ADAPTERS.get(normalizedProviderId);
+  if (
+    options.preferNativeAdapters === true
+    && preferredNativeAdapterId
+    && options.adapters?.[preferredNativeAdapterId]
+  ) {
+    return preferredNativeAdapterId;
+  }
+  return definition?.adapterId || normalizeProviderAdapterName(normalizedProviderId);
+}
+
 function normalizeAuthBindings(bindings = {}) {
   if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) return {};
   return Object.fromEntries(
@@ -95,7 +154,7 @@ function applyBoundCredentialEnv(providerId, envInput = {}, bindings = {}) {
   for (const [bindingKey, hintKeys] of bindingMap) {
     const sourceEnvKey = normalizedBindings[bindingKey];
     if (!sourceEnvKey) continue;
-    const resolvedValue = toTrimmedString(env[sourceEnvKey]);
+    const resolvedValue = resolveBoundCredentialValue(env, sourceEnvKey);
     if (!resolvedValue) continue;
     for (const hintKey of hintKeys) {
       const normalizedHintKey = toTrimmedString(hintKey);
@@ -189,7 +248,7 @@ function buildProviderEntry(providerId, definition, adapter, fields, options) {
     provider: fields.provider,
     executor: fields.executor,
     variant: fields.variant,
-    adapterId: definition?.adapterId || normalizeProviderAdapterName(providerId),
+    adapterId: fields.adapterId || definition?.adapterId || normalizeProviderAdapterName(providerId),
     transport: definition?.transport || null,
     transportConfig: fields.transportConfig || null,
     apiStyle: fields.apiStyle || definition?.transport?.apiStyle || null,
@@ -237,8 +296,8 @@ function buildConfiguredProviders(options = {}) {
     : [];
   return executors.map((entry, index) => {
     const { providerId, definition } = resolveDefinitionFromEntry(entry);
-    const adapterId = definition?.adapterId || normalizeProviderAdapterName(entry?.adapterId || entry?.executor);
-    const adapter = adapters[adapterId] || adapters["codex-sdk"] || {};
+    const adapterId = resolveRuntimeAdapterId(providerId, definition, options, entry);
+    const adapter = adapters[adapterId] || adapters[definition?.adapterId] || adapters["codex-sdk"] || {};
     const enabled = resolveProviderEnabled(providerId, entry?.enabled !== false, options);
     const available = enabled && !resolveDisabled(definition || { id: providerId, adapterId }, env);
     const configuredModels = Array.isArray(entry?.models)
@@ -260,6 +319,7 @@ function buildConfiguredProviders(options = {}) {
         provider: definition?.provider || adapter.provider || String(entry?.executor || "").toUpperCase() || providerId,
         executor: definition?.executor || String(entry?.executor || "").toUpperCase() || adapter.provider || providerId,
         variant: String(entry?.variant || definition?.variant || "DEFAULT"),
+        adapterId,
         available,
         enabled,
         busy: available ? readBusy(adapter) : false,
@@ -293,7 +353,8 @@ function buildBuiltinProviders(options = {}) {
     ? options.readBusy
     : () => false;
   return listBuiltinProviderDefinitions().map((definition) => {
-    const adapter = adapters[definition.adapterId] || adapters["codex-sdk"] || {};
+    const adapterId = resolveRuntimeAdapterId(definition.id, definition, options);
+    const adapter = adapters[adapterId] || adapters[definition.adapterId] || adapters["codex-sdk"] || {};
     const enabled = resolveProviderEnabled(definition.id, undefined, options);
     const available = enabled && !resolveDisabled(definition, env);
     return buildProviderEntry(
@@ -306,6 +367,7 @@ function buildBuiltinProviders(options = {}) {
         provider: definition.provider,
         executor: definition.executor,
         variant: definition.variant || "DEFAULT",
+        adapterId,
         available,
         enabled,
         busy: available ? readBusy(adapter) : false,

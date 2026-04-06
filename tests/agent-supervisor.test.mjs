@@ -60,6 +60,7 @@ describe("agent-supervisor", () => {
     it("exposes SITUATION and INTERVENTION enums", () => {
       expect(SITUATION.HEALTHY).toBe("healthy");
       expect(SITUATION.PLAN_STUCK).toBe("plan_stuck");
+      expect(SITUATION.DOOM_LOOP).toBe("doom_loop");
       expect(SITUATION.IDLE_SOFT).toBe("idle_soft");
       expect(SITUATION.IDLE_HARD).toBe("idle_hard");
       expect(SITUATION.ERROR_LOOP).toBe("error_loop");
@@ -355,6 +356,14 @@ describe("agent-supervisor", () => {
       });
       expect(result.prompt).toContain("different strategy");
       expect(result.prompt).toContain("grep_search, read_file");
+    });
+
+    it("generates doom_loop prompt", () => {
+      const result = supervisor.assess("task-1", {
+        situation: SITUATION.DOOM_LOOP,
+      });
+      expect(result.prompt).toContain("doom loop");
+      expect(result.prompt).toContain("changes state");
     });
 
     it("generates error_loop prompt", () => {
@@ -754,6 +763,70 @@ describe("agent-supervisor", () => {
       expect(mockDispatchFix).not.toHaveBeenCalled();
       // Falls back to inject
       expect(mockInjectPrompt).toHaveBeenCalledWith("task-1", "Generic fix prompt");
+    });
+
+    it("maps near-identical reasoning anomalies to doom_loop", () => {
+      const s = createAgentSupervisor({
+        anomalyDetector: {
+          getActiveAnomalies: () => [
+            {
+              type: "THOUGHT_SPINNING",
+              severity: "LOW",
+              data: { loopKind: "near_identical_reasoning" },
+            },
+          ],
+        },
+      });
+      const result = s.assess("task-doom");
+      expect(result.situation).toBe(SITUATION.DOOM_LOOP);
+      expect(result.intervention).toBe(INTERVENTION.INJECT_PROMPT);
+    });
+
+    it("maps idle stall anomalies to idle situations", () => {
+      const s = createAgentSupervisor({
+        anomalyDetector: {
+          getActiveAnomalies: () => [
+            {
+              type: "IDLE_STALL",
+              severity: "HIGH",
+              data: {},
+            },
+          ],
+        },
+      });
+      const result = s.assess("task-stall");
+      expect(result.situation).toBe(SITUATION.IDLE_HARD);
+    });
+
+    it("maps no_progress session analysis to idle_soft", () => {
+      const s = createAgentSupervisor({
+        sessionTracker: {
+          getProgressStatus: () => ({
+            totalEvents: 8,
+            elapsedMs: 120000,
+            idleMs: 1000,
+            hasCommits: false,
+            hasEdits: false,
+          }),
+          getLastMessages: () => [
+            { type: "system", content: "Task assigned" },
+            { type: "system", content: "Session started" },
+            { type: "agent_message", content: "Still checking status 101" },
+            { type: "agent_message", content: "Still checking status 102" },
+            { type: "agent_message", content: "Still checking status 103" },
+            { type: "system", content: "Heartbeat" },
+          ],
+        },
+        errorDetector: {
+          analyzeMessageSequence: () => ({
+            primary: "no_progress",
+            patterns: ["no_progress"],
+            details: { no_progress: "stalled" },
+          }),
+        },
+      });
+      const result = s.assess("task-stalled");
+      expect(result.situation).toBe(SITUATION.IDLE_SOFT);
     });
   });
 

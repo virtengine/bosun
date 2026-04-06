@@ -12,6 +12,7 @@ import {
   reconcileWorkflowRunApprovalRequests,
   resolveApprovalQueuePath,
   resolveApprovalRequest,
+  upsertApprovalRequest,
   upsertWorkflowRunApprovalRequest,
   upsertHarnessRunApprovalRequest,
 } from "../workflow/approval-queue.mjs";
@@ -92,6 +93,7 @@ describe("workflow approval queue", () => {
       scopeType: "harness-run",
       scopeId: "run-123",
       status: "pending",
+      judgment: "ESCALATE",
       stageId: "gate",
     });
     expect(getHarnessRunApprovalRequest("run-123", { repoRoot })).toMatchObject({
@@ -109,9 +111,11 @@ describe("workflow approval queue", () => {
     expect(resolved.request).toMatchObject({
       requestId: "harness-run:run-123",
       status: "approved",
+      judgment: "ACCEPT",
       resolution: expect.objectContaining({
         actorId: "reviewer",
         note: "Proceed.",
+        judgment: "ACCEPT",
       }),
     });
     expect(resolved.updateResult).toMatchObject({
@@ -170,6 +174,7 @@ describe("workflow approval queue", () => {
     expect(expired.request).toMatchObject({
       requestId: "harness-run:run-123",
       status: "expired",
+      judgment: "ESCALATE",
       resolution: expect.objectContaining({
         actorId: "system:timeout",
         note: "Approval gate timed out.",
@@ -402,10 +407,51 @@ describe("workflow approval queue", () => {
     expect(reconciledRequest).toMatchObject({
       requestId: "workflow-run:run-missing-1",
       status: "expired",
+      judgment: "ESCALATE",
       resolution: expect.objectContaining({
         actorId: "system:reconcile",
         note: "Workflow run run-missing-1 no longer exists.",
       }),
+    });
+  });
+
+  it("maps expired workflow-gate requests with proceed policy to ACCEPT judgments", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "bosun-workflow-gate-approval-queue-"));
+    tempRoots.push(repoRoot);
+
+    const created = upsertApprovalRequest({
+      scopeType: "workflow-gate",
+      scopeId: "run-gate-1:gate-1",
+      runId: "run-gate-1",
+      workflowId: "wf-gate-1",
+      nodeId: "gate-1",
+      reason: "Proceed after timeout.",
+      timeoutMs: 10,
+      onTimeout: "proceed",
+      mode: "manual",
+    }, { repoRoot });
+
+    expect(created.request).toMatchObject({
+      status: "pending",
+      judgment: "ESCALATE",
+    });
+
+    const expired = expireApprovalRequest("workflow-gate:run-gate-1:gate-1", {
+      repoRoot,
+      actorId: "system:timeout",
+      note: "Timed out but allowed to proceed.",
+    });
+
+    expect(expired.request).toMatchObject({
+      status: "expired",
+      judgment: "ACCEPT",
+      resolution: expect.objectContaining({
+        judgment: "ACCEPT",
+      }),
+    });
+    expect(getApprovalRequest("workflow-gate", "run-gate-1:gate-1", { repoRoot })).toMatchObject({
+      status: "expired",
+      judgment: "ACCEPT",
     });
   });
 });

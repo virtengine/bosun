@@ -1,4 +1,5 @@
 import { getShreddingStats, retrieveToolLog } from "../../workspace/context-cache.mjs";
+import { deriveHarnessSessionPhase } from "../../agent/session-manager.mjs";
 
 function toTrimmedString(value) {
   return String(value ?? "").trim();
@@ -509,6 +510,34 @@ function compactSessionListItem(session = {}) {
   return compact;
 }
 
+async function resolveSessionHistoryRevealPath(session = null, deps = {}) {
+  if (!session || typeof session !== "object") return null;
+  const resolveSessionWorktreePath = deps.resolveSessionWorktreePath;
+  const normalizeCandidatePath = deps.normalizeCandidatePath || ((value) => value);
+  const existsSync = deps.existsSync || (() => false);
+  const resolvedWorktree =
+    typeof resolveSessionWorktreePath === "function"
+      ? await resolveSessionWorktreePath(session)
+      : null;
+  const directCandidates = [
+    resolvedWorktree,
+    session?.workspaceDir,
+    session?.workspaceRoot,
+    session?.workspacePath,
+    session?.metadata?.selectedRepoPath,
+    session?.metadata?.workspaceDir,
+    session?.metadata?.workspaceRoot,
+    session?.metadata?.workspacePath,
+    session?.surface?.repository?.selected?.path,
+  ]
+    .map((value) => normalizeCandidatePath(value))
+    .filter(Boolean);
+  for (const candidate of directCandidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return directCandidates[0] || null;
+}
+
 async function buildSessionSurfacePayload(session = null, workspaceContext = {}, deps = {}, options = {}) {
   if (!session || typeof session !== "object") return null;
   const includeBranches = options.includeBranches === true;
@@ -560,10 +589,24 @@ async function buildSessionSurfacePayload(session = null, workspaceContext = {},
     },
     executionTarget: buildExecutionTargetSurface(session),
     permissionMode: buildPermissionModeSurface(session),
+    phase: deriveHarnessSessionPhase({
+      ...session,
+      metadata,
+      insights: session?.insights && typeof session.insights === "object"
+        ? session.insights
+        : {},
+      runtimeHealth: session?.runtimeHealth
+        || session?.insights?.runtimeHealth
+        || metadata?.runtimeHealth
+        || null,
+    }),
     contextWindow: context.contextWindow,
     contextBreakdown: context.contextBreakdown,
     tokenUsage: context.tokenUsage,
     compaction: context.compaction,
+    history: {
+      revealPath: await resolveSessionHistoryRevealPath(session, deps),
+    },
   };
 }
 
@@ -1195,6 +1238,34 @@ export async function tryHandleHarnessSessionRoutes(context = {}) {
         session,
         metrics: buildSessionCompressionMetrics(session, events),
         recentEvents: events.slice(0, 50),
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return true;
+  }
+
+  if (action === "reveal" && req.method === "POST") {
+    try {
+      const session = getScopedSessionRecord({ includeMessages: false });
+      if (!session) {
+        jsonResponse(res, 404, { ok: false, error: "Session not found" });
+        return true;
+      }
+      const revealPath = await resolveSessionHistoryRevealPath(session, deps);
+      if (!revealPath) {
+        jsonResponse(res, 404, { ok: false, error: "Session folder not available" });
+        return true;
+      }
+      const revealed = await deps.revealPathInShell?.(revealPath, { sessionId });
+      if (!revealed) {
+        jsonResponse(res, 500, { ok: false, error: "Could not reveal session folder" });
+        return true;
+      }
+      jsonResponse(res, 200, { ok: true, path: revealPath });
+      broadcastUiEvent(["sessions"], "invalidate", {
+        reason: "session-folder-revealed",
+        sessionId,
       });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -1951,7 +2022,7 @@ export async function tryHandleHarnessSessionRoutes(context = {}) {
     return true;
   }
 
-  if (action === "delete" && req.method === "POST") {
+  if ((action === "delete" || action === "delete-history") && req.method === "POST") {
     try {
       const session = getScopedSession();
       if (!session) {
@@ -1966,7 +2037,7 @@ export async function tryHandleHarnessSessionRoutes(context = {}) {
       invalidateDurableSessionListCache();
       jsonResponse(res, 200, { ok: true });
       broadcastUiEvent(["sessions"], "invalidate", {
-        reason: "session-deleted",
+        reason: action === "delete-history" ? "session-history-deleted" : "session-deleted",
         sessionId,
       });
       broadcastSessionsSnapshot();

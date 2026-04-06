@@ -33,6 +33,7 @@ import {
   listHarnessExecutorProviderOptions,
   readHarnessExecutorFabric,
 } from "../agent/harness-executor-config.mjs";
+import { createShellAdapterRegistry } from "../shell/shell-adapter-registry.mjs";
 
 const gzipAsync = promisify(zlibGzip);
 const DURABLE_ACTIVE_SESSION_EXPIRY_MS = 10 * 60 * 1000;
@@ -10927,30 +10928,68 @@ function sanitizeProviderAuthState(auth = {}) {
   };
 }
 
+function describeProviderRuntimeBinding(adapterId = "") {
+  const normalized = String(adapterId || "").trim().toLowerCase();
+  if (normalized.endsWith("-native")) {
+    return {
+      runtimeOwnership: "native",
+      runtimeLabel: "Bosun-native",
+    };
+  }
+  if (normalized.endsWith("-sdk")) {
+    return {
+      runtimeOwnership: "external-sdk",
+      runtimeLabel: "External SDK",
+    };
+  }
+  return {
+    runtimeOwnership: "runtime-managed",
+    runtimeLabel: "Runtime-managed",
+  };
+}
+
 function buildProviderInventory(settings = null) {
+  const effectiveConfig = readConfigDocument().configData;
   const effectiveSettings = settings && typeof settings === "object"
     ? settings
     : buildResolvedSettingsState().rawValues;
+  const runtimeRegistry = createProviderRegistry({
+    adapters: createShellAdapterRegistry(),
+    env: process.env,
+    includeBuiltins: true,
+    preferNativeAdapters:
+      normalizeAgentRuntimeValue(effectiveSettings?.BOSUN_AGENT_RUNTIME || effectiveConfig?.agentRuntime || "harness") === "harness",
+    settings: effectiveSettings,
+  });
+  const runtimeProvidersById = new Map(
+    runtimeRegistry
+      .listProviders()
+      .map((entry) => [String(entry?.providerId || entry?.id || "").trim(), entry])
+      .filter(([id]) => id),
+  );
   const items = listBuiltInProviderDrivers().map((driver) => {
-    const auth = normalizeProviderAuthState(driver.id, {}, {
+    const runtimeEntry = runtimeProvidersById.get(driver.id) || null;
+    const auth = runtimeEntry?.auth || normalizeProviderAuthState(driver.id, {}, {
       env: process.env,
       settings: effectiveSettings,
     });
+    const adapterId = runtimeEntry?.adapterId || driver.adapterId || driver.adapterHints?.adapterId || null;
     return {
       providerId: driver.id,
       label: driver.name,
       description: driver.description || "",
-      adapterId: driver.adapterId || driver.adapterHints?.adapterId || null,
+      adapterId,
       advanced: driver.visibility?.advanced === true,
       defaultEnabled: driver.visibility?.defaultEnabled === true,
       enabled: auth.enabled !== false,
       capabilities: getProviderCapabilities(driver.id),
       transport: driver.transport ? { ...driver.transport } : null,
       auth: sanitizeProviderAuthState(auth),
-      modelCatalog: getProviderModelCatalog(driver.id, {
+      modelCatalog: runtimeEntry?.modelCatalog || getProviderModelCatalog(driver.id, {
         env: process.env,
         settings: effectiveSettings,
       }),
+      ...describeProviderRuntimeBinding(adapterId),
     };
   });
   const requestedDefaultProviderId = normalizeProviderDefinitionId(
@@ -10983,9 +11022,12 @@ function buildHarnessExecutorInventory(configData = null, rawSettings = null, pr
     providerRoutingMode: effectiveProviderInventory?.routingMode || effectiveSettings?.BOSUN_PROVIDER_ROUTING_MODE,
   });
   const runtimeRegistry = createProviderRegistry({
+    adapters: createShellAdapterRegistry(),
     configExecutors: fabric.executors,
     env: process.env,
     includeBuiltins: false,
+    preferNativeAdapters:
+      normalizeAgentRuntimeValue(effectiveSettings?.BOSUN_AGENT_RUNTIME || effectiveConfig?.agentRuntime || "harness") === "harness",
     settings: effectiveSettings,
   });
   const runtimeProvidersById = new Map(
@@ -11001,11 +11043,16 @@ function buildHarnessExecutorInventory(configData = null, rawSettings = null, pr
       return runtimeEntry
         ? {
             ...entry,
+            adapterId: runtimeEntry.adapterId || entry.adapterId || null,
             auth: runtimeEntry.auth || null,
             modelCatalog: runtimeEntry.modelCatalog || null,
             available: runtimeEntry.available !== false,
+            ...describeProviderRuntimeBinding(runtimeEntry.adapterId || entry.adapterId || null),
           }
-        : entry;
+        : {
+            ...entry,
+            ...describeProviderRuntimeBinding(entry.adapterId || null),
+          };
     }),
     providerOptions: listHarnessExecutorProviderOptions(),
     providers: effectiveProviderInventory,
@@ -11193,6 +11240,12 @@ function buildHarnessVisibleAgentInventory(executorFabric = {}, providerAgents =
         capabilities: normalizeAgentCapabilitiesList(runtimeEntry?.capabilities || providerEntry?.capabilities),
         auth: runtimeEntry?.auth || providerEntry?.auth || null,
         modelCatalog: runtimeEntry?.modelCatalog || providerEntry?.modelCatalog || null,
+        runtimeOwnership:
+          String(runtimeEntry?.runtimeOwnership || providerEntry?.runtimeOwnership || "").trim()
+          || null,
+        runtimeLabel:
+          String(runtimeEntry?.runtimeLabel || providerEntry?.runtimeLabel || "").trim()
+          || null,
         runtimeKind: "harness",
         subtitle: buildAgentSubtitle({
           ...runtimeEntry,
@@ -19170,6 +19223,27 @@ async function resolveSessionWorktreePath(session) {
   }
 }
 
+async function revealPathInShell(targetPath) {
+  const normalized = normalizeCandidatePath(targetPath);
+  if (!normalized || !existsSync(normalized)) return false;
+  try {
+    const command =
+      process.platform === "win32"
+        ? "explorer.exe"
+        : process.platform === "darwin"
+          ? "open"
+          : "xdg-open";
+    const child = spawn(command, [normalized], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref?.();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function resolveTaskLinkedWorktreePath(task, tracker = null) {
   const directCandidates = [
     task?.worktreePath,
@@ -23330,7 +23404,10 @@ async function handleApi(req, res, url) {
     try {
       const tagsRaw = (url.searchParams.get("tags") || "").trim();
       const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()) : undefined;
-      const catalog = listCatalog({ tags });
+      const stabilityTier = (url.searchParams.get("stabilityTier") || "").trim() || undefined;
+      const includeExperimental = ["1", "true", "yes", "on"]
+        .includes((url.searchParams.get("includeExperimental") || "").trim().toLowerCase());
+      const catalog = listCatalog({ tags, stabilityTier, includeExperimental });
       jsonResponse(res, 200, { ok: true, data: catalog });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -24565,6 +24642,7 @@ async function handleApi(req, res, url) {
       invalidateDurableSessionListCache,
       deleteSessionRecordFromStateLedger,
       resolveSessionWorktreePath,
+      revealPathInShell,
       collectDiffStats,
       getCompactDiffSummary,
       getRecentCommits,

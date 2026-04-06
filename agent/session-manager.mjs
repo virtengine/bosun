@@ -74,6 +74,259 @@ function formatHarnessValidationError(validationReport = {}) {
     .join("; ");
 }
 
+const SESSION_PHASE_DEFINITIONS = Object.freeze({
+  planning: Object.freeze({
+    id: "planning",
+    label: "Planning",
+    tone: "info",
+    description: "Clarifying goals, inspecting context, and shaping the next execution path.",
+    promptRule: "Stay plan-first: gather context, define constraints, and make the next step explicit before acting.",
+    toolRule: "Prefer discovery, read-only inspection, and outlining tools until the path is clear.",
+    uiState: "draft",
+  }),
+  building: Object.freeze({
+    id: "building",
+    label: "Building",
+    tone: "primary",
+    description: "Implementing concrete changes, assembling outputs, or preparing deliverables.",
+    promptRule: "Keep the implementation loop tight: make focused changes, explain intent, and verify incrementally.",
+    toolRule: "Favor edit, diff, patch, and targeted verification tools that create forward progress.",
+    uiState: "build",
+  }),
+  staging: Object.freeze({
+    id: "staging",
+    label: "Staging",
+    tone: "warning",
+    description: "Preparing a checkpoint, approval gate, handoff, or release boundary.",
+    promptRule: "Package readiness clearly: summarize risks, blockers, and the exact gate or handoff that comes next.",
+    toolRule: "Prefer validation, packaging, checkpoint, and approval-aware tools over broad new changes.",
+    uiState: "checkpoint",
+  }),
+  running: Object.freeze({
+    id: "running",
+    label: "Running",
+    tone: "success",
+    description: "A live worker, workflow, or delegated execution is actively in motion.",
+    promptRule: "Prioritize progress reporting, continuity, and runtime safety while execution is live.",
+    toolRule: "Use runtime-safe monitoring, continuation, and observability tools instead of disruptive reconfiguration.",
+    uiState: "live",
+  }),
+  editing: Object.freeze({
+    id: "editing",
+    label: "Editing",
+    tone: "secondary",
+    description: "The workspace is being actively changed and should stay grounded in diffs.",
+    promptRule: "Keep edits incremental, stay anchored to the current diff, and validate before widening scope.",
+    toolRule: "Favor file edits, patch review, and targeted test runs that keep the working tree legible.",
+    uiState: "workspace",
+  }),
+});
+
+const PHASE_KEYWORD_MAP = Object.freeze({
+  planning: ["plan", "planning", "research", "analy", "discover", "decompose", "spec", "scope", "triage"],
+  building: ["build", "implement", "implementation", "refactor", "fix", "write", "code", "compose"],
+  staging: ["stage", "staging", "review", "verify", "validation", "approve", "approval", "gate", "handoff", "release", "checkpoint", "package"],
+  editing: ["edit", "editing", "patch", "diff", "commit", "workspace", "change"],
+});
+
+function normalizeSessionPhaseId(value, fallback = "planning") {
+  const normalized = toTrimmedString(
+    typeof value === "object" && value !== null
+      ? (value.id || value.key || value.phase || "")
+      : value,
+  ).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SESSION_PHASE_DEFINITIONS, normalized)
+    ? normalized
+    : fallback;
+}
+
+function normalizeRuntimeLikeState(value) {
+  const normalized = toTrimmedString(value).toLowerCase();
+  if (!normalized) return "";
+  if (["active", "busy", "working", "inprogress"].includes(normalized)) return "running";
+  if (["ended", "done", "complete"].includes(normalized)) return "completed";
+  return normalized;
+}
+
+function matchPhaseKeywords(haystack, phaseId) {
+  const lower = toTrimmedString(haystack).toLowerCase();
+  if (!lower) return false;
+  return (PHASE_KEYWORD_MAP[phaseId] || []).some((keyword) => lower.includes(keyword));
+}
+
+function hasPhaseRelevantMetadataPatch(metadataPatch = {}) {
+  if (!metadataPatch || typeof metadataPatch !== "object" || Array.isArray(metadataPatch)) return false;
+  return [
+    "operatorPhase",
+    "phase",
+    "sessionPhase",
+    "currentStageId",
+    "entryStageId",
+    "runtimeState",
+    "lifecycleStatus",
+    "surface",
+    "mode",
+    "intent",
+    "source",
+    "hasEdits",
+    "hasCommits",
+  ].some((key) => Object.prototype.hasOwnProperty.call(metadataPatch, key));
+}
+
+function shouldRecomputeSessionPhase(record, patch = {}) {
+  if (!record?.operatorPhase) return true;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return false;
+  return [
+    "operatorPhase",
+    "phase",
+    "sessionPhase",
+    "status",
+    "lifecycleStatus",
+    "runtimeState",
+    "currentStageId",
+    "entryStageId",
+    "sessionType",
+    "scope",
+    "taskTitle",
+    "taskKey",
+    "activeWorkerId",
+    "activeWorker",
+  ].some((key) => Object.prototype.hasOwnProperty.call(patch, key))
+    || hasPhaseRelevantMetadataPatch(patch.metadata);
+}
+
+function buildPhaseInferenceContext(session = {}) {
+  const metadata = toPlainObject(session.metadata);
+  const currentOperatorPhase = session.operatorPhase && typeof session.operatorPhase === "object"
+    ? session.operatorPhase
+    : null;
+  const currentPhaseObject = session.phase && typeof session.phase === "object"
+    ? session.phase
+    : null;
+  const currentSessionPhaseObject = session.sessionPhase && typeof session.sessionPhase === "object"
+    ? session.sessionPhase
+    : null;
+  return {
+    metadata,
+    explicitPhaseHint:
+      (currentOperatorPhase?.source === "explicit" ? currentOperatorPhase.id || currentOperatorPhase.key || null : null)
+      || (currentPhaseObject?.source === "explicit" ? currentPhaseObject.id || currentPhaseObject.key || null : null)
+      || (currentSessionPhaseObject?.source === "explicit" ? currentSessionPhaseObject.id || currentSessionPhaseObject.key || null : null)
+      || (typeof session.phase === "string" ? session.phase : null)
+      || (typeof session.sessionPhase === "string" ? session.sessionPhase : null)
+      || metadata.operatorPhase
+      || metadata.phase
+      || metadata.sessionPhase
+      || null,
+    stageHint: [
+      session.currentStageId,
+      session.entryStageId,
+      metadata.currentStageId,
+      metadata.entryStageId,
+    ].map((entry) => toTrimmedString(entry)).filter(Boolean).join(" "),
+    runtimeState: normalizeRuntimeLikeState(
+      session.runtimeState
+      || session.runtimeHealth?.state
+      || metadata.runtimeState
+      || session.status,
+    ),
+    lifecycleState: normalizeRuntimeLikeState(
+      session.lifecycleStatus
+      || session.status
+      || metadata.lifecycleStatus,
+    ),
+    focusText: [
+      session.sessionType,
+      session.scope,
+      session.taskTitle,
+      session.taskKey,
+      metadata.surface,
+      metadata.mode,
+      metadata.intent,
+      metadata.source,
+    ].map((entry) => toTrimmedString(entry)).filter(Boolean).join(" "),
+    hasActiveWorker: Boolean(
+      toTrimmedString(session.activeWorkerId)
+      || toTrimmedString(session.activeWorker?.workerId)
+      || toTrimmedString(session.activeWorker?.threadId),
+    ),
+    hasEdits: Boolean(
+      session.runtimeHealth?.hasEdits
+      || session.runtimeHealth?.hasCommits
+      || metadata.hasEdits
+      || metadata.hasCommits,
+    ),
+  };
+}
+
+export function deriveHarnessSessionPhase(session = {}) {
+  const context = buildPhaseInferenceContext(session);
+  const explicitPhaseId = context.explicitPhaseHint
+    ? normalizeSessionPhaseId(context.explicitPhaseHint, "")
+    : "";
+  let phaseId = explicitPhaseId;
+  let source = explicitPhaseId ? "explicit" : "derived";
+  let reason = explicitPhaseId ? "Phase was explicitly assigned on the session." : "Defaulted to operator planning mode.";
+
+  if (!phaseId && context.hasEdits) {
+    phaseId = "editing";
+    reason = "Runtime telemetry shows workspace edits or commits.";
+  }
+  if (!phaseId && ["waiting_approval", "paused", "queued", "retrying", "resuming", "blocked"].includes(context.lifecycleState)) {
+    phaseId = "staging";
+    reason = "Lifecycle status indicates a gate, pause, or queued checkpoint.";
+  }
+  if (!phaseId && matchPhaseKeywords(context.stageHint, "editing")) {
+    phaseId = "editing";
+    reason = "Current stage is edit- or patch-oriented.";
+  }
+  if (!phaseId && matchPhaseKeywords(context.stageHint, "staging")) {
+    phaseId = "staging";
+    reason = "Current stage is checkpoint-, review-, or approval-oriented.";
+  }
+  if (!phaseId && matchPhaseKeywords(context.stageHint, "planning")) {
+    phaseId = "planning";
+    reason = "Current stage is analysis or planning oriented.";
+  }
+  if (!phaseId && matchPhaseKeywords(context.stageHint, "building")) {
+    phaseId = "building";
+    reason = "Current stage is implementation oriented.";
+  }
+  if (!phaseId && matchPhaseKeywords(context.focusText, "planning")) {
+    phaseId = "planning";
+    reason = "Session metadata points to planning or research work.";
+  }
+  if (!phaseId && matchPhaseKeywords(context.focusText, "building")) {
+    phaseId = "building";
+    reason = "Session metadata points to implementation work.";
+  }
+  if (!phaseId && context.runtimeState === "editing") {
+    phaseId = "editing";
+    reason = "Runtime state is explicitly editing.";
+  }
+  if (!phaseId && ["running", "working", "committing"].includes(context.runtimeState)) {
+    phaseId = context.hasEdits ? "editing" : "running";
+    reason = context.hasEdits
+      ? "Runtime is live and carrying workspace changes."
+      : "A worker or workflow is actively executing.";
+  }
+  if (!phaseId && context.hasActiveWorker) {
+    phaseId = "running";
+    reason = "The session currently has an attached active worker or thread.";
+  }
+  if (!phaseId && ["task", "workflow", "workflow-overseer", "subagent"].includes(toTrimmedString(session.sessionType).toLowerCase())) {
+    phaseId = "building";
+    reason = "Execution-oriented session types default to build mode when idle heuristics are absent.";
+  }
+
+  const definition = SESSION_PHASE_DEFINITIONS[normalizeSessionPhaseId(phaseId, "planning")];
+  return {
+    ...definition,
+    source,
+    reason,
+  };
+}
+
 function resolveTurnExecutor(options = {}) {
   if (typeof options.executeTurn === "function") return options.executeTurn;
   if (typeof options.turnExecutor === "function") return options.turnExecutor;
@@ -134,12 +387,27 @@ function buildSessionRecord(compiledProfile, options = {}, parentRecord = null) 
     profileName: toTrimmedString(compiledProfile?.name || compiledProfile?.agentId || compiledProfile?.taskKey || "harness-session"),
     entryStageId: toTrimmedString(compiledProfile?.entryStageId || ""),
     replayCursor: null,
+    checkpointCursor: null,
+    lastCheckpointAt: null,
+    messageCursor: 0,
+    turnCursor: 0,
+    spillCount: 0,
     executionCount: 0,
     workerGeneration: 0,
     workerSwapCount: 0,
     activeWorkerId: null,
     activeWorker: null,
     workerHistory: [],
+    operatorPhase: deriveHarnessSessionPhase({
+      sessionType: toTrimmedString(options.sessionType || (parentRecord ? "subagent" : "primary")) || "primary",
+      status: normalizeStatus(options.status || "idle"),
+      entryStageId: toTrimmedString(compiledProfile?.entryStageId || ""),
+      activeThreadId: threadId,
+      metadata: {
+        ...(toPlainObject(compiledProfile?.metadata)),
+        ...(toPlainObject(options.metadata)),
+      },
+    }),
     metadata: {
       ...(toPlainObject(compiledProfile?.metadata)),
       ...(toPlainObject(options.metadata)),
@@ -170,6 +438,11 @@ function mergeSessionRecord(record, patch = {}) {
   next.executionCount = Math.max(0, Number.isFinite(Number(next.executionCount)) ? Math.trunc(Number(next.executionCount)) : Number(record.executionCount || 0));
   next.workerGeneration = Math.max(0, Number.isFinite(Number(next.workerGeneration)) ? Math.trunc(Number(next.workerGeneration)) : Number(record.workerGeneration || 0));
   next.workerSwapCount = Math.max(0, Number.isFinite(Number(next.workerSwapCount)) ? Math.trunc(Number(next.workerSwapCount)) : Number(record.workerSwapCount || 0));
+  next.checkpointCursor = toTrimmedString(next.checkpointCursor || record.checkpointCursor || "") || null;
+  next.lastCheckpointAt = toTrimmedString(next.lastCheckpointAt || record.lastCheckpointAt || "") || null;
+  next.messageCursor = Math.max(0, Number.isFinite(Number(next.messageCursor)) ? Math.trunc(Number(next.messageCursor)) : Number(record.messageCursor || 0));
+  next.turnCursor = Math.max(0, Number.isFinite(Number(next.turnCursor)) ? Math.trunc(Number(next.turnCursor)) : Number(record.turnCursor || 0));
+  next.spillCount = Math.max(0, Number.isFinite(Number(next.spillCount)) ? Math.trunc(Number(next.spillCount)) : Number(record.spillCount || 0));
   next.activeWorkerId = hasActiveWorkerIdPatch
     ? (toTrimmedString(patch.activeWorkerId || "") || null)
     : (toTrimmedString(next.activeWorkerId || record.activeWorkerId || "") || null);
@@ -184,6 +457,9 @@ function mergeSessionRecord(record, patch = {}) {
       ? next.workerHistory.map((entry) => cloneValue(entry))
       : (Array.isArray(record.workerHistory) ? record.workerHistory.map((entry) => cloneValue(entry)) : []));
   next.lastActiveAt = toTrimmedString(next.lastActiveAt || record.lastActiveAt || next.updatedAt) || next.updatedAt;
+  next.operatorPhase = shouldRecomputeSessionPhase(record, patch)
+    ? deriveHarnessSessionPhase(next)
+    : cloneValue(record.operatorPhase);
   return next;
 }
 
@@ -301,12 +577,103 @@ function createLifecyclePatch(event = {}, sessionRecord = {}) {
   };
 }
 
+function countCompressedMessages(messages = []) {
+  return (Array.isArray(messages) ? messages : []).reduce(
+    (total, message) => total + (message?.meta?.compression ? 1 : 0),
+    0,
+  );
+}
+
+function countMessagesByType(messages = [], type) {
+  const normalizedType = toTrimmedString(type).toLowerCase();
+  return (Array.isArray(messages) ? messages : []).reduce(
+    (total, message) => total + (toTrimmedString(message?.type || "").toLowerCase() === normalizedType ? 1 : 0),
+    0,
+  );
+}
+
+function inferReplayBoundaryType(action, payload = {}, sessionRecord = {}) {
+  const eventType = toTrimmedString(payload.eventType || "").toLowerCase();
+  const normalizedAction = toTrimmedString(action).toLowerCase();
+  if (
+    eventType.startsWith("harness:stage")
+    || eventType.startsWith("node.")
+    || toTrimmedString(payload?.meta?.nodeId || payload?.meta?.stageId || payload?.meta?.currentStageId || sessionRecord.currentStageId || "")
+  ) {
+    return "node_boundary";
+  }
+  if (
+    eventType.includes("turn")
+    || eventType.startsWith("provider.turn")
+    || normalizedAction.startsWith("session_")
+    || normalizedAction.startsWith("steer_")
+    || normalizedAction.startsWith("external_execution_")
+    || normalizedAction === "execution_registered"
+  ) {
+    return "turn_boundary";
+  }
+  return "event_boundary";
+}
+
+function buildReplayCheckpoint(sessionRecord, action, payload = {}, extras = {}) {
+  const tracker = extras.tracker || null;
+  const tracked = sessionRecord?.sessionId && typeof tracker?.getSession === "function"
+    ? tracker.getSession(sessionRecord.sessionId)
+    : null;
+  const messages = Array.isArray(tracked?.messages) ? tracked.messages : [];
+  const turns = Array.isArray(tracked?.turns) ? tracked.turns : [];
+  const meta = toPlainObject(payload.meta);
+  const result = payload.result && typeof payload.result === "object" ? payload.result : {};
+  const thread = extras.thread && typeof extras.thread === "object" ? extras.thread : null;
+  const summary = toTrimmedString(
+    payload.summary
+    || result?.error
+    || result?.status
+    || sessionRecord?.lastError
+    || "",
+  ) || null;
+  return {
+    checkpointId: extras.checkpointId || extras.snapshotId || undefined,
+    snapshotId: extras.snapshotId || undefined,
+    replayCursor: extras.snapshotId || undefined,
+    sessionId: sessionRecord?.sessionId || null,
+    runId: toTrimmedString(payload.runId || result.runId || sessionRecord?.runId || "") || null,
+    threadId: toTrimmedString(payload.threadId || result.threadId || sessionRecord?.activeThreadId || thread?.threadId || "") || null,
+    parentSessionId: sessionRecord?.parentSessionId || null,
+    rootSessionId: sessionRecord?.rootSessionId || sessionRecord?.sessionId || null,
+    status: payload.status || sessionRecord?.status || "idle",
+    action,
+    eventType: payload.eventType || null,
+    boundaryType: inferReplayBoundaryType(action, payload, sessionRecord),
+    providerTurnId: toTrimmedString(payload.providerTurnId || result.providerTurnId || meta.providerTurnId || "") || null,
+    stageId: toTrimmedString(meta.stageId || meta.currentStageId || sessionRecord?.currentStageId || "") || null,
+    nodeId: toTrimmedString(meta.nodeId || "") || null,
+    nodeType: toTrimmedString(meta.nodeType || "") || null,
+    summary,
+    updatedAt: payload.timestamp || sessionRecord?.lastActiveAt || nowIso(),
+    messageCursor: messages.length,
+    turnCursor: Math.max(0, Number(tracked?.turnCount || turns.length || 0)),
+    eventCursor: Math.max(0, Number(tracked?.totalEvents || messages.length || 0)),
+    spillCount: countCompressedMessages(messages),
+    toolCallCount: countMessagesByType(messages, "tool_call"),
+    toolResultCount: countMessagesByType(messages, "tool_result"),
+    meta: {
+      ...meta,
+      threadStatus: thread?.status || null,
+      activeWorkerId: sessionRecord?.activeWorkerId || null,
+      executionCount: Number(sessionRecord?.executionCount || 0),
+      workerGeneration: Number(sessionRecord?.workerGeneration || 0),
+    },
+  };
+}
+
 function createInternalSessionManager(defaultOptions = {}) {
   const sessions = new Map();
   const activeSessions = new Map();
   const sessionControllers = new Map();
   let managerApi = null;
   const threadRegistry = defaultOptions.threadRegistry || createThreadRegistry();
+  const sessionTracker = defaultOptions.sessionTracker || null;
   const replayStore = defaultOptions.replayStore || createSessionReplayStore(defaultOptions);
   const subagentControl = defaultOptions.subagentControl || createSubagentControl({ threadRegistry });
   const subagentPool = defaultOptions.subagentPool || createSubagentPool({
@@ -571,10 +938,13 @@ function createInternalSessionManager(defaultOptions = {}) {
   }
 
   function captureReplay(sessionRecord, action, payload = {}) {
+    const threadId = payload.threadId || sessionRecord.activeThreadId;
+    const thread = threadId ? threadRegistry.getThread(threadId) : null;
+    const checkpoint = buildReplayCheckpoint(sessionRecord, action, payload, { thread, tracker: sessionTracker });
     const snapshot = replayStore.captureSnapshot({
       sessionId: sessionRecord.sessionId,
       runId: sessionRecord.runId,
-      threadId: payload.threadId || sessionRecord.activeThreadId,
+      threadId,
       parentSessionId: sessionRecord.parentSessionId,
       parentThreadId: sessionRecord.parentThreadId,
       rootSessionId: sessionRecord.rootSessionId,
@@ -584,12 +954,20 @@ function createInternalSessionManager(defaultOptions = {}) {
       summary: toTrimmedString(payload.summary || payload?.result?.error || payload?.result?.status || "") || null,
       state: {
         session: sessionRecord,
-        thread: sessionRecord.activeThreadId ? threadRegistry.getThread(sessionRecord.activeThreadId) : null,
+        thread,
         meta: toPlainObject(payload.meta),
       },
       result: payload.result ? cloneValue(payload.result) : undefined,
+      checkpoint,
     });
-    return storeSession(sessionRecord, { replayCursor: snapshot.snapshotId });
+    return storeSession(sessionRecord, {
+      replayCursor: snapshot.snapshotId,
+      checkpointCursor: snapshot?.checkpoint?.checkpointId || snapshot.snapshotId,
+      lastCheckpointAt: snapshot?.checkpoint?.updatedAt || snapshot.createdAt,
+      messageCursor: Number(snapshot?.checkpoint?.messageCursor ?? sessionRecord.messageCursor ?? 0),
+      turnCursor: Number(snapshot?.checkpoint?.turnCursor ?? sessionRecord.turnCursor ?? 0),
+      spillCount: Number(snapshot?.checkpoint?.spillCount ?? sessionRecord.spillCount ?? 0),
+    });
   }
 
   function createManagedCompiledSession(compiledProfile, options = {}) {
@@ -597,6 +975,16 @@ function createInternalSessionManager(defaultOptions = {}) {
       throw new Error("Compiled harness profile is required");
     }
     const mergedOptions = { ...defaultOptions, ...options };
+    const subagentContract =
+      (mergedOptions.subagentContract && typeof mergedOptions.subagentContract === "object"
+        ? mergedOptions.subagentContract
+        : null)
+      || (compiledProfile.subagentContract && typeof compiledProfile.subagentContract === "object"
+        ? compiledProfile.subagentContract
+        : null)
+      || (mergedOptions.metadata?.subagentContract && typeof mergedOptions.metadata.subagentContract === "object"
+        ? mergedOptions.metadata.subagentContract
+        : null);
     const parentRecord = toTrimmedString(mergedOptions.parentSessionId || "")
       ? sessions.get(toTrimmedString(mergedOptions.parentSessionId))
       : null;
@@ -627,6 +1015,7 @@ function createInternalSessionManager(defaultOptions = {}) {
         childThreadId: sessionRecord.activeThreadId,
         taskKey: sessionRecord.taskKey,
         status: sessionRecord.status,
+        contract: subagentContract,
         metadata: mergedOptions.metadata,
       });
     }
@@ -691,6 +1080,7 @@ function createInternalSessionManager(defaultOptions = {}) {
       extensions: mergedOptions.extensions,
       extensionRegistry: mergedOptions.extensionRegistry,
       sessionManager: mergedOptions.sessionManager || managerApi || null,
+      subagentContract,
     });
     const runtimeController = harnessRuntime.session;
 
@@ -771,8 +1161,10 @@ function createInternalSessionManager(defaultOptions = {}) {
             parentSessionId: sessionRecord.parentSessionId,
             rootSessionId: sessionRecord.rootSessionId,
             taskKey: sessionRecord.taskKey,
+            contract: subagentContract,
             metadata: {
               sessionType: sessionRecord.sessionType,
+              subagentContract,
             },
             onQueued: (lease) => {
               sessionRecord = storeSession(sessions.get(sessionRecord.sessionId) || sessionRecord, {
@@ -1044,12 +1436,29 @@ function createInternalSessionManager(defaultOptions = {}) {
         profileName: toTrimmedString(input.scope || input.sessionType || "session") || "session",
         entryStageId: "",
         replayCursor: null,
+        checkpointCursor: null,
+        lastCheckpointAt: null,
+        messageCursor: 0,
+        turnCursor: 0,
+        spillCount: 0,
         executionCount: 0,
         workerGeneration: 0,
         workerSwapCount: 0,
         activeWorkerId: null,
         activeWorker: null,
         workerHistory: [],
+        operatorPhase: deriveHarnessSessionPhase({
+          sessionType: toTrimmedString(input.sessionType || "primary") || "primary",
+          status: normalizeStatus(input.status || "idle"),
+          activeThreadId: toTrimmedString(input.threadId || "") || null,
+          metadata: {
+            ...(toPlainObject(input.metadata)),
+            cwd: input.cwd || "",
+            providerSelection: input.providerSelection || "",
+            adapterName: input.adapterName || "",
+            scope: input.scope || "default",
+          },
+        }),
         metadata: {
           ...(toPlainObject(input.metadata)),
           cwd: input.cwd || "",

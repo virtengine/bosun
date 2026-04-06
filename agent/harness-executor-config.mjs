@@ -30,12 +30,8 @@ function normalizeModelEntryId(value, fallback = "model") {
   return toTrimmedString(value) || fallback;
 }
 
-function normalizeEnvBindingKey(value) {
-  return toTrimmedString(value)
-    .replace(/[^A-Za-z0-9_]/g, "_")
-    .replace(/__+/g, "_")
-    .replace(/^_+/, "")
-    .replace(/_+$/, "");
+function normalizeBindingReference(value) {
+  return toTrimmedString(value);
 }
 
 function parseBooleanLike(value, fallback = true) {
@@ -172,13 +168,13 @@ function normalizeExecutorAuthBindings(rawExecutor = {}) {
         ? rawExecutor.auth
         : {};
   const bindings = {
-    apiKeyEnv: normalizeEnvBindingKey(
+    apiKeyEnv: normalizeBindingReference(
       input.apiKeyEnv || input.apiKey || rawExecutor.apiKeyEnv || rawExecutor.apiKeyRef || "",
     ),
-    oauthTokenEnv: normalizeEnvBindingKey(
+    oauthTokenEnv: normalizeBindingReference(
       input.oauthTokenEnv || input.oauthEnv || input.oauthToken || rawExecutor.oauthTokenEnv || rawExecutor.oauthTokenRef || "",
     ),
-    subscriptionEnv: normalizeEnvBindingKey(
+    subscriptionEnv: normalizeBindingReference(
       input.subscriptionEnv || input.subscriptionTokenEnv || input.subscription || rawExecutor.subscriptionEnv || rawExecutor.subscriptionRef || "",
     ),
   };

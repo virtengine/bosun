@@ -29,10 +29,108 @@ function createSnapshotId() {
   return `replay-${randomUUID()}`;
 }
 
+function createCheckpointId() {
+  return `checkpoint-${randomUUID()}`;
+}
+
 function normalizeStatus(value, fallback = "idle") {
   const normalized = toTrimmedString(value).toLowerCase();
   if (!normalized) return fallback;
   return normalized.replace(/[^a-z0-9_-]+/g, "_");
+}
+
+function toSafeInteger(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.trunc(numeric)) : fallback;
+}
+
+function normalizeBoundaryType(value, fallback = "event_boundary") {
+  const normalized = toTrimmedString(value).toLowerCase();
+  if (!normalized) return fallback;
+  return normalized.replace(/[^a-z0-9_-]+/g, "_");
+}
+
+function inferBoundaryType(input = {}, fallback = "event_boundary") {
+  const explicit = normalizeBoundaryType(input.boundaryType || input?.meta?.boundaryType || "", "");
+  if (explicit) return explicit;
+  const eventType = toTrimmedString(input.eventType || "").toLowerCase();
+  const action = toTrimmedString(input.action || "").toLowerCase();
+  if (
+    eventType.startsWith("node.")
+    || eventType.startsWith("harness:stage")
+    || toTrimmedString(input.nodeId || input.stageId || input.currentStageId || "")
+  ) {
+    return "node_boundary";
+  }
+  if (
+    eventType.includes("turn")
+    || eventType.startsWith("provider.turn")
+    || action.startsWith("session_")
+    || action.startsWith("steer_")
+    || action.startsWith("external_execution_")
+    || action === "execution_registered"
+  ) {
+    return "turn_boundary";
+  }
+  return fallback;
+}
+
+function normalizeReplayCheckpoint(input = {}, fallback = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const cursor = source.cursor && typeof source.cursor === "object" ? source.cursor : {};
+  const counters = source.counters && typeof source.counters === "object" ? source.counters : {};
+  const updatedAt = toTrimmedString(
+    source.updatedAt
+    || source.timestamp
+    || fallback.updatedAt
+    || fallback.createdAt
+    || "",
+  ) || nowIso();
+  const messageCursor = toSafeInteger(source.messageCursor ?? cursor.message ?? fallback.messageCursor, null);
+  const turnCursor = toSafeInteger(source.turnCursor ?? cursor.turn ?? fallback.turnCursor, null);
+  const eventCursor = toSafeInteger(source.eventCursor ?? cursor.event ?? fallback.eventCursor, null);
+  const spillCount = toSafeInteger(source.spillCount ?? counters.spillCount ?? fallback.spillCount, 0);
+  const toolCallCount = toSafeInteger(source.toolCallCount ?? counters.toolCallCount ?? fallback.toolCallCount, 0);
+  const toolResultCount = toSafeInteger(source.toolResultCount ?? counters.toolResultCount ?? fallback.toolResultCount, 0);
+  return {
+    checkpointId: toTrimmedString(source.checkpointId || fallback.checkpointId || "") || createCheckpointId(),
+    snapshotId: toTrimmedString(source.snapshotId || fallback.snapshotId || "") || null,
+    replayCursor: toTrimmedString(source.replayCursor || source.snapshotId || fallback.replayCursor || fallback.snapshotId || "") || null,
+    sessionId: toTrimmedString(source.sessionId || fallback.sessionId || "") || null,
+    runId: toTrimmedString(source.runId || fallback.runId || "") || null,
+    threadId: toTrimmedString(source.threadId || fallback.threadId || "") || null,
+    parentSessionId: toTrimmedString(source.parentSessionId || fallback.parentSessionId || "") || null,
+    rootSessionId: toTrimmedString(source.rootSessionId || fallback.rootSessionId || source.sessionId || fallback.sessionId || "") || null,
+    status: normalizeStatus(source.status || fallback.status || "idle"),
+    action: toTrimmedString(source.action || fallback.action || "") || null,
+    eventType: toTrimmedString(source.eventType || fallback.eventType || "") || null,
+    boundaryType: inferBoundaryType(source, inferBoundaryType(fallback)),
+    providerTurnId: toTrimmedString(source.providerTurnId || fallback.providerTurnId || "") || null,
+    stageId: toTrimmedString(source.stageId || source.currentStageId || fallback.stageId || fallback.currentStageId || "") || null,
+    nodeId: toTrimmedString(source.nodeId || fallback.nodeId || "") || null,
+    nodeType: toTrimmedString(source.nodeType || fallback.nodeType || "") || null,
+    summary: toTrimmedString(source.summary || fallback.summary || "") || null,
+    updatedAt,
+    messageCursor,
+    turnCursor,
+    eventCursor,
+    spillCount,
+    toolCallCount,
+    toolResultCount,
+    cursor: {
+      replay: toTrimmedString(source.replayCursor || source.snapshotId || fallback.replayCursor || fallback.snapshotId || "") || null,
+      message: messageCursor,
+      turn: turnCursor,
+      event: eventCursor,
+    },
+    counters: {
+      spillCount,
+      toolCallCount,
+      toolResultCount,
+    },
+    meta: cloneValue(source.meta || fallback.meta || {}),
+  };
 }
 
 function resolveExistingPath(...candidates) {
@@ -75,37 +173,88 @@ function summarizeProjection(projection = {}) {
   };
 }
 
-function buildLiveRestoreState(sessionId, coldRestore = {}, latestSnapshot = null) {
+function buildLiveRestoreState(sessionId, coldRestore = {}, latestSnapshot = null, latestCheckpoint = null) {
   const telemetry = coldRestore?.telemetry || null;
   const stateLedger = coldRestore?.stateLedger || null;
   const executionLedger = coldRestore?.executionLedger || null;
   const latestSession = telemetry?.latestSession || stateLedger?.latestSession || null;
   const latestRun = telemetry?.latestRun || stateLedger?.latestRun || executionLedger?.latestRun || null;
   const latestEvent = executionLedger?.latestEvent || null;
+  const checkpoint = latestCheckpoint || executionLedger?.latestCheckpoint || latestSnapshot?.checkpoint || null;
   const status =
-    latestSession?.status
+    checkpoint?.status
+    || latestSession?.status
     || latestRun?.status
     || executionLedger?.status
     || latestSnapshot?.status
     || null;
   return {
     source:
-      (telemetry?.sessionCount || telemetry?.runCount)
-        ? "telemetry"
-        : ((stateLedger?.sessionCount || stateLedger?.runCount)
-            ? "state-ledger"
-            : (executionLedger?.runCount ? "execution-ledger" : null)),
-    sessionId: toTrimmedString(latestSession?.sessionId || sessionId || "") || null,
-    threadId: toTrimmedString(latestSession?.threadId || latestRun?.threadId || latestSnapshot?.threadId || "") || null,
-    runId: toTrimmedString(latestRun?.runId || latestSnapshot?.runId || "") || null,
+      checkpoint
+        ? "checkpoint"
+        : ((telemetry?.sessionCount || telemetry?.runCount)
+            ? "telemetry"
+            : ((stateLedger?.sessionCount || stateLedger?.runCount)
+                ? "state-ledger"
+                : (executionLedger?.runCount ? "execution-ledger" : null))),
+    sessionId: toTrimmedString(checkpoint?.sessionId || latestSession?.sessionId || sessionId || "") || null,
+    threadId: toTrimmedString(checkpoint?.threadId || latestSession?.threadId || latestRun?.threadId || latestSnapshot?.threadId || "") || null,
+    runId: toTrimmedString(checkpoint?.runId || latestRun?.runId || latestSnapshot?.runId || "") || null,
     status: normalizeStatus(status, "idle"),
     updatedAt:
-      latestSession?.updatedAt
+      checkpoint?.updatedAt
+      || latestSession?.updatedAt
       || latestRun?.updatedAt
       || latestEvent?.timestamp
       || latestSnapshot?.createdAt
       || null,
   };
+}
+
+function buildResumePointer({ latestCheckpoint = null, latestSnapshot = null, liveStatus = null } = {}) {
+  if (latestCheckpoint) {
+    return {
+      checkpointId: latestCheckpoint.checkpointId,
+      snapshotId: latestCheckpoint.snapshotId || latestCheckpoint.replayCursor || null,
+      replayCursor: latestCheckpoint.replayCursor || latestCheckpoint.snapshotId || null,
+      threadId: latestCheckpoint.threadId || null,
+      runId: latestCheckpoint.runId || null,
+      status: latestCheckpoint.status || null,
+      action: latestCheckpoint.action || null,
+      eventType: latestCheckpoint.eventType || null,
+      boundaryType: latestCheckpoint.boundaryType || null,
+      messageCursor: latestCheckpoint.messageCursor ?? null,
+      turnCursor: latestCheckpoint.turnCursor ?? null,
+      spillCount: latestCheckpoint.spillCount ?? 0,
+      updatedAt: latestCheckpoint.updatedAt || null,
+    };
+  }
+  if (latestSnapshot) {
+    return {
+      snapshotId: latestSnapshot.snapshotId,
+      replayCursor: latestSnapshot.snapshotId,
+      threadId: latestSnapshot.threadId,
+      runId: latestSnapshot.runId || null,
+      status: latestSnapshot.status,
+      action: latestSnapshot.action,
+      eventType: latestSnapshot.eventType || null,
+      boundaryType: latestSnapshot?.checkpoint?.boundaryType || null,
+    };
+  }
+  if (liveStatus?.threadId || liveStatus?.runId) {
+    return {
+      snapshotId: null,
+      replayCursor: null,
+      threadId: liveStatus.threadId,
+      runId: liveStatus.runId,
+      status: liveStatus.status,
+      action: `cold_restore:${liveStatus.source || "persisted"}`,
+      eventType: null,
+      boundaryType: liveStatus.source === "checkpoint" ? "checkpoint_restore" : null,
+      updatedAt: liveStatus.updatedAt || null,
+    };
+  }
+  return null;
 }
 
 function createEventEmitter(hooks = []) {
@@ -122,8 +271,9 @@ function createEventEmitter(hooks = []) {
 
 export function createReplaySnapshot(input = {}) {
   const createdAt = nowIso();
-  return {
-    snapshotId: toTrimmedString(input.snapshotId || "") || createSnapshotId(),
+  const snapshotId = toTrimmedString(input.snapshotId || "") || createSnapshotId();
+  const base = {
+    snapshotId,
     sessionId: toTrimmedString(input.sessionId || "") || null,
     runId: toTrimmedString(input.runId || "") || null,
     threadId: toTrimmedString(input.threadId || "") || null,
@@ -137,6 +287,19 @@ export function createReplaySnapshot(input = {}) {
     createdAt,
     state: cloneValue(input.state || {}),
     result: cloneValue(input.result),
+  };
+  return {
+    ...base,
+    checkpoint: input.checkpoint
+      ? normalizeReplayCheckpoint(input.checkpoint, {
+          ...base,
+          checkpointId: snapshotId,
+          snapshotId,
+          replayCursor: snapshotId,
+          updatedAt: createdAt,
+          summary: base.summary,
+        })
+      : null,
   };
 }
 
@@ -159,6 +322,17 @@ function mergeReplaySnapshot(snapshot, patch = {}) {
   next.state = cloneValue(next.state || snapshot.state || {});
   next.result = cloneValue(next.result ?? snapshot.result);
   next.createdAt = toTrimmedString(next.createdAt || snapshot.createdAt || "") || nowIso();
+  next.checkpoint = next.checkpoint
+    ? normalizeReplayCheckpoint(next.checkpoint, {
+        ...snapshot?.checkpoint,
+        ...snapshot,
+        ...next,
+        checkpointId: next.snapshotId,
+        snapshotId: next.snapshotId,
+        replayCursor: next.snapshotId,
+        updatedAt: next.createdAt,
+      })
+    : null;
   return next;
 }
 
@@ -226,6 +400,7 @@ export function createSessionReplayStore(options = {}) {
     snapshotStore.writeSession(normalizedSessionId, {
       snapshots: snapshotStore.list(normalizedSessionId),
       events: bucket,
+      checkpoint: event?.checkpoint ?? meta?.checkpoint ?? snapshotStore.getCheckpoint(normalizedSessionId) ?? null,
     });
     emitEvent({
       type: "replay:event-recorded",
@@ -251,6 +426,22 @@ export function createSessionReplayStore(options = {}) {
 
   function getLatestSnapshot(sessionId) {
     return snapshotStore.getLatest(sessionId);
+  }
+
+  function getLatestCheckpoint(sessionId) {
+    const latestSnapshot = getLatestSnapshot(sessionId);
+    const stored = snapshotStore.getCheckpoint(sessionId) || latestSnapshot?.checkpoint || null;
+    return stored
+      ? normalizeReplayCheckpoint(stored, latestSnapshot
+        ? {
+            ...latestSnapshot,
+            checkpointId: latestSnapshot.snapshotId,
+            snapshotId: latestSnapshot.snapshotId,
+            replayCursor: latestSnapshot.snapshotId,
+            updatedAt: latestSnapshot.createdAt,
+          }
+        : {})
+      : null;
   }
 
   function buildColdRestoreState(sessionId, options_ = {}) {
@@ -317,13 +508,16 @@ export function createSessionReplayStore(options = {}) {
     const telemetry = summarizeProjection(telemetryProjection);
     const stateLedger = summarizeProjection(stateLedgerProjection);
     const latestSnapshot = getLatestSnapshot(normalizedSessionId);
+    const latestCheckpoint = getLatestCheckpoint(normalizedSessionId) || ledgerRestore?.latestCheckpoint || null;
     const sources = [];
+    if (latestCheckpoint) sources.push("checkpoint");
     if (telemetry.eventCount > 0) sources.push("telemetry");
     if (stateLedger.eventCount > 0) sources.push("state-ledger");
     if ((ledgerRestore?.runCount || 0) > 0) sources.push("execution-ledger");
     return {
       restored: sources.length > 0,
       sources,
+      latestCheckpoint,
       telemetry: {
         ...telemetry,
         events: telemetryProjection.events,
@@ -337,49 +531,41 @@ export function createSessionReplayStore(options = {}) {
         telemetry,
         stateLedger,
         executionLedger: ledgerRestore,
-      }, latestSnapshot),
+      }, latestSnapshot, latestCheckpoint),
     };
   }
 
   function buildResumeState(sessionId, options_ = {}) {
     const latestSnapshot = getLatestSnapshot(sessionId);
+    const latestCheckpoint = getLatestCheckpoint(sessionId);
     const recentSnapshots = listSnapshots(sessionId, { limit: options_.snapshotLimit || 10 });
     const recentEvents = listEvents(sessionId, { limit: options_.eventLimit || 25 });
     const coldRestore = options_.includeColdRestore === false
       ? {
           restored: false,
           sources: [],
+          latestCheckpoint: null,
           telemetry: null,
           stateLedger: null,
           executionLedger: null,
           liveStatus: null,
         }
       : buildColdRestoreState(sessionId, options_);
+    const resolvedCheckpoint = latestCheckpoint || coldRestore.latestCheckpoint || coldRestore.executionLedger?.latestCheckpoint || null;
     const liveStatus = coldRestore.liveStatus || null;
     return {
       sessionId: toTrimmedString(sessionId) || null,
       latestSnapshot,
+      latestCheckpoint: resolvedCheckpoint,
       snapshots: recentSnapshots,
       events: recentEvents,
       coldRestore,
       liveStatus,
-      resumeFrom: latestSnapshot
-        ? {
-            snapshotId: latestSnapshot.snapshotId,
-            threadId: latestSnapshot.threadId,
-            status: latestSnapshot.status,
-            action: latestSnapshot.action,
-          }
-        : (liveStatus?.threadId || liveStatus?.runId
-            ? {
-                snapshotId: null,
-                threadId: liveStatus.threadId,
-                runId: liveStatus.runId,
-                status: liveStatus.status,
-                action: `cold_restore:${liveStatus.source || "persisted"}`,
-              }
-            : null)
-      ,
+      resumeFrom: buildResumePointer({
+        latestCheckpoint: resolvedCheckpoint,
+        latestSnapshot,
+        liveStatus,
+      }),
     };
   }
 
@@ -417,6 +603,7 @@ export function createSessionReplayStore(options = {}) {
     listSnapshots,
     listEvents,
     getLatestSnapshot,
+    getLatestCheckpoint,
     buildColdRestoreState,
     buildResumeState,
     getSnapshotStore() {

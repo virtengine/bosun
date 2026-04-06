@@ -7,6 +7,12 @@ function toTrimmedString(value) {
   return String(value ?? "").trim();
 }
 
+function toStringArray(value) {
+  return Array.isArray(value)
+    ? value.map((entry) => toTrimmedString(entry)).filter(Boolean)
+    : [];
+}
+
 function buildStagePrompt(stage = {}, options = {}) {
   const prompt = toTrimmedString(stage.prompt || "");
   const tools = Array.isArray(stage.tools) ? stage.tools.map((tool) => toTrimmedString(tool)).filter(Boolean) : [];
@@ -43,6 +49,17 @@ export async function createTurnRunner(options = {}) {
     async runStageTurn(input = {}) {
       const stage = input.stage || {};
       const profile = input.profile || {};
+      const toolPolicy = input.toolPolicy && typeof input.toolPolicy === "object"
+        ? input.toolPolicy
+        : {};
+      const turnContext = {
+        allowedTools: toStringArray(input.allowedTools || toolPolicy.allowedTools),
+        deniedTools: toStringArray(input.deniedTools || toolPolicy.deniedTools),
+        toolPolicy,
+        subagentContract: input.subagentContract && typeof input.subagentContract === "object"
+          ? input.subagentContract
+          : null,
+      };
       const prompt = buildStagePrompt(stage, options);
       if (typeof options.runProviderTurn === "function") {
         const providerSession = createProviderSession(
@@ -63,7 +80,7 @@ export async function createTurnRunner(options = {}) {
         const result = await providerSession.runTurn(prompt, {
           cwd: toTrimmedString(stage.cwd || input.cwd || profile.cwd || ""),
           model: toTrimmedString(stage.model || input.model || profile.model || ""),
-          tools: toolRunner.listTools(),
+          tools: toolRunner.listTools(turnContext),
           toolRunner,
           sessionManager: options.sessionManager || null,
           onEvent: options.onEvent,
@@ -72,6 +89,7 @@ export async function createTurnRunner(options = {}) {
           taskKey: toTrimmedString(stage.taskKey || input.taskKey || profile.taskKey || profile.agentId || "harness"),
           sessionId: input.sessionId || null,
           threadId: input.threadId || null,
+          ...turnContext,
         });
         return {
           ...normalizeTurnResult(result),
@@ -94,7 +112,7 @@ export async function createTurnRunner(options = {}) {
       const result = await providerSession.runTurn(prompt, {
         cwd: toTrimmedString(stage.cwd || input.cwd || profile.cwd || ""),
         model: toTrimmedString(stage.model || input.model || profile.model || ""),
-        tools: toolRunner.listTools(),
+        tools: toolRunner.listTools(turnContext),
         toolRunner,
         sessionManager: options.sessionManager || null,
         onEvent: options.onEvent,
@@ -103,6 +121,7 @@ export async function createTurnRunner(options = {}) {
         taskKey: toTrimmedString(stage.taskKey || input.taskKey || profile.taskKey || profile.agentId || "harness"),
         sessionId: input.sessionId || null,
         threadId: input.threadId || null,
+        ...turnContext,
       });
       return {
         ...normalizeTurnResult(result),

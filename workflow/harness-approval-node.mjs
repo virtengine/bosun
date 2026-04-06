@@ -1,4 +1,5 @@
 import {
+  deriveApprovalRequestJudgment,
   expireApprovalRequest,
   getApprovalRequest,
   resolveApprovalRequest,
@@ -15,6 +16,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function buildGateJudgment(decision, reason, extras = {}) {
+  return {
+    judgment: decision,
+    judgmentReason: reason,
+    ...extras,
+  };
+}
+
+function throwGateJudgmentError(message, judgment, extras = {}) {
+  const error = new Error(message);
+  error.judgment = judgment?.judgment || null;
+  error.judgmentReason = judgment?.judgmentReason || null;
+  Object.assign(error, extras);
+  throw error;
+}
+
 export async function executeHarnessApprovalNode(node, ctx, engine) {
   const mode = node.config?.mode || "condition";
   const timeoutMs = node.config?.timeoutMs || 300000;
@@ -28,10 +45,11 @@ export async function executeHarnessApprovalNode(node, ctx, engine) {
 
   if (mode === "timeout") {
     await sleep(timeoutMs);
+    const judgment = buildGateJudgment("ACCEPT", "gate.timeout_elapsed");
     return normalizeHarnessApprovalNodeOutput({
       success: true,
       status: "completed",
-      output: { gateOpened: true, mode, waited: timeoutMs, reason },
+      output: { gateOpened: true, mode, waited: timeoutMs, reason, ...judgment },
       summary: reason,
       sessionId: ctx?.data?._workflowSessionId || null,
       rootSessionId: ctx?.data?._workflowRootSessionId || null,
@@ -48,10 +66,11 @@ export async function executeHarnessApprovalNode(node, ctx, engine) {
       try {
         const fn = new Function("$data", "$ctx", `return (${node.config.condition});`);
         if (fn(ctx.data, ctx)) {
+          const judgment = buildGateJudgment("ACCEPT", "gate.condition_met");
           return normalizeHarnessApprovalNodeOutput({
             success: true,
             status: "completed",
-            output: { gateOpened: true, mode, waited: Date.now() - start, reason },
+            output: { gateOpened: true, mode, waited: Date.now() - start, reason, ...judgment },
             summary: reason,
           });
         }
@@ -59,12 +78,17 @@ export async function executeHarnessApprovalNode(node, ctx, engine) {
       await sleep(pollInterval);
     }
     if (onTimeout === "fail") {
-      throw new Error(`Gate timed out after ${timeoutMs}ms: ${reason}`);
+      throwGateJudgmentError(
+        `Gate timed out after ${timeoutMs}ms: ${reason}`,
+        buildGateJudgment("ESCALATE", "gate.condition_timeout_fail"),
+        { mode, timeoutMs, nodeId: node?.id || null },
+      );
     }
+    const judgment = buildGateJudgment("ACCEPT", "gate.condition_timeout_proceed");
     return normalizeHarnessApprovalNodeOutput({
       success: true,
       status: "timed_out",
-      output: { gateOpened: true, mode, timedOut: true, waited: timeoutMs, reason },
+      output: { gateOpened: true, mode, timedOut: true, waited: timeoutMs, reason, ...judgment },
       summary: reason,
     });
   }
@@ -124,12 +148,13 @@ export async function executeHarnessApprovalNode(node, ctx, engine) {
       } catch {}
       delete ctx.data._pendingApprovalRequests[gateRequest.requestId];
       engine?._checkpointRun?.(ctx);
+      const judgment = buildGateJudgment("ACCEPT", "gate.approved_legacy");
       return normalizeHarnessApprovalNodeOutput({
         success: true,
         status: "approved",
         approvalRequestId: gateRequest.requestId,
         approvalState: "approved",
-        output: { gateOpened: true, mode: "manual", waited: Date.now() - start, reason },
+        output: { gateOpened: true, mode: "manual", waited: Date.now() - start, reason, ...judgment },
         lineage: buildWorkflowLineageContract({
           runId: ctx?.id,
           workflowId: ctx?.data?._workflowId,
@@ -151,23 +176,34 @@ export async function executeHarnessApprovalNode(node, ctx, engine) {
     if (approvalState === "approved" || approvalState === "denied") {
       delete ctx.data._pendingApprovalRequests[gateRequest.requestId];
       engine?._checkpointRun?.(ctx);
+      const approvalJudgment = deriveApprovalRequestJudgment(currentRequest, currentRequest?.resolution);
+      const judgment = buildGateJudgment(approvalJudgment.decision, approvalJudgment.reason);
       if (approvalState === "denied") {
-        throw new Error(`Gate approval denied: ${reason}`);
+        throwGateJudgmentError(
+          `Gate approval denied: ${reason}`,
+          judgment,
+          {
+            approvalRequestId: gateRequest.requestId,
+            approvalState,
+            nodeId: node?.id || null,
+          },
+        );
       }
       return normalizeHarnessApprovalNodeOutput({
         success: true,
         status: approvalState,
         approvalRequestId: gateRequest.requestId,
         approvalState,
-        output: { gateOpened: true, mode: "manual", waited: Date.now() - start, reason },
+        output: { gateOpened: true, mode: "manual", waited: Date.now() - start, reason, ...judgment },
       });
     }
     await sleep(pollInterval);
   }
 
   const pending = getApprovalRequest(gateRequest.scopeType, gateRequest.scopeId, { repoRoot });
+  let expiredRequest = null;
   if (pending && pending.status === "pending") {
-    expireApprovalRequest(gateRequest.requestId, {
+    expiredRequest = expireApprovalRequest(gateRequest.requestId, {
       repoRoot,
       actorId: "workflow-engine",
       note: `Gate timed out after ${timeoutMs}ms`,
@@ -175,15 +211,26 @@ export async function executeHarnessApprovalNode(node, ctx, engine) {
   }
   delete ctx.data._pendingApprovalRequests[gateRequest.requestId];
   engine?._checkpointRun?.(ctx);
+  const judgmentSource = expiredRequest?.request || pending || gateRequest;
+  const approvalJudgment = deriveApprovalRequestJudgment(judgmentSource, expiredRequest?.request?.resolution);
+  const judgment = buildGateJudgment(approvalJudgment.decision, approvalJudgment.reason);
   if (onTimeout === "fail") {
-    throw new Error(`Manual gate timed out after ${timeoutMs}ms: ${reason}`);
+    throwGateJudgmentError(
+      `Manual gate timed out after ${timeoutMs}ms: ${reason}`,
+      judgment,
+      {
+        approvalRequestId: gateRequest.requestId,
+        approvalState: "expired",
+        nodeId: node?.id || null,
+      },
+    );
   }
   return normalizeHarnessApprovalNodeOutput({
     success: true,
     status: "expired",
     approvalRequestId: gateRequest.requestId,
     approvalState: "expired",
-    output: { gateOpened: true, mode: "manual", timedOut: true, waited: timeoutMs, reason },
+    output: { gateOpened: true, mode: "manual", timedOut: true, waited: timeoutMs, reason, ...judgment },
   });
 }
 

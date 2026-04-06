@@ -116,8 +116,12 @@ const {
 const { executeToolCall } = await import("../voice/voice-tools.mjs");
 const {
   clearVisionSessionState,
+  describeMultimodalFallback,
+  ensureBrowserWorkerIsolation,
+  getBrowserWorkerIsolation,
   getVoiceTurnTrace,
   formatVoiceTurnTrace,
+  recordMultimodalFallback,
 } = await import("../voice/vision-session-state.mjs");
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -127,6 +131,51 @@ describe("voice-action-dispatcher", () => {
     vi.clearAllMocks();
     clearVisionSessionState("trace-mismatch");
     clearVisionSessionState("trace-duplicate");
+    clearVisionSessionState("browser-worker-session");
+  });
+
+  describe("browser worker isolation", () => {
+    it("creates an isolated browser profile context per session and records text fallback state", () => {
+      const browserWorker = ensureBrowserWorkerIsolation("browser-worker-session", {
+        parentSessionId: "parent-browser-session",
+        rootSessionId: "root-browser-session",
+        requestedCapabilities: ["playwright.navigate", "playwright.screenshot"],
+        toolHints: ["browser", "screenshot"],
+      });
+      const fallback = recordMultimodalFallback("browser-worker-session", {
+        summary: "Build dashboard shows one failing smoke test in the right rail.",
+        source: "browser-screenshot",
+        width: 1440,
+        height: 900,
+        reason: "ui_validation",
+      });
+      const description = describeMultimodalFallback("browser-worker-session");
+
+      expect(browserWorker).toEqual(expect.objectContaining({
+        sessionId: "browser-worker-session",
+        parentSessionId: "parent-browser-session",
+        rootSessionId: "root-browser-session",
+        profileScope: "isolated-subagent",
+        profileDir: expect.stringContaining(".bosun/.cache/browser-workers/"),
+        requestedCapabilities: ["playwright.navigate", "playwright.screenshot"],
+      }));
+      expect(getBrowserWorkerIsolation("browser-worker-session")).toEqual(expect.objectContaining({
+        workerId: browserWorker.workerId,
+        profileId: browserWorker.profileId,
+      }));
+      expect(fallback).toEqual(expect.objectContaining({
+        available: true,
+        source: "browser-screenshot",
+        summary: expect.stringContaining("failing smoke test"),
+      }));
+      expect(description).toEqual(expect.objectContaining({
+        available: true,
+        description: expect.stringContaining("failing smoke test"),
+        browserWorker: expect.objectContaining({
+          workerId: browserWorker.workerId,
+        }),
+      }));
+    });
   });
 
   // ── Registry ───────────────────────────────────────────────

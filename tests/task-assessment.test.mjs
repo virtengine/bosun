@@ -150,6 +150,61 @@ describe("task-assessment", () => {
       expect(prompt).toContain("3 files changed");
     });
 
+    it("includes explicit objective-frame sections when present", () => {
+      const prompt = buildAssessmentPrompt({
+        taskId: "abc-123",
+        trigger: "agent_completed",
+        shortId: "abc",
+        objectiveFrame: {
+          successCriteria: [
+            {
+              id: "criterion-1",
+              title: "Finish evidence summary",
+              description: "Capture final evidence and operator notes",
+              status: "partial",
+              blocking: true,
+            },
+          ],
+          goalProgress: {
+            status: "in_progress",
+            completedCriteriaCount: 1,
+            totalCriteriaCount: 2,
+            completionRatio: 0.5,
+            summary: "Half complete",
+          },
+          constraintState: {
+            status: "blocked",
+            blocked: true,
+            violationCount: 1,
+            blockingViolationCount: 1,
+            violations: [
+              {
+                constraintId: "approval",
+                message: "Operator approval required before rollout.",
+                blocking: true,
+              },
+            ],
+          },
+          tokenBudget: {
+            status: "near_limit",
+            budgetTokens: 1000,
+            totalTokens: 910,
+            remainingTokens: 90,
+            utilizationRatio: 0.91,
+          },
+        },
+      });
+
+      expect(prompt).toContain("## Explicit Success Criteria");
+      expect(prompt).toContain("Finish evidence summary [partial] (blocking)");
+      expect(prompt).toContain("## Goal Progress");
+      expect(prompt).toContain("Completion ratio: 50%");
+      expect(prompt).toContain("## Constraints");
+      expect(prompt).toContain("approval: Operator approval required before rollout.");
+      expect(prompt).toContain("## Token Budget");
+      expect(prompt).toContain("Status: near_limit");
+    });
+
     it("includes agent last message", () => {
       const prompt = buildAssessmentPrompt({
         taskId: "abc-123",
@@ -310,6 +365,33 @@ describe("task-assessment", () => {
 
       // attemptCount check runs first in the implementation
       expect(result.action).toBe("manual_review");
+    });
+
+    it("returns manual_review when objective constraints are blocked", () => {
+      const result = quickAssess({
+        taskId: "t10",
+        trigger: "agent_completed",
+        shortId: "t10",
+        objectiveFrame: {
+          constraintState: {
+            status: "blocked",
+            blocked: true,
+            approvalPending: true,
+            violations: [
+              {
+                constraintId: "approval",
+                message: "Approval pending",
+                blocking: true,
+              },
+            ],
+          },
+        },
+      });
+
+      expect(result).not.toBeNull();
+      expect(result.action).toBe("manual_review");
+      expect(result.reason).toContain("blocked");
+      expect(result.rawOutput).toBe("quick_assess:constraint_blocked");
     });
   });
 
@@ -516,6 +598,48 @@ describe("task-assessment", () => {
       expect(result.splitTasks[1].acceptance_criteria).toEqual([
         "Covers parse success + failure",
       ]);
+    });
+
+    it("normalizes objectiveFrame from decision output", async () => {
+      const execCodex = vi.fn().mockResolvedValue({
+        finalResponse:
+          '{"action":"wait","waitSeconds":120,"reason":"Need operator confirmation","objectiveFrame":{"successCriteria":[{"id":"criterion-1","title":"Gather operator approval","status":"partial","blocking":true}],"goalProgress":{"status":"in_progress","completedCriteriaCount":1,"totalCriteriaCount":2,"completionRatio":0.5},"constraintState":{"status":"blocked","blocked":true,"violations":[{"constraintId":"approval","message":"Operator approval pending","blocking":true}]},"tokenBudget":{"budgetTokens":1000,"totalTokens":950,"remainingTokens":50,"status":"near_limit"}}}',
+      });
+
+      const result = await assessTask(
+        {
+          taskId: "task-010",
+          taskTitle: "Objective frame extract",
+          trigger: "agent_completed",
+          shortId: "task-010",
+        },
+        { execCodex, logDir: null },
+      );
+
+      expect(result.action).toBe("wait");
+      expect(result.objectiveFrame).toEqual(expect.objectContaining({
+        blocked: true,
+        successCriteria: [
+          expect.objectContaining({
+            title: "Gather operator approval",
+            status: "partial",
+            blocking: true,
+          }),
+        ],
+        goalProgress: expect.objectContaining({
+          status: "in_progress",
+          completionRatio: 0.5,
+        }),
+        constraintState: expect.objectContaining({
+          status: "blocked",
+          blocked: true,
+          blockingViolationCount: 1,
+        }),
+        tokenBudget: expect.objectContaining({
+          status: "near_limit",
+          totalTokens: 950,
+        }),
+      }));
     });
   });
 });

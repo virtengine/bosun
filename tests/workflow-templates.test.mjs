@@ -566,6 +566,8 @@ describe("workflow-templates", () => {
     expect(template.category).toBe("research");
     expect(template.variables?.evidenceMode).toBe("answer");
     expect(template.variables?.promoteReviewedFindings).toBe(true);
+    expect(template.variables?.researchToolBundleId).toBe("scientific-evidence");
+    expect(template.variables?.includeRuntimeLogEvidence).toBe(true);
 
     const sidecarNode = template.nodes.find((node) => node.id === "run-evidence-sidecar");
     const generatorNode = template.nodes.find((node) => node.id === "generate-solution");
@@ -577,8 +579,12 @@ describe("workflow-templates", () => {
     expect(sidecarNode?.config?.command).toBe("node");
     expect(sidecarNode?.config?.args).toContain("workflow/research-evidence-sidecar.mjs");
     expect(sidecarNode?.config?.parseJson).toBe(true);
+    expect(String(sidecarNode?.config?.env?.BOSUN_RESEARCH_SIDECAR_INPUT || "")).toContain("researchToolBundleId");
+    expect(String(sidecarNode?.config?.env?.BOSUN_RESEARCH_SIDECAR_INPUT || "")).toContain("includeRuntimeLogEvidence");
     expect(String(generatorNode?.config?.prompt || "")).toContain("Evidence Summary");
+    expect(String(generatorNode?.config?.prompt || "")).toContain("Research Tool Bundle");
     expect(String(generatorNode?.config?.prompt || "")).toContain("Use citation keys");
+    expect(String(verifierNode?.config?.prompt || "")).toContain("Research Tool Bundle");
     expect(String(verifierNode?.config?.prompt || "")).toContain("VERDICT: CORRECT");
     expect(verdictNode?.type).toBe("transform.llm_parse");
     expect(verdictNode?.config?.outputPort).toBe("verdict");

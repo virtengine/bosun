@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { exec as childExec } from "node:child_process";
 import { createServer } from "node:http";
+import { CredentialStore } from "../workflow/credential-store.mjs";
 import {
   clearSharedOAuthToken,
   getProviderAuthStatePath,
@@ -36,6 +37,19 @@ function isExpired(expiresAt) {
   const ts = Number(new Date(expiresAt).getTime());
   if (Number.isNaN(ts)) return false;
   return ts <= Date.now() + 30_000;
+}
+
+function resolveCredentialStore(options = {}) {
+  if (options.credentialStore) return options.credentialStore;
+  if (!options.configDir) return null;
+  try {
+    return new CredentialStore({
+      configDir: options.configDir,
+      secretKey: options.secretKey,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function getProviderEnvCandidates(provider) {
@@ -187,6 +201,80 @@ const OAUTH_PROVIDERS = {
     accentColor: "#1a73e8",
   },
 };
+
+function resolveVoiceProviderCredentialRecord(provider, options = {}) {
+  const credentialStore = resolveCredentialStore(options);
+  if (!credentialStore) return { record: null, validation: null };
+  const candidates = credentialStore.listByProvider(provider);
+  const record = candidates.find((entry) => {
+    const authMode = normalizeProvider(entry?.lifecycle?.authMode || entry?.metadata?.authMode || "oauth");
+    return !authMode || authMode === "oauth";
+  }) || null;
+  if (!record) return { record: null, validation: null };
+  return {
+    record,
+    validation: credentialStore.validate(record.name, {
+      env: options.env || process.env,
+      config: options.config || null,
+      workflowId: options.workflowId,
+    }),
+  };
+}
+
+export function describeVoiceProviderLifecycle(provider, options = {}) {
+  const normalizedProvider = normalizeProvider(provider);
+  const cfg = OAUTH_PROVIDERS[normalizedProvider];
+  if (!cfg) {
+    return {
+      provider: normalizedProvider,
+      status: "unknown",
+      missingActions: [],
+      envKeys: [],
+      refreshable: false,
+    };
+  }
+
+  const token = resolveVoiceOAuthToken(normalizedProvider, options.forceReload === true);
+  const loginStatus = _providerPendingLogin.get(normalizedProvider)?.status || "idle";
+  const clientIdConfigured = normalizeEnvValue(cfg.clientId).length >= 8;
+  const { record, validation } = resolveVoiceProviderCredentialRecord(normalizedProvider, options);
+  const refreshable = Boolean(token?.refreshToken || validation?.refreshable);
+  const missingActions = [];
+
+  if (!clientIdConfigured) missingActions.push("configure_client");
+  if (!token?.token && !record?.name) missingActions.push("sign_in");
+  if (token?.expiresAt && isExpired(token.expiresAt) && refreshable) missingActions.push("refresh_token");
+
+  return {
+    provider: normalizedProvider,
+    status: token?.token
+      ? (isExpired(token.expiresAt) ? "expired" : "connected")
+      : (loginStatus === "pending" ? "pending" : "idle"),
+    hasToken: Boolean(token?.token),
+    expiresAt: token?.expiresAt || validation?.expiresAt || null,
+    refreshable,
+    connectedSource: token?.source || (record?.name ? "credential-store" : null),
+    pendingStatus: loginStatus,
+    clientIdConfigured,
+    requiredEnvKeys: cfg.clientSecret
+      ? [`BOSUN_${normalizedProvider.toUpperCase()}_OAUTH_CLIENT_ID`, `BOSUN_${normalizedProvider.toUpperCase()}_OAUTH_CLIENT_SECRET`]
+      : [`BOSUN_${normalizedProvider.toUpperCase()}_OAUTH_CLIENT_ID`],
+    missingActions,
+    credentialName: record?.name || null,
+    validationErrors: validation?.errors || [],
+  };
+}
+
+export function validateVoiceProviderLifecycle(provider, options = {}) {
+  const lifecycle = describeVoiceProviderLifecycle(provider, options);
+  return {
+    ok: lifecycle.missingActions.length === 0 && lifecycle.validationErrors.length === 0,
+    status: lifecycle.status,
+    missingActions: lifecycle.missingActions,
+    validationErrors: lifecycle.validationErrors,
+    refreshable: lifecycle.refreshable,
+  };
+}
 
 // Module-scope per-provider pending login state (never inside a function — hard rule).
 const _providerPendingLogin = new Map();

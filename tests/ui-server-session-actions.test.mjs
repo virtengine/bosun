@@ -453,4 +453,159 @@ describe("ui-server session actions", () => {
     });
     expect(tracker.getSession(sessionId)).toBeNull();
   });
+
+  it("reveals a session folder through the HTTP reveal route", async () => {
+    const { tryHandleHarnessSessionRoutes } = await import("../server/routes/harness-sessions.mjs");
+    const { createSessionTracker } = await import("../infra/session-tracker.mjs");
+    const tracker = createSessionTracker({ persistDir: null });
+    const sessionId = "reveal-session-folder";
+    tracker.createSession({
+      id: sessionId,
+      type: "primary",
+      metadata: {
+        workspaceId: "ws-main",
+        workspaceDir: "C:/repo/worktree-alpha",
+        title: "Reveal Me",
+      },
+    });
+
+    const revealedPaths = [];
+    const res = {};
+
+    await tryHandleHarnessSessionRoutes({
+      req: { method: "POST" },
+      res,
+      path: `/api/sessions/${encodeURIComponent(sessionId)}/reveal`,
+      url: new URL(`http://localhost/api/sessions/${encodeURIComponent(sessionId)}/reveal?workspace=all`),
+      deps: {
+        jsonResponse: (target, status, payload) => {
+          target.statusCode = status;
+          target.body = payload;
+        },
+        getBosunSessionManager: () => ({ listSessions: () => [], snapshot: () => ({ activeSessions: 0 }) }),
+        getSessionTracker: () => tracker,
+        mergeTrackerAndLedgerSessions: () => [],
+        shouldHideSessionFromDefaultList: () => false,
+        sessionMatchesWorkspaceContext: () => true,
+        normalizeCandidatePath: (value) => value,
+        repoRoot: process.cwd(),
+        getPrimaryAgentName: () => "Codex",
+        getAgentMode: () => "agent",
+        broadcastUiEvent: () => {},
+        broadcastSessionsSnapshot: () => {},
+        sessionRunAbortControllers: new Map(),
+        readJsonBody: async () => ({}),
+        resolveSessionWorkspaceDir: () => process.cwd(),
+        resolveInteractiveSessionExecutor: async () => null,
+        readMultipartForm: async () => ({ files: [] }),
+        sanitizePathSegment: (value) => value,
+        ATTACHMENTS_ROOT: process.cwd(),
+        extname: () => "",
+        basename: (value) => value,
+        randomBytes: (size) => Buffer.alloc(size, 1),
+        writeFileSync: () => {},
+        relative: () => "",
+        MIME_TYPES: {},
+        resolveAttachmentUrl: () => "",
+        getSessionActivityFromStateLedger: () => null,
+        normalizeLedgerSessionDocument: (value) => value,
+        mergeSessionRecords: (trackerSession, ledgerSession) => trackerSession || ledgerSession || null,
+        listDurableSessionsFromLedger: () => [],
+        resolveUiStateLedgerOptions: () => ({}),
+        upsertSessionRecordToStateLedger: (payload) => payload,
+        invalidateDurableSessionListCache: () => {},
+        deleteSessionRecordFromStateLedger: () => {},
+        resolveSessionWorktreePath: async () => "C:/repo/worktree-alpha",
+        existsSync: () => true,
+        revealPathInShell: async (targetPath) => {
+          revealedPaths.push(targetPath);
+          return true;
+        },
+        collectDiffStats: async () => null,
+        getCompactDiffSummary: async () => null,
+        getRecentCommits: async () => [],
+        resolveActiveWorkspaceExecutionContext: () => null,
+        resolveWorkspaceContextFromRequest: () => ({ workspaceId: "all" }),
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ok: true, path: "C:/repo/worktree-alpha" });
+    expect(revealedPaths).toEqual(["C:/repo/worktree-alpha"]);
+  });
+
+  it("supports delete-history as a dedicated session-history route", async () => {
+    const { tryHandleHarnessSessionRoutes } = await import("../server/routes/harness-sessions.mjs");
+    const { createSessionTracker } = await import("../infra/session-tracker.mjs");
+    const tracker = createSessionTracker({ persistDir: null });
+    const sessionId = "delete-session-history";
+    tracker.createSession({
+      id: sessionId,
+      type: "primary",
+      metadata: { workspaceId: "ws-main", title: "Delete History" },
+    });
+
+    const deletedIds = [];
+    const res = {};
+
+    await tryHandleHarnessSessionRoutes({
+      req: { method: "POST" },
+      res,
+      path: `/api/sessions/${encodeURIComponent(sessionId)}/delete-history`,
+      url: new URL(`http://localhost/api/sessions/${encodeURIComponent(sessionId)}/delete-history?workspace=all`),
+      deps: {
+        jsonResponse: (target, status, payload) => {
+          target.statusCode = status;
+          target.body = payload;
+        },
+        getBosunSessionManager: () => ({ listSessions: () => [], snapshot: () => ({ activeSessions: 0 }) }),
+        getSessionTracker: () => tracker,
+        mergeTrackerAndLedgerSessions: () => [],
+        shouldHideSessionFromDefaultList: () => false,
+        sessionMatchesWorkspaceContext: () => true,
+        normalizeCandidatePath: (value) => value,
+        repoRoot: process.cwd(),
+        getPrimaryAgentName: () => "Codex",
+        getAgentMode: () => "agent",
+        broadcastUiEvent: () => {},
+        broadcastSessionsSnapshot: () => {},
+        sessionRunAbortControllers: new Map(),
+        readJsonBody: async () => ({}),
+        resolveSessionWorkspaceDir: () => process.cwd(),
+        resolveInteractiveSessionExecutor: async () => null,
+        readMultipartForm: async () => ({ files: [] }),
+        sanitizePathSegment: (value) => value,
+        ATTACHMENTS_ROOT: process.cwd(),
+        extname: () => "",
+        basename: (value) => value,
+        randomBytes: (size) => Buffer.alloc(size, 1),
+        writeFileSync: () => {},
+        relative: () => "",
+        MIME_TYPES: {},
+        resolveAttachmentUrl: () => "",
+        getSessionActivityFromStateLedger: () => null,
+        normalizeLedgerSessionDocument: (value) => value,
+        mergeSessionRecords: (trackerSession, ledgerSession) => trackerSession || ledgerSession || null,
+        listDurableSessionsFromLedger: () => [],
+        resolveUiStateLedgerOptions: () => ({}),
+        upsertSessionRecordToStateLedger: (payload) => payload,
+        invalidateDurableSessionListCache: () => {},
+        deleteSessionRecordFromStateLedger: (id) => {
+          deletedIds.push(id);
+        },
+        resolveSessionWorktreePath: async () => null,
+        existsSync: () => false,
+        collectDiffStats: async () => null,
+        getCompactDiffSummary: async () => null,
+        getRecentCommits: async () => [],
+        resolveActiveWorkspaceExecutionContext: () => null,
+        resolveWorkspaceContextFromRequest: () => ({ workspaceId: "all" }),
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(tracker.getSession(sessionId)).toBeNull();
+    expect(deletedIds).toEqual([sessionId]);
+  });
 });

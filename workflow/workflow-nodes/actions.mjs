@@ -3930,6 +3930,49 @@ registerNodeType("action.execute_workflow", {
         default: true,
         description: "In sync mode, throw when child workflow completes with errors",
       },
+      allowedTools: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional allow-list of tools the delegated subagent may invoke",
+      },
+      deniedTools: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional block-list of tools the delegated subagent may not invoke",
+      },
+      freshConversation: {
+        type: "boolean",
+        default: true,
+        description: "Run the delegated subagent with a fresh conversation by default",
+      },
+      allowNestedDelegation: {
+        type: "boolean",
+        default: false,
+        description: "Allow the delegated subagent to spawn further subagents",
+      },
+      inheritedMemoryMode: {
+        type: "string",
+        enum: ["read_only", "inherit", "isolated"],
+        default: "read_only",
+        description: "How parent execution state is exposed to the delegated subagent",
+      },
+      progressReportingMode: {
+        type: "string",
+        enum: ["one_way_progress", "none"],
+        default: "one_way_progress",
+        description: "How the delegated subagent reports progress back to the parent",
+      },
+      escalationMode: {
+        type: "string",
+        enum: ["wait_for_response", "none"],
+        default: "wait_for_response",
+        description: "How the delegated subagent escalates when it needs operator input",
+      },
+      waitForResponse: {
+        type: "boolean",
+        default: true,
+        description: "Allow child workflows to enter an explicit waiting-for-response state",
+      },
       allowRecursive: {
         type: "boolean",
         default: false,
@@ -3962,6 +4005,37 @@ registerNodeType("action.execute_workflow", {
           .map((value) => String(resolveWorkflowNodeValue(value, ctx) || "").trim())
           .filter(Boolean)
       : [];
+    const allowedTools = Array.isArray(node.config?.allowedTools)
+      ? node.config.allowedTools
+          .map((value) => String(resolveWorkflowNodeValue(value, ctx) || "").trim())
+          .filter(Boolean)
+      : [];
+    const deniedTools = Array.isArray(node.config?.deniedTools)
+      ? node.config.deniedTools
+          .map((value) => String(resolveWorkflowNodeValue(value, ctx) || "").trim())
+          .filter(Boolean)
+      : [];
+    const freshConversation = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.freshConversation ?? true, ctx),
+      true,
+    );
+    const allowNestedDelegation = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.allowNestedDelegation ?? false, ctx),
+      false,
+    );
+    const inheritedMemoryMode = String(
+      resolveWorkflowNodeValue(node.config?.inheritedMemoryMode || "read_only", ctx) || "read_only",
+    ).trim() || "read_only";
+    const progressReportingMode = String(
+      resolveWorkflowNodeValue(node.config?.progressReportingMode || "one_way_progress", ctx) || "one_way_progress",
+    ).trim() || "one_way_progress";
+    const escalationMode = String(
+      resolveWorkflowNodeValue(node.config?.escalationMode || "wait_for_response", ctx) || "wait_for_response",
+    ).trim() || "wait_for_response";
+    const waitForResponse = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.waitForResponse ?? true, ctx),
+      true,
+    );
 
     if (!workflowId) {
       throw new Error("action.execute_workflow: 'workflowId' is required");
@@ -4050,6 +4124,14 @@ registerNodeType("action.execute_workflow", {
       mode,
       outputVariable,
       failOnChildError,
+      allowedTools,
+      deniedTools,
+      freshConversation,
+      allowNestedDelegation,
+      inheritedMemoryMode,
+      progressReportingMode,
+      escalationMode,
+      waitForResponse,
       childInput,
       childRunOptions: buildWorkflowChildRunOptions(ctx),
     });

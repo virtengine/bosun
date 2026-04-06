@@ -346,6 +346,25 @@ describe("voice-auth-manager OAuth", () => {
     expect(resolved?.token).toBe("refreshed_access");
   });
 
+  it("describes voice provider lifecycle with refreshability and missing actions", async () => {
+    mod.saveVoiceOAuthToken("openai", {
+      accessToken: "voice_openai_token",
+      refreshToken: "voice_refresh_token",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+
+    const lifecycle = mod.describeVoiceProviderLifecycle("openai");
+
+    expect(lifecycle).toEqual(expect.objectContaining({
+      provider: "openai",
+      status: "connected",
+      hasToken: true,
+      refreshable: true,
+      connectedSource: expect.any(String),
+    }));
+    expect(lifecycle.missingActions).toEqual([]);
+  });
+
   it("refreshOpenAICodexToken throws on non-OK response", async () => {
     mod.saveVoiceOAuthToken("openai", {
       accessToken: "old",

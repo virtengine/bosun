@@ -268,7 +268,9 @@ import {
   selectedSessionId,
   sessionsData,
   createSession,
+  deleteSessionHistory,
   loadSessionMessages,
+  revealSessionFolder,
   archiveSession,
   resumeSession,
 } from "../components/session-list.js";
@@ -277,6 +279,7 @@ import { ChatView } from "../components/chat-view.js";
 import { apiFetch } from "../modules/api.js";
 import {
   buildSessionApiPath,
+  getSessionHistoryState,
   getSessionLifecycleState,
   getSessionRecencyTimestamp,
   getSessionRuntimeState,
@@ -1330,6 +1333,7 @@ export function ChatTab() {
   const sessionTitle = activeSession?.title || activeSession?.taskId || "Session";
   const sessionLifecycle = getSessionLifecycleState(activeSession);
   const sessionRuntime = getSessionRuntimeState(activeSession);
+  const sessionHistory = getSessionHistoryState(activeSession);
   const trackedAgentStatus = streamingAgentStatus.value || {};
   const trackedSessionId = String(trackedAgentStatus.sessionId || "").trim();
   const currentSessionId = String(sessionId || "").trim();
@@ -1364,6 +1368,7 @@ export function ChatTab() {
     `Lifecycle: ${sessionLifecycle.label}`,
     `Runtime: ${sessionRuntime.label}`,
     `Freshness: ${sessionFreshnessLabel}`,
+    sessionHistory.isHistoric ? `History: ${sessionHistory.label}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -1377,6 +1382,27 @@ export function ChatTab() {
     await handleSend("/compact", composerBusy ? { deliveryMode: "queue" } : {});
     setContextTrackerOpen(true);
   }, [composerBusy, handleSend, sessionId]);
+
+  const handleRevealSessionFolder = useCallback(async () => {
+    if (!sessionId) return;
+    const revealedPath = await revealSessionFolder(sessionId);
+    if (!revealedPath) {
+      showToast("Session folder is not available", "error");
+      return;
+    }
+    showToast("Opened session folder", "success");
+  }, [sessionId]);
+
+  const handleDeleteSessionHistory = useCallback(async () => {
+    if (!sessionId) return;
+    const deleted = await deleteSessionHistory(sessionId);
+    if (!deleted) {
+      showToast("Could not delete session history", "error");
+      return;
+    }
+    showToast("Session history deleted", "success");
+    setRouteParams({}, { replace: true, skipGuard: true });
+  }, [sessionId]);
 
   // Clear one-shot stop UI lock as soon as the selected agent reports idle.
   useEffect(() => {
@@ -1684,7 +1710,7 @@ export function ChatTab() {
                                 onClick=${() => resumeSession(activeSession.id)}
                                 sx=${{ textTransform: "none" }}
                               >
-                                Restore
+                                Resume Work
                               <//>
                             `
                           : html`
@@ -1697,6 +1723,31 @@ export function ChatTab() {
                                 Archive
                               <//>
                             `}
+                        ${sessionHistory.canRevealFolder
+                          ? html`
+                              <${Button}
+                                variant="text"
+                                size="small"
+                                onClick=${handleRevealSessionFolder}
+                                sx=${{ textTransform: "none" }}
+                              >
+                                Reveal Folder
+                              <//>
+                            `
+                          : null}
+                        ${sessionHistory.canDeleteHistory
+                          ? html`
+                              <${Button}
+                                variant="text"
+                                size="small"
+                                color="error"
+                                onClick=${handleDeleteSessionHistory}
+                                sx=${{ textTransform: "none" }}
+                              >
+                                Delete History
+                              <//>
+                            `
+                          : null}
                       <//>
                     `
                   : null}

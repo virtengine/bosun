@@ -28,32 +28,14 @@ const LEGACY_PROVIDER_MAP = Object.freeze({
   "copilot-sdk": "copilot-oauth",
   claude: "claude-subscription-shim",
   "claude-sdk": "claude-subscription-shim",
-  gemini: "gemini-sdk",
-  "gemini-sdk": "gemini-sdk",
-  "google-gemini": "gemini-sdk",
+  gemini: "gemini-generate-content",
+  "gemini-sdk": "gemini-generate-content",
+  "google-gemini": "gemini-generate-content",
   opencode: "openai-compatible",
   "opencode-sdk": "openai-compatible",
   "open-code": "openai-compatible",
 });
-
-const LEGACY_PROVIDER_CAPABILITIES = Object.freeze({
-  "gemini-sdk": Object.freeze({
-    ...DEFAULT_CAPABILITIES,
-    providerId: "gemini-sdk",
-    adapterId: "gemini-sdk",
-    transport: "sdk",
-    streaming: true,
-    steering: true,
-    sessions: true,
-    sdkCommands: true,
-    usage: true,
-    auth: true,
-    apiKey: true,
-    reasoning: true,
-    toolCalls: true,
-    cost: true,
-  }),
-});
+const LEGACY_PROVIDER_CAPABILITIES = Object.freeze({});
 
 function normalizeKnownProviderId(value) {
   const normalized = normalizeProviderDriverId(value || "");

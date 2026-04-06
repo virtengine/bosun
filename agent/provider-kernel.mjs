@@ -22,25 +22,56 @@ function setProviderSetting(target, key, value) {
   target[key] = value;
 }
 
-export function buildProviderKernelSettings(config = {}) {
+function resolveProviderConfigAliases(config = {}) {
   const providers = config?.providers && typeof config.providers === "object"
     ? config.providers
     : {};
+  return {
+    ...providers,
+    openai: providers.openai && typeof providers.openai === "object"
+      ? providers.openai
+      : providers.openaiResponses,
+    openaiResponses: providers.openaiResponses && typeof providers.openaiResponses === "object"
+      ? providers.openaiResponses
+      : providers.openai,
+    azureOpenai: providers.azureOpenai && typeof providers.azureOpenai === "object"
+      ? providers.azureOpenai
+      : providers.azureOpenAi,
+    azureOpenAi: providers.azureOpenAi && typeof providers.azureOpenAi === "object"
+      ? providers.azureOpenAi
+      : providers.azureOpenai,
+    copilot: providers.copilot && typeof providers.copilot === "object"
+      ? providers.copilot
+      : providers.copilotOAuth,
+    copilotOAuth: providers.copilotOAuth && typeof providers.copilotOAuth === "object"
+      ? providers.copilotOAuth
+      : providers.copilot,
+    gemini: providers.gemini && typeof providers.gemini === "object"
+      ? providers.gemini
+      : providers.geminiGenerateContent,
+    geminiGenerateContent: providers.geminiGenerateContent && typeof providers.geminiGenerateContent === "object"
+      ? providers.geminiGenerateContent
+      : providers.gemini,
+  };
+}
+
+export function buildProviderKernelSettings(config = {}) {
+  const providers = resolveProviderConfigAliases(config);
   const flattened = {};
   setProviderSetting(flattened, "BOSUN_PROVIDER_DEFAULT", providers.defaultProvider);
   setProviderSetting(flattened, "BOSUN_PROVIDER_DEFAULT_MODEL", providers.defaultModel);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_RESPONSES_ENABLED", providers.openaiResponses?.enabled);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_RESPONSES_MODEL", providers.openaiResponses?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_RESPONSES_ENABLED", providers.openai?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_RESPONSES_MODEL", providers.openai?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_ENABLED", providers.chatgptCodex?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_MODE", providers.chatgptCodex?.mode);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_MODEL", providers.chatgptCodex?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_WORKSPACE", providers.chatgptCodex?.workspace);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_ENABLED", providers.azureOpenAi?.enabled);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_MODE", providers.azureOpenAi?.mode);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_MODEL", providers.azureOpenAi?.defaultModel);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_ENDPOINT", providers.azureOpenAi?.endpoint);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_DEPLOYMENT", providers.azureOpenAi?.deployment);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_API_VERSION", providers.azureOpenAi?.apiVersion);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_ENABLED", providers.azureOpenai?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_MODE", providers.azureOpenai?.mode);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_MODEL", providers.azureOpenai?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_ENDPOINT", providers.azureOpenai?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_DEPLOYMENT", providers.azureOpenai?.deployment);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_AZURE_OPENAI_API_VERSION", providers.azureOpenai?.apiVersion);
   setProviderSetting(flattened, "BOSUN_PROVIDER_ANTHROPIC_ENABLED", providers.anthropic?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_ANTHROPIC_MODEL", providers.anthropic?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_ENABLED", providers.claudeSubscription?.enabled);
@@ -54,25 +85,27 @@ export function buildProviderKernelSettings(config = {}) {
   setProviderSetting(flattened, "BOSUN_PROVIDER_OLLAMA_ENABLED", providers.ollama?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OLLAMA_MODEL", providers.ollama?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OLLAMA_BASE_URL", providers.ollama?.baseUrl);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_COPILOT_OAUTH_ENABLED", providers.copilotOAuth?.enabled);
-  setProviderSetting(flattened, "BOSUN_PROVIDER_COPILOT_OAUTH_MODEL", providers.copilotOAuth?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_COPILOT_OAUTH_ENABLED", providers.copilot?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_COPILOT_OAUTH_MODEL", providers.copilot?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_ENABLED", providers.gemini?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_MODEL", providers.gemini?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_BASE_URL", providers.gemini?.baseUrl || providers.gemini?.endpoint);
   return flattened;
 }
 
 function resolveKernelProviderSettings(config = {}, providerId = "") {
-  const providers = config?.providers && typeof config.providers === "object"
-    ? config.providers
-    : {};
+  const providers = resolveProviderConfigAliases(config);
   const normalizedProviderId = normalizeProviderDefinitionId(providerId, "") || "";
   const providerConfigById = {
-    "openai-responses": providers.openaiResponses,
+    "openai-responses": providers.openai,
     "openai-codex-subscription": providers.chatgptCodex,
-    "azure-openai-responses": providers.azureOpenAi,
+    "azure-openai-responses": providers.azureOpenai,
     "anthropic-messages": providers.anthropic,
     "claude-subscription-shim": providers.claudeSubscription,
     "openai-compatible": providers.openaiCompatible,
     ollama: providers.ollama,
-    "copilot-oauth": providers.copilotOAuth,
+    "copilot-oauth": providers.copilot,
+    "gemini-generate-content": providers.gemini,
   };
   const providerConfig = providerConfigById[normalizedProviderId];
   if (!providerConfig || typeof providerConfig !== "object") {
@@ -186,6 +219,7 @@ function createRegistryFactory(options = {}) {
       ) || undefined,
       env: options.env || process.env,
       includeBuiltins: harnessFabric.hasExplicitExecutors ? false : options.includeBuiltins !== false,
+      preferNativeAdapters: agentRuntime === "harness",
       settings,
       readBusy: options.readBusy,
       getAdapterCapabilities: options.getAdapterCapabilities,
@@ -389,7 +423,10 @@ export function createProviderKernel(options = {}) {
                           ...(modelApiVersion ? { apiVersion: modelApiVersion } : {}),
                         }
                       : undefined;
-                  return targetAdapter.exec(extractMessageFromPayload(payload), {
+                  const adapterInput = targetAdapter.acceptsTurnPayload === true
+                    ? payload
+                    : extractMessageFromPayload(payload);
+                  return targetAdapter.exec(adapterInput, {
                     ...execOptions,
                     ...(explicitProviderId ? { provider: explicitProviderId } : {}),
                     ...(mergedProviderConfig ? { providerConfig: mergedProviderConfig } : {}),

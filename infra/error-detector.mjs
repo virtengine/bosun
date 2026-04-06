@@ -828,6 +828,46 @@ Do NOT restart from scratch — build on existing progress.`;
 
     const patterns = [];
     const details = {};
+    const normalizeBehaviorText = (text, { loose = false } = {}) => {
+      let normalized = String(text || "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim();
+      if (loose) {
+        normalized = normalized
+          .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi, "<id>")
+          .replace(/\b(?:0x)?[0-9a-f]{10,}\b/gi, "<hex>")
+          .replace(/\b\d{2,}\b/g, "<n>");
+      }
+      return normalized;
+    };
+    const isReadTool = (message) => {
+      const name = (message?.meta?.toolName || message?.content || "").toLowerCase();
+      return (
+        name.includes("read") ||
+        name.includes("search") ||
+        name.includes("grep") ||
+        name.includes("list") ||
+        name.includes("find") ||
+        name.includes("cat")
+      );
+    };
+    const isEditTool = (message) => {
+      const name = (message?.meta?.toolName || message?.content || "").toLowerCase();
+      return (
+        name.includes("write") ||
+        name.includes("edit") ||
+        name.includes("create") ||
+        name.includes("replace") ||
+        name.includes("patch") ||
+        name.includes("append")
+      );
+    };
+    const buildToolFingerprint = (message, { loose = false } = {}) => {
+      const toolName = normalizeBehaviorText(message?.meta?.toolName || "unknown");
+      const content = normalizeBehaviorText(message?.content || "", { loose });
+      return `${toolName}::${content}`;
+    };
 
     // ── Tool loop detection ──
     const toolCalls = messages.filter((m) => m.type === "tool_call");
@@ -835,36 +875,31 @@ Do NOT restart from scratch — build on existing progress.`;
       const toolNames = toolCalls.map((m) => m.meta?.toolName || "unknown");
       const lastFive = toolNames.slice(-5);
       const uniqueInLastFive = new Set(lastFive).size;
-      if (uniqueInLastFive <= 2) {
+      const lastFiveCalls = toolCalls.slice(-5);
+      const exactFingerprints = lastFiveCalls.map((m) => buildToolFingerprint(m));
+      const looseFingerprints = lastFiveCalls.map((m) => buildToolFingerprint(m, { loose: true }));
+      const dominantLooseFingerprint = looseFingerprints
+        .map((fingerprint) => ({
+          fingerprint,
+          count: looseFingerprints.filter((entry) => entry === fingerprint).length,
+        }))
+        .sort((a, b) => b.count - a.count)[0];
+      if (uniqueInLastFive <= 2 || dominantLooseFingerprint?.count >= 4) {
         patterns.push("tool_loop");
-        details.tool_loop = `Repeated tools: ${[...new Set(lastFive)].join(", ")} (${lastFive.length}x in last 5)`;
+        const loopMode = dominantLooseFingerprint?.count >= 4 &&
+            new Set(exactFingerprints).size > 1
+          ? "near-identical"
+          : "repeated";
+        details.tool_loop = loopMode === "near-identical"
+          ? `Near-identical tool retries: ${[...new Set(lastFive)].join(", ")} (${dominantLooseFingerprint.count}x in last 5)`
+          : `Repeated tools: ${[...new Set(lastFive)].join(", ")} (${lastFive.length}x in last 5)`;
       }
     }
 
     // ── Analysis paralysis ──
     if (toolCalls.length >= 10) {
-      const readTools = toolCalls.filter((m) => {
-        const name = (m.meta?.toolName || m.content || "").toLowerCase();
-        return (
-          name.includes("read") ||
-          name.includes("search") ||
-          name.includes("grep") ||
-          name.includes("list") ||
-          name.includes("find") ||
-          name.includes("cat")
-        );
-      });
-      const editTools = toolCalls.filter((m) => {
-        const name = (m.meta?.toolName || m.content || "").toLowerCase();
-        return (
-          name.includes("write") ||
-          name.includes("edit") ||
-          name.includes("create") ||
-          name.includes("replace") ||
-          name.includes("patch") ||
-          name.includes("append")
-        );
-      });
+      const readTools = toolCalls.filter((m) => isReadTool(m));
+      const editTools = toolCalls.filter((m) => isEditTool(m));
 
       if (readTools.length >= 8 && editTools.length === 0) {
         patterns.push("analysis_paralysis");
@@ -874,6 +909,7 @@ Do NOT restart from scratch — build on existing progress.`;
 
     // ── Plan stuck ──
     const agentMessages = messages.filter((m) => m.type === "agent_message");
+    const lastAgentMessages = agentMessages.slice(-3);
     const allAgentText = agentMessages
       .map((m) => m.content)
       .join(" ")
@@ -890,18 +926,26 @@ Do NOT restart from scratch — build on existing progress.`;
       "would you like me to implement",
     ];
     const hasPlanPhrase = planPhrases.some((p) => allAgentText.includes(p));
-    const editToolCalls = toolCalls.filter((m) => {
-      const name = (m.meta?.toolName || m.content || "").toLowerCase();
-      return (
-        name.includes("write") ||
-        name.includes("edit") ||
-        name.includes("create") ||
-        name.includes("replace")
-      );
-    });
+    const editToolCalls = toolCalls.filter((m) => isEditTool(m));
     if (hasPlanPhrase && editToolCalls.length <= 1) {
       patterns.push("plan_stuck");
       details.plan_stuck = "Agent created a plan but did not implement it";
+    }
+
+    // ── Doom loop: repeated near-identical assistant outputs with no concrete progress ──
+    if (lastAgentMessages.length >= 3) {
+      const exactOutputs = lastAgentMessages.map((m) => normalizeBehaviorText(m.content));
+      const looseOutputs = lastAgentMessages.map((m) =>
+        normalizeBehaviorText(m.content, { loose: true }));
+      const sameLooseResponse = looseOutputs.every((text) => text && text === looseOutputs[0]);
+      const sameExactResponse = exactOutputs.every((text) => text && text === exactOutputs[0]);
+      const recentEditCalls = toolCalls
+        .filter((m) => messages.slice(-8).includes(m))
+        .filter((m) => isEditTool(m));
+      if ((sameLooseResponse || sameExactResponse) && recentEditCalls.length === 0) {
+        patterns.push("doom_loop");
+        details.doom_loop = `Near-identical assistant outputs repeated ${lastAgentMessages.length}x without edits`;
+      }
     }
 
     // ── Needs clarification ──
@@ -1000,6 +1044,18 @@ Do NOT restart from scratch — build on existing progress.`;
       patterns.push("no_progress");
       details.no_progress =
         `${messages.length} messages but no tool calls and ≤1 agent message — agent may be stuck`;
+    } else if (
+      messages.length >= 6 &&
+      toolCalls.slice(-6).length <= 1 &&
+      lastAgentMessages.length >= 2
+    ) {
+      const looseOutputs = lastAgentMessages.map((m) =>
+        normalizeBehaviorText(m.content, { loose: true }));
+      if (looseOutputs.every((text) => text && text === looseOutputs[0])) {
+        patterns.push("no_progress");
+        details.no_progress =
+          `Recent session activity is stalled: ${lastAgentMessages.length} near-identical assistant messages with no meaningful tool progress`;
+      }
     }
 
     // ── Error loop (same error repeating) ──
@@ -1015,6 +1071,7 @@ Do NOT restart from scratch — build on existing progress.`;
     // Determine primary pattern (most actionable)
     const priority = [
       "rate_limited",
+      "doom_loop",
       "plan_stuck",
       "false_completion",
       "commits_no_push",
@@ -1109,6 +1166,24 @@ Do NOT restart from scratch — build on existing progress.`;
           ``,
           `This is autonomous execution — implement immediately.`,
         ].join("\n");
+
+      case "doom_loop":
+        return [
+          `# BREAK THE DOOM LOOP — Change State, Then Act`,
+          ``,
+          `You're replaying near-identical responses on "${taskTitle}" without moving the work forward.`,
+          analysis.details?.doom_loop
+            ? `Detail: ${analysis.details.doom_loop}`
+            : "",
+          ``,
+          `Break the cycle immediately:`,
+          `1. Stop restating the same status`,
+          `2. Pick one concrete file or command that changes state`,
+          `3. Execute it now`,
+          `4. Verify whether the state actually changed before continuing`,
+        ]
+          .filter(Boolean)
+          .join("\n");
 
       case "tool_loop":
         return [

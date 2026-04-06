@@ -7,6 +7,7 @@ import { AZURE_OPENAI_AUTH_ADAPTER } from "./azure-openai.mjs";
 import { CHATGPT_CODEX_SUBSCRIPTION_AUTH_ADAPTER } from "./chatgpt-codex-subscription.mjs";
 import { CLAUDE_SUBSCRIPTION_AUTH_ADAPTER } from "./claude-subscription.mjs";
 import { COPILOT_OAUTH_AUTH_ADAPTER } from "./copilot-oauth.mjs";
+import { GEMINI_API_KEY_AUTH_ADAPTER } from "./gemini-api-key.mjs";
 import { OLLAMA_AUTH_ADAPTER } from "./ollama.mjs";
 import { OPENAI_API_KEY_AUTH_ADAPTER } from "./openai-api-key.mjs";
 import { OPENAI_COMPATIBLE_AUTH_ADAPTER } from "./openai-compatible.mjs";
@@ -17,6 +18,7 @@ export {
   CHATGPT_CODEX_SUBSCRIPTION_AUTH_ADAPTER,
   CLAUDE_SUBSCRIPTION_AUTH_ADAPTER,
   COPILOT_OAUTH_AUTH_ADAPTER,
+  GEMINI_API_KEY_AUTH_ADAPTER,
   OLLAMA_AUTH_ADAPTER,
   OPENAI_API_KEY_AUTH_ADAPTER,
   OPENAI_COMPATIBLE_AUTH_ADAPTER,
@@ -31,6 +33,7 @@ const AUTH_ADAPTER_BY_PROVIDER_ID = Object.freeze({
   "openai-compatible": OPENAI_COMPATIBLE_AUTH_ADAPTER,
   ollama: OLLAMA_AUTH_ADAPTER,
   "copilot-oauth": COPILOT_OAUTH_AUTH_ADAPTER,
+  "gemini-generate-content": GEMINI_API_KEY_AUTH_ADAPTER,
 });
 
 const BUILTIN_PROVIDER_AUTH_ADAPTERS = Object.freeze(

@@ -4,9 +4,11 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  buildTaskDebtOperationalProtocols,
   normalizeDebtItems,
   recordTaskDebt,
   readTaskDebtEntries,
+  summarizeTaskDebtLedger,
 } from "../task/task-debt-ledger.mjs";
 
 function makeTempDir(prefix) {
@@ -115,6 +117,56 @@ describe("task-debt-ledger", () => {
       const entries = readTaskDebtEntries({ baseDir, limit: 10 });
       expect(entries).toHaveLength(2);
       expect(entries.map((entry) => entry.taskId)).toEqual(["TASK-A", "TASK-B"]);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("summarizes debt entries and emits runtime protocols", async () => {
+    const baseDir = makeTempDir("debt-ledger-summary-");
+    try {
+      recordTaskDebt(
+        {
+          taskId: "TASK-300",
+          taskTitle: "Patch cycle",
+          action: "accept_with_debt",
+          reason: "verification deferred after compile fix",
+          debtItems: [
+            { type: "missing_tests", severity: "high", description: "Add regression tests" },
+          ],
+        },
+        { baseDir },
+      );
+      recordTaskDebt(
+        {
+          taskId: "TASK-300",
+          taskTitle: "Patch cycle",
+          action: "split_task",
+          reason: "scope too broad for one run",
+          debtItems: [
+            { type: "task_split", severity: "medium", description: "Create follow-up tasks" },
+          ],
+        },
+        { baseDir },
+      );
+
+      const entries = readTaskDebtEntries({ baseDir });
+      const summary = summarizeTaskDebtLedger(entries, { taskId: "TASK-300" });
+      const protocols = buildTaskDebtOperationalProtocols(entries, { taskId: "TASK-300" });
+
+      expect(summary).toMatchObject({
+        entryCount: 2,
+        highestSeverity: "high",
+      });
+      expect(summary.typeCounts).toEqual(expect.objectContaining({
+        missing_tests: 1,
+        task_split: 1,
+      }));
+      expect(protocols.map((entry) => entry.title)).toEqual(expect.arrayContaining([
+        "Quality Monitoring Protocol",
+        "Error Recovery Protocol",
+        "Operational Note-Taking Protocol",
+      ]));
     } finally {
       await rm(baseDir, { recursive: true, force: true });
     }

@@ -1,6 +1,7 @@
 import { getProviderCapabilities, normalizeProviderCapabilityId } from "./provider-capabilities.mjs";
 import { getProviderAuthAdapter } from "./auth/index.mjs";
 import { getBuiltinProviderEnvHints } from "./providers/index.mjs";
+import { CredentialStore } from "../workflow/credential-store.mjs";
 import {
   buildSharedProviderAccountSummary,
   isClaudeOAuthTosWarningRequired,
@@ -15,6 +16,96 @@ const AUTH_METHOD_ORDER = Object.freeze([
   "oauth",
   "apiKey",
 ]);
+
+const PROVIDER_CREDENTIAL_BLUEPRINTS = Object.freeze({
+  "openai-responses": {
+    apiKey: {
+      label: "OpenAI API Key",
+      envKeys: ["OPENAI_API_KEY"],
+      validation: { prefix: "sk-", minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  "anthropic-messages": {
+    apiKey: {
+      label: "Anthropic API Key",
+      envKeys: ["ANTHROPIC_API_KEY"],
+      validation: { prefix: "sk-ant-", minLength: 12 },
+      templates: {
+        headers: {
+          "x-api-key": "{{credential.value}}",
+          "anthropic-version": "2023-06-01",
+        },
+      },
+    },
+  },
+  "azure-openai-responses": {
+    apiKey: {
+      label: "Azure OpenAI API Key",
+      envKeys: ["AZURE_OPENAI_API_KEY"],
+      validation: { minLength: 12 },
+      templates: {
+        headers: { "api-key": "{{credential.value}}" },
+        query: { "api-version": "{{context.apiVersion}}" },
+      },
+    },
+    oauth: {
+      label: "Azure OpenAI OAuth Token",
+      envKeys: ["AZURE_OPENAI_ACCESS_TOKEN", "AZURE_OPENAI_AD_TOKEN"],
+      templates: {
+        headers: { Authorization: "Bearer {{credential.value}}" },
+        query: { "api-version": "{{context.apiVersion}}" },
+      },
+      refreshable: true,
+    },
+  },
+  "openai-compatible": {
+    apiKey: {
+      label: "OpenAI-Compatible API Key",
+      envKeys: ["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"],
+      validation: { minLength: 8 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  "gemini-generate-content": {
+    apiKey: {
+      label: "Gemini API Key",
+      envKeys: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+      validation: { minLength: 12 },
+      templates: {},
+    },
+  },
+  "openai-codex-subscription": {
+    oauth: {
+      label: "OpenAI OAuth Session",
+      envKeys: ["OPENAI_OAUTH_ACCESS_TOKEN", "OPENAI_ACCESS_TOKEN"],
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+      refreshable: true,
+    },
+    apiKey: {
+      label: "Codex API Key",
+      envKeys: ["CODEX_API_KEY", "OPENAI_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  "claude-subscription-shim": {
+    oauth: {
+      label: "Claude OAuth Session",
+      envKeys: ["CLAUDE_ACCESS_TOKEN", "ANTHROPIC_ACCESS_TOKEN"],
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+      refreshable: true,
+    },
+  },
+  "copilot-oauth": {
+    oauth: {
+      label: "GitHub Copilot OAuth Session",
+      envKeys: ["GITHUB_TOKEN", "GH_TOKEN", "COPILOT_ACCESS_TOKEN"],
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+      refreshable: true,
+    },
+  },
+});
 
 function toTrimmedString(value) {
   return String(value ?? "").trim();
@@ -34,6 +125,202 @@ function normalizeMethodName(value) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function normalizeCredentialName(value = "") {
+  return toTrimmedString(value).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function resolveCredentialStore(options = {}) {
+  if (options.credentialStore) return options.credentialStore;
+  if (!options.configDir) return null;
+  try {
+    return new CredentialStore({
+      configDir: options.configDir,
+      secretKey: options.secretKey,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function buildSyntheticCredentialValidation(value, blueprint = {}) {
+  const errors = [];
+  const validation = blueprint.validation && typeof blueprint.validation === "object"
+    ? blueprint.validation
+    : {};
+  if (!hasValue(value)) errors.push("Credential value is missing");
+  if (hasValue(value) && validation.prefix && !String(value).startsWith(validation.prefix)) {
+    errors.push(`Credential must start with "${validation.prefix}"`);
+  }
+  if (hasValue(value) && validation.minLength && String(value).length < validation.minLength) {
+    errors.push(`Credential must be at least ${validation.minLength} characters`);
+  }
+  if (hasValue(value) && validation.pattern) {
+    try {
+      if (!new RegExp(validation.pattern).test(String(value))) {
+        errors.push("Credential does not match the required format");
+      }
+    } catch {
+      errors.push("Credential validation pattern is invalid");
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    status: errors.length > 0 ? (!hasValue(value) ? "missing" : "invalid") : "ready",
+    errors,
+    value: value || null,
+    expiringSoon: false,
+    refreshable: blueprint.refreshable === true,
+  };
+}
+
+function resolveProviderCredentialRecord(providerId, method, options = {}) {
+  const credentialStore = resolveCredentialStore(options);
+  const blueprint = PROVIDER_CREDENTIAL_BLUEPRINTS?.[providerId]?.[method] || null;
+  if (!blueprint) return { credentialStore, blueprint, record: null, validation: null, templates: null };
+
+  const explicitName = toTrimmedString(
+    options.credentialNames?.[method]
+    || options.credentialNames?.[providerId]
+    || options.credentialName,
+  );
+  const providerCredentials = credentialStore?.listByProvider(providerId) || [];
+  const matchingRecord =
+    (explicitName ? credentialStore?.get(explicitName) : null)
+    || providerCredentials.find((entry) => {
+      const lifecycleMode = toTrimmedString(entry?.lifecycle?.authMode || entry?.metadata?.authMode || "").toLowerCase();
+      if (lifecycleMode && lifecycleMode !== method.toLowerCase()) return false;
+      return true;
+    })
+    || null;
+
+  if (matchingRecord) {
+    const validation = credentialStore.validate(matchingRecord.name, {
+      workflowId: options.workflowId,
+      env: options.env || process.env,
+      config: options.config || null,
+    });
+    const templates = credentialStore.resolveTemplates(matchingRecord.name, matchingRecord.templates || blueprint.templates || {}, {
+      workflowId: options.workflowId,
+      env: options.env || process.env,
+      config: options.config || null,
+      providerId,
+      context: {
+        apiVersion: options.settings?.apiVersion || options.settings?.api_version || null,
+      },
+    });
+    return { credentialStore, blueprint, record: matchingRecord, validation, templates };
+  }
+
+  const envState = resolveProviderAuthEnv(providerId, options.env || process.env);
+  const envInfo = method === "apiKey"
+    ? envState.apiKey
+    : method === "oauth"
+      ? envState.oauth
+      : envState.subscription;
+  const value = toTrimmedString(envInfo?.value || "");
+  const validation = buildSyntheticCredentialValidation(value, blueprint);
+  const templates = blueprint.templates
+    ? CredentialStore
+      ? {
+          headers: {},
+          query: {},
+          body: {},
+          ...{
+            headers: Object.fromEntries(
+              Object.entries(blueprint.templates.headers || {}).map(([key, template]) => [
+                key,
+                String(template).replace("{{credential.value}}", value),
+              ]),
+            ),
+            query: Object.fromEntries(
+              Object.entries(blueprint.templates.query || {}).map(([key, template]) => [
+                key,
+                String(template).replace("{{context.apiVersion}}", toTrimmedString(options.settings?.apiVersion || options.settings?.api_version || "")),
+              ]),
+            ),
+            body: blueprint.templates.body || {},
+          },
+        }
+      : null
+    : null;
+  return { credentialStore, blueprint, record: null, validation, templates };
+}
+
+export function buildProviderCredentialLifecycle(providerId, resolvedState = {}, options = {}) {
+  const normalizedProviderId = normalizeProviderCapabilityId(providerId);
+  const state = resolvedState && typeof resolvedState === "object" ? resolvedState : {};
+  const methods = Array.isArray(state.methods) ? state.methods : [];
+  const supportedMethods = methods.length > 0
+    ? methods
+    : listProviderAuthModes(normalizedProviderId).map((type) => ({ type }));
+  const lifecycleMethods = supportedMethods.map((methodState) => {
+    const methodType = normalizeMethodName(methodState?.type || methodState);
+    const { blueprint, record, validation, templates } = resolveProviderCredentialRecord(
+      normalizedProviderId,
+      methodType,
+      {
+        ...options,
+        settings: state.settings || options.settings || {},
+      },
+    );
+    const configured = record
+      ? validation?.ok === true || validation?.status === "expiring"
+      : methodState?.configured === true || validation?.ok === true;
+    const authenticated = methodState?.authenticated === true || state.preferredMode === methodType && state.authenticated === true;
+    const expiresAt =
+      validation?.expiresAt
+      || record?.lifecycle?.expiresAt
+      || methodState?.expiresAt
+      || state.expiresAt
+      || null;
+    const requiresCredential = methodType !== "local";
+    const missing = requiresCredential && !(configured || authenticated);
+    const source = record?.name
+      ? "credential-store"
+      : methodState?.source || (validation?.value ? "env" : null);
+    return {
+      type: methodType,
+      label: blueprint?.label || methodType,
+      configured,
+      authenticated,
+      status: authenticated
+        ? "authenticated"
+        : configured
+          ? (validation?.status || "configured")
+          : (missing ? "missing" : "idle"),
+      source,
+      missing,
+      refreshable: validation?.refreshable === true || blueprint?.refreshable === true,
+      envKeys: blueprint?.envKeys || [],
+      credentialName: record?.name || null,
+      templates: templates || blueprint?.templates || null,
+      validationErrors: validation?.errors || [],
+      expiresAt,
+    };
+  });
+
+  const missingCredentials = lifecycleMethods
+    .filter((entry) => entry.missing)
+    .map((entry) => ({
+      type: entry.type,
+      label: entry.label,
+      envKeys: entry.envKeys,
+    }));
+
+  return {
+    providerId: normalizedProviderId,
+    status: missingCredentials.length > 0
+      ? "missing"
+      : lifecycleMethods.some((entry) => entry.authenticated)
+        ? "authenticated"
+        : lifecycleMethods.some((entry) => entry.configured)
+          ? "configured"
+          : "idle",
+    methods: lifecycleMethods,
+    missingCredentials,
+  };
 }
 
 function getProviderEnvHints(providerId) {
@@ -400,6 +687,17 @@ export function normalizeProviderAuthState(providerId, authState = {}, options =
     preferredMode: preferredMethod?.type || null,
     settings: settingsState,
   }, preferredMethod);
+  const lifecycle = buildProviderCredentialLifecycle(normalizedProviderId, {
+    providerId: normalizedProviderId,
+    status,
+    enabled,
+    available,
+    authenticated,
+    preferredMode: preferredMethod?.type || null,
+    expiresAt: preferredMethod?.expiresAt || null,
+    methods,
+    settings: settingsState,
+  }, options);
   return {
     providerId: normalizedProviderId,
     status,
@@ -422,6 +720,7 @@ export function normalizeProviderAuthState(providerId, authState = {}, options =
     },
     settings: settingsState,
     env: envState,
+    credentialLifecycle: lifecycle,
     warnings,
     sharedAccounts: buildSharedProviderAccountSummary(false),
   };
@@ -437,6 +736,10 @@ export function createProviderAuthManager(defaultOptions = {}) {
     },
     resolve(providerId, authState = {}, options = {}) {
       return normalizeProviderAuthState(providerId, authState, { ...defaultOptions, ...options });
+    },
+    resolveCredentialLifecycle(providerId, authState = {}, options = {}) {
+      const resolved = this.resolve(providerId, authState, options);
+      return resolved.credentialLifecycle || buildProviderCredentialLifecycle(providerId, resolved, { ...defaultOptions, ...options });
     },
     isAuthenticated(providerId, authState = {}, options = {}) {
       return this.resolve(providerId, authState, options).authenticated;

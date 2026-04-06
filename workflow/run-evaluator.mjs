@@ -35,6 +35,12 @@ const DEFAULTS = {
   promotionMinConfidence: 0.65,
 };
 
+export const RUN_EVALUATION_JUDGMENTS = Object.freeze({
+  ACCEPT: "ACCEPT",
+  RETRY: "RETRY",
+  ESCALATE: "ESCALATE",
+});
+
 function computeGrade(score) {
   if (score >= 90) return "A";
   if (score >= 75) return "B";
@@ -52,6 +58,60 @@ function roundMetric(value, digits = 3) {
 function clamp01(value) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
+}
+
+function buildRunEvaluationJudgment({ metrics = {}, issues = [], remediation = {}, governance = null }) {
+  const failedNodes = Number(metrics?.failedNodes || 0);
+  const hasRuntimeErrors = issues.some((issue) => String(issue?.severity ?? "").trim().toLowerCase() === "error");
+  if (governance?.approvalPending === true) {
+    return {
+      decision: RUN_EVALUATION_JUDGMENTS.ESCALATE,
+      reason: "governance.approval_pending",
+      summary: "Run requires operator approval before it can continue.",
+      retryMode: null,
+      operatorRequired: true,
+      blocked: true,
+    };
+  }
+  if (governance?.blocked === true) {
+    return {
+      decision: RUN_EVALUATION_JUDGMENTS.ESCALATE,
+      reason: "governance.blocked",
+      summary: "Run is blocked by budget or execution policy constraints.",
+      retryMode: null,
+      operatorRequired: false,
+      blocked: true,
+    };
+  }
+  if ((remediation?.canAutoRetry === true && remediation?.suggestedRetryMode)
+    || (failedNodes > 0 && remediation?.canAutoFix === true)) {
+    return {
+      decision: RUN_EVALUATION_JUDGMENTS.RETRY,
+      reason: remediation?.retryReason || (remediation?.canAutoFix ? "remediation.auto_fixable" : "remediation.auto_retry"),
+      summary: remediation?.summary || "Run can be retried with automated remediation.",
+      retryMode: remediation?.suggestedRetryMode || null,
+      operatorRequired: false,
+      blocked: false,
+    };
+  }
+  if (failedNodes > 0 || hasRuntimeErrors) {
+    return {
+      decision: RUN_EVALUATION_JUDGMENTS.ESCALATE,
+      reason: "run.manual_review_required",
+      summary: remediation?.summary || "Run requires manual review before another attempt.",
+      retryMode: remediation?.suggestedRetryMode || null,
+      operatorRequired: false,
+      blocked: false,
+    };
+  }
+  return {
+    decision: RUN_EVALUATION_JUDGMENTS.ACCEPT,
+    reason: "run.accepted",
+    summary: "Run output accepted.",
+    retryMode: null,
+    operatorRequired: false,
+    blocked: false,
+  };
 }
 
 function trimText(value, maxLength = 220) {
@@ -159,6 +219,160 @@ function buildGoalState(data = {}) {
       ? normalizeGovernanceInteger(primaryGoal.depth, { min: 0, max: 1_000 }) ?? Math.max(goalAncestry.length - 1, 0)
       : null,
   };
+}
+
+function normalizeSuccessCriteria(raw, fallbackAcceptanceCriteria = []) {
+  const source = Array.isArray(raw)
+    ? raw
+    : (Array.isArray(fallbackAcceptanceCriteria) ? fallbackAcceptanceCriteria : []);
+  return source
+    .map((entry, index) => {
+      if (typeof entry === "string") {
+        const title = normalizeGovernanceText(entry, 240);
+        if (!title) return null;
+        return {
+          id: `criterion-${index + 1}`,
+          title,
+          description: "",
+          status: "pending",
+          blocking: true,
+        };
+      }
+      if (!entry || typeof entry !== "object") return null;
+      const id = normalizeGovernanceText(entry.id || entry.criterionId || entry.key || `criterion-${index + 1}`, 120);
+      const title = normalizeGovernanceText(entry.title || entry.name || entry.criterion || entry.description || "", 240);
+      const description = normalizeGovernanceText(entry.description || entry.detail || entry.summary || "", 320) || "";
+      const rawStatus = String(entry.status || "").trim().toLowerCase();
+      const status = ["pending", "in_progress", "partial", "satisfied", "failed", "waived", "blocked"].includes(rawStatus)
+        ? rawStatus
+        : (entry.satisfied === true ? "satisfied" : "pending");
+      return cleanGovernanceObject({
+        id: id || `criterion-${index + 1}`,
+        title: title || description || id || `criterion-${index + 1}`,
+        description,
+        status,
+        blocking: entry.blocking === true || entry.required === true || entry.optional === false,
+      });
+    })
+    .filter(Boolean);
+}
+
+function normalizeConstraintState(raw = {}) {
+  if (!raw) return null;
+  const source = Array.isArray(raw) ? { violations: raw } : (typeof raw === "object" ? raw : null);
+  if (!source) return null;
+  const violations = Array.isArray(source.violations || source.items || source.constraintViolations)
+    ? (source.violations || source.items || source.constraintViolations)
+      .map((entry, index) => {
+        const ruleId = normalizeGovernanceText(entry?.constraintId || entry?.ruleId || entry?.id || `constraint-${index + 1}`, 120);
+        const message = normalizeGovernanceText(entry?.message || entry?.reason || entry?.description || "", 320);
+        if (!ruleId && !message) return null;
+        return cleanGovernanceObject({
+          constraintId: ruleId || `constraint-${index + 1}`,
+          type: normalizeGovernanceText(entry?.type || entry?.kind || "constraint", 80) || "constraint",
+          severity: normalizeGovernanceText(entry?.severity || "", 40) || ((entry?.blocking === true || entry?.blocked === true) ? "error" : "warning"),
+          status: normalizeGovernanceText(entry?.status || "", 40) || ((entry?.blocking === true || entry?.blocked === true) ? "blocked" : "open"),
+          message: message || null,
+          blocking: entry?.blocking === true || entry?.blocked === true,
+        });
+      })
+      .filter(Boolean)
+    : [];
+  const blockingViolationCount = violations.filter((entry) => entry?.blocking === true).length;
+  const violationCount = violations.length;
+  const blocked = source.blocked === true || blockingViolationCount > 0;
+  const approvalPending = source.approvalPending === true || normalizeGovernanceText(source.approvalState || "", 40) === "pending";
+  const status = normalizeGovernanceText(source.status || "", 40) || (blocked ? "blocked" : (violationCount > 0 ? "warning" : "ok"));
+  if (violationCount === 0 && !blocked && !approvalPending && !status) return null;
+  return cleanGovernanceObject({
+    status,
+    blocked,
+    approvalPending,
+    violationCount,
+    blockingViolationCount,
+    violations,
+  });
+}
+
+function normalizeTokenBudget(raw = {}) {
+  if (!raw || typeof raw !== "object") return null;
+  const budgetTokens = normalizeGovernanceInteger(raw.budgetTokens ?? raw.limitTokens ?? raw.maxTokens, { min: 0 });
+  const inputTokens = normalizeGovernanceInteger(raw.inputTokens, { min: 0 }) ?? 0;
+  const outputTokens = normalizeGovernanceInteger(raw.outputTokens, { min: 0 }) ?? 0;
+  const totalTokens = normalizeGovernanceInteger(raw.totalTokens ?? (inputTokens + outputTokens), { min: 0 });
+  const reservedTokens = normalizeGovernanceInteger(raw.reservedTokens, { min: 0 }) ?? 0;
+  const remainingTokens = normalizeGovernanceInteger(
+    raw.remainingTokens ?? (budgetTokens != null ? budgetTokens - (totalTokens || 0) - reservedTokens : null),
+    { min: Number.MIN_SAFE_INTEGER },
+  );
+  const utilizationRatio = budgetTokens && budgetTokens > 0
+    ? clamp01(((totalTokens || 0) + reservedTokens) / budgetTokens)
+    : null;
+  const exceeded = budgetTokens != null ? ((totalTokens || 0) + reservedTokens) > budgetTokens : false;
+  const nearLimitThresholdTokens = normalizeGovernanceInteger(raw.nearLimitThresholdTokens ?? raw.warningTokens, { min: 0 });
+  const nearLimit = !exceeded && budgetTokens != null
+    ? (
+        (nearLimitThresholdTokens != null && remainingTokens != null && remainingTokens <= nearLimitThresholdTokens)
+        || ((utilizationRatio ?? 0) >= 0.9)
+      )
+    : false;
+  const status = normalizeGovernanceText(raw.status || "", 40) || (exceeded ? "exceeded" : (nearLimit ? "near_limit" : "ok"));
+  if (budgetTokens == null && totalTokens == null && !status) return null;
+  return cleanGovernanceObject({
+    status,
+    budgetTokens,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    reservedTokens,
+    remainingTokens,
+    utilizationRatio: utilizationRatio != null ? roundMetric(utilizationRatio) : null,
+    nearLimit,
+    exceeded,
+    approvalRequired: raw.approvalRequired === true,
+  });
+}
+
+function normalizeGoalProgress(raw = {}, successCriteria = []) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const completedCriteriaCount = normalizeGovernanceInteger(source.completedCriteriaCount, { min: 0 })
+    ?? successCriteria.filter((entry) => ["satisfied", "waived"].includes(entry.status)).length;
+  const totalCriteriaCount = normalizeGovernanceInteger(source.totalCriteriaCount, { min: 0 })
+    ?? successCriteria.length;
+  const completionRatio = clamp01(
+    source.completionRatio ?? (totalCriteriaCount > 0 ? completedCriteriaCount / totalCriteriaCount : 0),
+  );
+  const status = normalizeGovernanceText(source.status || "", 40)
+    || (completionRatio === 1 ? "satisfied" : (completionRatio > 0 ? "partial" : "pending"));
+  if (!status && totalCriteriaCount === 0 && !normalizeGovernanceText(source.summary || "", 320)) return null;
+  return cleanGovernanceObject({
+    status,
+    summary: normalizeGovernanceText(source.summary || "", 320) || null,
+    completedCriteriaCount,
+    totalCriteriaCount,
+    completionRatio: roundMetric(completionRatio),
+  });
+}
+
+function buildObjectiveFrame(data = {}) {
+  const successCriteria = normalizeSuccessCriteria(
+    data?.successCriteria || data?._successCriteria || data?.criteria,
+    data?.acceptanceCriteria || data?._acceptanceCriteria,
+  );
+  const goalProgress = normalizeGoalProgress(data?.goalProgress || data?._goalProgress, successCriteria);
+  const constraintState = normalizeConstraintState(data?.constraintState || data?._constraintState || data?.constraints);
+  const tokenBudget = normalizeTokenBudget(data?.tokenBudget || data?._tokenBudget);
+  const blocked = constraintState?.blocked === true
+    || constraintState?.approvalPending === true
+    || tokenBudget?.status === "exceeded";
+  if (successCriteria.length === 0 && !goalProgress && !constraintState && !tokenBudget) return null;
+  return cleanGovernanceObject({
+    successCriteria,
+    goalProgress,
+    constraintState,
+    tokenBudget,
+    blocked,
+  });
 }
 
 function normalizeHeartbeatRun(raw = {}) {
@@ -305,6 +519,7 @@ function extractGovernanceState(raw = {}) {
   const executionPolicy = normalizeExecutionPolicy(raw?.executionPolicy || raw?._executionPolicy);
   const budgetOutcome = buildBudgetOutcome(budgetPolicy);
   const policyOutcome = buildPolicyOutcome(executionPolicy);
+  const objectiveFrame = buildObjectiveFrame(raw?.objectiveFrame || raw?._objectiveFrame || raw);
   const approvalPending =
     (executionPolicy?.approvalRequired === true && (!executionPolicy?.approvalState || executionPolicy.approvalState === "pending")) ||
     (budgetPolicy?.approvalRequired === true && ["exceeded", "near_limit"].includes(budgetOutcome?.status || ""));
@@ -316,8 +531,13 @@ function extractGovernanceState(raw = {}) {
     executionPolicy,
     budgetOutcome,
     policyOutcome,
+    successCriteria: objectiveFrame?.successCriteria || [],
+    goalProgress: objectiveFrame?.goalProgress || null,
+    constraintState: objectiveFrame?.constraintState || null,
+    tokenBudget: objectiveFrame?.tokenBudget || null,
+    objectiveFrame,
     approvalPending,
-    blocked: policyOutcome?.blocked === true || budgetOutcome?.status === "exceeded",
+    blocked: policyOutcome?.blocked === true || budgetOutcome?.status === "exceeded" || objectiveFrame?.blocked === true,
   });
 }
 
@@ -578,6 +798,16 @@ export class RunEvaluator {
       approvalPending: governance?.approvalPending === true,
       policyViolationCount: governance?.policyOutcome?.violationCount ?? 0,
       blockingViolationCount: governance?.policyOutcome?.blockingViolationCount ?? 0,
+      successCriteriaCount: Array.isArray(governance?.successCriteria) ? governance.successCriteria.length : 0,
+      completedCriteriaCount: governance?.goalProgress?.completedCriteriaCount ?? 0,
+      goalProgressStatus: governance?.goalProgress?.status || null,
+      goalCompletionRatio: governance?.goalProgress?.completionRatio ?? null,
+      constraintStatus: governance?.constraintState?.status || null,
+      constraintViolationCount: governance?.constraintState?.violationCount ?? 0,
+      blockingConstraintViolationCount: governance?.constraintState?.blockingViolationCount ?? 0,
+      tokenBudgetStatus: governance?.tokenBudget?.status || null,
+      tokenUtilizationRatio: governance?.tokenBudget?.utilizationRatio ?? null,
+      totalTokens: governance?.tokenBudget?.totalTokens ?? 0,
     };
 
     // ── Compute score ─────────────────────────────────────────────────
@@ -709,6 +939,82 @@ export class RunEvaluator {
       }
     }
 
+    const incompleteBlockingCriteria = Array.isArray(governance?.successCriteria)
+      ? governance.successCriteria.filter((criterion) => (
+        criterion?.blocking === true
+        && !["satisfied", "waived"].includes(String(criterion?.status || "").trim().toLowerCase())
+      ))
+      : [];
+    if (incompleteBlockingCriteria.length > 0) {
+      score -= Math.min(12, incompleteBlockingCriteria.length * 4);
+      for (const criterion of incompleteBlockingCriteria.slice(0, 8)) {
+        issues.push({
+          severity: "error",
+          nodeId: null,
+          message: `Blocking success criterion incomplete: ${criterion.title || criterion.id || "criterion"}`,
+          suggestion: "Finish the required success criterion or explicitly waive it before promotion",
+        });
+      }
+    } else if (
+      (Array.isArray(governance?.successCriteria) && governance.successCriteria.length > 0)
+      && governance?.goalProgress?.completionRatio != null
+      && governance.goalProgress.completionRatio < 1
+    ) {
+      score -= 3;
+      issues.push({
+        severity: "warning",
+        nodeId: null,
+        message: `Goal progress is only ${Math.round(governance.goalProgress.completionRatio * 100)}% complete.`,
+        suggestion: "Review the remaining success criteria before promotion",
+      });
+    }
+
+    if (governance?.constraintState?.blocked === true) {
+      score -= 12;
+      issues.push({
+        severity: "error",
+        nodeId: null,
+        message: "Constraint state is blocked and must be resolved before the run can be accepted.",
+        suggestion: governance?.constraintState?.approvalPending === true
+          ? "Obtain the required approval before retrying"
+          : "Resolve blocking constraint violations before continuing",
+      });
+    } else if ((governance?.constraintState?.violationCount || 0) > 0) {
+      score -= Math.min(8, (governance.constraintState.violationCount || 0) * 2);
+      for (const violation of governance.constraintState.violations.slice(0, 8)) {
+        issues.push({
+          severity: violation?.blocking ? "error" : "warning",
+          nodeId: null,
+          message: violation?.message
+            ? `Constraint violation (${violation.constraintId || "constraint"}): ${violation.message}`
+            : `Constraint violation (${violation.constraintId || "constraint"})`,
+          suggestion: violation?.blocking
+            ? "Resolve the blocking constraint before retrying"
+            : "Review the constraint warning before promotion",
+        });
+      }
+    }
+
+    if (governance?.tokenBudget?.status === "exceeded") {
+      score -= 10;
+      issues.push({
+        severity: "error",
+        nodeId: null,
+        message: `Token budget exceeded (${governance.tokenBudget.totalTokens || 0} used${governance.tokenBudget.budgetTokens != null ? ` vs ${governance.tokenBudget.budgetTokens} budget` : ""}).`,
+        suggestion: governance?.tokenBudget?.approvalRequired
+          ? "Request additional token budget or reduce scope before retrying"
+          : "Reduce scope or checkpoint progress before continuing",
+      });
+    } else if (governance?.tokenBudget?.status === "near_limit") {
+      score -= 4;
+      issues.push({
+        severity: "warning",
+        nodeId: null,
+        message: `Token budget is near limit (${governance.tokenBudget.remainingTokens ?? 0} remaining).`,
+        suggestion: "Checkpoint progress and trim additional work before the next retry",
+      });
+    }
+
     score = Math.max(0, Math.min(100, score));
     const grade = computeGrade(score);
 
@@ -767,8 +1073,9 @@ export class RunEvaluator {
       ratchet,
       governance,
     });
+    const judgment = buildRunEvaluationJudgment({ metrics, issues, remediation, governance });
 
-    const result = { score, grade, issues, metrics, governance, remediation, benchmark, strategies, promotion, ratchet, insights };
+    const result = { score, grade, issues, metrics, governance, remediation, benchmark, strategies, promotion, ratchet, insights, judgment };
 
     if (options.recordHistory === true) {
       this.#recordHistory(
@@ -807,6 +1114,16 @@ export class RunEvaluator {
         approvalPending: false,
         policyViolationCount: 0,
         blockingViolationCount: 0,
+        successCriteriaCount: 0,
+        completedCriteriaCount: 0,
+        goalProgressStatus: null,
+        goalCompletionRatio: null,
+        constraintStatus: null,
+        constraintViolationCount: 0,
+        blockingConstraintViolationCount: 0,
+        tokenBudgetStatus: null,
+        tokenUtilizationRatio: null,
+        totalTokens: 0,
       },
       governance: null,
       remediation: {
@@ -886,6 +1203,14 @@ export class RunEvaluator {
           totalNodeCount: 0,
           errorRate: 0,
         },
+      },
+      judgment: {
+        decision: RUN_EVALUATION_JUDGMENTS.ESCALATE,
+        reason: "run.missing_detail",
+        summary: reason,
+        retryMode: null,
+        operatorRequired: false,
+        blocked: false,
       },
     };
   }
@@ -989,6 +1314,63 @@ export class RunEvaluator {
       }
     }
 
+    const incompleteBlockingCriteria = Array.isArray(governance?.successCriteria)
+      ? governance.successCriteria.filter((criterion) => (
+        criterion?.blocking === true
+        && !["satisfied", "waived"].includes(String(criterion?.status || "").trim().toLowerCase())
+      ))
+      : [];
+    for (const criterion of incompleteBlockingCriteria) {
+      fixActions.push({
+        type: "complete_success_criterion",
+        nodeId: null,
+        description: `Complete blocking success criterion: ${criterion.title || criterion.id || "criterion"}`,
+        action: { field: "successCriteria", suggestion: "finish_or_waive_blocking_criterion" },
+      });
+    }
+
+    if (
+      (Array.isArray(governance?.successCriteria) && governance.successCriteria.length > 0)
+      && governance?.goalProgress?.completionRatio != null
+      && governance.goalProgress.completionRatio < 1
+    ) {
+      fixActions.push({
+        type: "review_goal_progress",
+        nodeId: null,
+        description: `Goal progress is ${Math.round(governance.goalProgress.completionRatio * 100)}%; review remaining success criteria.`,
+        action: { field: "goalProgress", suggestion: "close_remaining_criteria" },
+      });
+    }
+
+    if (Array.isArray(governance?.constraintState?.violations)) {
+      for (const violation of governance.constraintState.violations) {
+        fixActions.push({
+          type: "resolve_constraint_violation",
+          nodeId: null,
+          description: violation?.message
+            ? `Resolve constraint violation ${violation.constraintId || ""}: ${violation.message}`.trim()
+            : `Resolve constraint violation ${violation?.constraintId || ""}`.trim(),
+          action: { field: "constraintState", suggestion: "resolve_constraint" },
+        });
+      }
+    }
+
+    if (governance?.tokenBudget?.status === "exceeded") {
+      fixActions.push({
+        type: "request_token_budget_approval",
+        nodeId: null,
+        description: "Run exceeded its token budget and needs more budget or narrower scope.",
+        action: { field: "tokenBudget", suggestion: "request_approval_or_reduce_scope" },
+      });
+    } else if (governance?.tokenBudget?.status === "near_limit") {
+      fixActions.push({
+        type: "review_token_budget",
+        nodeId: null,
+        description: "Run is near its token budget; checkpoint or narrow scope before another retry.",
+        action: { field: "tokenBudget", suggestion: "review_remaining_budget" },
+      });
+    }
+
     let suggestedRetryMode = null;
     let retryReason = null;
     if (issueAdvisor?.recommendedAction === "resume_remaining") {
@@ -1027,6 +1409,7 @@ export class RunEvaluator {
       suggestedRetryMode &&
       issueAdvisor?.recommendedAction !== "inspect_failure" &&
       governance?.blocked !== true &&
+      governance?.constraintState?.blocked !== true &&
       governance?.approvalPending !== true,
     );
     const governanceSummary = governance?.blocked === true

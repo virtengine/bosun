@@ -17119,7 +17119,8 @@
         "research",
         "evidence-sidecar",
         "verification-loop",
-        "scientific-evidence"
+        "scientific-evidence",
+        "research-tools"
       ],
       "nodeCount": 28,
       "edgeCount": 32,
@@ -17132,9 +17133,12 @@
         "domain": "computer-science",
         "maxIterations": 10,
         "searchLiterature": true,
+        "researchToolBundleId": "scientific-evidence",
         "evidenceMode": "answer",
         "maxEvidenceSources": 6,
         "corpusPaths": [],
+        "includeRuntimeLogEvidence": true,
+        "runtimeLogPaths": [],
         "promoteReviewedFindings": true,
         "sidecarCommand": "",
         "_previousFeedback": "",
@@ -17149,7 +17153,8 @@
           "research",
           "evidence-sidecar",
           "verification-loop",
-          "scientific-evidence"
+          "scientific-evidence",
+          "research-tools"
         ]
       },
       "nodes": [
@@ -17214,7 +17219,7 @@
             "failOnError": false,
             "timeoutMs": 300000,
             "env": {
-              "BOSUN_RESEARCH_SIDECAR_INPUT": "{{({ problem: $data.problem, domain: $data.domain, evidenceMode: $data.evidenceMode, maxEvidenceSources: $data.maxEvidenceSources, corpusPaths: $data.corpusPaths, searchLiterature: $data.searchLiterature, literatureResults: $ctx.getNodeOutput('literature-search')?.results || [], repoRoot: $data.repoRoot, triggerSource: $data.triggerSource || 'manual', sidecarCommand: $data.sidecarCommand || '' })}}"
+              "BOSUN_RESEARCH_SIDECAR_INPUT": "{{({ problem: $data.problem, domain: $data.domain, researchToolBundleId: $data.researchToolBundleId, evidenceMode: $data.evidenceMode, maxEvidenceSources: $data.maxEvidenceSources, corpusPaths: $data.corpusPaths, includeRuntimeLogEvidence: $data.includeRuntimeLogEvidence, runtimeLogPaths: $data.runtimeLogPaths, searchLiterature: $data.searchLiterature, literatureResults: $ctx.getNodeOutput('literature-search')?.results || [], repoRoot: $data.repoRoot, triggerSource: $data.triggerSource || 'manual', sidecarCommand: $data.sidecarCommand || '' })}}"
             }
           },
           "position": {
@@ -17282,7 +17287,7 @@
           "type": "action.run_agent",
           "label": "Generate Solution",
           "config": {
-            "prompt": "# Evidence-Backed Research Generation\n\n## Research Problem\n{{problem}}\n\n## Domain\n{{domain}}\n\n## Evidence Mode\n{{evidenceMode}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Uncertainty Summary\n{{run-evidence-sidecar.output.bundle.uncertaintySummary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Artifact\n{{run-evidence-sidecar.output.artifactPath}}\n\n## Previous Critical Feedback\n{{_previousFeedback}}\n\n## Instructions\nYou are Bosun's research generation phase.\nProduce a rigorous candidate answer grounded in the supplied evidence.\nUse citation keys such as [E1], [E2] inline whenever you rely on an evidence item.\nDo not invent claims not supported by the evidence bundle.\nIf the evidence is insufficient, say exactly what remains uncertain.\n\nReturn sections in this order:\n1. Claim\n2. Evidence Synthesis\n3. Limitations\n4. Final Answer",
+            "prompt": "# Evidence-Backed Research Generation\n\n## Research Problem\n{{problem}}\n\n## Domain\n{{domain}}\n\n## Evidence Mode\n{{evidenceMode}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Research Tool Bundle\n{{run-evidence-sidecar.output.toolBundleBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Uncertainty Summary\n{{run-evidence-sidecar.output.bundle.uncertaintySummary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Artifact\n{{run-evidence-sidecar.output.artifactPath}}\n\n## Previous Critical Feedback\n{{_previousFeedback}}\n\n## Instructions\nYou are Bosun's research generation phase.\nProduce a rigorous candidate answer grounded in the supplied evidence.\nUse citation keys such as [E1], [E2] inline whenever you rely on an evidence item.\nPrefer the named research tool bundle and its recommended MCP/native evidence capabilities before making unsupported claims.\nDo not invent claims not supported by the evidence bundle.\nIf the evidence is insufficient, say exactly what remains uncertain.\n\nReturn sections in this order:\n1. Claim\n2. Evidence Synthesis\n3. Limitations\n4. Final Answer",
             "sdk": "auto",
             "timeoutMs": 1800000,
             "failOnError": false
@@ -17387,7 +17392,7 @@
           "type": "action.run_agent",
           "label": "Verify Solution",
           "config": {
-            "prompt": "# Independent Evidence Verification\n\n## Problem\n{{problem}}\n\n## Candidate Solution\n{{currentDraft}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Instructions\nYou are the independent verifier.\nAssess whether the candidate answer is fully supported by the evidence bundle.\nCheck citation usage, factual consistency, unsupported leaps, and contradictions.\n\nReturn exactly one verdict:\n- VERDICT: CORRECT\n- VERDICT: MINOR\n- VERDICT: CRITICAL\n\nThen explain:\n1. Whether the cited evidence is sufficient\n2. Specific flaws or missing support\n3. Whether the answer is safe to preserve as reviewed knowledge",
+            "prompt": "# Independent Evidence Verification\n\n## Problem\n{{problem}}\n\n## Candidate Solution\n{{currentDraft}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Research Tool Bundle\n{{run-evidence-sidecar.output.toolBundleBrief}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Instructions\nYou are the independent verifier.\nAssess whether the candidate answer is fully supported by the evidence bundle.\nCheck citation usage, factual consistency, unsupported leaps, and contradictions.\n\nReturn exactly one verdict:\n- VERDICT: CORRECT\n- VERDICT: MINOR\n- VERDICT: CRITICAL\n\nThen explain:\n1. Whether the cited evidence is sufficient\n2. Specific flaws or missing support\n3. Whether the answer is safe to preserve as reviewed knowledge",
             "sdk": "auto",
             "timeoutMs": 900000,
             "failOnError": false
@@ -17432,7 +17437,7 @@
           "type": "action.continue_session",
           "label": "Revise Solution",
           "config": {
-            "prompt": "The verifier found correctable issues in your evidence-backed answer.\n\n## Current Draft\n{{currentDraft}}\n\n## Verifier Feedback\n{{verify-solution.output}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\nRevise the answer to address every issue while remaining grounded in the supplied evidence.\nKeep or improve inline citation keys like [E1].",
+            "prompt": "The verifier found correctable issues in your evidence-backed answer.\n\n## Current Draft\n{{currentDraft}}\n\n## Verifier Feedback\n{{verify-solution.output}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Research Tool Bundle\n{{run-evidence-sidecar.output.toolBundleBrief}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\nRevise the answer to address every issue while remaining grounded in the supplied evidence.\nKeep or improve inline citation keys like [E1].",
             "strategy": "refine",
             "timeoutMs": 900000
           },
@@ -17654,7 +17659,9 @@
               "domain": "{{domain}}",
               "iterationCount": "{{iterationCount}}",
               "artifactPath": "{{run-evidence-sidecar.output.artifactPath}}",
-              "citations": "{{run-evidence-sidecar.output.bundle.citations}}"
+              "citations": "{{run-evidence-sidecar.output.bundle.citations}}",
+              "researchToolBundleId": "{{run-evidence-sidecar.output.researchToolBundle.id}}",
+              "recommendedMcpServers": "{{run-evidence-sidecar.output.researchToolBundle.recommendedServerIds}}"
             }
           },
           "position": {
@@ -41807,9 +41814,12 @@
         "domain": "computer-science",
         "maxIterations": 10,
         "searchLiterature": true,
+        "researchToolBundleId": "scientific-evidence",
         "evidenceMode": "answer",
         "maxEvidenceSources": 6,
         "corpusPaths": [],
+        "includeRuntimeLogEvidence": true,
+        "runtimeLogPaths": [],
         "promoteReviewedFindings": true,
         "sidecarCommand": "",
         "_previousFeedback": "",
@@ -41878,7 +41888,7 @@
             "failOnError": false,
             "timeoutMs": 300000,
             "env": {
-              "BOSUN_RESEARCH_SIDECAR_INPUT": "{{({ problem: $data.problem, domain: $data.domain, evidenceMode: $data.evidenceMode, maxEvidenceSources: $data.maxEvidenceSources, corpusPaths: $data.corpusPaths, searchLiterature: $data.searchLiterature, literatureResults: $ctx.getNodeOutput('literature-search')?.results || [], repoRoot: $data.repoRoot, triggerSource: $data.triggerSource || 'manual', sidecarCommand: $data.sidecarCommand || '' })}}"
+              "BOSUN_RESEARCH_SIDECAR_INPUT": "{{({ problem: $data.problem, domain: $data.domain, researchToolBundleId: $data.researchToolBundleId, evidenceMode: $data.evidenceMode, maxEvidenceSources: $data.maxEvidenceSources, corpusPaths: $data.corpusPaths, includeRuntimeLogEvidence: $data.includeRuntimeLogEvidence, runtimeLogPaths: $data.runtimeLogPaths, searchLiterature: $data.searchLiterature, literatureResults: $ctx.getNodeOutput('literature-search')?.results || [], repoRoot: $data.repoRoot, triggerSource: $data.triggerSource || 'manual', sidecarCommand: $data.sidecarCommand || '' })}}"
             }
           },
           "position": {
@@ -41946,7 +41956,7 @@
           "type": "action.run_agent",
           "label": "Generate Solution",
           "config": {
-            "prompt": "# Evidence-Backed Research Generation\n\n## Research Problem\n{{problem}}\n\n## Domain\n{{domain}}\n\n## Evidence Mode\n{{evidenceMode}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Uncertainty Summary\n{{run-evidence-sidecar.output.bundle.uncertaintySummary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Artifact\n{{run-evidence-sidecar.output.artifactPath}}\n\n## Previous Critical Feedback\n{{_previousFeedback}}\n\n## Instructions\nYou are Bosun's research generation phase.\nProduce a rigorous candidate answer grounded in the supplied evidence.\nUse citation keys such as [E1], [E2] inline whenever you rely on an evidence item.\nDo not invent claims not supported by the evidence bundle.\nIf the evidence is insufficient, say exactly what remains uncertain.\n\nReturn sections in this order:\n1. Claim\n2. Evidence Synthesis\n3. Limitations\n4. Final Answer",
+            "prompt": "# Evidence-Backed Research Generation\n\n## Research Problem\n{{problem}}\n\n## Domain\n{{domain}}\n\n## Evidence Mode\n{{evidenceMode}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Research Tool Bundle\n{{run-evidence-sidecar.output.toolBundleBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Uncertainty Summary\n{{run-evidence-sidecar.output.bundle.uncertaintySummary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Artifact\n{{run-evidence-sidecar.output.artifactPath}}\n\n## Previous Critical Feedback\n{{_previousFeedback}}\n\n## Instructions\nYou are Bosun's research generation phase.\nProduce a rigorous candidate answer grounded in the supplied evidence.\nUse citation keys such as [E1], [E2] inline whenever you rely on an evidence item.\nPrefer the named research tool bundle and its recommended MCP/native evidence capabilities before making unsupported claims.\nDo not invent claims not supported by the evidence bundle.\nIf the evidence is insufficient, say exactly what remains uncertain.\n\nReturn sections in this order:\n1. Claim\n2. Evidence Synthesis\n3. Limitations\n4. Final Answer",
             "sdk": "auto",
             "timeoutMs": 1800000,
             "failOnError": false
@@ -42051,7 +42061,7 @@
           "type": "action.run_agent",
           "label": "Verify Solution",
           "config": {
-            "prompt": "# Independent Evidence Verification\n\n## Problem\n{{problem}}\n\n## Candidate Solution\n{{currentDraft}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Instructions\nYou are the independent verifier.\nAssess whether the candidate answer is fully supported by the evidence bundle.\nCheck citation usage, factual consistency, unsupported leaps, and contradictions.\n\nReturn exactly one verdict:\n- VERDICT: CORRECT\n- VERDICT: MINOR\n- VERDICT: CRITICAL\n\nThen explain:\n1. Whether the cited evidence is sufficient\n2. Specific flaws or missing support\n3. Whether the answer is safe to preserve as reviewed knowledge",
+            "prompt": "# Independent Evidence Verification\n\n## Problem\n{{problem}}\n\n## Candidate Solution\n{{currentDraft}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Research Tool Bundle\n{{run-evidence-sidecar.output.toolBundleBrief}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\n## Instructions\nYou are the independent verifier.\nAssess whether the candidate answer is fully supported by the evidence bundle.\nCheck citation usage, factual consistency, unsupported leaps, and contradictions.\n\nReturn exactly one verdict:\n- VERDICT: CORRECT\n- VERDICT: MINOR\n- VERDICT: CRITICAL\n\nThen explain:\n1. Whether the cited evidence is sufficient\n2. Specific flaws or missing support\n3. Whether the answer is safe to preserve as reviewed knowledge",
             "sdk": "auto",
             "timeoutMs": 900000,
             "failOnError": false
@@ -42096,7 +42106,7 @@
           "type": "action.continue_session",
           "label": "Revise Solution",
           "config": {
-            "prompt": "The verifier found correctable issues in your evidence-backed answer.\n\n## Current Draft\n{{currentDraft}}\n\n## Verifier Feedback\n{{verify-solution.output}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\nRevise the answer to address every issue while remaining grounded in the supplied evidence.\nKeep or improve inline citation keys like [E1].",
+            "prompt": "The verifier found correctable issues in your evidence-backed answer.\n\n## Current Draft\n{{currentDraft}}\n\n## Verifier Feedback\n{{verify-solution.output}}\n\n## Evidence Summary\n{{run-evidence-sidecar.output.bundle.summary}}\n\n## Research Tool Bundle\n{{run-evidence-sidecar.output.toolBundleBrief}}\n\n## Evidence Bundle\n{{run-evidence-sidecar.output.evidenceBrief}}\n\n## Review Hints\n{{run-evidence-sidecar.output.bundle.reviewHints}}\n\nRevise the answer to address every issue while remaining grounded in the supplied evidence.\nKeep or improve inline citation keys like [E1].",
             "strategy": "refine",
             "timeoutMs": 900000
           },
@@ -42318,7 +42328,9 @@
               "domain": "{{domain}}",
               "iterationCount": "{{iterationCount}}",
               "artifactPath": "{{run-evidence-sidecar.output.artifactPath}}",
-              "citations": "{{run-evidence-sidecar.output.bundle.citations}}"
+              "citations": "{{run-evidence-sidecar.output.bundle.citations}}",
+              "researchToolBundleId": "{{run-evidence-sidecar.output.researchToolBundle.id}}",
+              "recommendedMcpServers": "{{run-evidence-sidecar.output.researchToolBundle.recommendedServerIds}}"
             }
           },
           "position": {

@@ -14,6 +14,41 @@ function toPositiveInteger(value, fallback = 0) {
   return Number.isFinite(numeric) && numeric > 0 ? Math.trunc(numeric) : fallback;
 }
 
+function normalizeStringArray(values) {
+  return Array.from(new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((entry) => toTrimmedString(entry))
+      .filter(Boolean),
+  ));
+}
+
+function normalizeContractSummary(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const toolPolicy = source.toolPolicy && typeof source.toolPolicy === "object" ? source.toolPolicy : {};
+  const memoryPolicy = source.memoryPolicy && typeof source.memoryPolicy === "object" ? source.memoryPolicy : {};
+  const reportingPolicy = source.reportingPolicy && typeof source.reportingPolicy === "object" ? source.reportingPolicy : {};
+  const escalationPolicy = source.escalationPolicy && typeof source.escalationPolicy === "object" ? source.escalationPolicy : {};
+  return {
+    freshConversation: source.freshConversation !== false,
+    toolPolicy: {
+      allowedTools: normalizeStringArray(toolPolicy.allowedTools),
+      deniedTools: normalizeStringArray(toolPolicy.deniedTools),
+      allowNestedDelegation: toolPolicy.allowNestedDelegation === true,
+    },
+    memoryPolicy: {
+      mode: toTrimmedString(memoryPolicy.mode || "read_only") || "read_only",
+    },
+    reportingPolicy: {
+      mode: toTrimmedString(reportingPolicy.mode || "one_way_progress") || "one_way_progress",
+      progressOnly: reportingPolicy.progressOnly !== false,
+    },
+    escalationPolicy: {
+      mode: toTrimmedString(escalationPolicy.mode || "none") || "none",
+      waitForResponse: escalationPolicy.waitForResponse === true,
+    },
+  };
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -36,6 +71,7 @@ function createEventEmitter(hooks = []) {
 
 function createLeaseRecord(input = {}) {
   const queuedAt = nowIso();
+  const contract = normalizeContractSummary(input.contract || input.metadata?.subagentContract || {});
   return {
     leaseId: toTrimmedString(input.leaseId || "") || `subagent-lease-${randomUUID()}`,
     poolId: createPoolId(input.poolId),
@@ -46,6 +82,7 @@ function createLeaseRecord(input = {}) {
     taskKey: toTrimmedString(input.taskKey || "") || null,
     role: toTrimmedString(input.role || "subagent") || "subagent",
     metadata: input.metadata && typeof input.metadata === "object" ? { ...input.metadata } : {},
+    contract,
     maxConcurrent: toPositiveInteger(input.maxConcurrent, 1) || 1,
     queuedAt,
     acquiredAt: null,
@@ -71,6 +108,7 @@ export function createSubagentPool(options = {}) {
     return cloneValue({
       ...lease,
       metadata: lease.metadata && typeof lease.metadata === "object" ? { ...lease.metadata } : {},
+      contract: normalizeContractSummary(lease.contract),
     });
   }
 
@@ -100,6 +138,7 @@ export function createSubagentPool(options = {}) {
       parentSessionId: lease.parentSessionId,
       rootSessionId: lease.rootSessionId,
       taskKey: lease.taskKey,
+      contract: normalizeContractSummary(lease.contract),
       maxConcurrent: lease.maxConcurrent,
       queuedAt: lease.queuedAt,
       acquiredAt: lease.acquiredAt,

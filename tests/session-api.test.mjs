@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifySessionRequestError,
   formatSessionFreshnessTimestamp,
+  getSessionHistoryState,
   getSessionManualRetryState,
   getSessionListState,
   getSessionLifecycleState,
@@ -367,6 +368,44 @@ describe("session lifecycle/runtime metadata", () => {
         source: "runtime",
         isLive: false,
         isStale: true,
+      }),
+    );
+  });
+
+  it("derives explicit history metadata for cold-reopen and folder actions", () => {
+    expect(
+      getSessionHistoryState({
+        lifecycleStatus: "archived",
+        status: "archived",
+        metadata: {
+          selectedRepoPath: "/repo/worktree-alpha",
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        key: "archived",
+        label: "Archived history",
+        isHistoric: true,
+        canResumeWork: true,
+        canRevealFolder: true,
+        folderPath: "/repo/worktree-alpha",
+        deleteLabel: "Delete history",
+      }),
+    );
+
+    expect(
+      getSessionHistoryState({
+        lifecycleStatus: "completed",
+        status: "completed",
+        runtimeState: "stopped",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        key: "historic",
+        label: "Cold reopen ready",
+        isHistoric: true,
+        canResumeWork: false,
+        reopenLabel: "Reopen transcript",
       }),
     );
   });

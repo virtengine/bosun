@@ -292,6 +292,166 @@ describe("session manager cutover", () => {
     ]));
   });
 
+  it("derives explicit operator phases that stay meaningful across planning, staging, running, building, and editing", () => {
+    const sessionManager = createHarnessSessionManager();
+
+    const planning = sessionManager.beginExternalSession({
+      sessionId: "phase-planning",
+      sessionType: "primary",
+      metadata: {
+        phase: "planning",
+        surface: "chat",
+      },
+    });
+    const staging = sessionManager.ensureSession({
+      sessionId: "phase-staging",
+      sessionType: "task",
+      status: "waiting_approval",
+      metadata: {
+        source: "workflow-engine-run",
+      },
+    });
+    const building = sessionManager.ensureSession({
+      sessionId: "phase-building",
+      sessionType: "workflow-overseer",
+      status: "idle",
+      metadata: {
+        source: "workflow-engine-run",
+      },
+    });
+    const editing = sessionManager.ensureSession({
+      sessionId: "phase-editing",
+      sessionType: "primary",
+      status: "running",
+      metadata: {
+        hasEdits: true,
+      },
+    });
+    sessionManager.beginExternalSession({
+      sessionId: "phase-running",
+      sessionType: "workflow-overseer",
+      scope: "workflow-task",
+      metadata: {
+        source: "workflow-engine-run",
+      },
+    });
+    const running = sessionManager.registerExecution("phase-running", {
+      sessionType: "workflow-overseer",
+      scope: "workflow-task",
+      status: "running",
+      threadId: "phase-running-thread",
+      metadata: {
+        source: "workflow-engine-run",
+      },
+    });
+
+    expect(planning.operatorPhase).toEqual(expect.objectContaining({
+      id: "planning",
+      label: "Planning",
+      source: "explicit",
+    }));
+    expect(staging.operatorPhase).toEqual(expect.objectContaining({
+      id: "staging",
+      label: "Staging",
+      source: "derived",
+    }));
+    expect(building.operatorPhase).toEqual(expect.objectContaining({
+      id: "building",
+      label: "Building",
+      source: "derived",
+    }));
+    expect(editing.operatorPhase).toEqual(expect.objectContaining({
+      id: "editing",
+      label: "Editing",
+      source: "derived",
+    }));
+    expect(running.operatorPhase).toEqual(expect.objectContaining({
+      id: "running",
+      label: "Running",
+      source: "derived",
+    }));
+  });
+
+  it("writes through resumable checkpoints at each session boundary", async () => {
+    const trackerMod = await import("../infra/session-tracker.mjs");
+    trackerMod._resetSingleton();
+    const tracker = trackerMod.getSessionTracker();
+    const sessionManager = createHarnessSessionManager({ sessionTracker: tracker });
+
+    sessionManager.beginExternalSession({
+      sessionId: "checkpoint-session-1",
+      threadId: "checkpoint-thread-1",
+      scope: "workflow-task",
+      sessionType: "task",
+      taskKey: "TASK-CHECKPOINT",
+      cwd: process.cwd(),
+    });
+    tracker.recordEvent("checkpoint-session-1", {
+      role: "user",
+      content: "resume from the last durable boundary",
+      timestamp: "2026-04-05T09:00:00.000Z",
+    });
+    tracker.recordEvent("checkpoint-session-1", {
+      type: "item.completed",
+      timestamp: "2026-04-05T09:00:01.000Z",
+      item: {
+        id: "tool-result-1",
+        type: "function_call_output",
+        output: "saved tool output",
+        _compressed: "tool_cache",
+        _originalLength: 2048,
+      },
+    });
+
+    sessionManager.registerExecution("checkpoint-session-1", {
+      sessionType: "task",
+      taskKey: "TASK-CHECKPOINT",
+      threadId: "checkpoint-thread-1",
+      providerSelection: "codex",
+      adapterName: "codex",
+      status: "running",
+      scope: "workflow-task",
+    });
+    sessionManager.finalizeExternalExecution("checkpoint-session-1", {
+      success: true,
+      status: "completed",
+      threadId: "checkpoint-thread-1",
+      result: {
+        output: "done",
+      },
+    });
+
+    const session = sessionManager.getSession("checkpoint-session-1");
+    const replayState = sessionManager.getReplayState("checkpoint-session-1");
+
+    expect(session).toEqual(expect.objectContaining({
+      replayCursor: expect.any(String),
+      checkpointCursor: expect.any(String),
+      messageCursor: 2,
+      turnCursor: 1,
+      spillCount: 1,
+    }));
+    expect(replayState.latestCheckpoint).toEqual(expect.objectContaining({
+      checkpointId: session.checkpointCursor,
+      replayCursor: session.replayCursor,
+      threadId: "checkpoint-thread-1",
+      status: "completed",
+      boundaryType: "turn_boundary",
+      messageCursor: 2,
+      spillCount: 1,
+      toolResultCount: 1,
+    }));
+    expect(replayState.resumeFrom).toEqual(expect.objectContaining({
+      checkpointId: session.checkpointCursor,
+      replayCursor: session.replayCursor,
+      threadId: "checkpoint-thread-1",
+      status: "completed",
+      boundaryType: "turn_boundary",
+      messageCursor: 2,
+      spillCount: 1,
+    }));
+  });
+
   it("cold-restores persisted replay history and live execution status after restart", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "bosun-session-replay-restore-"));
     const configDir = join(repoRoot, ".bosun");
@@ -318,6 +478,25 @@ describe("session manager cutover", () => {
         type: "turn.persisted",
         timestamp: "2026-04-05T08:00:00.000Z",
         message: "persisted replay event",
+      });
+      store.captureSnapshot({
+        sessionId: "cold-session-1",
+        runId: "cold-run-1",
+        threadId: "cold-thread-1",
+        action: "session_continue_requested",
+        eventType: "provider.turn.completed",
+        status: "running",
+        summary: "write-through checkpoint",
+        checkpoint: {
+          boundaryType: "turn_boundary",
+          messageCursor: 5,
+          turnCursor: 2,
+          spillCount: 1,
+          toolCallCount: 2,
+          toolResultCount: 1,
+          providerTurnId: "provider-turn-cold-1",
+          updatedAt: "2026-04-05T08:00:00.500Z",
+        },
       });
       spine.recordEvent({
         timestamp: "2026-04-05T08:00:01.000Z",
@@ -348,6 +527,19 @@ describe("session manager cutover", () => {
         eventType: "run.start",
         status: "running",
         timestamp: "2026-04-05T08:00:02.000Z",
+        checkpoint: {
+          boundaryType: "node_boundary",
+          messageCursor: 6,
+          turnCursor: 2,
+          spillCount: 2,
+          toolCallCount: 2,
+          toolResultCount: 2,
+          nodeId: "agent-node-1",
+          nodeType: "agent",
+          stageId: "agent-stage",
+          providerTurnId: "provider-turn-cold-1",
+          updatedAt: "2026-04-05T08:00:02.000Z",
+        },
       });
 
       await flushHarnessTelemetryRuntimeForTests();
@@ -371,7 +563,15 @@ describe("session manager cutover", () => {
       ]);
       expect(replayState.coldRestore).toEqual(expect.objectContaining({
         restored: true,
-        sources: expect.arrayContaining(["telemetry", "execution-ledger"]),
+        sources: expect.arrayContaining(["checkpoint", "telemetry", "execution-ledger"]),
+        latestCheckpoint: expect.objectContaining({
+          threadId: "cold-thread-1",
+          runId: "cold-run-1",
+          boundaryType: "turn_boundary",
+          messageCursor: 5,
+          turnCursor: 2,
+          spillCount: 1,
+        }),
         liveStatus: expect.objectContaining({
           sessionId: "cold-session-1",
           threadId: "cold-thread-1",
@@ -379,18 +579,37 @@ describe("session manager cutover", () => {
           status: "running",
         }),
       }));
+      expect(replayState.latestCheckpoint).toEqual(expect.objectContaining({
+        threadId: "cold-thread-1",
+        runId: "cold-run-1",
+        boundaryType: "turn_boundary",
+        messageCursor: 5,
+        spillCount: 1,
+      }));
       expect(replayState.resumeFrom).toEqual(expect.objectContaining({
+        checkpointId: expect.any(String),
+        replayCursor: expect.any(String),
         threadId: "cold-thread-1",
         runId: "cold-run-1",
         status: "running",
+        boundaryType: "turn_boundary",
+        messageCursor: 5,
+        spillCount: 1,
       }));
-      expect(String(replayState.resumeFrom?.action || "")).toContain("cold_restore");
+      expect(replayState.resumeFrom?.action).toBe("session_continue_requested");
       expect(replayState.coldRestore.executionLedger).toEqual(expect.objectContaining({
         runCount: 1,
         status: "running",
         latestRun: expect.objectContaining({
           runId: "cold-run-1",
           threadId: "cold-thread-1",
+        }),
+        latestCheckpoint: expect.objectContaining({
+          boundaryType: "node_boundary",
+          nodeId: "agent-node-1",
+          stageId: "agent-stage",
+          messageCursor: 6,
+          spillCount: 2,
         }),
       }));
       expect(replayState.coldRestore.telemetry).toEqual(expect.objectContaining({

@@ -32,6 +32,12 @@ function cloneValue(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function toStringArray(value) {
+  return Array.isArray(value)
+    ? value.map((entry) => toTrimmedString(entry)).filter(Boolean)
+    : [];
+}
+
 function toPositiveInteger(value, fallback = 0) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? Math.trunc(numeric) : fallback;
@@ -164,10 +170,46 @@ async function fallbackSearchFiles(pattern, input = {}, rootDir) {
 function buildSubagentProfile(prompt, args = {}, context = {}) {
   const role = toTrimmedString(args.role || args.profileName || "subagent") || "subagent";
   const taskKey = toTrimmedString(args.taskKey || `${toTrimmedString(context.taskKey || context.sessionId || "harness")}:subagent`) || "harness:subagent";
+  const allowNestedDelegation = args.allowNestedDelegation === true;
+  const deniedTools = [
+    ...toStringArray(args.deniedTools),
+    ...(allowNestedDelegation ? [] : [
+      "spawn_subagent",
+      "spawn_agent",
+      "wait_subagent",
+      "wait_for_subagent",
+      "cancel_subagent",
+      "abort_subagent",
+      "close_agent",
+      "list_subagents",
+    ]),
+  ];
+  const subagentContract = {
+    freshConversation: args.freshConversation !== false,
+    toolPolicy: {
+      allowedTools: toStringArray(args.allowedTools),
+      deniedTools,
+      allowNestedDelegation,
+    },
+    memoryPolicy: {
+      mode: toTrimmedString(args.inheritedMemoryMode || "read_only") || "read_only",
+      inheritedState: toPlainObject(context._executionStateScopes || {}),
+    },
+    reportingPolicy: {
+      mode: toTrimmedString(args.progressReportingMode || "one_way_progress") || "one_way_progress",
+      progressOnly: args.progressOnly !== false,
+    },
+    escalationPolicy: {
+      mode: toTrimmedString(args.escalationMode || "wait_for_response") || "wait_for_response",
+      waitForResponse: args.waitForResponse !== false,
+    },
+  };
   return {
     name: role,
     taskKey,
     sessionType: "subagent",
+    allowedTools: subagentContract.toolPolicy.allowedTools,
+    subagentContract,
     provider: toTrimmedString(args.provider || context.providerId || "") || null,
     model: toTrimmedString(args.model || context.model || "") || null,
     cwd: toTrimmedString(args.cwd || context.cwd || context.repoRoot || "") || null,
@@ -273,17 +315,20 @@ function buildHarnessNativeDefinitions(options = {}) {
           throw new Error("spawn_subagent requires a prompt or message");
         }
         const sessionManager = context.sessionManager || options.sessionManager || getBosunSessionManager();
+        const compiledProfile = buildSubagentProfile(prompt, args, context);
         const childSession = sessionManager.spawnSubagent(
-          buildSubagentProfile(prompt, args, context),
+          compiledProfile,
           {
             parentSessionId: toTrimmedString(args.parentSessionId || context.sessionId || "") || null,
             parentThreadId: toTrimmedString(args.parentThreadId || context.threadId || "") || null,
             requestedBy: toTrimmedString(context.requestedBy || "tool:spawn_subagent") || "tool:spawn_subagent",
             taskKey: toTrimmedString(args.taskKey || context.taskKey || "") || null,
             cwd: toTrimmedString(args.cwd || context.cwd || context.repoRoot || "") || null,
+            subagentContract: compiledProfile.subagentContract,
             metadata: {
               ...(toPlainObject(args.metadata)),
               spawnedByTool: "spawn_subagent",
+              subagentContract: compiledProfile.subagentContract,
             },
             subagentMaxParallel: toPositiveInteger(args.maxParallel || context.subagentMaxParallel, 0) || undefined,
           },
@@ -327,6 +372,7 @@ function buildHarnessNativeDefinitions(options = {}) {
         const sessionManager = context.sessionManager || options.sessionManager || getBosunSessionManager();
         return await sessionManager.waitForSubagent(childSessionId, {
           timeoutMs: toPositiveInteger(args.timeoutMs, 0) || undefined,
+          returnOn: toStringArray(args.returnOn),
         });
       },
     },

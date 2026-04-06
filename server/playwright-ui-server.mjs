@@ -11,10 +11,19 @@ import { existsSync } from "node:fs";
 import { resolve, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
+import {
+  describeMultimodalFallback,
+  ensureBrowserWorkerIsolation,
+  getBrowserWorkerIsolation,
+  listBrowserWorkerIsolations,
+  recordMultimodalFallback,
+  releaseBrowserWorkerIsolation,
+} from "../voice/vision-session-state.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const uiRoot = resolve(__dirname, "..", "ui");
 const sharedLibRoot = resolve(__dirname, "..", "lib");
+const workflowRoot = resolve(__dirname, "..", "workflow");
 const PORT = Number.parseInt(String(process.env.PLAYWRIGHT_UI_PORT || "4444"), 10) || 4444;
 const ESM_CACHE_DIR = resolve(__dirname, "..", ".cache", "esm-vendor");
 const LOCAL_ESM_PATH_RE = /^\/(?:@|[a-z0-9][a-z0-9._-]*@)/i;
@@ -306,6 +315,17 @@ const MOCK_API = {
   "/api/benchmarks": { results: [], providers: [] },
 };
 
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  if (chunks.length === 0) return {};
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = url.pathname;
@@ -314,6 +334,93 @@ const server = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+  if (pathname === "/api/playwright/browser-workers" && req.method === "GET") {
+    const sessionId = String(url.searchParams.get("sessionId") || "").trim();
+    const workers = sessionId
+      ? [getBrowserWorkerIsolation(sessionId)].filter(Boolean)
+      : listBrowserWorkerIsolations();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true,
+      workers,
+      total: workers.length,
+    }));
+    return;
+  }
+
+  if (pathname === "/api/playwright/browser-workers" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const sessionId = String(body?.sessionId || "").trim();
+      if (!sessionId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "sessionId is required" }));
+        return;
+      }
+      const worker = ensureBrowserWorkerIsolation(sessionId, {
+        parentSessionId: String(body?.parentSessionId || "").trim() || null,
+        rootSessionId: String(body?.rootSessionId || "").trim() || null,
+        profileScope: String(body?.profileScope || "").trim() || "isolated-subagent",
+        requestedCapabilities: Array.isArray(body?.requestedCapabilities) ? body.requestedCapabilities : [],
+        toolHints: Array.isArray(body?.toolHints) ? body.toolHints : [],
+        metadata: body?.metadata && typeof body.metadata === "object" ? body.metadata : {},
+        multimodalFallback: body?.multimodalFallback && typeof body.multimodalFallback === "object"
+          ? body.multimodalFallback
+          : undefined,
+      });
+      const fallback = body?.fallback && typeof body.fallback === "object"
+        ? recordMultimodalFallback(sessionId, body.fallback)
+        : describeMultimodalFallback(sessionId);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        worker,
+        fallback,
+      }));
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+    return;
+  }
+
+  if (/^\/api\/playwright\/browser-workers\/[^/]+\/fallback$/.test(pathname) && req.method === "POST") {
+    try {
+      const sessionId = decodeURIComponent(pathname.split("/")[4] || "").trim();
+      const body = await readJsonBody(req);
+      if (!sessionId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "sessionId is required" }));
+        return;
+      }
+      const fallback = recordMultimodalFallback(sessionId, {
+        ...body,
+        source: String(body?.source || "").trim() || "playwright-ui",
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        fallback,
+      }));
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+    return;
+  }
+
+  if (/^\/api\/playwright\/browser-workers\/[^/]+$/.test(pathname) && req.method === "DELETE") {
+    const sessionId = decodeURIComponent(pathname.split("/")[4] || "").trim();
+    const worker = releaseBrowserWorkerIsolation(sessionId, "playwright-ui-release");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true,
+      released: Boolean(worker),
+      worker,
+    }));
+    return;
+  }
 
   // Mock API
   if (pathname.startsWith("/api/")) {
@@ -359,11 +466,14 @@ const server = createServer(async (req, res) => {
 
   // Static files
   const servesSharedLib = pathname === "/lib" || pathname.startsWith("/lib/");
-  const staticRoot = servesSharedLib ? sharedLibRoot : uiRoot;
+  const servesWorkflowModule = pathname === "/workflow" || pathname.startsWith("/workflow/");
+  const staticRoot = servesSharedLib ? sharedLibRoot : (servesWorkflowModule ? workflowRoot : uiRoot);
   const relativePath = pathname === "/"
     ? "index.html"
     : servesSharedLib
       ? pathname.slice("/lib/".length)
+      : servesWorkflowModule
+        ? pathname.slice("/workflow/".length)
       : pathname.replace(/^\//, "");
   let filePath = resolve(staticRoot, relativePath || "index.html");
 

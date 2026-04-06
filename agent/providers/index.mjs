@@ -3,6 +3,7 @@ import ANTHROPIC_MESSAGES_PROVIDER from "./anthropic-messages.mjs";
 import AZURE_OPENAI_RESPONSES_PROVIDER from "./azure-openai-responses.mjs";
 import CLAUDE_SUBSCRIPTION_SHIM_PROVIDER from "./claude-subscription-shim.mjs";
 import COPILOT_OAUTH_PROVIDER from "./copilot-oauth.mjs";
+import GEMINI_GENERATE_CONTENT_PROVIDER from "./gemini-generate-content.mjs";
 import OLLAMA_PROVIDER from "./ollama.mjs";
 import OPENAI_CODEX_SUBSCRIPTION_PROVIDER from "./openai-codex-subscription.mjs";
 import OPENAI_COMPATIBLE_PROVIDER from "./openai-compatible.mjs";
@@ -40,6 +41,7 @@ export {
   AZURE_OPENAI_RESPONSES_PROVIDER,
   CLAUDE_SUBSCRIPTION_SHIM_PROVIDER,
   COPILOT_OAUTH_PROVIDER,
+  GEMINI_GENERATE_CONTENT_PROVIDER,
   OLLAMA_PROVIDER,
   OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
   OPENAI_COMPATIBLE_PROVIDER,
@@ -55,6 +57,7 @@ export const BUILTIN_PROVIDER_DRIVERS = Object.freeze([
   OPENAI_COMPATIBLE_PROVIDER,
   OLLAMA_PROVIDER,
   COPILOT_OAUTH_PROVIDER,
+  GEMINI_GENERATE_CONTENT_PROVIDER,
 ]);
 
 export const BUILTIN_PROVIDER_DEFINITIONS = BUILTIN_PROVIDER_DRIVERS;
@@ -70,6 +73,9 @@ const LEGACY_PROVIDER_ALIASES = Object.freeze({
   copilot: "copilot-oauth",
   "copilot-sdk": "copilot-oauth",
   "github-copilot": "copilot-oauth",
+  gemini: "gemini-generate-content",
+  "gemini-sdk": "gemini-generate-content",
+  "google-gemini": "gemini-generate-content",
   opencode: "openai-compatible",
   "opencode-sdk": "openai-compatible",
   "open-code": "openai-compatible",

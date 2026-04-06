@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 
 import { normalizeProviderAuthState } from "../agent/provider-auth-manager.mjs";
+import { CredentialStore } from "../workflow/credential-store.mjs";
 import { getProviderModelCatalog } from "../agent/provider-model-catalog.mjs";
 
 describe("provider auth and model settings", () => {
@@ -119,5 +120,76 @@ describe("provider auth and model settings", () => {
     expect(catalog.enabled).toBe(true);
     expect(catalog.defaultModel).toBe("o4-mini");
     expect(catalog.models.some((entry) => entry.id === "o4-mini" && entry.default === true)).toBe(true);
+  });
+
+  it("surfaces Gemini API-key settings and model defaults through auth normalization", () => {
+    const auth = normalizeProviderAuthState("gemini-generate-content", {}, {
+      implicitAuth: false,
+      env: {
+        GEMINI_API_KEY: "gemini-test-key",
+      },
+      settings: {
+        BOSUN_PROVIDER_GEMINI_ENABLED: "true",
+        BOSUN_PROVIDER_GEMINI_MODEL: "gemini-2.5-flash",
+        BOSUN_PROVIDER_GEMINI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta",
+      },
+    });
+    const catalog = getProviderModelCatalog("gemini-generate-content", {
+      settings: {
+        BOSUN_PROVIDER_GEMINI_ENABLED: "true",
+        BOSUN_PROVIDER_GEMINI_MODEL: "gemini-2.5-flash",
+      },
+    });
+
+    expect(auth.enabled).toBe(true);
+    expect(auth.authenticated).toBe(true);
+    expect(auth.preferredMode).toBe("apiKey");
+    expect(auth.settings).toEqual(expect.objectContaining({
+      enabled: true,
+      authMode: "apiKey",
+      defaultModel: "gemini-2.5-flash",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    }));
+    expect(catalog.defaultModel).toBe("gemini-2.5-flash");
+    expect(catalog.models.some((entry) => entry.id === "gemini-2.5-flash" && entry.default === true)).toBe(true);
+  });
+
+  it("builds provider credential lifecycle state from the shared credential store", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "bosun-provider-cred-"));
+    const credentialStore = new CredentialStore({ configDir: tempDir });
+    credentialStore.set("openai-runtime", {
+      type: "static",
+      value: "sk-runtime-1234567890",
+      provider: "openai-responses",
+      validation: { prefix: "sk-", minLength: 12 },
+      lifecycle: { authMode: "apiKey" },
+      templates: {
+        headers: { Authorization: "Bearer {{credential.value}}" },
+      },
+    });
+
+    const auth = normalizeProviderAuthState("openai-responses", {}, {
+      implicitAuth: false,
+      credentialStore,
+      settings: {
+        BOSUN_PROVIDER_OPENAI_ENABLED: "true",
+        BOSUN_PROVIDER_OPENAI_MODE: "apiKey",
+      },
+    });
+
+    expect(auth.credentialLifecycle).toEqual(expect.objectContaining({
+      providerId: "openai-responses",
+      status: "authenticated",
+    }));
+    expect(auth.credentialLifecycle.methods).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "apiKey",
+        configured: true,
+        credentialName: "openai-runtime",
+        templates: expect.objectContaining({
+          headers: { Authorization: "Bearer sk-runtime-1234567890" },
+        }),
+      }),
+    ]));
   });
 });

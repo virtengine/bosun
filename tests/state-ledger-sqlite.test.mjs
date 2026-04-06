@@ -231,6 +231,143 @@ describe("state ledger sqlite workflow integration", () => {
     expect(fallbackRun.events).toHaveLength(2);
   });
 
+  it("writes objective-frame state through the ledger and restore summary", async () => {
+    const repoRoot = makeTempDir("state-ledger-objectives-");
+    const runsDir = join(repoRoot, ".bosun", "workflow-runs");
+    mkdirSync(runsDir, { recursive: true });
+
+    const { WorkflowExecutionLedger } = await import("../workflow/execution-ledger.mjs");
+    const ledger = new WorkflowExecutionLedger({ runsDir });
+
+    ledger.ensureRun({
+      runId: "run-objective-1",
+      workflowId: "wf-objective-1",
+      workflowName: "Objective Ledger Workflow",
+      startedAt: "2026-04-06T01:00:00.000Z",
+      status: "running",
+      objectiveFrame: {
+        successCriteria: [
+          { id: "criterion-1", title: "Draft report", status: "partial", blocking: true },
+        ],
+        goalProgress: {
+          status: "in_progress",
+          completedCriteriaCount: 1,
+          totalCriteriaCount: 2,
+          completionRatio: 0.5,
+        },
+        constraintState: {
+          status: "blocked",
+          blocked: true,
+          violations: [
+            {
+              constraintId: "approval",
+              message: "Operator approval pending",
+              blocking: true,
+            },
+          ],
+        },
+        tokenBudget: {
+          budgetTokens: 2000,
+          totalTokens: 1800,
+          remainingTokens: 200,
+          status: "near_limit",
+        },
+      },
+    });
+    ledger.appendEvent({
+      runId: "run-objective-1",
+      workflowId: "wf-objective-1",
+      workflowName: "Objective Ledger Workflow",
+      eventType: "run.start",
+      timestamp: "2026-04-06T01:00:00.000Z",
+      status: "running",
+      meta: {
+        taskId: "task-objective-1",
+        sessionId: "session-objective-1",
+        objectiveFrame: {
+          successCriteria: [
+            { id: "criterion-1", title: "Draft report", status: "partial", blocking: true },
+          ],
+          goalProgress: {
+            status: "in_progress",
+            completedCriteriaCount: 1,
+            totalCriteriaCount: 2,
+            completionRatio: 0.5,
+          },
+          constraintState: {
+            status: "blocked",
+            blocked: true,
+            violations: [
+              {
+                constraintId: "approval",
+                message: "Operator approval pending",
+                blocking: true,
+              },
+            ],
+          },
+          tokenBudget: {
+            budgetTokens: 2000,
+            totalTokens: 1800,
+            remainingTokens: 200,
+            status: "near_limit",
+          },
+        },
+      },
+    });
+
+    const persisted = ledger.getRunLedger("run-objective-1");
+    expect(persisted).toEqual(expect.objectContaining({
+      objectiveFrame: expect.objectContaining({
+        blocked: true,
+      }),
+      goalProgress: expect.objectContaining({
+        status: "in_progress",
+        completionRatio: 0.5,
+      }),
+      constraintState: expect.objectContaining({
+        status: "blocked",
+        blockingViolationCount: 1,
+      }),
+      tokenBudget: expect.objectContaining({
+        status: "near_limit",
+        totalTokens: 1800,
+      }),
+    }));
+
+    const restore = ledger.buildRestoreState({ runId: "run-objective-1" });
+    expect(restore).toEqual(expect.objectContaining({
+      objectiveFrame: expect.objectContaining({
+        blocked: true,
+      }),
+      goalProgress: expect.objectContaining({
+        status: "in_progress",
+      }),
+      constraintState: expect.objectContaining({
+        status: "blocked",
+      }),
+      tokenBudget: expect.objectContaining({
+        status: "near_limit",
+      }),
+    }));
+    expect(restore.runs).toEqual([
+      expect.objectContaining({
+        runId: "run-objective-1",
+        objectiveFrame: expect.objectContaining({
+          blocked: true,
+        }),
+        goalProgress: expect.objectContaining({
+          status: "in_progress",
+        }),
+        constraintState: expect.objectContaining({
+          status: "blocked",
+        }),
+        tokenBudget: expect.objectContaining({
+          status: "near_limit",
+        }),
+      }),
+    ]);
+  });
+
   it("stores workflow run detail snapshots in sqlite for fileless reads", () => {
     const repoRoot = makeTempDir("state-ledger-workflow-detail-");
     const runsDir = join(repoRoot, ".bosun", "workflow-runs");

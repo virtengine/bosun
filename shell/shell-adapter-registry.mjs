@@ -33,6 +33,7 @@ import {
   resetClaudeSession,
   initClaudeShell,
 } from "./claude-shell.mjs";
+import anthropicNativeAdapter from "./anthropic-native-adapter.mjs";
 import {
   execOpencodePrompt,
   steerOpencodePrompt,
@@ -57,6 +58,8 @@ import {
   switchSession as switchGeminiSession,
   createSession as createGeminiSession,
 } from "./gemini-shell.mjs";
+import geminiNativeAdapter from "./gemini-native-adapter.mjs";
+import openaiNativeAdapter from "./openai-native-adapter.mjs";
 
 function passthroughRuntimeOptions(_adapterName, options = {}) {
   return options;
@@ -74,6 +77,73 @@ export function createShellAdapterRegistry(options = {}) {
       : passthroughRuntimeOptions;
 
   return {
+    "anthropic-native": {
+      name: anthropicNativeAdapter.name,
+      provider: anthropicNativeAdapter.provider,
+      displayName: anthropicNativeAdapter.displayName,
+      acceptsTurnPayload: anthropicNativeAdapter.acceptsTurnPayload === true,
+      exec: (msg, execOptions) => anthropicNativeAdapter.exec(
+        msg,
+        applyRuntimeOptions(withRuntimeOptions, "anthropic-native", execOptions || {}),
+      ),
+      isBusy: anthropicNativeAdapter.isBusy,
+      getInfo: (sessionId) => anthropicNativeAdapter.getInfo(sessionId),
+      reset: anthropicNativeAdapter.reset,
+      init: async () => anthropicNativeAdapter.init(),
+      listSessions: anthropicNativeAdapter.listSessions,
+      getSessionMessages: anthropicNativeAdapter.getSessionMessages,
+    },
+    "gemini-native": {
+      name: geminiNativeAdapter.name,
+      provider: geminiNativeAdapter.provider,
+      displayName: geminiNativeAdapter.displayName,
+      acceptsTurnPayload: geminiNativeAdapter.acceptsTurnPayload === true,
+      exec: (msg, execOptions) => geminiNativeAdapter.exec(
+        msg,
+        applyRuntimeOptions(withRuntimeOptions, "gemini-native", execOptions || {}),
+      ),
+      isBusy: geminiNativeAdapter.isBusy,
+      getInfo: (sessionId) => geminiNativeAdapter.getInfo(sessionId),
+      reset: geminiNativeAdapter.reset,
+      init: async () => geminiNativeAdapter.init(),
+      listSessions: geminiNativeAdapter.listSessions,
+      getSessionMessages: geminiNativeAdapter.getSessionMessages,
+    },
+    "openai-native": {
+      name: openaiNativeAdapter.name,
+      provider: openaiNativeAdapter.provider,
+      displayName: openaiNativeAdapter.displayName,
+      exec: (msg, execOptions) => openaiNativeAdapter.exec(
+        msg,
+        applyRuntimeOptions(withRuntimeOptions, "openai-native", {
+          persistent: true,
+          ...execOptions,
+        }),
+      ),
+      isBusy: openaiNativeAdapter.isBusy,
+      getInfo: () => openaiNativeAdapter.getInfo(),
+      reset: openaiNativeAdapter.reset,
+      init: async () => openaiNativeAdapter.init(),
+      listSessions: openaiNativeAdapter.listSessions,
+      getSessionMessages: openaiNativeAdapter.getSessionMessages,
+      sdkCommands: ["/compact", "/clear"],
+      async execSdkCommand(command, args, commandOptions = {}) {
+        const cmd = command.startsWith("/") ? command : `/${command}`;
+        if (cmd === "/clear") {
+          openaiNativeAdapter.reset({ sessionId: commandOptions.sessionId || null });
+          return "Session cleared.";
+        }
+        const fullCmd = args ? `${cmd} ${args}` : cmd;
+        return openaiNativeAdapter.exec(
+          fullCmd,
+          applyRuntimeOptions(withRuntimeOptions, "openai-native", {
+            persistent: true,
+            cwd: commandOptions.cwd,
+            sessionId: commandOptions.sessionId || null,
+          }),
+        );
+      },
+    },
     "codex-sdk": {
       name: "codex-sdk",
       provider: "CODEX",

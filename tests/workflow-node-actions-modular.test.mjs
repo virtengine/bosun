@@ -333,6 +333,7 @@ describe("workflow modular actions", () => {
         workflowId: "child-wf",
         mode: "sync",
         outputVariable: "childSummary",
+        allowedTools: ["read_file", "search_files"],
       },
     };
     const ctx = {
@@ -392,6 +393,180 @@ describe("workflow modular actions", () => {
       }),
       rootSession: expect.objectContaining({
         sessionId: "session-root-2",
+      }),
+    });
+    expect(sessionManager.getSubagentControl().getSubagent(childSessionId)).toMatchObject({
+      childSessionId,
+      status: "completed",
+      contract: expect.objectContaining({
+        freshConversation: true,
+        toolPolicy: expect.objectContaining({
+          allowedTools: ["read_file", "search_files"],
+          deniedTools: expect.arrayContaining(["spawn_subagent", "wait_subagent"]),
+          allowNestedDelegation: false,
+        }),
+        memoryPolicy: expect.objectContaining({
+          mode: "read_only",
+        }),
+        reportingPolicy: expect.objectContaining({
+          mode: "one_way_progress",
+        }),
+        escalationPolicy: expect.objectContaining({
+          mode: "wait_for_response",
+          waitForResponse: true,
+        }),
+      }),
+      latestProgress: expect.objectContaining({
+        status: "completed",
+      }),
+    });
+  });
+
+  it("surfaces explicit wait_for_response child escalations as waiting subagent state", async () => {
+    const nodeType = getNodeType("action.execute_workflow");
+    const sessionManager = createHarnessSessionManager();
+    const node = {
+      id: "dispatch-child-waiting",
+      type: "action.execute_workflow",
+      config: {
+        workflowId: "child-wf",
+        mode: "sync",
+        outputVariable: "childSummary",
+      },
+    };
+    const ctx = {
+      id: "run-parent-3",
+      data: {
+        _workflowId: "parent-wf",
+        _workflowName: "Parent Workflow",
+        _workflowSessionId: "session-parent-3",
+        _workflowRootSessionId: "session-root-3",
+        taskId: "TASK-202",
+        taskTitle: "Wait on child workflow",
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+    };
+    const childCtx = {
+      id: "child-run-waiting",
+      errors: [],
+      data: {
+        _waitForResponse: true,
+        _waitForResponseMessage: "Need operator confirmation before continuing",
+        _workflowTerminalOutput: {
+          needsApproval: true,
+          escalation: {
+            type: "wait_for_response",
+            waitForResponse: true,
+            message: "Need operator confirmation before continuing",
+          },
+        },
+      },
+    };
+    const engine = {
+      services: { sessionManager },
+      execute: vi.fn().mockResolvedValue(childCtx),
+      get: vi.fn().mockReturnValue({ id: "child-wf" }),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+    const childSessionId = "TASK-202:subagent:run-parent-3:dispatch-child-waiting:child-wf";
+    const record = sessionManager.getSubagentControl().getSubagent(childSessionId);
+
+    expect(result).toMatchObject({
+      success: true,
+      status: "waiting",
+      waitForResponse: true,
+      childSessionId,
+      escalation: expect.objectContaining({
+        type: "wait_for_response",
+        waitForResponse: true,
+        message: "Need operator confirmation before continuing",
+      }),
+    });
+    expect(ctx.data.childSummary).toEqual(result);
+    expect(record).toMatchObject({
+      childSessionId,
+      status: "waiting",
+      escalation: expect.objectContaining({
+        type: "wait_for_response",
+        waitForResponse: true,
+      }),
+      latestProgress: expect.objectContaining({
+        status: "waiting",
+      }),
+    });
+  });
+
+  it("binds isolated browser-worker context and multimodal fallback metadata onto workflow subagents", async () => {
+    const nodeType = getNodeType("action.execute_workflow");
+    const sessionManager = createHarnessSessionManager();
+    const node = {
+      id: "dispatch-child-browser",
+      type: "action.execute_workflow",
+      config: {
+        workflowId: "browser-child-wf",
+        mode: "sync",
+        outputVariable: "childSummary",
+        browserIsolation: true,
+        browserCapabilities: ["playwright.navigate", "playwright.screenshot"],
+        allowedTools: ["playwright.navigate", "playwright.screenshot", "vision-analysis"],
+      },
+    };
+    const ctx = {
+      id: "run-parent-browser",
+      data: {
+        _workflowId: "parent-wf",
+        _workflowName: "Parent Workflow",
+        _workflowSessionId: "session-parent-browser",
+        _workflowRootSessionId: "session-root-browser",
+        taskId: "TASK-203",
+        taskTitle: "Validate browser child workflow",
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+    };
+    const childCtx = {
+      id: "child-run-browser",
+      errors: [],
+      data: {
+        _workflowTerminalOutput: { summary: "browser child complete" },
+      },
+    };
+    const engine = {
+      services: { sessionManager },
+      execute: vi.fn().mockResolvedValue(childCtx),
+      get: vi.fn().mockReturnValue({ id: "browser-child-wf" }),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+    const childSessionId = "TASK-203:subagent:run-parent-browser:dispatch-child-browser:browser-child-wf";
+    const record = sessionManager.getSubagentControl().getSubagent(childSessionId);
+
+    expect(result).toMatchObject({
+      success: true,
+      childSessionId,
+      browserWorker: expect.objectContaining({
+        sessionId: childSessionId,
+        profileScope: "isolated-subagent",
+        requestedCapabilities: ["playwright.navigate", "playwright.screenshot", "vision-analysis"],
+      }),
+      multimodalFallback: expect.objectContaining({
+        fallback: expect.objectContaining({
+          enabled: true,
+          mode: "vision_summary_to_text",
+        }),
+      }),
+    });
+    expect(record).toMatchObject({
+      metadata: expect.objectContaining({
+        browserWorker: expect.objectContaining({
+          sessionId: childSessionId,
+        }),
       }),
     });
   });

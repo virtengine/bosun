@@ -75,6 +75,11 @@ const ASSESSMENT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min per task
  * @property {number}   [commitsBehind]   - Commits behind upstream
  * @property {number}   [taskAgeHours]    - How old the task is in hours
  * @property {string[]} [acceptanceCriteria] - Task acceptance criteria checklist
+ * @property {Array<string|{id?: string, title?: string, description?: string, status?: string, blocking?: boolean, required?: boolean, satisfied?: boolean}>} [successCriteria]
+ * @property {{status?: string, summary?: string, completionRatio?: number, completedCriteriaCount?: number, totalCriteriaCount?: number}} [goalProgress]
+ * @property {{status?: string, blocked?: boolean, approvalPending?: boolean, violations?: Array<object>}} [constraintState]
+ * @property {{status?: string, budgetTokens?: number, inputTokens?: number, outputTokens?: number, totalTokens?: number, remainingTokens?: number, approvalRequired?: boolean}} [tokenBudget]
+ * @property {{successCriteria?: Array<object>, goalProgress?: object, constraintState?: object, tokenBudget?: object}} [objectiveFrame]
  * @property {object}   [previousDecisions] - History of past decisions for this task
  */
 
@@ -88,6 +93,7 @@ const ASSESSMENT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min per task
  * @property {string}  [agentType]   - Preferred agent for new_attempt ("codex" | "copilot")
  * @property {Array<{type?: string, severity?: string, description?: string, criterion?: string}>} [debtItems]
  * @property {Array<{title: string, description?: string, acceptance_criteria?: string[], priority?: string, tags?: string[]}>} [splitTasks]
+ * @property {{successCriteria: Array<object>, goalProgress: object | null, constraintState: object | null, tokenBudget: object | null, blocked: boolean}} [objectiveFrame]
  * @property {string}  rawOutput  - Raw SDK output for audit
  */
 
@@ -124,6 +130,68 @@ minimizing wasted compute.
           .map((criterion) => `- ${String(criterion || "").trim()}`)
           .filter((line) => line !== "-"),
       ].join("\n"),
+    );
+  }
+  const objectiveFrame = normalizeObjectiveFrame(ctx.objectiveFrame || ctx, {
+    acceptanceCriteria: ctx.acceptanceCriteria,
+    successCriteria: ctx.successCriteria,
+    goalProgress: ctx.goalProgress,
+    constraintState: ctx.constraintState,
+    tokenBudget: ctx.tokenBudget,
+  });
+  if (Array.isArray(objectiveFrame?.successCriteria) && objectiveFrame.successCriteria.length) {
+    parts.push(
+      [
+        "## Explicit Success Criteria",
+        ...objectiveFrame.successCriteria
+          .slice(0, 20)
+          .map((criterion) => {
+            const status = criterion.status ? ` [${criterion.status}]` : "";
+            const blocking = criterion.blocking ? " (blocking)" : "";
+            const details = criterion.description ? ` - ${criterion.description}` : "";
+            return `- ${criterion.title}${status}${blocking}${details}`;
+          }),
+      ].join("\n"),
+    );
+  }
+  if (objectiveFrame?.goalProgress) {
+    parts.push(
+      [
+        "## Goal Progress",
+        `- Status: ${objectiveFrame.goalProgress.status || "unknown"}`,
+        `- Completion: ${objectiveFrame.goalProgress.completedCriteriaCount ?? 0}/${objectiveFrame.goalProgress.totalCriteriaCount ?? 0}`,
+        objectiveFrame.goalProgress.completionRatio != null
+          ? `- Completion ratio: ${Math.round(objectiveFrame.goalProgress.completionRatio * 100)}%`
+          : "",
+        objectiveFrame.goalProgress.summary ? `- Summary: ${objectiveFrame.goalProgress.summary}` : "",
+      ].filter(Boolean).join("\n"),
+    );
+  }
+  if (objectiveFrame?.constraintState) {
+    parts.push(
+      [
+        "## Constraints",
+        `- Status: ${objectiveFrame.constraintState.status || "unknown"}`,
+        `- Blocked: ${objectiveFrame.constraintState.blocked === true ? "yes" : "no"}`,
+        `- Violations: ${objectiveFrame.constraintState.violationCount || 0} (${objectiveFrame.constraintState.blockingViolationCount || 0} blocking)`,
+        ...objectiveFrame.constraintState.violations
+          .slice(0, 10)
+          .map((violation) => `- ${violation.constraintId}: ${violation.message || violation.type || "constraint violation"}`),
+      ].join("\n"),
+    );
+  }
+  if (objectiveFrame?.tokenBudget) {
+    parts.push(
+      [
+        "## Token Budget",
+        `- Status: ${objectiveFrame.tokenBudget.status || "unknown"}`,
+        objectiveFrame.tokenBudget.budgetTokens != null ? `- Budget tokens: ${objectiveFrame.tokenBudget.budgetTokens}` : "",
+        `- Used tokens: ${objectiveFrame.tokenBudget.totalTokens || 0}`,
+        objectiveFrame.tokenBudget.remainingTokens != null ? `- Remaining tokens: ${objectiveFrame.tokenBudget.remainingTokens}` : "",
+        objectiveFrame.tokenBudget.utilizationRatio != null
+          ? `- Utilization: ${Math.round(objectiveFrame.tokenBudget.utilizationRatio * 100)}%`
+          : "",
+      ].filter(Boolean).join("\n"),
     );
   }
   if (ctx.branch) parts.push(`**Branch:** ${ctx.branch}`);
@@ -537,6 +605,197 @@ function normalizeSplitTasks(rawSplitTasks) {
     .filter(Boolean);
 }
 
+function clampRatio(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.min(1, Number(parsed.toFixed(3))));
+}
+
+function normalizeSuccessCriteria(rawCriteria, fallbackAcceptanceCriteria = []) {
+  const source = Array.isArray(rawCriteria)
+    ? rawCriteria
+    : (Array.isArray(fallbackAcceptanceCriteria) ? fallbackAcceptanceCriteria : []);
+  return source
+    .map((entry, index) => {
+      if (typeof entry === "string") {
+        const title = entry.trim();
+        if (!title) return null;
+        return {
+          id: `criterion-${index + 1}`,
+          title,
+          description: "",
+          status: "pending",
+          blocking: true,
+        };
+      }
+      if (!entry || typeof entry !== "object") return null;
+      const id = String(entry.id || entry.criterionId || entry.key || `criterion-${index + 1}`).trim();
+      const title = String(entry.title || entry.name || entry.criterion || "").trim();
+      const description = String(entry.description || entry.detail || entry.summary || "").trim();
+      const rawStatus = String(entry.status || "").trim().toLowerCase();
+      const status = ["pending", "in_progress", "partial", "satisfied", "failed", "waived", "blocked"].includes(rawStatus)
+        ? rawStatus
+        : (entry.satisfied === true ? "satisfied" : "pending");
+      const blocking = entry.blocking === true || entry.required === true || entry.optional === false;
+      if (!id && !title && !description) return null;
+      return {
+        id: id || `criterion-${index + 1}`,
+        title: title || description || id || `criterion-${index + 1}`,
+        description,
+        status,
+        blocking,
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeConstraintViolations(rawViolations) {
+  if (!Array.isArray(rawViolations)) return [];
+  return rawViolations
+    .map((entry, index) => {
+      if (!entry || typeof entry !== "object") return null;
+      const constraintId = String(entry.constraintId || entry.ruleId || entry.id || `constraint-${index + 1}`).trim();
+      const type = String(entry.type || entry.kind || "").trim().toLowerCase();
+      const severity = String(entry.severity || "").trim().toLowerCase();
+      const message = String(entry.message || entry.reason || entry.description || "").trim();
+      const status = String(entry.status || "").trim().toLowerCase();
+      const blocking = entry.blocking === true || entry.blocked === true;
+      if (!constraintId && !type && !message) return null;
+      return {
+        constraintId: constraintId || `constraint-${index + 1}`,
+        type: type || "constraint",
+        severity: ["critical", "high", "medium", "low", "warning", "error"].includes(severity) ? severity : (blocking ? "error" : "warning"),
+        status: ["open", "resolved", "waived", "warning", "blocked"].includes(status) ? status : (blocking ? "blocked" : "open"),
+        message,
+        blocking,
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeConstraintState(rawConstraintState) {
+  if (!rawConstraintState) return null;
+  const source = Array.isArray(rawConstraintState)
+    ? { violations: rawConstraintState }
+    : (typeof rawConstraintState === "object" ? rawConstraintState : null);
+  if (!source) return null;
+  const violations = normalizeConstraintViolations(
+    source.violations || source.items || source.constraintViolations,
+  );
+  const blockingViolationCount = violations.filter((entry) => entry.blocking === true).length;
+  const violationCount = violations.length;
+  const blocked = source.blocked === true || blockingViolationCount > 0;
+  const approvalPending = source.approvalPending === true || String(source.approvalState || "").trim().toLowerCase() === "pending";
+  const rawStatus = String(source.status || "").trim().toLowerCase();
+  const status = rawStatus || (blocked ? "blocked" : (violationCount > 0 ? "warning" : "ok"));
+  if (violationCount === 0 && !blocked && !approvalPending && !status) return null;
+  return {
+    status,
+    blocked,
+    approvalPending,
+    violationCount,
+    blockingViolationCount,
+    violations,
+  };
+}
+
+function normalizeTokenBudget(rawTokenBudget) {
+  if (!rawTokenBudget || typeof rawTokenBudget !== "object") return null;
+  const budgetTokens = Number(rawTokenBudget.budgetTokens ?? rawTokenBudget.limitTokens ?? rawTokenBudget.maxTokens);
+  const inputTokens = Number(rawTokenBudget.inputTokens ?? 0);
+  const outputTokens = Number(rawTokenBudget.outputTokens ?? 0);
+  const totalTokens = Number(
+    rawTokenBudget.totalTokens
+    ?? ((Number.isFinite(inputTokens) ? inputTokens : 0) + (Number.isFinite(outputTokens) ? outputTokens : 0)),
+  );
+  const reservedTokens = Number(rawTokenBudget.reservedTokens ?? 0);
+  const effectiveTotal = Number.isFinite(totalTokens) ? totalTokens : 0;
+  const effectiveReserved = Number.isFinite(reservedTokens) ? reservedTokens : 0;
+  const effectiveBudget = Number.isFinite(budgetTokens) ? budgetTokens : null;
+  const remainingTokens = Number(
+    rawTokenBudget.remainingTokens
+    ?? (effectiveBudget != null ? effectiveBudget - effectiveTotal - effectiveReserved : NaN),
+  );
+  const nearLimitThresholdTokens = Number(rawTokenBudget.nearLimitThresholdTokens ?? rawTokenBudget.warningTokens);
+  const utilizationRatio = effectiveBudget && effectiveBudget > 0
+    ? clampRatio((effectiveTotal + effectiveReserved) / effectiveBudget)
+    : null;
+  const exceeded = effectiveBudget != null ? (effectiveTotal + effectiveReserved) > effectiveBudget : false;
+  const nearLimit = !exceeded && effectiveBudget != null
+    ? (
+        (Number.isFinite(nearLimitThresholdTokens) && Number.isFinite(remainingTokens) && remainingTokens <= nearLimitThresholdTokens)
+        || ((utilizationRatio ?? 0) >= 0.9)
+      )
+    : false;
+  const rawStatus = String(rawTokenBudget.status || "").trim().toLowerCase();
+  const status = rawStatus || (exceeded ? "exceeded" : (nearLimit ? "near_limit" : "ok"));
+  if (!Number.isFinite(effectiveTotal) && effectiveBudget == null && !rawStatus) return null;
+  return {
+    status,
+    budgetTokens: effectiveBudget,
+    inputTokens: Number.isFinite(inputTokens) ? inputTokens : 0,
+    outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0,
+    totalTokens: effectiveTotal,
+    reservedTokens: effectiveReserved,
+    remainingTokens: Number.isFinite(remainingTokens) ? remainingTokens : null,
+    utilizationRatio,
+    nearLimit,
+    exceeded,
+    approvalRequired: rawTokenBudget.approvalRequired === true,
+  };
+}
+
+function normalizeGoalProgress(rawGoalProgress, successCriteria = []) {
+  const source = rawGoalProgress && typeof rawGoalProgress === "object" ? rawGoalProgress : {};
+  const completedCriteriaCount = Number.isFinite(Number(source.completedCriteriaCount))
+    ? Number(source.completedCriteriaCount)
+    : successCriteria.filter((entry) => ["satisfied", "waived"].includes(entry.status)).length;
+  const totalCriteriaCount = Number.isFinite(Number(source.totalCriteriaCount))
+    ? Number(source.totalCriteriaCount)
+    : successCriteria.length;
+  const completionRatio = clampRatio(
+    source.completionRatio
+    ?? (totalCriteriaCount > 0 ? completedCriteriaCount / totalCriteriaCount : null),
+  );
+  const rawStatus = String(source.status || "").trim().toLowerCase();
+  const status = rawStatus || (
+    completionRatio === 1 ? "satisfied"
+      : completionRatio != null && completionRatio > 0 ? "partial"
+        : totalCriteriaCount > 0 ? "pending"
+          : "pending"
+  );
+  if (!status && totalCriteriaCount === 0 && !String(source.summary || "").trim()) return null;
+  return {
+    status,
+    summary: String(source.summary || "").trim() || "",
+    completedCriteriaCount,
+    totalCriteriaCount,
+    completionRatio,
+  };
+}
+
+function normalizeObjectiveFrame(rawObjectiveFrame, fallback = {}) {
+  const source = rawObjectiveFrame && typeof rawObjectiveFrame === "object" ? rawObjectiveFrame : {};
+  const successCriteria = normalizeSuccessCriteria(
+    source.successCriteria || source.criteria || fallback.successCriteria,
+    fallback.acceptanceCriteria,
+  );
+  const goalProgress = normalizeGoalProgress(source.goalProgress || fallback.goalProgress, successCriteria);
+  const constraintState = normalizeConstraintState(source.constraintState || source.constraints || fallback.constraintState);
+  const tokenBudget = normalizeTokenBudget(source.tokenBudget || fallback.tokenBudget);
+  const blocked = constraintState?.blocked === true
+    || constraintState?.approvalPending === true
+    || tokenBudget?.status === "exceeded";
+  if (successCriteria.length === 0 && !goalProgress && !constraintState && !tokenBudget) return null;
+  return {
+    successCriteria,
+    goalProgress,
+    constraintState,
+    tokenBudget,
+    blocked,
+  };
+}
+
 // ── Main assessment function ────────────────────────────────────────────────
 
 /**
@@ -564,6 +823,13 @@ export async function assessTask(ctx, opts) {
   assessmentDedup.set(ctx.taskId, Date.now());
 
   const timeoutMs = opts.timeoutMs || 5 * 60 * 1000;
+  const fallbackObjectiveFrame = normalizeObjectiveFrame(ctx.objectiveFrame || ctx, {
+    acceptanceCriteria: ctx.acceptanceCriteria,
+    successCriteria: ctx.successCriteria,
+    goalProgress: ctx.goalProgress,
+    constraintState: ctx.constraintState,
+    tokenBudget: ctx.tokenBudget,
+  });
 
   try {
     // ── Build prompt ──────────────────────────────────────────
@@ -608,6 +874,13 @@ export async function assessTask(ctx, opts) {
       agentType: decision.agentType || undefined,
       debtItems: normalizeDebtItems(decision.debtItems || decision.debt_items),
       splitTasks: normalizeSplitTasks(decision.splitTasks || decision.subTasks || decision.sub_tasks),
+      objectiveFrame: normalizeObjectiveFrame(decision.objectiveFrame || decision.evaluationFrame || decision, {
+        acceptanceCriteria: ctx.acceptanceCriteria,
+        successCriteria: ctx.successCriteria,
+        goalProgress: ctx.goalProgress,
+        constraintState: ctx.constraintState,
+        tokenBudget: ctx.tokenBudget,
+      }) || fallbackObjectiveFrame,
       rawOutput: rawStr,
     };
 
@@ -663,6 +936,32 @@ export async function assessTask(ctx, opts) {
  * @returns {TaskAssessmentDecision | null}
  */
 export function quickAssess(ctx) {
+  const objectiveFrame = normalizeObjectiveFrame(ctx.objectiveFrame || ctx, {
+    acceptanceCriteria: ctx.acceptanceCriteria,
+    successCriteria: ctx.successCriteria,
+    goalProgress: ctx.goalProgress,
+    constraintState: ctx.constraintState,
+    tokenBudget: ctx.tokenBudget,
+  });
+  if (objectiveFrame?.constraintState?.blocked === true || objectiveFrame?.constraintState?.approvalPending === true) {
+    return {
+      success: true,
+      action: "manual_review",
+      reason: "Task is currently blocked by explicit execution constraints or pending approval",
+      objectiveFrame,
+      rawOutput: "quick_assess:constraint_blocked",
+    };
+  }
+  if (objectiveFrame?.tokenBudget?.status === "exceeded") {
+    return {
+      success: true,
+      action: "manual_review",
+      reason: "Token budget exceeded - approval or scope reduction is required before continuing",
+      objectiveFrame,
+      rawOutput: "quick_assess:token_budget_exceeded",
+    };
+  }
+
   // ── Rebase failed on only auto-resolvable files ──────────
   if (ctx.trigger === "rebase_failed" && ctx.conflictFiles?.length) {
     const lockPatterns = [

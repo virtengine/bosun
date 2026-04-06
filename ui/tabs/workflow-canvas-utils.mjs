@@ -1,3 +1,8 @@
+import {
+  buildWorkflowDraftFlowchart,
+  normalizeWorkflowFlowchartMetadata,
+} from "../../workflow/workflow-serializer.mjs";
+
 function deepClone(value) {
   try {
     if (typeof structuredClone === "function") return structuredClone(value);
@@ -22,6 +27,17 @@ function normalizeGroupList(groups = []) {
       collapsed: group?.collapsed === true,
     }))
     .filter((group) => group.id && group.nodeIds.length > 0);
+}
+
+function normalizeText(value, fallback = "") {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
+function uniqueStrings(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => normalizeText(value))
+    .filter(Boolean))];
 }
 
 function escapeRegex(value) {
@@ -734,6 +750,79 @@ export function buildCollapsedGraph(graph = {}) {
     visibleEdges,
     visibleGroups: snapshot.groups,
     collapsedGroups,
+  };
+}
+
+export function buildDraftFlowchartMetadata(graph = {}, flowchart = null) {
+  return buildWorkflowDraftFlowchart({
+    ...(graph || {}),
+    metadata: {
+      ...((graph?.metadata && typeof graph.metadata === "object" && !Array.isArray(graph.metadata)) ? graph.metadata : {}),
+      ...(flowchart ? { flowchart } : {}),
+    },
+  });
+}
+
+export function buildDraftFlowchartMap(graph = {}, flowchart = null) {
+  const snapshot = createGraphSnapshot(graph.nodes, graph.edges, graph.groups);
+  const nodeMap = new Map((snapshot.nodes || []).map((node) => [normalizeText(node?.id), node]).filter(([id]) => id));
+  const groupMap = new Map((snapshot.groups || []).map((group) => [normalizeText(group?.id), group]).filter(([id]) => id));
+  const normalizedFlowchart = flowchart
+    ? normalizeWorkflowFlowchartMetadata(flowchart, snapshot)
+    : null;
+  const metadata = buildDraftFlowchartMetadata(
+    { ...graph, nodes: snapshot.nodes, edges: snapshot.edges, groups: snapshot.groups },
+    normalizedFlowchart,
+  );
+
+  const steps = (metadata?.steps || []).map((step) => {
+    const runtimeNodeIds = uniqueStrings(step.runtimeNodeIds).filter((nodeId) => nodeMap.has(nodeId));
+    const runtimeNodes = runtimeNodeIds.map((nodeId) => nodeMap.get(nodeId)).filter(Boolean);
+    const runtimeNodeLabels = runtimeNodes.map((node) => normalizeText(node?.label, node?.id || "node"));
+    const groupId = normalizeText(step.groupId);
+    const group = groupMap.get(groupId) || null;
+    return {
+      ...step,
+      runtimeNodeIds,
+      runtimeNodes,
+      runtimeNodeLabels,
+      runtimeNodeCount: runtimeNodeIds.length,
+      missingRuntimeNodeIds: uniqueStrings(step.runtimeNodeIds).filter((nodeId) => !nodeMap.has(nodeId)),
+      group,
+      groupId,
+      primaryNodeId: normalizeText(step.primaryNodeId || runtimeNodeIds[0]),
+      isBound: runtimeNodeIds.length > 0,
+    };
+  });
+
+  const stepMap = new Map(steps.map((step) => [step.id, step]));
+  const runtimeNodeToStepId = {};
+  for (const step of steps) {
+    for (const nodeId of step.runtimeNodeIds) {
+      if (!runtimeNodeToStepId[nodeId]) runtimeNodeToStepId[nodeId] = step.id;
+    }
+  }
+
+  const links = (metadata?.links || [])
+    .map((link) => ({
+      ...link,
+      sourceStep: stepMap.get(link.sourceStepId) || null,
+      targetStep: stepMap.get(link.targetStepId) || null,
+      edgeIds: uniqueStrings(link.edgeIds),
+    }))
+    .filter((link) => link.sourceStep && link.targetStep);
+
+  const mappedRuntimeNodeIds = new Set(Object.keys(runtimeNodeToStepId));
+  const unboundRuntimeNodes = (snapshot.nodes || []).filter((node) => !mappedRuntimeNodeIds.has(normalizeText(node?.id)));
+
+  return {
+    ...metadata,
+    steps,
+    links,
+    stepMap,
+    groupMap,
+    runtimeNodeToStepId,
+    unboundRuntimeNodes,
   };
 }
 

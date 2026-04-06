@@ -15,6 +15,11 @@ import {
 const APPROVAL_QUEUE_RELATIVE_PATH = [".bosun", "approvals", "requests.json"];
 const WORKFLOW_RUNS_RELATIVE_PATH = [".bosun", "workflow-runs"];
 const APPROVAL_SCOPE_TYPES = new Set(["workflow-run", "workflow-gate", "workflow-action", "harness-run"]);
+export const RUNTIME_JUDGMENT_DECISIONS = Object.freeze({
+  ACCEPT: "ACCEPT",
+  RETRY: "RETRY",
+  ESCALATE: "ESCALATE",
+});
 
 function normalizeText(value) {
   return String(value ?? "").trim();
@@ -236,6 +241,62 @@ function normalizeApprovalRequestStatus(value, fallback = "pending") {
   const normalized = normalizeText(value).toLowerCase();
   if (["pending", "approved", "denied", "expired"].includes(normalized)) return normalized;
   return fallback;
+}
+
+export function normalizeRuntimeJudgmentDecision(value, fallback = RUNTIME_JUDGMENT_DECISIONS.ESCALATE) {
+  const normalized = normalizeText(value).toUpperCase();
+  if (Object.values(RUNTIME_JUDGMENT_DECISIONS).includes(normalized)) return normalized;
+  return fallback;
+}
+
+function resolveApprovalTimeoutPolicy(request = {}, resolution = null) {
+  return normalizeText(
+    resolution?.onTimeout
+      || request?.gate?.onTimeout
+      || request?.action?.onTimeout
+      || request?.approval?.onTimeout,
+  ).toLowerCase() || null;
+}
+
+export function deriveApprovalRequestJudgment(request = {}, resolution = null) {
+  const status = normalizeApprovalRequestStatus(
+    resolution?.decision || request?.status || request?.resolution?.decision,
+    "pending",
+  );
+  const timeoutPolicy = resolveApprovalTimeoutPolicy(request, resolution);
+  let decision = RUNTIME_JUDGMENT_DECISIONS.ESCALATE;
+  let reason = "approval.pending";
+  if (status === "approved") {
+    decision = RUNTIME_JUDGMENT_DECISIONS.ACCEPT;
+    reason = "approval.approved";
+  } else if (status === "denied") {
+    decision = RUNTIME_JUDGMENT_DECISIONS.ESCALATE;
+    reason = "approval.denied";
+  } else if (status === "expired" && timeoutPolicy === "proceed") {
+    decision = RUNTIME_JUDGMENT_DECISIONS.ACCEPT;
+    reason = "approval.timeout_proceed";
+  } else if (status === "expired") {
+    decision = RUNTIME_JUDGMENT_DECISIONS.ESCALATE;
+    reason = "approval.expired";
+  }
+  return {
+    decision,
+    reason,
+    status,
+    timeoutPolicy,
+    operatorRequired: status === "pending" || decision === RUNTIME_JUDGMENT_DECISIONS.ESCALATE,
+    blocking: decision !== RUNTIME_JUDGMENT_DECISIONS.ACCEPT,
+  };
+}
+
+function withApprovalJudgment(request = {}, resolution = null) {
+  if (!request || typeof request !== "object") return request;
+  const judgment = deriveApprovalRequestJudgment(request, resolution);
+  return {
+    ...request,
+    judgment: judgment.decision,
+    judgmentReason: judgment.reason,
+  };
 }
 
 function deriveStaleApprovalResolution(request = {}) {
@@ -507,6 +568,7 @@ function recordWorkflowGateLedgerEvent(repoRoot, request, resolution = null) {
   const runId = normalizeText(request?.runId || request?.scopeId?.split?.(":")?.[0]);
   if (!runId) return null;
   const decision = normalizeApprovalRequestStatus(resolution?.decision, "");
+  const judgment = deriveApprovalRequestJudgment(request, resolution);
   const ledger = new WorkflowExecutionLedger({ runsDir: resolveWorkflowRunsDir(repoRoot) });
   ledger.ensureRun({
     runId,
@@ -546,6 +608,8 @@ function recordWorkflowGateLedgerEvent(repoRoot, request, resolution = null) {
       actorId: resolution?.actorId || null,
       note: resolution?.note || null,
       decision: decision || null,
+      judgment: judgment.decision,
+      judgmentReason: judgment.reason,
       taskId: request.taskId || null,
       taskTitle: request.taskTitle || null,
       reason: request.reason || null,
@@ -558,6 +622,7 @@ function recordWorkflowActionLedgerEvent(repoRoot, request, resolution = null) {
   const runId = normalizeText(request?.runId || request?.scopeId?.split?.(":")?.[0]);
   if (!runId) return null;
   const decision = normalizeApprovalRequestStatus(resolution?.decision, "");
+  const judgment = deriveApprovalRequestJudgment(request, resolution);
   const ledger = new WorkflowExecutionLedger({ runsDir: resolveWorkflowRunsDir(repoRoot) });
   ledger.ensureRun({
     runId,
@@ -598,6 +663,8 @@ function recordWorkflowActionLedgerEvent(repoRoot, request, resolution = null) {
       actorId: resolution?.actorId || null,
       note: resolution?.note || null,
       decision: decision || null,
+      judgment: judgment.decision,
+      judgmentReason: judgment.reason,
       taskId: request.taskId || null,
       taskTitle: request.taskTitle || null,
       reason: request.reason || null,
@@ -611,10 +678,10 @@ function recordWorkflowActionLedgerEvent(repoRoot, request, resolution = null) {
 
 function normalizeApprovalRequest(request = {}, existing = null) {
   const scopeType = normalizeApprovalScopeType(request?.scopeType || existing?.scopeType, "workflow-run");
-  if (scopeType === "workflow-run") return normalizeWorkflowRunApprovalRequest(request, existing);
-  if (scopeType === "workflow-gate") return normalizeWorkflowGateApprovalRequest(request, existing);
-  if (scopeType === "workflow-action") return normalizeWorkflowActionApprovalRequest(request, existing);
-  if (scopeType === "harness-run") return normalizeHarnessRunApprovalRequest(request, existing);
+  if (scopeType === "workflow-run") return withApprovalJudgment(normalizeWorkflowRunApprovalRequest(request, existing));
+  if (scopeType === "workflow-gate") return withApprovalJudgment(normalizeWorkflowGateApprovalRequest(request, existing));
+  if (scopeType === "workflow-action") return withApprovalJudgment(normalizeWorkflowActionApprovalRequest(request, existing));
+  if (scopeType === "harness-run") return withApprovalJudgment(normalizeHarnessRunApprovalRequest(request, existing));
   return null;
 }
 
@@ -633,14 +700,14 @@ export function getApprovalRequest(scopeType, scopeId, options = {}) {
   const queue = readApprovalQueue(repoRoot);
   const requests = Array.isArray(queue.data.requests) ? queue.data.requests : [];
   const index = getApprovalRequestIndex(requests, scopeType, scopeId);
-  if (index >= 0) return cloneJson(requests[index]);
+  if (index >= 0) return cloneJson(withApprovalJudgment(requests[index], requests[index]?.resolution));
   try {
     const sqlRequest = getApprovalRequestByScopeFromStateLedger(
       scopeType,
       scopeId,
       resolveWorkflowLedgerOptions(repoRoot),
     );
-    if (sqlRequest) return sqlRequest;
+    if (sqlRequest) return withApprovalJudgment(sqlRequest, sqlRequest?.resolution);
   } catch {
     // fall back to null below
   }
@@ -654,13 +721,13 @@ export function getApprovalRequestById(requestId, options = {}) {
   const request = (queue.data.requests || []).find(
     (entry) => normalizeText(entry?.requestId) === normalizedRequestId,
   ) || null;
-  if (request) return cloneJson(request);
+  if (request) return cloneJson(withApprovalJudgment(request, request?.resolution));
   try {
     const sqlRequest = getApprovalRequestFromStateLedger(
       requestId,
       resolveWorkflowLedgerOptions(repoRoot),
     );
-    if (sqlRequest) return sqlRequest;
+    if (sqlRequest) return withApprovalJudgment(sqlRequest, sqlRequest?.resolution);
   } catch {
     // fall back to null below
   }
@@ -764,7 +831,7 @@ export function listApprovalRequests(options = {}) {
   }
   requests = requests.map((entry) => {
     const derivedResolution = deriveStaleApprovalResolution(entry);
-    if (!derivedResolution) return entry;
+    if (!derivedResolution) return withApprovalJudgment(entry, entry?.resolution);
     return applyApprovalResolutionRecord(entry, derivedResolution);
   });
   if (status) {
@@ -779,7 +846,7 @@ export function listApprovalRequests(options = {}) {
   return {
     ok: true,
     path: resolveApprovalQueuePath(repoRoot),
-    requests: requests.slice(0, limit).map((entry) => cloneJson(entry)),
+    requests: requests.slice(0, limit).map((entry) => cloneJson(withApprovalJudgment(entry, entry?.resolution))),
   };
 }
 
@@ -922,25 +989,30 @@ function applyApprovalResolutionRecord(existing, resolution) {
   const decision = normalizeApprovalRequestStatus(resolution?.decision, "approved");
   const actorId = normalizeText(resolution?.actorId) || "operator";
   const note = normalizeText(resolution?.note) || null;
+  const judgment = deriveApprovalRequestJudgment(existing, resolution);
   const history = Array.isArray(existing?.history) ? existing.history.slice() : [];
   history.push({
     timestamp: now,
     decision,
+    judgment: judgment.decision,
+    judgmentReason: judgment.reason,
     actorId,
     note,
   });
-  return {
+  return withApprovalJudgment({
     ...existing,
     status: decision,
     updatedAt: now,
     history,
     resolution: {
       decision,
+      judgment: judgment.decision,
+      judgmentReason: judgment.reason,
       actorId,
       note,
       resolvedAt: now,
     },
-  };
+  }, resolution);
 }
 
 function updateWorkflowRunApprovalState(repoRoot, request, resolution = {}) {
@@ -957,6 +1029,7 @@ function updateWorkflowRunApprovalState(repoRoot, request, resolution = {}) {
   const actorId = normalizeText(resolution.actorId) || null;
   const note = normalizeText(resolution.note) || null;
   const decision = normalizeApprovalRequestStatus(resolution.decision, "approved");
+  const judgment = deriveApprovalRequestJudgment(request, resolution);
   if (!detail.data || typeof detail.data !== "object") detail.data = {};
   const currentExecutionPolicy = {
     ...(detail.data.executionPolicy && typeof detail.data.executionPolicy === "object" ? detail.data.executionPolicy : {}),
@@ -968,6 +1041,8 @@ function updateWorkflowRunApprovalState(repoRoot, request, resolution = {}) {
     approvalRequired: true,
     approvalState: decision,
     blocked: decision !== "approved",
+    judgment: judgment.decision,
+    judgmentReason: judgment.reason,
     resolvedAt: now,
     resolvedBy: actorId,
     approvalNote: note,
@@ -987,6 +1062,8 @@ function updateWorkflowRunApprovalState(repoRoot, request, resolution = {}) {
   detail.data._workflowApproval = {
     requestId: request.requestId,
     decision,
+    judgment: judgment.decision,
+    judgmentReason: judgment.reason,
     resolvedAt: now,
     actorId,
     note,
@@ -1032,6 +1109,8 @@ function updateWorkflowRunApprovalState(repoRoot, request, resolution = {}) {
       actorId,
       note,
       decision,
+      judgment: judgment.decision,
+      judgmentReason: judgment.reason,
       taskId: request.taskId || null,
       taskTitle: request.taskTitle || null,
     },
@@ -1069,6 +1148,7 @@ function updateHarnessRunApprovalState(repoRoot, request, resolution = {}) {
   const now = normalizeTimestamp(resolution.resolvedAt);
   const actorId = normalizeText(resolution.actorId) || null;
   const note = normalizeText(resolution.note) || null;
+  const judgment = deriveApprovalRequestJudgment(request, resolution);
   const approvals = Array.isArray(runRecord?.approvals) ? runRecord.approvals.slice() : [];
   approvals.push({
     requestId: request.requestId,
@@ -1077,6 +1157,8 @@ function updateHarnessRunApprovalState(repoRoot, request, resolution = {}) {
     stageId: request.stageId || null,
     stageType: request.stageType || null,
     decision,
+    judgment: judgment.decision,
+    judgmentReason: judgment.reason,
     resolvedAt: now,
     actorId,
     note,

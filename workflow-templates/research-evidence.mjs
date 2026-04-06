@@ -18,9 +18,12 @@ export const RESEARCH_EVIDENCE_AGENT_TEMPLATE = {
     domain: "computer-science",
     maxIterations: 10,
     searchLiterature: true,
+    researchToolBundleId: "scientific-evidence",
     evidenceMode: "answer",
     maxEvidenceSources: 6,
     corpusPaths: [],
+    includeRuntimeLogEvidence: true,
+    runtimeLogPaths: [],
     promoteReviewedFindings: true,
     sidecarCommand: "",
     _previousFeedback: "",
@@ -49,7 +52,7 @@ export const RESEARCH_EVIDENCE_AGENT_TEMPLATE = {
       timeoutMs: 300000,
       env: {
         BOSUN_RESEARCH_SIDECAR_INPUT:
-          "{{({ problem: $data.problem, domain: $data.domain, evidenceMode: $data.evidenceMode, maxEvidenceSources: $data.maxEvidenceSources, corpusPaths: $data.corpusPaths, searchLiterature: $data.searchLiterature, literatureResults: $ctx.getNodeOutput('literature-search')?.results || [], repoRoot: $data.repoRoot, triggerSource: $data.triggerSource || 'manual', sidecarCommand: $data.sidecarCommand || '' })}}",
+          "{{({ problem: $data.problem, domain: $data.domain, researchToolBundleId: $data.researchToolBundleId, evidenceMode: $data.evidenceMode, maxEvidenceSources: $data.maxEvidenceSources, corpusPaths: $data.corpusPaths, includeRuntimeLogEvidence: $data.includeRuntimeLogEvidence, runtimeLogPaths: $data.runtimeLogPaths, searchLiterature: $data.searchLiterature, literatureResults: $ctx.getNodeOutput('literature-search')?.results || [], repoRoot: $data.repoRoot, triggerSource: $data.triggerSource || 'manual', sidecarCommand: $data.sidecarCommand || '' })}}",
       },
     }, { x: 420, y: 500 }),
 
@@ -90,6 +93,9 @@ export const RESEARCH_EVIDENCE_AGENT_TEMPLATE = {
 ## Evidence Summary
 {{run-evidence-sidecar.output.bundle.summary}}
 
+## Research Tool Bundle
+{{run-evidence-sidecar.output.toolBundleBrief}}
+
 ## Review Hints
 {{run-evidence-sidecar.output.bundle.reviewHints}}
 
@@ -109,6 +115,7 @@ export const RESEARCH_EVIDENCE_AGENT_TEMPLATE = {
 You are Bosun's research generation phase.
 Produce a rigorous candidate answer grounded in the supplied evidence.
 Use citation keys such as [E1], [E2] inline whenever you rely on an evidence item.
+Prefer the named research tool bundle and its recommended MCP/native evidence capabilities before making unsupported claims.
 Do not invent claims not supported by the evidence bundle.
 If the evidence is insufficient, say exactly what remains uncertain.
 
@@ -167,6 +174,9 @@ Return sections in this order:
 ## Evidence Summary
 {{run-evidence-sidecar.output.bundle.summary}}
 
+## Research Tool Bundle
+{{run-evidence-sidecar.output.toolBundleBrief}}
+
 ## Evidence Bundle
 {{run-evidence-sidecar.output.evidenceBrief}}
 
@@ -215,6 +225,9 @@ Then explain:
 
 ## Evidence Summary
 {{run-evidence-sidecar.output.bundle.summary}}
+
+## Research Tool Bundle
+{{run-evidence-sidecar.output.toolBundleBrief}}
 
 ## Evidence Bundle
 {{run-evidence-sidecar.output.evidenceBrief}}
@@ -324,6 +337,8 @@ Keep or improve inline citation keys like [E1].`,
         iterationCount: "{{iterationCount}}",
         artifactPath: "{{run-evidence-sidecar.output.artifactPath}}",
         citations: "{{run-evidence-sidecar.output.bundle.citations}}",
+        researchToolBundleId: "{{run-evidence-sidecar.output.researchToolBundle.id}}",
+        recommendedMcpServers: "{{run-evidence-sidecar.output.researchToolBundle.recommendedServerIds}}",
       },
     }, { x: 1080, y: 2580 }),
   ],
@@ -365,7 +380,7 @@ Keep or improve inline citation keys like [E1].`,
     createdAt: "2026-03-31T00:00:00.000Z",
     version: 1,
     author: "bosun",
-    tags: ["research", "evidence-sidecar", "verification-loop", "scientific-evidence"],
+    tags: ["research", "evidence-sidecar", "verification-loop", "scientific-evidence", "research-tools"],
   },
 };
 
