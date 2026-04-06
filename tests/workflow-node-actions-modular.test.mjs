@@ -252,6 +252,77 @@ describe("workflow modular actions", () => {
     });
   });
 
+  it("inherits resolved executor settings for workflow agent launches when sdk is auto", async () => {
+    const nodeType = getNodeType("action.run_agent");
+    const sessionManager = createHarnessSessionManager();
+    const launchOrResumeThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: "workflow agent completed",
+      items: [],
+      sdk: "codex",
+      threadId: "workflow-thread-2",
+      resumed: false,
+    });
+    const node = {
+      id: "run-agent",
+      type: "action.run_agent",
+      config: {
+        prompt: "Plan the task.",
+        sdk: "auto",
+        failOnError: false,
+        autoRecover: false,
+      },
+    };
+    const ctx = {
+      id: "run-parent-2",
+      data: {
+        _workflowId: "wf-resolved-executor",
+        _workflowName: "Resolved Executor Workflow",
+        taskId: "TASK-201",
+        taskTitle: "Resolved executor inheritance",
+        resolvedSdk: "codex",
+        resolvedModel: "gpt-5.4",
+        task: {
+          id: "TASK-201",
+          title: "Resolved executor inheritance",
+        },
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+      setNodeStatus: vi.fn(),
+    };
+    const engine = {
+      services: {
+        sessionManager,
+        agentPool: {
+          launchEphemeralThread: vi.fn().mockResolvedValue({
+            success: true,
+            output: "fallback should not be used",
+            items: [],
+            sdk: "codex",
+            threadId: "workflow-thread-fallback-2",
+          }),
+          launchOrResumeThread,
+        },
+      },
+      list: () => [],
+      execute: vi.fn(),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+
+    expect(result.success).toBe(true);
+    expect(launchOrResumeThread).toHaveBeenCalledOnce();
+    expect(launchOrResumeThread.mock.calls[0][3]).toEqual(
+      expect.objectContaining({
+        sdk: "codex",
+        model: "gpt-5.4",
+      }),
+    );
+  });
+
   it("routes child workflow execution through the shared session manager lineage graph", async () => {
     const nodeType = getNodeType("action.execute_workflow");
     const sessionManager = createHarnessSessionManager();

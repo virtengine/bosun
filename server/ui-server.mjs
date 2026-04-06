@@ -1754,6 +1754,7 @@ let _wfLoadedBase = null;
 let _wfTaskTraceHookRegistered = false;
 let _workflowTelegramDigestPromise = null;
 const workflowTelegramDedup = new Map();
+const workflowBoundEngines = new Set();
 
 async function getWorkflowTelegramDigest() {
   if (_workflowTelegramDigestPromise) {
@@ -1826,12 +1827,14 @@ async function sendWorkflowTelegramMessage(chatId, text, options = {}) {
  */
 let _testDefaultEngine = null;
 export function _testInjectWorkflowEngine(mockModule, mockEngine) {
+  cleanupAllWorkflowEngineBindings();
   _wfEngine = mockModule;
   _wfInitDone = true;
   _wfInitPromise = null;
   _testDefaultEngine = mockEngine || null;
   _wfEngineByWorkspace.clear();
   _wfEngineInitByWorkspace.clear();
+  _wfTaskTraceHookRegistered = false;
 }
 
 function traceHttpServerAction(req, span = {}, fn) {
@@ -2091,12 +2094,8 @@ async function getWorkflowEngineModule() {
               /* Fall back: create engine in-process */
               const engine = _wfEngine.getWorkflowEngine({ services });
               attachWorkflowEngineLiveBridge(engine);
-              if (!_wfTaskTraceHookRegistered && typeof engine?.registerTaskTraceHook === "function") {
-                engine.registerTaskTraceHook((event) => {
-                  handleTaskWorkflowTraceEvent(event);
-                });
-                _wfTaskTraceHookRegistered = true;
-              }
+              attachTaskWorkflowTraceHook(engine);
+              _wfTaskTraceHookRegistered = workflowTaskTraceHookCleanup.has(engine);
               if (typeof engine.resumeInterruptedRuns === "function") {
                 setTimeout(() => {
                   engine.resumeInterruptedRuns().catch((err) => {
@@ -2108,12 +2107,8 @@ async function getWorkflowEngineModule() {
           } else {
             const engine = _wfEngine.getWorkflowEngine({ services });
             attachWorkflowEngineLiveBridge(engine);
-            if (!_wfTaskTraceHookRegistered && typeof engine?.registerTaskTraceHook === "function") {
-              engine.registerTaskTraceHook((event) => {
-                handleTaskWorkflowTraceEvent(event);
-              });
-              _wfTaskTraceHookRegistered = true;
-            }
+            attachTaskWorkflowTraceHook(engine);
+            _wfTaskTraceHookRegistered = workflowTaskTraceHookCleanup.has(engine);
           }
         } else {
           _wfRecommendedInstalled = true;
@@ -3841,15 +3836,12 @@ async function getWorkflowRequestContext(reqUrl, options = {}) {
               services: _wfServices || {},
               onTaskWorkflowEvent: handleTaskWorkflowTraceEvent,
             });
-            if (typeof nextEngine.registerTaskTraceHook === "function") {
-              nextEngine.registerTaskTraceHook((event) => {
-                handleTaskWorkflowTraceEvent(event);
-              });
-            }
+            attachTaskWorkflowTraceHook(nextEngine);
             await nextEngine.load();
           }
-          attachWorkflowEngineLiveBridge(nextEngine);
         }
+        attachTaskWorkflowTraceHook(nextEngine);
+        attachWorkflowEngineLiveBridge(nextEngine);
         _wfEngineByWorkspace.set(workspaceKey, nextEngine);
         return nextEngine;
       })().finally(() => {
@@ -4003,12 +3995,20 @@ function collectTaskLinkedSessionIds(task, tracker = null, options = {}) {
   const sessionTracker = tracker || getSessionTracker();
   const includePersisted = options.includePersisted === true;
   const liveSessions = typeof sessionTracker?.listAllSessions === "function"
-    ? sessionTracker.listAllSessions({ includePersisted: false, lightweight: true })
+    ? sessionTracker.listAllSessions({
+      includePersisted: false,
+      lightweight: true,
+      includeRuntimeProgress: false,
+    })
     : [];
   collectTaskLinkedSessionIdsFromSummaries(taskKeySet, liveSessions, ids);
 
   if (includePersisted && typeof sessionTracker?.listAllSessions === "function") {
-    const persistedSessions = sessionTracker.listAllSessions({ includePersisted: true, lightweight: true });
+    const persistedSessions = sessionTracker.listAllSessions({
+      includePersisted: true,
+      lightweight: true,
+      includeRuntimeProgress: false,
+    });
     collectTaskLinkedSessionIdsFromSummaries(taskKeySet, persistedSessions, ids);
   }
 
@@ -9276,6 +9276,7 @@ let tuiStatsEmitter = null;
 const WORKFLOW_WS_BATCH_MS = 80;
 const workflowWsBatchByKey = new Map();
 const workflowEngineListenerCleanup = new WeakMap();
+const workflowTaskTraceHookCleanup = new WeakMap();
 let workflowWsSeq = 0;
 let uiInstanceLockPath = "";
 let uiInstanceLockHeld = false;
@@ -10516,10 +10517,22 @@ function getRequestIp(req) {
   ).split(",")[0].trim().toLowerCase();
 }
 
+function pruneFallbackAuthRateLimits(now = Date.now()) {
+  for (const [ip, bucket] of fallbackAuthRateLimitByIp) {
+    if (now - Number(bucket?.windowStart || 0) > 120_000) {
+      fallbackAuthRateLimitByIp.delete(ip);
+    }
+  }
+  if (now - Number(fallbackAuthGlobalWindow?.windowStart || 0) > 120_000) {
+    fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
+  }
+}
+
 function consumeFallbackRateLimits(req, config) {
   const now = Date.now();
   const windowMs = 60_000;
   const ip = getRequestIp(req);
+  pruneFallbackAuthRateLimits(now);
 
   const globalBucket = fallbackAuthGlobalWindow;
   if (!globalBucket.windowStart || now - globalBucket.windowStart > windowMs) {
@@ -10630,18 +10643,6 @@ function getFallbackAuthStatus() {
     remediation,
   };
 }
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, bucket] of fallbackAuthRateLimitByIp) {
-    if (now - bucket.windowStart > 120_000) {
-      fallbackAuthRateLimitByIp.delete(ip);
-    }
-  }
-  if (now - fallbackAuthGlobalWindow.windowStart > 120_000) {
-    fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
-  }
-}, 300_000).unref();
 
 const projectSyncWebhookMetrics = {
   received: 0,
@@ -11911,6 +11912,14 @@ function buildInternalVoiceSessionMetadata(base = {}, source = "voice-http") {
   };
 }
 
+function pruneUiRateLimitBuckets(now = Date.now()) {
+  for (const [key, value] of _rateLimitMap) {
+    if (now - Number(value?.windowStart || 0) > 120_000) {
+      _rateLimitMap.delete(key);
+    }
+  }
+}
+
 function checkRateLimit(req, maxPerMin = 30, scope = "global") {
   const keyParts = [
     scope,
@@ -11918,6 +11927,7 @@ function checkRateLimit(req, maxPerMin = 30, scope = "global") {
   ];
   const key = keyParts.join(":");
   const now = Date.now();
+  pruneUiRateLimitBuckets(now);
   let bucket = _rateLimitMap.get(key);
   if (!bucket || now - bucket.windowStart > 60000) {
     bucket = { windowStart: now, count: 0 };
@@ -11927,13 +11937,6 @@ function checkRateLimit(req, maxPerMin = 30, scope = "global") {
   if (bucket.count > maxPerMin) return false;
   return true;
 }
-// Cleanup stale entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of _rateLimitMap) {
-    if (now - v.windowStart > 120000) _rateLimitMap.delete(k);
-  }
-}, 300000).unref();
 
 // ── Session token (auto-generated per startup for browser access) ────
 let sessionToken = "";
@@ -16388,6 +16391,41 @@ function attachWorkflowEngineLiveBridge(engine) {
   workflowEngineListenerCleanup.set(engine, () => {
     for (const unsub of unsubs) unsub();
   });
+  workflowBoundEngines.add(engine);
+}
+
+function attachTaskWorkflowTraceHook(engine) {
+  if (!engine || typeof engine.registerTaskTraceHook !== "function" || workflowTaskTraceHookCleanup.has(engine)) {
+    return;
+  }
+  const cleanup = engine.registerTaskTraceHook((event) => {
+    handleTaskWorkflowTraceEvent(event);
+  });
+  workflowTaskTraceHookCleanup.set(engine, typeof cleanup === "function" ? cleanup : () => {});
+  workflowBoundEngines.add(engine);
+}
+
+function cleanupWorkflowEngineBindings(engine) {
+  if (!engine) return;
+  try {
+    workflowEngineListenerCleanup.get(engine)?.();
+  } catch {
+    // best effort
+  }
+  workflowEngineListenerCleanup.delete(engine);
+  try {
+    workflowTaskTraceHookCleanup.get(engine)?.();
+  } catch {
+    // best effort
+  }
+  workflowTaskTraceHookCleanup.delete(engine);
+  workflowBoundEngines.delete(engine);
+}
+
+function cleanupAllWorkflowEngineBindings() {
+  for (const engine of [...workflowBoundEngines]) {
+    cleanupWorkflowEngineBindings(engine);
+  }
 }
 
 function broadcastUiEvent(channels, type, payload = {}) {
@@ -29787,10 +29825,15 @@ export async function startTelegramUiServer(options = {}) {
   _apiCache.clear();
   _apiInflight.clear();
   activeHarnessRuns.clear();
+  fallbackAuthRateLimitByIp.clear();
+  fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
+  _rateLimitMap.clear();
   invalidateDurableSessionListCache();
+  cleanupAllWorkflowEngineBindings();
   _wfRecommendedInstalledByWorkspace.clear();
   _wfEngineByWorkspace.clear();
   _wfEngineInitByWorkspace.clear();
+  _wfTaskTraceHookRegistered = false;
   if (uiServer) return uiServer;
 
   injectUiDependencies(options.dependencies || {});
@@ -30798,10 +30841,15 @@ export function stopTelegramUiServer() {
   _apiCache.clear();
   _apiInflight.clear();
   activeHarnessRuns.clear();
+  fallbackAuthRateLimitByIp.clear();
+  fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
+  _rateLimitMap.clear();
   invalidateDurableSessionListCache();
+  cleanupAllWorkflowEngineBindings();
   _wfRecommendedInstalledByWorkspace.clear();
   _wfEngineByWorkspace.clear();
   _wfEngineInitByWorkspace.clear();
+  _wfTaskTraceHookRegistered = false;
   // Clear injected dependencies so restart cycles do not inherit stale mocks,
   // caches, or runtime handles from an earlier server instance.
   uiDeps = {};

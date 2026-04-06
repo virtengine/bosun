@@ -115,7 +115,7 @@
     "prompt:lint": "node tools/prompt-lint.mjs",
       "demo-defaults:sync": "node tools/generate-demo-defaults.mjs",
       "pretest": "npm run syntax:check && npm run demo-defaults:sync",
-    "test": "node --max-old-space-size=8192 tools/vitest-full-suite.mjs",
+    "test": "node --max-old-space-size=8192 tools/vitest-full-suite.mjs && npm run test:node",
     "test:quick": "node tools/vitest-runner.mjs run",
     "test:vitest": "node --max-old-space-size=8192 tools/vitest-full-suite.mjs",
     "test:node": "node --no-warnings=ExperimentalWarning --import ./tests/node-test-bootstrap.mjs --test tests/*.node.test.mjs",

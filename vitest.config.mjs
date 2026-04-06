@@ -128,8 +128,8 @@ export default defineConfig({
         test: {
           ...sharedProjectTestConfig,
           name: "fast",
-          pool: "threads",
-          isolate: process.env.BOSUN_VITEST_FAST_ISOLATE !== "0",
+          pool: "forks",
+          isolate: true,
           include: ["**/*.test.mjs"],
           exclude: [...sharedTestExcludes, ...isolatedProjectSuites],
           sequence: { groupOrder: 1 },
@@ -143,12 +143,9 @@ export default defineConfig({
           isolate: true,
           include: isolatedProjectSuites,
           exclude: sharedTestExcludes,
-          // Isolated suites are memory-heavy (workflow-engine, agent-pool, etc.).
-          // Limit concurrency to prevent OOM when each fork can consume 2-4 GB.
-          maxWorkers: Math.min(
-            parseWorkerCount(process.env.BOSUN_VITEST_ISOLATED_MAX_WORKERS, 2),
-            defaultMaxWorkers ?? 2,
-          ),
+          // Isolated suites are memory-heavy (ui-server, workflow-guaranteed need >8 GB).
+          // Run one at a time to avoid OOM when two heavy forks share system memory.
+          maxWorkers: parseWorkerCount(process.env.BOSUN_VITEST_ISOLATED_MAX_WORKERS, 1),
           minWorkers: 1,
           sequence: { groupOrder: 2 },
         },

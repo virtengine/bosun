@@ -1680,11 +1680,11 @@ export class SessionTracker {
   listAllSessions(options = {}) {
     const includePersisted = options.includePersisted !== false;
     const lightweight = options.lightweight === true;
+    const includeRuntimeProgress = options.includeRuntimeProgress !== false;
     const byId = new Map();
-    const addSummary = (s, options = {}) => {
+    const addSummary = (s) => {
       if (!s) return;
       const sessionId = s.id || s.taskId;
-      const includeRuntimeProgress = options.includeRuntimeProgress !== false;
       const progress = includeRuntimeProgress && s.status === "active"
         ? this.getProgressStatus(sessionId)
         : null;

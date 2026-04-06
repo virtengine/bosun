@@ -2835,13 +2835,15 @@ registerNodeType("action.run_agent", {
         const maxContinues = Number.isFinite(parsedMaxContinues)
           ? Math.max(0, Math.min(10, Math.floor(parsedMaxContinues)))
           : 2;
-        const sdkOverride = sdk === "auto" ? undefined : sdk;
+        const resolvedSdkFromContext = String(ctx.data?.resolvedSdk || "").trim().toLowerCase() || undefined;
+        const sdkOverride = sdk === "auto" ? resolvedSdkFromContext : sdk;
         const resolvedModelOverride = node.config?.model
           ? String(ctx.resolve(node.config.model) || "").trim()
           : "";
+        const resolvedModelFromContext = String(ctx.data?.resolvedModel || "").trim() || undefined;
         const modelOverride = resolvedModelOverride && !isUnresolvedTemplateToken(resolvedModelOverride)
           ? resolvedModelOverride
-          : undefined;
+          : resolvedModelFromContext;
         const providerOverride = String(ctx.data?.resolvedProvider || "").trim() || undefined;
         const resolvedProviderConfig =
           ctx.data?.resolvedProviderConfig && typeof ctx.data.resolvedProviderConfig === "object"
