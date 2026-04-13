@@ -11,6 +11,16 @@ const HARNESS_PROVIDER_CONFIG_KEYS = Object.freeze({
   "openai-compatible": "openaiCompatible",
   "ollama": "ollama",
   "copilot-oauth": "copilot",
+  openrouter: "openrouter",
+  perplexity: "perplexity",
+  deepinfra: "deepinfra",
+  groq: "groq",
+  together: "together",
+  xai: "xai",
+  fireworks: "fireworks",
+  cerebras: "cerebras",
+  sambanova: "sambanova",
+  nebius: "nebius",
 });
 
 function ensureObject(value) {

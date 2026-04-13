@@ -31,7 +31,6 @@ import {
   SaveDiscardBar,
 } from "../components/shared.js";
 import { SearchInput, SegmentedControl, Toggle } from "../components/forms.js";
-import { AppContextMenu, useContextMenuState } from "../components/context-menu.js";
 import {
   Typography, Box, Stack, Card, CardContent, CardHeader, CardActions,
   Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment,
@@ -643,22 +642,12 @@ function TypePills() {
   `;
 }
 
-function LibraryCard({ entry, onSelect, onContextMenu = null }) {
+function LibraryCard({ entry, onSelect }) {
   const icon = TYPE_ICONS[entry.type] || ":file:";
   const typeLabel = TYPE_LABELS[entry.type] || entry.type;
   const typeColor = TYPE_COLORS[entry.type] || "#aaa";
   return html`
-    <${Card}
-      variant="outlined"
-      sx=${{ cursor: "pointer", transition: "all 0.15s", "&:hover": { borderColor: "primary.main", transform: "translateY(-1px)", boxShadow: 3 }, position: "relative", bgcolor: "background.paper" }}
-      onClick=${() => onSelect(entry)}
-      onContextMenu=${(event) => {
-        if (typeof onContextMenu !== "function") return;
-        event.preventDefault();
-        event.stopPropagation();
-        onContextMenu(entry, event);
-      }}
-    >
+    <${Card} variant="outlined" sx=${{ cursor: "pointer", transition: "all 0.15s", "&:hover": { borderColor: "primary.main", transform: "translateY(-1px)", boxShadow: 3 }, position: "relative", bgcolor: "background.paper" }} onClick=${() => onSelect(entry)}>
       <${CardContent}>
         <${Box} sx=${{ position: "absolute", top: 8, right: 8 }}>
           <${Chip} label=${typeLabel} size="small" sx=${{ bgcolor: typeColor + "22", color: typeColor, fontWeight: 500 }} />
@@ -3043,11 +3032,6 @@ export function LibraryTab() {
   const [importTools, setImportTools] = useState(true);
   const isMountedRef = useRef(true);
   const loadEntriesRequestRef = useRef(0);
-  const {
-    contextMenu: libraryCardContextMenu,
-    openContextMenu: openLibraryCardContextMenuState,
-    closeContextMenu: closeLibraryCardContextMenu,
-  } = useContextMenuState();
 
   // Load all entries on mount and type/search changes
   const loadEntries = useCallback(async () => {
@@ -3138,59 +3122,6 @@ export function LibraryTab() {
     haptic("light");
     setEditing(entry);
   }, []);
-
-  const openLibraryCardContextMenu = useCallback((entry, event) => {
-    if (!entry?.id) return;
-    openLibraryCardContextMenuState({
-      entryId: entry.id,
-      storageScope: entry.storageScope || "",
-    }, event);
-  }, [openLibraryCardContextMenuState]);
-
-  const handleLibraryCardAction = useCallback(async (action) => {
-    const entryId = String(libraryCardContextMenu?.entryId || "").trim();
-    if (!entryId) {
-      closeLibraryCardContextMenu();
-      return;
-    }
-    const entry = (entries.value || []).find((item) => String(item?.id || "") === entryId)
-      || (allEntries.value || []).find((item) => String(item?.id || "") === entryId)
-      || null;
-    closeLibraryCardContextMenu();
-    if (!entry) return;
-    if (action === "open") {
-      handleSelect(entry);
-      return;
-    }
-    if (action === "copy-id") {
-      try {
-        await navigator.clipboard.writeText(entryId);
-      } catch {
-      }
-      return;
-    }
-    if (action === "copy-name") {
-      try {
-        await navigator.clipboard.writeText(String(entry.name || ""));
-      } catch {
-      }
-      return;
-    }
-    if (action === "delete") {
-      const confirmed = window.confirm(`Delete "${entry.name}" from the library?`);
-      if (!confirmed) return;
-      try {
-        await removeEntry(entry.id, false, entry.storageScope);
-        showToast(`Deleted "${entry.name}"`, "success");
-        if (editing?.id === entry.id) {
-          setEditing(null);
-        }
-        await loadEntries();
-      } catch (err) {
-        showToast(err?.message || "Failed to delete library entry", "error");
-      }
-    }
-  }, [closeLibraryCardContextMenu, editing?.id, handleSelect, libraryCardContextMenu?.entryId, loadEntries]);
 
   const handleCreateAudioAgent = useCallback((templateKey) => {
     const template = AUDIO_AGENT_TEMPLATES[templateKey];
@@ -3305,7 +3236,7 @@ export function LibraryTab() {
                 <//>
                 <div class="library-grid">
                   ${section.items.map((e) => html`
-                    <${LibraryCard} key=${e.id} entry=${e} onSelect=${handleSelect} onContextMenu=${openLibraryCardContextMenu} />
+                    <${LibraryCard} key=${e.id} entry=${e} onSelect=${handleSelect} />
                   `)}
                 </div>
               </${Box}>
@@ -3314,23 +3245,11 @@ export function LibraryTab() {
           : html`
             <div class="library-grid">
               ${displayed.map((e) => html`
-                <${LibraryCard} key=${e.id} entry=${e} onSelect=${handleSelect} onContextMenu=${openLibraryCardContextMenu} />
+                <${LibraryCard} key=${e.id} entry=${e} onSelect=${handleSelect} />
               `)}
             </div>
           `}
       `}
-
-      <${AppContextMenu}
-        menu=${libraryCardContextMenu}
-        onClose=${closeLibraryCardContextMenu}
-        items=${[
-          { key: "open", label: "Open entry", icon: ":edit:", onClick: () => handleLibraryCardAction("open") },
-          { key: "copy-id", label: "Copy ID", icon: ":copy:", onClick: () => handleLibraryCardAction("copy-id") },
-          { key: "copy-name", label: "Copy name", icon: ":book:", onClick: () => handleLibraryCardAction("copy-name") },
-          { kind: "divider", key: "library-danger-divider" },
-          { key: "delete", label: "Delete", icon: ":trash:", danger: true, onClick: () => handleLibraryCardAction("delete") },
-        ]}
-      />
 
       ${editing && html`
         <${EntryEditor}

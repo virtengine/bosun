@@ -1037,6 +1037,16 @@ const HARNESS_EXECUTOR_ENDPOINT_PROVIDER_IDS = new Set([
   "openai-responses",
   "openai-compatible",
   "ollama",
+  "openrouter",
+  "perplexity",
+  "deepinfra",
+  "groq",
+  "together",
+  "xai",
+  "fireworks",
+  "cerebras",
+  "sambanova",
+  "nebius",
   "gemini-generate-content",
 ]);
 
@@ -1045,6 +1055,16 @@ const HARNESS_EXECUTOR_CONFIGURABLE_API_STYLE_PROVIDER_IDS = new Set([
   "openai-responses",
   "openai-compatible",
   "ollama",
+  "openrouter",
+  "perplexity",
+  "deepinfra",
+  "groq",
+  "together",
+  "xai",
+  "fireworks",
+  "cerebras",
+  "sambanova",
+  "nebius",
 ]);
 
 function normalizeHarnessExecutorId(value, fallback = "harness-executor") {

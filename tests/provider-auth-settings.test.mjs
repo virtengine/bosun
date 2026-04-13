@@ -154,6 +154,108 @@ describe("provider auth and model settings", () => {
     expect(catalog.models.some((entry) => entry.id === "gemini-2.5-flash" && entry.default === true)).toBe(true);
   });
 
+  it("surfaces OpenRouter API-key settings and model defaults through auth normalization", () => {
+    const auth = normalizeProviderAuthState("openrouter", {}, {
+      implicitAuth: false,
+      env: {
+        OPENROUTER_API_KEY: "openrouter-test-key",
+      },
+      settings: {
+        BOSUN_PROVIDER_OPENROUTER_ENABLED: "true",
+        BOSUN_PROVIDER_OPENROUTER_MODEL: "openai/gpt-5",
+        BOSUN_PROVIDER_OPENROUTER_BASE_URL: "https://openrouter.example/v1",
+      },
+    });
+    const catalog = getProviderModelCatalog("openrouter", {
+      settings: {
+        BOSUN_PROVIDER_OPENROUTER_ENABLED: "true",
+        BOSUN_PROVIDER_OPENROUTER_MODEL: "openai/gpt-5",
+      },
+    });
+
+    expect(auth.enabled).toBe(true);
+    expect(auth.authenticated).toBe(true);
+    expect(auth.preferredMode).toBe("apiKey");
+    expect(auth.settings).toEqual(expect.objectContaining({
+      enabled: true,
+      authMode: "apiKey",
+      defaultModel: "openai/gpt-5",
+      baseUrl: "https://openrouter.example/v1",
+    }));
+    expect(catalog.defaultModel).toBe("openai/gpt-5");
+    expect(catalog.models.some((entry) => entry.id === "openai/gpt-5" && entry.default === true)).toBe(true);
+  });
+
+  it("surfaces Groq API-key settings and model defaults through auth normalization", () => {
+    const auth = normalizeProviderAuthState("groq", {}, {
+      implicitAuth: false,
+      env: {
+        GROQ_API_KEY: "groq-test-key",
+      },
+      settings: {
+        BOSUN_PROVIDER_GROQ_ENABLED: "true",
+        BOSUN_PROVIDER_GROQ_MODEL: "llama-3.3-70b-versatile",
+        BOSUN_PROVIDER_GROQ_BASE_URL: "https://api.groq.example/openai/v1",
+      },
+    });
+    const catalog = getProviderModelCatalog("groq", {
+      settings: {
+        BOSUN_PROVIDER_GROQ_ENABLED: "true",
+        BOSUN_PROVIDER_GROQ_MODEL: "llama-3.3-70b-versatile",
+      },
+    });
+
+    expect(auth.enabled).toBe(true);
+    expect(auth.authenticated).toBe(true);
+    expect(auth.preferredMode).toBe("apiKey");
+    expect(auth.settings).toEqual(expect.objectContaining({
+      enabled: true,
+      authMode: "apiKey",
+      defaultModel: "llama-3.3-70b-versatile",
+      baseUrl: "https://api.groq.example/openai/v1",
+    }));
+    expect(catalog.defaultModel).toBe("llama-3.3-70b-versatile");
+    expect(catalog.models.some((entry) => entry.id === "llama-3.3-70b-versatile" && entry.default === true)).toBe(true);
+  });
+
+  it("surfaces Fireworks and Nebius API-key settings through auth normalization", () => {
+    const fireworksAuth = normalizeProviderAuthState("fireworks", {}, {
+      implicitAuth: false,
+      env: {
+        FIREWORKS_API_KEY: "fireworks-test-key",
+      },
+      settings: {
+        BOSUN_PROVIDER_FIREWORKS_ENABLED: "true",
+        BOSUN_PROVIDER_FIREWORKS_MODEL: "llama-v3p3-70b-instruct",
+        BOSUN_PROVIDER_FIREWORKS_BASE_URL: "https://fireworks.example/inference/v1",
+      },
+    });
+    const nebiusAuth = normalizeProviderAuthState("nebius", {}, {
+      implicitAuth: false,
+      env: {
+        NEBIUS_API_KEY: "nebius-test-key",
+      },
+      settings: {
+        BOSUN_PROVIDER_NEBIUS_ENABLED: "true",
+        BOSUN_PROVIDER_NEBIUS_MODEL: "meta-llama/Meta-Llama-3.1-70B-Instruct",
+        BOSUN_PROVIDER_NEBIUS_BASE_URL: "https://nebius.example/v1",
+      },
+    });
+
+    expect(fireworksAuth.settings).toEqual(expect.objectContaining({
+      enabled: true,
+      authMode: "apiKey",
+      defaultModel: "llama-v3p3-70b-instruct",
+      baseUrl: "https://fireworks.example/inference/v1",
+    }));
+    expect(nebiusAuth.settings).toEqual(expect.objectContaining({
+      enabled: true,
+      authMode: "apiKey",
+      defaultModel: "meta-llama/Meta-Llama-3.1-70B-Instruct",
+      baseUrl: "https://nebius.example/v1",
+    }));
+  });
+
   it("builds provider credential lifecycle state from the shared credential store", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "bosun-provider-cred-"));
     const credentialStore = new CredentialStore({ configDir: tempDir });

@@ -171,6 +171,11 @@ describe("provider kernel cutover", () => {
           enabled: true,
           defaultModel: "claude-opus-4.6",
         },
+        openrouter: {
+          enabled: true,
+          defaultModel: "openai/gpt-5",
+          baseUrl: "https://openrouter.example/v1",
+        },
       },
     });
 
@@ -183,6 +188,9 @@ describe("provider kernel cutover", () => {
       BOSUN_PROVIDER_AZURE_OPENAI_DEPLOYMENT: "gpt-5-prod",
       BOSUN_PROVIDER_COPILOT_OAUTH_ENABLED: true,
       BOSUN_PROVIDER_COPILOT_OAUTH_MODEL: "claude-opus-4.6",
+      BOSUN_PROVIDER_OPENROUTER_ENABLED: true,
+      BOSUN_PROVIDER_OPENROUTER_MODEL: "openai/gpt-5",
+      BOSUN_PROVIDER_OPENROUTER_BASE_URL: "https://openrouter.example/v1",
     });
   });
 
@@ -503,6 +511,67 @@ describe("provider kernel cutover", () => {
         preferredMode: "apiKey",
       }),
     }));
+  });
+
+  it("prefers the native adapter for harness-managed OpenRouter providers", async () => {
+    const openaiNativeExec = vi.fn(async (message, options = {}) => ({
+      finalResponse: `openrouter-native:${message}`,
+      providerId: options.provider || null,
+      sessionId: options.sessionId || "openrouter-session",
+      threadId: options.threadId || "openrouter-thread",
+      usage: {
+        inputTokens: 11,
+        outputTokens: 5,
+        totalTokens: 16,
+      },
+    }));
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: openaiNativeExec,
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "openrouter",
+          openrouter: {
+            enabled: true,
+            defaultModel: "openai/gpt-5",
+            baseUrl: "https://openrouter.example/v1",
+          },
+        },
+      },
+      env: {
+        OPENROUTER_API_KEY: "openrouter-secret",
+      },
+    });
+
+    const runtime = kernel.resolveRuntime("openrouter");
+    const session = kernel.createExecutionSession({
+      selectionId: "openrouter",
+      sessionId: "openrouter-provider-session",
+      threadId: "openrouter-provider-thread",
+      model: "openai/gpt-5",
+    });
+    const result = await session.runTurn("Stay on the Bosun-native OpenRouter path.");
+
+    expect(runtime.selection).toEqual(expect.objectContaining({
+      providerId: "openrouter",
+      adapterName: "openai-native",
+    }));
+    expect(runtime.providerEntry).toEqual(expect.objectContaining({
+      providerId: "openrouter",
+      adapterId: "openai-native",
+    }));
+    expect(result).toMatchObject({
+      finalResponse: "openrouter-native:USER: Stay on the Bosun-native OpenRouter path.",
+      providerId: "openrouter",
+      sessionId: "openrouter-provider-session",
+      threadId: "openrouter-provider-thread",
+    });
   });
 });
 

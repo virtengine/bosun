@@ -42,18 +42,6 @@ export const HOOK_DIR = ".bosun/hooks";
 export const LIBRARY_INDEX_DIR = ".bosun/library-index";
 export const AGENT_PROFILE_INDEX = "agent-profiles.json";
 export const SKILL_ENTRY_INDEX = "skills.json";
-export const LIBRARY_STABILITY_TIERS = Object.freeze(["verified", "experimental"]);
-export const LIBRARY_INSTALL_SURFACES = Object.freeze([
-  "curated",
-  "custom",
-  "autodiscovered",
-  "repository-import",
-]);
-export const CROSS_CLIENT_SKILL_DIRS = Object.freeze([
-  ".agents/skills",
-  ".github/skills",
-]);
-export const CROSS_CLIENT_SKILL_PLUGIN_ROOT = ".github/plugins";
 
 const UNRESOLVED_TEMPLATE_TOKEN_RE = /\{\{[^{}]+\}\}/;
 
@@ -65,52 +53,6 @@ const REPO_CONTEXT_TTL_MS = 120_000;
 
 export function hasUnresolvedTemplateTokens(value) {
   return UNRESOLVED_TEMPLATE_TOKEN_RE.test(String(value || ""));
-}
-
-export function normalizeLibraryStabilityTier(value, { fallback = null } = {}) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (normalized === "verified" || normalized === "stable" || normalized === "production") {
-    return "verified";
-  }
-  if (
-    normalized === "experimental"
-    || normalized === "unverified"
-    || normalized === "preview"
-    || normalized === "beta"
-  ) {
-    return "experimental";
-  }
-  return fallback;
-}
-
-export function normalizeLibraryInstallSurface(value, { fallback = null } = {}) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (LIBRARY_INSTALL_SURFACES.includes(normalized)) return normalized;
-  if (normalized === "imported" || normalized === "repository") return "repository-import";
-  return fallback;
-}
-
-function getEntryStabilityTier(entry, { fallback = null } = {}) {
-  return normalizeLibraryStabilityTier(entry?.stabilityTier ?? entry?.meta?.stabilityTier, { fallback });
-}
-
-function getEntryInstallSurface(entry, { fallback = null } = {}) {
-  return normalizeLibraryInstallSurface(entry?.installSurface ?? entry?.meta?.installSurface, { fallback });
-}
-
-function normalizeManifestEntry(entry) {
-  if (!entry || typeof entry !== "object") return entry;
-  const stabilityTier = getEntryStabilityTier(entry);
-  const installSurface = getEntryInstallSurface(entry);
-  const meta = { ...(entry.meta || {}) };
-  if (stabilityTier) meta.stabilityTier = stabilityTier;
-  if (installSurface) meta.installSurface = installSurface;
-  return {
-    ...entry,
-    ...(stabilityTier ? { stabilityTier } : {}),
-    ...(installSurface ? { installSurface } : {}),
-    meta,
-  };
 }
 
 /**
@@ -354,224 +296,6 @@ function getFileMtimeMs(filePath) {
   } catch {
     return 0;
   }
-}
-
-function safeReadText(filePath) {
-  if (!filePath || !existsSync(filePath)) return "";
-  try {
-    return readFileSync(filePath, "utf8");
-  } catch {
-    return "";
-  }
-}
-
-function normalizeRelativePathForCatalog(rootDir, filePath) {
-  return relative(resolve(rootDir || getBosunHomeDir()), resolve(filePath || ""))
-    .replace(/\\/g, "/")
-    .replace(/^\.\//, "");
-}
-
-function extractSkillCatalogMetadata(filePath) {
-  const content = safeReadText(filePath);
-  if (!content) {
-    return {
-      title: "",
-      description: "",
-      tags: [],
-      important: false,
-      contentLength: 0,
-      safety: evaluateMarkdownSafety("", { sourcePath: filePath }, {}),
-    };
-  }
-
-  const titleMatch = /^#\s+(?:Skill:\s*)?(.+)/mi.exec(content);
-  const descriptionMatch = /^#.+\r?\n+(?:>\s*)?(.+)/m.exec(content);
-  const tagsMatch = /<!--\s*tags:\s*(.+?)\s*-->/i.exec(content);
-  const importantMatch = /<!--\s*(?:important|eager)\s*:\s*(true|false|yes|no|on|off|1|0)\s*-->/i.exec(content);
-  const tags = tagsMatch
-    ? tagsMatch[1].split(/[,\s]+/).map((value) => value.trim().toLowerCase()).filter(Boolean)
-    : [];
-  const importantRaw = String(importantMatch?.[1] || "").trim().toLowerCase();
-  const important = importantRaw === "true" || importantRaw === "yes" || importantRaw === "on" || importantRaw === "1";
-  return {
-    title: String(titleMatch?.[1] || "").trim(),
-    description: String(descriptionMatch?.[1] || "").trim().slice(0, 220),
-    tags: uniqueStrings(tags),
-    important,
-    contentLength: content.length,
-    safety: evaluateMarkdownSafety(content, { sourcePath: filePath }, {}),
-  };
-}
-
-function listLocalSkillDiscoveryDirectories(rootDir) {
-  const root = resolve(rootDir || getBosunHomeDir());
-  const out = [
-    {
-      sourceKind: "workspace",
-      dir: resolve(root, SKILL_DIR),
-      relDir: SKILL_DIR.replace(/\\/g, "/"),
-    },
-    ...CROSS_CLIENT_SKILL_DIRS.map((relDir) => ({
-      sourceKind: "cross-client",
-      dir: resolve(root, relDir),
-      relDir,
-    })),
-  ];
-
-  const pluginRoot = resolve(root, CROSS_CLIENT_SKILL_PLUGIN_ROOT);
-  try {
-    const entries = readdirSync(pluginRoot, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const relDir = `${CROSS_CLIENT_SKILL_PLUGIN_ROOT}/${entry.name}/skills`;
-      out.push({
-        sourceKind: "cross-client-plugin",
-        dir: resolve(root, relDir),
-        relDir,
-      });
-    }
-  } catch {
-    // plugin root absent is fine
-  }
-
-  return out.filter((entry) => existsSync(entry.dir));
-}
-
-function collectLocalSkillCatalogFiles(rootDir) {
-  const files = [];
-  for (const source of listLocalSkillDiscoveryDirectories(rootDir)) {
-    let entries = [];
-    try {
-      entries = readdirSync(source.dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isFile() && /\.md$/i.test(entry.name) && entry.name.toLowerCase() !== "index.json") {
-        files.push({
-          sourceKind: source.sourceKind,
-          filePath: resolve(source.dir, entry.name),
-          relPath: `${source.relDir}/${entry.name}`.replace(/\\/g, "/"),
-        });
-        continue;
-      }
-      if (!entry.isDirectory()) continue;
-      const skillPath = resolve(source.dir, entry.name, "SKILL.md");
-      if (!existsSync(skillPath)) continue;
-      files.push({
-        sourceKind: source.sourceKind,
-        filePath: skillPath,
-        relPath: `${source.relDir}/${entry.name}/SKILL.md`.replace(/\\/g, "/"),
-      });
-    }
-  }
-  return files;
-}
-
-function resolveConfiguredCrossClientSkillTrustMode(options = {}) {
-  const raw = String(
-    options?.crossClientSkillTrustMode
-    || options?.trustMode
-    || process.env.BOSUN_CROSS_CLIENT_SKILLS_TRUST_MODE
-    || "",
-  ).trim().toLowerCase();
-  if (raw === "allow" || raw === "trusted" || raw === "enabled") return "allow";
-  if (raw === "disabled" || raw === "deny" || raw === "off") return "disabled";
-  return "catalog-only";
-}
-
-function tryReadRepositoryRemoteUrl(rootDir) {
-  const cwd = resolve(rootDir || getBosunHomeDir());
-  try {
-    return String(execSync("git config --get remote.origin.url", {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }) || "").trim();
-  } catch {
-    return "";
-  }
-}
-
-export function resolveRepositorySkillTrust(rootDir, options = {}) {
-  const mode = resolveConfiguredCrossClientSkillTrustMode(options);
-  const repoUrl = String(options?.repoUrl || tryReadRepositoryRemoteUrl(rootDir) || "").trim();
-  const repoTrust = repoUrl
-    ? computeWellKnownSourceTrust({ repoUrl }, {}, options)
-    : null;
-  const allowCrossClientExpansion =
-    mode === "allow"
-    || (mode !== "disabled" && repoTrust?.enabled === true && Number(repoTrust?.score || 0) >= 85);
-  const catalogEnabled = mode !== "disabled";
-  const reason = allowCrossClientExpansion
-    ? (mode === "allow" ? "operator-trusted" : "trusted-upstream")
-    : (catalogEnabled ? "catalog-only" : "disabled");
-  return {
-    mode,
-    repoUrl,
-    repoTrust,
-    catalogEnabled,
-    allowCrossClientExpansion,
-    reason,
-  };
-}
-
-export function discoverLocalSkillCatalog(rootDir, options = {}) {
-  const root = resolve(rootDir || getBosunHomeDir());
-  const trust = resolveRepositorySkillTrust(root, options);
-  const entries = [];
-  const blockedEntries = [];
-  const takenIds = new Set();
-
-  for (const file of collectLocalSkillCatalogFiles(root)) {
-    const metadata = extractSkillCatalogMetadata(file.filePath);
-    const relPath = normalizeRelativePathForCatalog(root, file.filePath) || file.relPath;
-    const sourceKind = file.sourceKind;
-    const isCrossClient = sourceKind !== "workspace";
-    const allowed = !isCrossClient || trust.allowCrossClientExpansion;
-    const catalogOnly = isCrossClient && !allowed;
-    const id = ensureUniqueId(
-      slugify(relPath.replace(/\/SKILL\.md$/i, "").replace(/\.md$/i, "")) || slugify(metadata.title) || `skill-${entries.length + blockedEntries.length + 1}`,
-      takenIds,
-    );
-
-    if (metadata.safety?.blocked) {
-      blockedEntries.push({
-        id,
-        title: metadata.title || basename(relPath).replace(/\.md$/i, ""),
-        sourceKind,
-        sourcePath: relPath,
-        trustState: catalogOnly ? "catalog-only" : "blocked",
-        reasons: metadata.safety?.safety?.reasons || metadata.safety?.reasons || [],
-      });
-      continue;
-    }
-
-    entries.push({
-      id,
-      type: "skill",
-      name: metadata.title || basename(relPath, ".md"),
-      title: metadata.title || basename(relPath, ".md"),
-      description: metadata.description || "",
-      tags: metadata.tags,
-      important: metadata.important === true,
-      sourceKind,
-      sourcePath: relPath,
-      catalogOnly,
-      trusted: allowed,
-      trustState: allowed ? "trusted" : "catalog-only",
-      trustReason: isCrossClient ? trust.reason : "workspace",
-      updatedAt: statSync(file.filePath).mtime.toISOString(),
-      contentLength: metadata.contentLength,
-    });
-  }
-
-  return {
-    generated: nowISO(),
-    trust,
-    entries,
-    blockedEntries,
-  };
 }
 
 // ── Token estimation & similarity utilities ──────────────────────────────────
@@ -1387,6 +1111,122 @@ export function listIndexedSkillEntries(rootDir, options = {}) {
   return Array.isArray(index?.skills) ? index.skills : [];
 }
 
+/**
+ * Scan the workspace (and global bosun home) skill directories and return
+ * discovered skill entries split into trusted/catalog-only and blocked lists.
+ *
+ * @param {string} workspaceRoot - Absolute path to the workspace root
+ * @returns {{ entries: object[], blockedEntries: object[] }}
+ */
+export function discoverLocalSkillCatalog(workspaceRoot) {
+  const root = resolve(workspaceRoot || getBosunHomeDir());
+  const resolvedBosunHome = resolve(getBosunHomeDir());
+
+  // Directories to scan: workspace .bosun/skills first, then global if different
+  const scanDirs = [];
+  const workspaceSkillDir = resolve(root, ".bosun", "skills");
+  scanDirs.push({ dir: workspaceSkillDir, sourceKind: "workspace", rootRef: root });
+
+  if (resolvedBosunHome !== root) {
+    const globalSkillDir = resolve(resolvedBosunHome, ".bosun", "skills");
+    if (globalSkillDir !== workspaceSkillDir) {
+      scanDirs.push({ dir: globalSkillDir, sourceKind: "global", rootRef: resolvedBosunHome });
+    }
+  }
+
+  const entries = [];
+  const blockedEntries = [];
+  const seenIds = new Set();
+
+  for (const { dir, sourceKind, rootRef } of scanDirs) {
+    if (!existsSync(dir)) continue;
+
+    let files = [];
+    try {
+      files = readdirSync(dir)
+        .filter((name) => /\.md$/i.test(name))
+        .sort((a, b) => a.localeCompare(b));
+    } catch {
+      continue;
+    }
+
+    for (const fileName of files) {
+      const fullPath = resolve(dir, fileName);
+      let content = "";
+      try {
+        content = readFileSync(fullPath, "utf8");
+      } catch {
+        continue;
+      }
+
+      const relPath = relative(rootRef, fullPath).replace(/\\/g, "/");
+      let updatedAt = nowISO();
+      try {
+        updatedAt = new Date(statSync(fullPath).mtimeMs).toISOString();
+      } catch { /* ignore */ }
+      const contentLength = content.length;
+
+      const { attrs } = parseSimpleFrontmatter(content);
+      const h1Match = content.match(/^#\s+(.+)$/m);
+      const title = String(
+        getFrontmatterValue(attrs, ["title", "name"])
+        || (h1Match ? h1Match[1].trim() : "")
+        || basename(fileName, ".md"),
+      ).trim();
+      const tags = parseJsonishArray(getFrontmatterValue(attrs, ["tags"]) || "");
+      const important = Boolean(getFrontmatterValue(attrs, ["important"]));
+      const baseId = slugify(basename(fileName, ".md"));
+      const id = ensureUniqueId(baseId, seenIds);
+
+      const safetyResult = evaluateMarkdownSafety(content, { path: relPath, sourceKind }, {});
+
+      if (safetyResult.blocked) {
+        blockedEntries.push({
+          id,
+          sourcePath: relPath,
+          sourceKind,
+          trustState: "blocked",
+          reasons: Array.isArray(safetyResult.safety?.reasons) ? safetyResult.safety.reasons : [],
+        });
+        try {
+          recordMarkdownSafetyAuditEvent({
+            sourcePath: relPath,
+            sourceKind,
+            reasons: safetyResult.safety?.reasons || [],
+            trustState: "blocked",
+          }, { rootDir: rootRef });
+        } catch { /* best-effort */ }
+        continue;
+      }
+
+      const catalogOnly = (safetyResult.safety?.score ?? 0) > 0;
+      const trusted = !catalogOnly;
+      const trustState = catalogOnly ? "catalog-only" : "trusted";
+      const trustReason = catalogOnly
+        ? uniqueStrings(safetyResult.safety?.reasons || []).join("; ")
+        : "";
+
+      entries.push({
+        id,
+        name: title,
+        title,
+        tags,
+        important,
+        sourcePath: relPath,
+        sourceKind,
+        updatedAt,
+        catalogOnly,
+        trusted,
+        trustState,
+        trustReason,
+        contentLength,
+      });
+    }
+  }
+
+  return { entries, blockedEntries };
+}
+
 export function resolveLibraryPlan(rootDir, criteria = {}, opts = {}) {
   const match = matchAgentProfiles(rootDir, criteria, opts);
   const best = match?.best || null;
@@ -1487,12 +1327,7 @@ export function getManifestPath(rootDir) {
 export function loadManifest(rootDir) {
   const manifestPath = getManifestPath(rootDir);
   const data = safeReadJson(manifestPath);
-  if (data && Array.isArray(data.entries)) {
-    return {
-      ...data,
-      entries: data.entries.map((entry) => normalizeManifestEntry(entry)),
-    };
-  }
+  if (data && Array.isArray(data.entries)) return data;
   return { entries: [], generated: nowISO() };
 }
 
@@ -1530,15 +1365,7 @@ function extForType(type) {
 /**
  * List all entries from the manifest, optionally filtered.
  */
-export function listEntries(rootDir, {
-  type,
-  tags,
-  scope,
-  search,
-  stabilityTier,
-  includeExperimental = true,
-  installSurface,
-} = {}) {
+export function listEntries(rootDir, { type, tags, scope, search } = {}) {
   const { entries } = loadManifest(rootDir);
   let filtered = entries;
   if (type) filtered = filtered.filter((e) => e.type === type);
@@ -1556,22 +1383,6 @@ export function listEntries(rootDir, {
         e.id.includes(q) ||
         e.tags.some((t) => t.includes(q)),
     );
-  }
-  const normalizedTier = normalizeLibraryStabilityTier(stabilityTier);
-  if (normalizedTier) {
-    filtered = filtered.filter((e) => getEntryStabilityTier(e) === normalizedTier);
-  } else if (includeExperimental === false) {
-    filtered = filtered.filter((e) => getEntryStabilityTier(e, { fallback: "experimental" }) === "verified");
-  }
-  if (installSurface) {
-    const requested = new Set(
-      (Array.isArray(installSurface) ? installSurface : [installSurface])
-        .map((surface) => normalizeLibraryInstallSurface(surface))
-        .filter(Boolean),
-    );
-    if (requested.size > 0) {
-      filtered = filtered.filter((e) => requested.has(getEntryInstallSurface(e)));
-    }
   }
   return filtered;
 }
@@ -1630,19 +1441,8 @@ export function upsertEntry(rootDir, data, content, options = {}) {
   const id = data.id || slugify(data.name);
   const existingIdx = manifest.entries.findIndex((e) => e.id === id);
   const existing = existingIdx >= 0 ? manifest.entries[existingIdx] : null;
-  const stabilityTier = normalizeLibraryStabilityTier(
-    data.stabilityTier ?? data.meta?.stabilityTier ?? existing?.stabilityTier ?? existing?.meta?.stabilityTier,
-  );
-  const installSurface = normalizeLibraryInstallSurface(
-    data.installSurface ?? data.meta?.installSurface ?? existing?.installSurface ?? existing?.meta?.installSurface,
-  );
-  const meta = { ...(existing?.meta || {}), ...(data.meta || {}) };
-  if (stabilityTier) meta.stabilityTier = stabilityTier;
-  else delete meta.stabilityTier;
-  if (installSurface) meta.installSurface = installSurface;
-  else delete meta.installSurface;
 
-  const entry = normalizeManifestEntry({
+  const entry = {
     id,
     type: data.type,
     name: data.name,
@@ -1651,12 +1451,10 @@ export function upsertEntry(rootDir, data, content, options = {}) {
     tags: data.tags || existing?.tags || [],
     scope: data.scope || existing?.scope || "global",
     workspace: data.workspace ?? existing?.workspace ?? null,
-    meta,
-    ...(stabilityTier ? { stabilityTier } : {}),
-    ...(installSurface ? { installSurface } : {}),
+    meta: { ...(existing?.meta || {}), ...(data.meta || {}) },
     createdAt: existing?.createdAt || nowISO(),
     updatedAt: nowISO(),
-  });
+  };
 
   // Write content file
   if (content !== undefined) {
@@ -2464,8 +2262,6 @@ export function syncAutoDiscoveredLibraryEntries(rootDir) {
       url: mcp.transport === "url" ? mcp.url : undefined,
       env: Object.keys(mcp.env || {}).length ? mcp.env : undefined,
       source: "autodiscovered",
-      stabilityTier: "experimental",
-      installSurface: "autodiscovered",
       tags: ["autodiscovered", "codex-config", "mcp"],
     };
 
@@ -2475,11 +2271,7 @@ export function syncAutoDiscoveredLibraryEntries(rootDir) {
       name: mcp.name,
       description: content.description,
       tags: uniqueStrings(["mcp", "autodiscovered", "codex-config"]),
-      stabilityTier: "experimental",
-      installSurface: "autodiscovered",
       meta: {
-        stabilityTier: "experimental",
-        installSurface: "autodiscovered",
         autoSync: {
           kind: "codex-mcp-config",
           sourcePath: mcp.sourcePath,
@@ -3021,8 +2813,6 @@ function importRepositoryMcpEntries(rootDir, checkoutDir, context) {
       url: mcp.transport === "url" ? mcp.url : undefined,
       env: Object.keys(mcp.env || {}).length ? mcp.env : undefined,
       source: "imported",
-      stabilityTier: "experimental",
-      installSurface: "repository-import",
       tags: ["imported", "mcp", sourceId || "external"],
     };
     upsertEntry(rootDir, {
@@ -3031,11 +2821,7 @@ function importRepositoryMcpEntries(rootDir, checkoutDir, context) {
       name: mcp.name,
       description: content.description,
       tags: uniqueStrings(["imported", "mcp", sourceId || "external"]),
-      stabilityTier: "experimental",
-      installSurface: "repository-import",
       meta: {
-        stabilityTier: "experimental",
-        installSurface: "repository-import",
         sourceId: sourceId || null,
         repoUrl,
         branch,

@@ -70,6 +70,68 @@ function applyRuntimeOptions(withRuntimeOptions, adapterName, options = {}) {
   return resolved && typeof resolved === "object" ? resolved : options;
 }
 
+function createLazyNativeAdapterEntry(definition, withRuntimeOptions) {
+  const {
+    adapterName,
+    name,
+    provider,
+    displayName,
+    acceptsTurnPayload = false,
+    persistent = false,
+    getAdapter,
+    sdkCommands = null,
+    execSdkCommand = null,
+  } = definition;
+  const entry = {
+    name,
+    provider,
+    displayName,
+    ...(acceptsTurnPayload ? { acceptsTurnPayload: true } : {}),
+    exec(msg, execOptions) {
+      const adapter = getAdapter();
+      return adapter.exec(
+        msg,
+        applyRuntimeOptions(withRuntimeOptions, adapterName, {
+          ...(persistent ? { persistent: true } : {}),
+          ...(execOptions || {}),
+        }),
+      );
+    },
+    isBusy(...args) {
+      return getAdapter().isBusy(...args);
+    },
+    getInfo(...args) {
+      return getAdapter().getInfo(...args);
+    },
+    reset(...args) {
+      return getAdapter().reset(...args);
+    },
+    async init(...args) {
+      return await getAdapter().init(...args);
+    },
+    listSessions(...args) {
+      return getAdapter().listSessions(...args);
+    },
+    getSessionMessages(...args) {
+      return getAdapter().getSessionMessages(...args);
+    },
+  };
+  if (Array.isArray(sdkCommands) && sdkCommands.length > 0) {
+    entry.sdkCommands = sdkCommands.slice();
+  }
+  if (typeof execSdkCommand === "function") {
+    entry.execSdkCommand = (command, args, commandOptions = {}) => execSdkCommand({
+      command,
+      args,
+      commandOptions,
+      getAdapter,
+      withRuntimeOptions,
+      adapterName,
+    });
+  }
+  return entry;
+}
+
 export function createShellAdapterRegistry(options = {}) {
   const withRuntimeOptions =
     typeof options.withRuntimeOptions === "function"
@@ -77,93 +139,68 @@ export function createShellAdapterRegistry(options = {}) {
       : passthroughRuntimeOptions;
 
   return {
-    "anthropic-native": {
-      name: anthropicNativeAdapter.name,
-      provider: anthropicNativeAdapter.provider,
-      displayName: anthropicNativeAdapter.displayName,
-      acceptsTurnPayload: anthropicNativeAdapter.acceptsTurnPayload === true,
-      exec: (msg, execOptions) => anthropicNativeAdapter.exec(
-        msg,
-        applyRuntimeOptions(withRuntimeOptions, "anthropic-native", execOptions || {}),
-      ),
-      isBusy: anthropicNativeAdapter.isBusy,
-      getInfo: (sessionId) => anthropicNativeAdapter.getInfo(sessionId),
-      reset: anthropicNativeAdapter.reset,
-      init: async () => anthropicNativeAdapter.init(),
-      listSessions: anthropicNativeAdapter.listSessions,
-      getSessionMessages: anthropicNativeAdapter.getSessionMessages,
-    },
-    "gemini-native": {
-      name: geminiNativeAdapter.name,
-      provider: geminiNativeAdapter.provider,
-      displayName: geminiNativeAdapter.displayName,
-      acceptsTurnPayload: geminiNativeAdapter.acceptsTurnPayload === true,
-      exec: (msg, execOptions) => geminiNativeAdapter.exec(
-        msg,
-        applyRuntimeOptions(withRuntimeOptions, "gemini-native", execOptions || {}),
-      ),
-      isBusy: geminiNativeAdapter.isBusy,
-      getInfo: (sessionId) => geminiNativeAdapter.getInfo(sessionId),
-      reset: geminiNativeAdapter.reset,
-      init: async () => geminiNativeAdapter.init(),
-      listSessions: geminiNativeAdapter.listSessions,
-      getSessionMessages: geminiNativeAdapter.getSessionMessages,
-    },
-    "openai-native": {
-      name: openaiNativeAdapter.name,
-      provider: openaiNativeAdapter.provider,
-      displayName: openaiNativeAdapter.displayName,
-      exec: (msg, execOptions) => openaiNativeAdapter.exec(
-        msg,
-        applyRuntimeOptions(withRuntimeOptions, "openai-native", {
-          persistent: true,
-          ...execOptions,
-        }),
-      ),
-      isBusy: openaiNativeAdapter.isBusy,
-      getInfo: () => openaiNativeAdapter.getInfo(),
-      reset: openaiNativeAdapter.reset,
-      init: async () => openaiNativeAdapter.init(),
-      listSessions: openaiNativeAdapter.listSessions,
-      getSessionMessages: openaiNativeAdapter.getSessionMessages,
+    "anthropic-native": createLazyNativeAdapterEntry({
+      adapterName: "anthropic-native",
+      name: "anthropic-native",
+      provider: "ANTHROPIC_NATIVE",
+      displayName: "Anthropic Native",
+      acceptsTurnPayload: true,
+      getAdapter: () => anthropicNativeAdapter,
+    }, withRuntimeOptions),
+    "gemini-native": createLazyNativeAdapterEntry({
+      adapterName: "gemini-native",
+      name: "gemini-native",
+      provider: "GEMINI_NATIVE",
+      displayName: "Gemini Native",
+      acceptsTurnPayload: true,
+      getAdapter: () => geminiNativeAdapter,
+    }, withRuntimeOptions),
+    "openai-native": createLazyNativeAdapterEntry({
+      adapterName: "openai-native",
+      name: "openai-native",
+      provider: "OPENAI_NATIVE",
+      displayName: "OpenAI Native",
+      persistent: true,
+      getAdapter: () => openaiNativeAdapter,
       sdkCommands: ["/compact", "/clear"],
-      async execSdkCommand(command, args, commandOptions = {}) {
+      execSdkCommand: ({ command, args, commandOptions = {}, getAdapter, withRuntimeOptions, adapterName }) => {
         const cmd = command.startsWith("/") ? command : `/${command}`;
+        const adapter = getAdapter();
         if (cmd === "/clear") {
-          openaiNativeAdapter.reset({ sessionId: commandOptions.sessionId || null });
+          adapter.reset({ sessionId: commandOptions.sessionId || null });
           return "Session cleared.";
         }
         const fullCmd = args ? `${cmd} ${args}` : cmd;
-        return openaiNativeAdapter.exec(
+        return adapter.exec(
           fullCmd,
-          applyRuntimeOptions(withRuntimeOptions, "openai-native", {
+          applyRuntimeOptions(withRuntimeOptions, adapterName, {
             persistent: true,
             cwd: commandOptions.cwd,
             sessionId: commandOptions.sessionId || null,
           }),
         );
       },
-    },
+    }, withRuntimeOptions),
     "codex-sdk": {
       name: "codex-sdk",
       provider: "CODEX",
       displayName: "Codex",
       exec: (msg, execOptions) => execCodexPrompt(msg, { persistent: true, ...execOptions }),
-      steer: steerCodexPrompt,
-      isBusy: isCodexBusy,
+      steer: (message) => steerCodexPrompt(message),
+      isBusy: () => isCodexBusy(),
       getInfo: () => {
         const info = getThreadInfo();
         return { ...info, sessionId: info.sessionId || info.threadId };
       },
-      reset: resetThread,
+      reset: () => resetThread(),
       init: async () => {
         await initCodexShell();
         return true;
       },
-      getSessionId: getCodexSessionId,
-      listSessions: listCodexSessions,
-      switchSession: switchCodexSession,
-      createSession: createCodexSession,
+      getSessionId: () => getCodexSessionId(),
+      listSessions: () => listCodexSessions(),
+      switchSession: (sessionId) => switchCodexSession(sessionId),
+      createSession: (sessionId) => createCodexSession(sessionId),
       sdkCommands: ["/compact", "/status", "/context", "/mcp", "/model", "/clear"],
       async execSdkCommand(command, args, commandOptions = {}) {
         const cmd = command.startsWith("/") ? command : `/${command}`;
@@ -184,10 +221,10 @@ export function createShellAdapterRegistry(options = {}) {
       provider: "COPILOT",
       displayName: "Copilot",
       exec: (msg, execOptions) => execCopilotPrompt(msg, { persistent: true, ...execOptions }),
-      steer: steerCopilotPrompt,
-      isBusy: isCopilotBusy,
+      steer: (message) => steerCopilotPrompt(message),
+      isBusy: () => isCopilotBusy(),
       getInfo: () => getCopilotSessionInfo(),
-      reset: resetCopilotSession,
+      reset: () => resetCopilotSession(),
       init: async () => initCopilotShell(),
       sdkCommands: ["/status", "/model", "/clear"],
       async execSdkCommand(command, args, commandOptions = {}) {
@@ -208,11 +245,11 @@ export function createShellAdapterRegistry(options = {}) {
       name: "claude-sdk",
       provider: "CLAUDE",
       displayName: "Claude",
-      exec: execClaudePrompt,
-      steer: steerClaudePrompt,
-      isBusy: isClaudeBusy,
+      exec: (msg, execOptions) => execClaudePrompt(msg, execOptions),
+      steer: (message) => steerClaudePrompt(message),
+      isBusy: () => isClaudeBusy(),
       getInfo: () => getClaudeSessionInfo(),
-      reset: resetClaudeSession,
+      reset: () => resetClaudeSession(),
       init: async () => {
         await initClaudeShell();
         return true;
@@ -236,15 +273,15 @@ export function createShellAdapterRegistry(options = {}) {
       provider: "GEMINI",
       displayName: "Gemini",
       exec: (msg, execOptions) => execGeminiPrompt(msg, { persistent: true, ...execOptions }),
-      steer: steerGeminiPrompt,
-      isBusy: isGeminiBusy,
+      steer: (message) => steerGeminiPrompt(message),
+      isBusy: () => isGeminiBusy(),
       getInfo: () => getGeminiSessionInfo(),
-      reset: resetGeminiSession,
+      reset: () => resetGeminiSession(),
       init: async () => initGeminiShell(),
-      getSessionId: getGeminiSessionId,
-      listSessions: listGeminiSessions,
-      switchSession: switchGeminiSession,
-      createSession: createGeminiSession,
+      getSessionId: () => getGeminiSessionId(),
+      listSessions: () => listGeminiSessions(),
+      switchSession: (sessionId) => switchGeminiSession(sessionId),
+      createSession: (sessionId) => createGeminiSession(sessionId),
       sdkCommands: ["/status", "/model", "/clear"],
       async execSdkCommand(command, args, commandOptions = {}) {
         const cmd = command.startsWith("/") ? command : `/${command}`;
@@ -273,17 +310,17 @@ export function createShellAdapterRegistry(options = {}) {
         }),
       ),
       steer: (message) => steerOpencodePrompt(message, { expectedPrimary: "opencode" }),
-      isBusy: isOpencodeBusy,
+      isBusy: () => isOpencodeBusy(),
       getInfo: () => getOpencodeSessionInfo(),
-      reset: resetOpencodeSession,
+      reset: () => resetOpencodeSession(),
       init: async () => {
         await initOpencodeShell();
         return true;
       },
-      getSessionId: getOpencodeSessionId,
-      listSessions: listOpencodeSessions,
-      switchSession: switchOpencodeSession,
-      createSession: createOpencodeSession,
+      getSessionId: () => getOpencodeSessionId(),
+      listSessions: () => listOpencodeSessions(),
+      switchSession: (sessionId) => switchOpencodeSession(sessionId),
+      createSession: (sessionId) => createOpencodeSession(sessionId),
       sdkCommands: ["/status", "/model", "/sessions", "/clear"],
       async execSdkCommand(command, args, commandOptions = {}) {
         const cmd = command.startsWith("/") ? command : `/${command}`;

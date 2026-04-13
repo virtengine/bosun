@@ -1644,6 +1644,17 @@ function buildSetupHarnessProviderSummary(sourceEnv = process.env, settings = {}
     "anthropic-messages",
     "claude-subscription-shim",
     "copilot-oauth",
+    "openrouter",
+    "perplexity",
+    "deepinfra",
+    "groq",
+    "together",
+    "xai",
+    "fireworks",
+    "cerebras",
+    "sambanova",
+    "nebius",
+    "gemini-generate-content",
   ];
   const providers = providerIds.map((providerId) => normalizeProviderAuthState(providerId, {}, {
     env: sourceEnv,
@@ -1656,6 +1667,17 @@ function buildSetupHarnessProviderSummary(sourceEnv = process.env, settings = {}
     || providers.find((entry) => entry.providerId === "claude-subscription-shim" && entry.authenticated)
     || providers.find((entry) => entry.providerId === "copilot-oauth" && entry.authenticated)
     || providers.find((entry) => entry.providerId === "anthropic-messages" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "openrouter" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "perplexity" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "deepinfra" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "groq" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "together" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "xai" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "fireworks" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "cerebras" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "sambanova" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "nebius" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "gemini-generate-content" && entry.authenticated)
     || null;
   return {
     providers,

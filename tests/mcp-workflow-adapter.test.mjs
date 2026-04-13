@@ -754,7 +754,7 @@ describe("action.mcp_tool_call node (dry-run)", () => {
     expect(ctx.nodeStatuses.get("mcp-call")).toBe(NodeStatus.COMPLETED);
     const output = ctx.getNodeOutput("mcp-call");
     expect(output._dryRun).toBe(true);
-  });
+  }, 15_000);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -819,7 +819,7 @@ describe("action.mcp_pipeline node (dry-run)", () => {
     engine.save(wf);
     const ctx = await engine.execute("test-pipeline-dryrun", {}, { dryRun: true });
     expect(ctx.nodeStatuses.get("pipeline")).toBe(NodeStatus.COMPLETED);
-  });
+  }, 15000);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

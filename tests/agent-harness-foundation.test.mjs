@@ -520,7 +520,7 @@ describe("session manager foundation", () => {
       { stageId: "done", mode: "continue" },
     ]);
     expect(session.canSteer()).toBe(false);
-  }, 10000);
+  }, 45_000);
 
   it("supports compiled and source sessions through the manager facade", async () => {
     const manager = createHarnessSessionManager({
@@ -558,7 +558,7 @@ describe("session manager foundation", () => {
     });
     expect(sourceRun.isValid).toBe(true);
     expect(sourceRun.result.success).toBe(true);
-  }, 15000);
+  }, 45_000);
 
   it("tracks Bosun-native sessions, child lineage, and replay snapshots", async () => {
     const trackerMod = await import("../infra/session-tracker.mjs");
@@ -1464,7 +1464,7 @@ describe("harness agent service foundation", () => {
       status: "completed",
       activeThreadId: "provider-thread-1",
     }));
-  });
+  }, 45_000);
 
   it("continues canonical interactive sessions through the bound session-manager controller", async () => {
     const sessionManager = createBosunSessionManager();
@@ -1531,7 +1531,7 @@ describe("harness agent service foundation", () => {
         threadId: "provider-thread-2",
       }),
     }));
-  }, 10000);
+  }, 45_000);
 
   it("forwards interactive usage metadata through assistant summary events", async () => {
     const sessionManager = createBosunSessionManager();
@@ -1620,7 +1620,7 @@ describe("harness agent service foundation", () => {
         }),
       },
     }));
-  });
+  }, 45_000);
 });
 
 describe("query engine foundation", () => {

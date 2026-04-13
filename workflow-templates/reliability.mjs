@@ -814,12 +814,12 @@ export const TASK_REPAIR_WORKTREE_TEMPLATE = {
       function: "tasks.update",
       args: {
         taskId: "{{taskId}}",
+        metaDeleteKeys: ["autoRecovery", "worktreeFailure", "blockedReason"],
         fields: {
           cooldownUntil: null,
           blockedReason: null,
           blockedContext: null,
           repairState: "completed",
-          meta: "{{(() => { const current = ($data?.meta && typeof $data.meta === 'object') ? $data.meta : {}; const next = { ...current }; delete next.autoRecovery; delete next.worktreeFailure; delete next.blockedReason; return next; })()}}",
         },
       },
     }, { x: 250, y: 1510 }),
@@ -856,10 +856,10 @@ export const TASK_REPAIR_WORKTREE_TEMPLATE = {
       function: "tasks.update",
       args: {
         taskId: "{{taskId}}",
+        metaDeleteKeys: ["autoRecovery", "worktreeFailure", "blockedReason"],
         fields: {
           cooldownUntil: null,
           blockedReason: null,
-          meta: "{{(() => { const current = ($data?.meta && typeof $data.meta === 'object') ? $data.meta : {}; const next = { ...current }; delete next.autoRecovery; delete next.worktreeFailure; delete next.blockedReason; return next; })()}}",
         },
       },
     }, { x: 560, y: 1440 }),
@@ -1617,9 +1617,9 @@ export const RECOVER_BLOCKED_TASK_TEMPLATE = {
       function: "tasks.update",
       args: {
         taskId: "{{$data?.item?.taskId || $data?.taskId || ''}}",
+        metaDeleteKeys: ["autoRecovery", "worktreeFailure", "consecutiveRecoveryFailures", "blockedReason"],
         fields: {
           blockedReason: null,
-          meta: "{{(() => { const cur = Object.assign({}, $data?.item?.meta || $data?.meta || {}); delete cur.autoRecovery; delete cur.worktreeFailure; delete cur.consecutiveRecoveryFailures; delete cur.blockedReason; return cur; })()}}",
         },
       },
     }, { x: 250, y: 940 }),
@@ -1725,6 +1725,26 @@ export const RECOVER_BLOCKED_WORKTREES_TEMPLATE = {
                 const worktreePath = t?.worktreePath || t?.metadata?.worktreePath || meta?.worktreePath || worktreeFailure?.worktreePath || null;
                 const baseBranch = t?.baseBranch || t?.metadata?.baseBranch || meta?.baseBranch || worktreeFailure?.baseBranch || null;
                 const defaultTargetBranch = t?.defaultTargetBranch || t?.metadata?.defaultTargetBranch || meta?.defaultTargetBranch || worktreeFailure?.defaultTargetBranch || null;
+                const minimalMeta = {};
+                if (worktreeFailure && typeof worktreeFailure === "object") {
+                  minimalMeta.worktreeFailure = {
+                    branch: worktreeFailure?.branch || branch || null,
+                    repoRoot: worktreeFailure?.repoRoot || repoRoot || null,
+                    worktreePath: worktreeFailure?.worktreePath || worktreePath || null,
+                    baseBranch: worktreeFailure?.baseBranch || baseBranch || null,
+                    defaultTargetBranch: worktreeFailure?.defaultTargetBranch || defaultTargetBranch || null,
+                  };
+                }
+                if (typeof meta?.blockedReason === "string" && meta.blockedReason.trim()) {
+                  minimalMeta.blockedReason = meta.blockedReason.trim();
+                }
+                if (meta?.autoRecovery && typeof meta.autoRecovery === "object") {
+                  minimalMeta.autoRecovery = {
+                    active: meta.autoRecovery.active === true,
+                    recoveredAt: meta.autoRecovery.recoveredAt || null,
+                    recoveredStatus: meta.autoRecovery.recoveredStatus || null,
+                  };
+                }
                 return {
                   taskId:       t?.id,
                   taskTitle:    t?.title || t?.id,
@@ -1734,7 +1754,7 @@ export const RECOVER_BLOCKED_WORKTREES_TEMPLATE = {
                   repository:   t?.repository || t?.metadata?.repository || meta?.repository || null,
                   baseBranch,
                   defaultTargetBranch,
-                  meta,
+                  meta: minimalMeta,
                 };
               })
               .filter(t => t && t.taskId && t.branch && t.repoRoot)

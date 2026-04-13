@@ -24,6 +24,10 @@ import {
   validateTaskBatchPayload,
 } from "../workflow-templates/task-batch.mjs";
 import {
+  RECOVER_BLOCKED_TASK_TEMPLATE,
+  RECOVER_BLOCKED_WORKTREES_TEMPLATE,
+} from "../workflow-templates/reliability.mjs";
+import {
   WorkflowEngine,
   getNodeType,
   registerNodeType,
@@ -1989,6 +1993,38 @@ describe("github template CLI compatibility", () => {
     expect(repairDispatch?.config?.mode).toBe("dispatch");
     expect(lifecycleTemplate.edges.find((e) => e.source === "annotate-blocked-wt-failed" && e.target === "dispatch-wt-repair")).toBeDefined();
     expect(lifecycleTemplate.edges.find((e) => e.source === "dispatch-wt-repair" && e.target === "release-slot-wt-failed")).toBeDefined();
+  });
+
+  it("blocked worktree recovery trims task metadata payloads before dispatch", () => {
+    const orchestratorTemplate = RECOVER_BLOCKED_WORKTREES_TEMPLATE;
+    const blockedTaskTemplate = RECOVER_BLOCKED_TASK_TEMPLATE;
+    const repairTemplate = getTemplate("template-task-repair-worktree");
+    const queryNode = orchestratorTemplate.nodes.find((n) => n.id === "query-blocked");
+    const clearBlockedNode = blockedTaskTemplate.nodes.find((n) => n.id === "clear-blocked-meta");
+    const clearRepairSuccessNode = repairTemplate.nodes.find((n) => n.id === "clear-repair-blocked-success");
+    const clearRepairFailureNode = repairTemplate.nodes.find((n) => n.id === "clear-repair-blocked-failure");
+    const queryCode = getNodeCommandCode(queryNode);
+
+    expect(queryCode).toContain("const minimalMeta = {};");
+    expect(queryCode).toContain("minimalMeta.worktreeFailure = {");
+    expect(queryCode).toContain("minimalMeta.autoRecovery = {");
+    expect(queryCode).not.toContain("meta,");
+    expect(clearBlockedNode?.config?.args?.metaDeleteKeys).toEqual([
+      "autoRecovery",
+      "worktreeFailure",
+      "consecutiveRecoveryFailures",
+      "blockedReason",
+    ]);
+    expect(clearRepairSuccessNode?.config?.args?.metaDeleteKeys).toEqual([
+      "autoRecovery",
+      "worktreeFailure",
+      "blockedReason",
+    ]);
+    expect(clearRepairFailureNode?.config?.args?.metaDeleteKeys).toEqual([
+      "autoRecovery",
+      "worktreeFailure",
+      "blockedReason",
+    ]);
   });
 
   it("PR watchdog and GitHub sync pass node outputs via template interpolation env vars", () => {

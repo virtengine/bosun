@@ -1540,6 +1540,242 @@ function cleanObject(value = {}) {
   );
 }
 
+const MAX_PERSISTED_RUN_STRING_LENGTH = 4_000;
+const MAX_PERSISTED_RUN_ARRAY_ITEMS = 25;
+const MAX_PERSISTED_RUN_OBJECT_KEYS = 40;
+const MAX_PERSISTED_RUN_DEPTH = 6;
+const MAX_PERSISTED_RUN_LOG_ENTRIES = 400;
+const MAX_PERSISTED_RUN_EVENT_ENTRIES = 600;
+
+function truncatePersistedRunString(value, limit = MAX_PERSISTED_RUN_STRING_LENGTH) {
+  const text = String(value ?? "");
+  if (!text) return text;
+  if (!Number.isFinite(limit) || limit <= 0 || text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function buildPersistedValueSummary(value) {
+  if (value == null) return value;
+  if (Array.isArray(value)) return `[Array(${value.length})]`;
+  if (typeof value === "object") {
+    const ctorName = String(value?.constructor?.name || "Object");
+    const keyCount = Object.keys(value || {}).length;
+    return `[${ctorName} keys=${keyCount}]`;
+  }
+  return truncatePersistedRunString(value, 200);
+}
+
+function summarizePersistedTaskMeta(meta = {}) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const worktreeFailure = meta.worktreeFailure && typeof meta.worktreeFailure === "object"
+    ? cleanObject({
+        branch: truncatePersistedRunString(meta.worktreeFailure.branch, 240) || undefined,
+        repoRoot: truncatePersistedRunString(meta.worktreeFailure.repoRoot, 400) || undefined,
+        worktreePath: truncatePersistedRunString(meta.worktreeFailure.worktreePath, 400) || undefined,
+        baseBranch: truncatePersistedRunString(meta.worktreeFailure.baseBranch, 120) || undefined,
+        defaultTargetBranch: truncatePersistedRunString(
+          meta.worktreeFailure.defaultTargetBranch,
+          120,
+        ) || undefined,
+      })
+    : undefined;
+  const autoRecovery = meta.autoRecovery && typeof meta.autoRecovery === "object"
+    ? cleanObject({
+        active: meta.autoRecovery.active === true,
+        recoveredAt: truncatePersistedRunString(meta.autoRecovery.recoveredAt, 120) || undefined,
+        recoveredStatus: truncatePersistedRunString(
+          meta.autoRecovery.recoveredStatus,
+          120,
+        ) || undefined,
+      })
+    : undefined;
+  const summary = cleanObject({
+    blockedReason: truncatePersistedRunString(meta.blockedReason, 240) || undefined,
+    repairState: truncatePersistedRunString(meta.repairState, 120) || undefined,
+    worktreeFailure: worktreeFailure && Object.keys(worktreeFailure).length > 0
+      ? worktreeFailure
+      : undefined,
+    autoRecovery: autoRecovery && Object.keys(autoRecovery).length > 0
+      ? autoRecovery
+      : undefined,
+    prLinkageCount: Array.isArray(meta.prLinkage) ? meta.prLinkage.length : undefined,
+    timelineCount: Array.isArray(meta.timeline) ? meta.timeline.length : undefined,
+    statusHistoryCount: Array.isArray(meta.statusHistory) ? meta.statusHistory.length : undefined,
+    commentCount: Array.isArray(meta.comments) ? meta.comments.length : undefined,
+    attachmentCount: Array.isArray(meta.attachments) ? meta.attachments.length : undefined,
+  });
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function isTaskLikePersistedValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Boolean(
+    value.taskId ||
+    value.id ||
+    value.taskTitle ||
+    value.title ||
+    value.branch ||
+    value.branchName ||
+    value.repoRoot ||
+    value.worktreePath ||
+    value.meta?.worktreeFailure,
+  );
+}
+
+function summarizePersistedTaskValue(value) {
+  if (!isTaskLikePersistedValue(value)) return value;
+  const taskSummary = cleanObject({
+    taskId: truncatePersistedRunString(value.taskId || value.id, 160) || undefined,
+    taskTitle: truncatePersistedRunString(value.taskTitle || value.title, 240) || undefined,
+    status: truncatePersistedRunString(value.status, 80) || undefined,
+    branch: truncatePersistedRunString(value.branch || value.branchName, 240) || undefined,
+    repoRoot: truncatePersistedRunString(value.repoRoot || value.workspace, 400) || undefined,
+    worktreePath: truncatePersistedRunString(value.worktreePath, 400) || undefined,
+    repository: truncatePersistedRunString(value.repository, 200) || undefined,
+    baseBranch: truncatePersistedRunString(value.baseBranch, 120) || undefined,
+    defaultTargetBranch: truncatePersistedRunString(value.defaultTargetBranch, 120) || undefined,
+    meta: summarizePersistedTaskMeta(value.meta),
+  });
+  return Object.keys(taskSummary).length > 0 ? taskSummary : buildPersistedValueSummary(value);
+}
+
+function summarizePersistedLoopResult(result, depth) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return summarizePersistedWorkflowValue(result, { depth, key: "result" });
+  }
+  return cleanObject({
+    index: Number.isFinite(Number(result.index)) ? Number(result.index) : undefined,
+    success: result.success === true,
+    queued: result.queued === true || undefined,
+    mode: truncatePersistedRunString(result.mode, 80) || undefined,
+    workflowId: truncatePersistedRunString(result.workflowId, 160) || undefined,
+    runId: truncatePersistedRunString(result.runId, 160) || undefined,
+    error: result.error
+      ? summarizePersistedWorkflowValue(result.error, { depth: depth + 1, key: "error" })
+      : undefined,
+    item: result.item
+      ? summarizePersistedWorkflowValue(result.item, { depth: depth + 1, key: "item" })
+      : undefined,
+  });
+}
+
+function summarizePersistedArray(value, { depth = 0, key = "" } = {}) {
+  const normalized = Array.isArray(value) ? value : [];
+  const limit = key === "logs"
+    ? MAX_PERSISTED_RUN_LOG_ENTRIES
+    : key === "nodeStatusEvents"
+      ? MAX_PERSISTED_RUN_EVENT_ENTRIES
+      : key === "results"
+        ? 20
+        : key === "output"
+          ? 20
+          : key === "timeline" || key === "statusHistory"
+            ? 12
+            : MAX_PERSISTED_RUN_ARRAY_ITEMS;
+  const out = normalized
+    .slice(0, limit)
+    .map((entry) => summarizePersistedWorkflowValue(entry, { depth: depth + 1, key }));
+  if (normalized.length > limit) {
+    out.push({ _truncatedItems: normalized.length - limit });
+  }
+  return out;
+}
+
+function summarizePersistedObject(value, { depth = 0, key = "" } = {}) {
+  if (isTaskLikePersistedValue(value)) return summarizePersistedTaskValue(value);
+
+  if (
+    Array.isArray(value?.results) &&
+    (value?.variable !== undefined || value?.count !== undefined || value?.totalItems !== undefined)
+  ) {
+    return cleanObject({
+      count: Number.isFinite(Number(value.count)) ? Number(value.count) : undefined,
+      totalItems: Number.isFinite(Number(value.totalItems)) ? Number(value.totalItems) : undefined,
+      variable: truncatePersistedRunString(value.variable, 120) || undefined,
+      successCount: Number.isFinite(Number(value.successCount)) ? Number(value.successCount) : undefined,
+      failCount: Number.isFinite(Number(value.failCount)) ? Number(value.failCount) : undefined,
+      items: Array.isArray(value.items)
+        ? summarizePersistedArray(value.items, { depth: depth + 1, key: "items" })
+        : undefined,
+      results: summarizePersistedArray(value.results, { depth: depth + 1, key: "results" }),
+    });
+  }
+
+  const entries = Object.entries(value || {});
+  const limit = key === "nodeOutputs"
+    ? 80
+    : key === "nodeInputs"
+      ? 40
+      : MAX_PERSISTED_RUN_OBJECT_KEYS;
+  const out = {};
+  for (const [entryKey, entryValue] of entries.slice(0, limit)) {
+    out[entryKey] = summarizePersistedWorkflowValue(entryValue, {
+      depth: depth + 1,
+      key: entryKey,
+    });
+  }
+  if (entries.length > limit) out._truncatedKeys = entries.length - limit;
+  return out;
+}
+
+function summarizePersistedWorkflowValue(value, { depth = 0, key = "" } = {}) {
+  if (value == null) return value;
+  const valueType = typeof value;
+  if (valueType === "string") return truncatePersistedRunString(value);
+  if (valueType === "number" || valueType === "boolean") return value;
+  if (valueType === "bigint") return String(value);
+  if (valueType === "function" || valueType === "symbol") return undefined;
+  if (depth >= MAX_PERSISTED_RUN_DEPTH) return buildPersistedValueSummary(value);
+  if (Array.isArray(value)) return summarizePersistedArray(value, { depth, key });
+  if (valueType === "object") return summarizePersistedObject(value, { depth, key });
+  return truncatePersistedRunString(value);
+}
+
+function compactPersistedRunDetail(detail = {}) {
+  const nextDetail = detail && typeof detail === "object" ? { ...detail } : {};
+  if (nextDetail.data && typeof nextDetail.data === "object") {
+    nextDetail.data = summarizePersistedWorkflowValue(nextDetail.data, { key: "data" });
+  }
+  if (nextDetail.nodeOutputs && typeof nextDetail.nodeOutputs === "object") {
+    nextDetail.nodeOutputs = summarizePersistedWorkflowValue(nextDetail.nodeOutputs, {
+      key: "nodeOutputs",
+    });
+  }
+  if (nextDetail.nodeInputs && typeof nextDetail.nodeInputs === "object") {
+    nextDetail.nodeInputs = summarizePersistedWorkflowValue(nextDetail.nodeInputs, {
+      key: "nodeInputs",
+    });
+  }
+  if (Array.isArray(nextDetail.logs)) {
+    nextDetail.logs = summarizePersistedArray(nextDetail.logs, { key: "logs" });
+  }
+  if (Array.isArray(nextDetail.errors)) {
+    nextDetail.errors = summarizePersistedArray(nextDetail.errors, { key: "errors" });
+  }
+  if (Array.isArray(nextDetail.nodeStatusEvents)) {
+    nextDetail.nodeStatusEvents = summarizePersistedArray(nextDetail.nodeStatusEvents, {
+      key: "nodeStatusEvents",
+    });
+  }
+  if (nextDetail.workflowDefinition && typeof nextDetail.workflowDefinition === "object") {
+    nextDetail.workflowDefinition = summarizePersistedWorkflowValue(
+      nextDetail.workflowDefinition,
+      { key: "workflowDefinition" },
+    );
+  }
+  if (nextDetail.dagState && typeof nextDetail.dagState === "object") {
+    nextDetail.dagState = summarizePersistedWorkflowValue(nextDetail.dagState, {
+      key: "dagState",
+    });
+  }
+  if (nextDetail.issueAdvisor && typeof nextDetail.issueAdvisor === "object") {
+    nextDetail.issueAdvisor = summarizePersistedWorkflowValue(nextDetail.issueAdvisor, {
+      key: "issueAdvisor",
+    });
+  }
+  return nextDetail;
+}
+
 function normalizeWorkflowText(value, maxLength = 240) {
   const text = String(value ?? "")
     .replace(/\s+/g, " ")
@@ -7572,7 +7808,7 @@ export class WorkflowEngine extends EventEmitter {
       detail.endedAt = null;
       detail.duration = Math.max(0, Date.now() - Number(ctx?.startedAt || Date.now()));
     }
-    return repairWorkflowRunDetail(detail);
+    return repairWorkflowRunDetail(isRunning ? detail : compactPersistedRunDetail(detail));
   }
 
   _buildSummaryFromDetail({ runId, workflowId, workflowName, status, detail }) {

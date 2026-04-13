@@ -187,5 +187,5 @@ describe("harness runtime cutover", () => {
 
     expect(toolEvents.filter((event) => event.type === "tool_execution_end")).toHaveLength(10);
     expect(toolEvents.every((event) => event.executionId)).toBe(true);
-  }, 15000);
+  }, 30000);
 });

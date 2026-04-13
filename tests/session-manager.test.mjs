@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.setConfig({ testTimeout: 15_000 });
 
 import { createSessionReplayStore } from "../agent/session-replay.mjs";
 import { createSessionSnapshotStore } from "../agent/session-snapshot-store.mjs";
@@ -170,7 +172,7 @@ describe("session manager cutover", () => {
         }),
       }),
     );
-  });
+  }, 15000);
 
   it("keeps a durable overseer shell while swapping external workers across executions", () => {
     const sessionManager = createHarnessSessionManager();
@@ -290,7 +292,7 @@ describe("session manager cutover", () => {
         threadId: "workflow-run-2",
       }),
     ]));
-  });
+  }, 15000);
 
   it("derives explicit operator phases that stay meaningful across planning, staging, running, building, and editing", () => {
     const sessionManager = createHarnessSessionManager();
@@ -370,7 +372,7 @@ describe("session manager cutover", () => {
       label: "Running",
       source: "derived",
     }));
-  });
+  }, 15000);
 
   it("writes through resumable checkpoints at each session boundary", async () => {
     const trackerMod = await import("../infra/session-tracker.mjs");

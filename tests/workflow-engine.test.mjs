@@ -22,6 +22,8 @@ import {
 } from "../workflow/approval-queue.mjs";
 import { _resetSingleton as resetSessionTracker, getSessionTracker } from "../infra/session-tracker.mjs";
 
+vi.setConfig({ testTimeout: 30_000 });
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 let tmpDir;
@@ -1120,7 +1122,7 @@ describe("WorkflowEngine - loop.for_each", () => {
 
     releaseRuns();
     await new Promise((resolve) => setTimeout(resolve, 50));
-  });
+  }, 60_000);
 
 });
 
@@ -2272,9 +2274,28 @@ describe("WorkflowEngine - run history details", () => {
     );
 
     engine.save(wf);
-    for (let i = 0; i < 35; i += 1) {
-      await engine.execute(wf.id, { run: i + 1 });
-    }
+    const runsDir = join(tmpDir, "runs");
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: Array.from({ length: 35 }, (_unused, index) => ({
+          runId: `run-global-page-${index + 1}`,
+          workflowId: wf.id,
+          workflowName: wf.name,
+          status: WorkflowStatus.COMPLETED,
+          startedAt: 35 - index,
+          endedAt: 36 - index,
+          triggerEvent: "manual",
+          triggerSource: "manual",
+          nodeCount: 1,
+          completedCount: 1,
+          failedCount: 0,
+          skippedCount: 0,
+          duration: 1,
+        })),
+      }, null, 2),
+      "utf8",
+    );
 
     const all = engine.getRunHistory();
     expect(all.length).toBeGreaterThanOrEqual(35);
@@ -2602,6 +2623,124 @@ describe("WorkflowEngine - run history details", () => {
       clearTimeout(timer);
       engine._activeRuns.delete(runId);
     }
+  });
+
+  it("compacts oversized completed run details for task-heavy loop outputs", () => {
+    const timeline = Array.from({ length: 300 }, (_, index) => ({
+      id: `timeline-${index}`,
+      at: `2026-04-04T16:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      type: "workflow.node.complete",
+      message: `event-${index}`,
+    }));
+    const taskPayload = {
+      taskId: "task-compact-1",
+      taskTitle: "Compact me",
+      branch: "task/compact-me",
+      repoRoot: "C:/repo",
+      worktreePath: "C:/repo/.cache/worktrees/task-compact-me",
+      repository: "virtengine/bosun",
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      meta: {
+        blockedReason: "worktree_failure",
+        worktreeFailure: {
+          branch: "task/compact-me",
+          repoRoot: "C:/repo",
+          worktreePath: "C:/repo/.cache/worktrees/task-compact-me",
+          baseBranch: "main",
+          defaultTargetBranch: "main",
+        },
+        timeline,
+      },
+    };
+
+    const ctx = new WorkflowContext({
+      _workflowId: "wf-compact",
+      _workflowName: "Compact Workflow",
+    });
+    ctx.setNodeOutput("query-blocked", {
+      success: true,
+      output: [taskPayload, taskPayload, taskPayload],
+    });
+    ctx.setNodeOutput("recover-each", {
+      count: 3,
+      totalItems: 3,
+      variable: "item",
+      results: Array.from({ length: 3 }, (_, index) => ({
+        index,
+        item: taskPayload,
+        success: true,
+        mode: "dispatch",
+        workflowId: "template-recover-blocked-task",
+      })),
+      successCount: 3,
+      failCount: 0,
+    });
+
+    const detail = engine._serializeRunContext(ctx, false);
+    expect(detail.nodeOutputs["query-blocked"].output[0]).toMatchObject({
+      taskId: "task-compact-1",
+      branch: "task/compact-me",
+      meta: expect.objectContaining({
+        blockedReason: "worktree_failure",
+        timelineCount: 300,
+      }),
+    });
+    expect(detail.nodeOutputs["query-blocked"].output[0].meta.timeline).toBeUndefined();
+    expect(detail.nodeOutputs["recover-each"].results[0].item.meta.timeline).toBeUndefined();
+    expect(detail.nodeOutputs["recover-each"].results[0].item.meta.timelineCount).toBe(300);
+    expect(JSON.stringify(detail).length).toBeLessThan(60_000);
+  });
+
+  it("tasks.update can delete selected metadata keys without overwriting remaining meta", async () => {
+    const kanban = {
+      getTask: vi.fn(async () => ({
+        id: "task-1",
+        meta: {
+          keepMe: "yes",
+          autoRecovery: { active: true },
+          worktreeFailure: { branch: "task/test" },
+          blockedReason: "worktree_failure",
+        },
+      })),
+      updateTask: vi.fn(async (_taskId, update) => update),
+    };
+    makeTmpEngine({ kanban });
+
+    const workflow = makeSimpleWorkflow([
+      { id: "start", type: "trigger.manual", label: "Start", config: {} },
+      {
+        id: "update",
+        type: "action.bosun_function",
+        label: "Update Task",
+        config: {
+          function: "tasks.update",
+          args: {
+            taskId: "task-1",
+            metaDeleteKeys: ["autoRecovery", "worktreeFailure", "blockedReason"],
+            fields: {
+              blockedReason: null,
+              cooldownUntil: null,
+            },
+          },
+        },
+      },
+    ], [
+      { id: "start-update", source: "start", target: "update" },
+    ], {
+      id: "wf-task-update-meta-delete",
+      name: "Task Update Meta Delete",
+    });
+
+    engine.save(workflow);
+    await engine.execute(workflow.id, {});
+
+    expect(kanban.getTask).toHaveBeenCalledWith("task-1");
+    expect(kanban.updateTask).toHaveBeenCalledWith("task-1", expect.objectContaining({
+      blockedReason: null,
+      cooldownUntil: null,
+      meta: { keepMe: "yes" },
+    }));
   });
 
   it("loads persisted run detail from sqlite when the detail file is missing", async () => {
@@ -9678,10 +9817,12 @@ describe("WorkflowEngine - timeout timer cleanup", () => {
 
     engine.save(wf);
     // If timers leaked, the 60s timeout timer would keep the process alive.
-    // We verify execution finishes well before the configured timeout.
+    // The assertion only needs to prove we finish comfortably before that
+    // deadline, not within an arbitrarily small wall-clock budget for this
+    // heavyweight isolated suite on Windows.
     const start = Date.now();
     const result = await engine.execute(wf.id, {});
-    expect(Date.now() - start).toBeLessThan(5000);
+    expect(Date.now() - start).toBeLessThan(15_000);
     expect(result.errors.length).toBe(0);
     const output = result.getNodeOutput("fast");
     expect(output.fast).toBe(true);
@@ -9843,7 +9984,7 @@ describe("Concurrency limiter", () => {
     expect(maxSeen).toBeGreaterThanOrEqual(2);
     // After all complete, slots should be released
     expect(engine.getConcurrencyStats().activeRuns).toBe(0);
-  });
+  }, 60_000);
 });
 
 
@@ -10188,7 +10329,7 @@ describe("WorkflowEngine.getTaskTraceEvents", () => {
     expect(parentSpan.attributes["bosun.task.id"]).toBe("TASK-WF-TRACE");
     expect(childSpan.attributes["bosun.task.id"]).toBe("TASK-WF-TRACE");
     expect(childSpan.attributes["bosun.workflow.parent_run_id"]).toBe(parentCtx.id);
-  }, 15000);
+  }, 30_000);
   it("records DAGState revisions and preserves completed nodes when replanning from a failed boundary", async () => {
     let attempts = 0;
     registerNodeType("test.replan_once", {

@@ -1053,15 +1053,75 @@ describeUiServer("ui-server mini app", () => {
     const savedOpenAiApiKey = process.env.OPENAI_API_KEY;
     const savedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
     const savedGeminiApiKey = process.env.GEMINI_API_KEY;
+    const savedOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    const savedPerplexityApiKey = process.env.PERPLEXITY_API_KEY;
+    const savedDeepinfraApiKey = process.env.DEEPINFRA_API_KEY;
+    const savedGroqApiKey = process.env.GROQ_API_KEY;
+    const savedTogetherApiKey = process.env.TOGETHER_API_KEY;
+    const savedXaiApiKey = process.env.XAI_API_KEY;
+    const savedFireworksApiKey = process.env.FIREWORKS_API_KEY;
+    const savedCerebrasApiKey = process.env.CEREBRAS_API_KEY;
+    const savedSambanovaApiKey = process.env.SAMBANOVA_API_KEY;
+    const savedNebiusApiKey = process.env.NEBIUS_API_KEY;
     const savedDefaultProvider = process.env.BOSUN_PROVIDER_DEFAULT;
     const savedOllamaEnabled = process.env.BOSUN_PROVIDER_OLLAMA_ENABLED;
     const savedOllamaBaseUrl = process.env.BOSUN_PROVIDER_OLLAMA_BASE_URL;
+    const savedOpenrouterEnabled = process.env.BOSUN_PROVIDER_OPENROUTER_ENABLED;
+    const savedOpenrouterBaseUrl = process.env.BOSUN_PROVIDER_OPENROUTER_BASE_URL;
+    const savedPerplexityEnabled = process.env.BOSUN_PROVIDER_PERPLEXITY_ENABLED;
+    const savedPerplexityBaseUrl = process.env.BOSUN_PROVIDER_PERPLEXITY_BASE_URL;
+    const savedDeepinfraEnabled = process.env.BOSUN_PROVIDER_DEEPINFRA_ENABLED;
+    const savedDeepinfraBaseUrl = process.env.BOSUN_PROVIDER_DEEPINFRA_BASE_URL;
+    const savedGroqEnabled = process.env.BOSUN_PROVIDER_GROQ_ENABLED;
+    const savedGroqBaseUrl = process.env.BOSUN_PROVIDER_GROQ_BASE_URL;
+    const savedTogetherEnabled = process.env.BOSUN_PROVIDER_TOGETHER_ENABLED;
+    const savedTogetherBaseUrl = process.env.BOSUN_PROVIDER_TOGETHER_BASE_URL;
+    const savedXaiEnabled = process.env.BOSUN_PROVIDER_XAI_ENABLED;
+    const savedXaiBaseUrl = process.env.BOSUN_PROVIDER_XAI_BASE_URL;
+    const savedFireworksEnabled = process.env.BOSUN_PROVIDER_FIREWORKS_ENABLED;
+    const savedFireworksBaseUrl = process.env.BOSUN_PROVIDER_FIREWORKS_BASE_URL;
+    const savedCerebrasEnabled = process.env.BOSUN_PROVIDER_CEREBRAS_ENABLED;
+    const savedCerebrasBaseUrl = process.env.BOSUN_PROVIDER_CEREBRAS_BASE_URL;
+    const savedSambanovaEnabled = process.env.BOSUN_PROVIDER_SAMBANOVA_ENABLED;
+    const savedSambanovaBaseUrl = process.env.BOSUN_PROVIDER_SAMBANOVA_BASE_URL;
+    const savedNebiusEnabled = process.env.BOSUN_PROVIDER_NEBIUS_ENABLED;
+    const savedNebiusBaseUrl = process.env.BOSUN_PROVIDER_NEBIUS_BASE_URL;
     process.env.OPENAI_API_KEY = "test-openai-key";
     process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
     process.env.GEMINI_API_KEY = "test-gemini-key";
+    process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    process.env.PERPLEXITY_API_KEY = "test-perplexity-key";
+    process.env.DEEPINFRA_API_KEY = "test-deepinfra-key";
+    process.env.GROQ_API_KEY = "test-groq-key";
+    process.env.TOGETHER_API_KEY = "test-together-key";
+    process.env.XAI_API_KEY = "test-xai-key";
+    process.env.FIREWORKS_API_KEY = "test-fireworks-key";
+    process.env.CEREBRAS_API_KEY = "test-cerebras-key";
+    process.env.SAMBANOVA_API_KEY = "test-sambanova-key";
+    process.env.NEBIUS_API_KEY = "test-nebius-key";
     process.env.BOSUN_PROVIDER_DEFAULT = "openai-responses";
     process.env.BOSUN_PROVIDER_OLLAMA_ENABLED = "true";
     process.env.BOSUN_PROVIDER_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+    process.env.BOSUN_PROVIDER_OPENROUTER_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_OPENROUTER_BASE_URL = "https://openrouter.example/v1";
+    process.env.BOSUN_PROVIDER_PERPLEXITY_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_PERPLEXITY_BASE_URL = "https://perplexity.example/v1";
+    process.env.BOSUN_PROVIDER_DEEPINFRA_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_DEEPINFRA_BASE_URL = "https://deepinfra.example/v1/openai";
+    process.env.BOSUN_PROVIDER_GROQ_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_GROQ_BASE_URL = "https://groq.example/openai/v1";
+    process.env.BOSUN_PROVIDER_TOGETHER_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_TOGETHER_BASE_URL = "https://together.example/v1";
+    process.env.BOSUN_PROVIDER_XAI_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_XAI_BASE_URL = "https://xai.example/v1";
+    process.env.BOSUN_PROVIDER_FIREWORKS_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_FIREWORKS_BASE_URL = "https://fireworks.example/inference/v1";
+    process.env.BOSUN_PROVIDER_CEREBRAS_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_CEREBRAS_BASE_URL = "https://cerebras.example/v1";
+    process.env.BOSUN_PROVIDER_SAMBANOVA_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_SAMBANOVA_BASE_URL = "https://sambanova.example/v1";
+    process.env.BOSUN_PROVIDER_NEBIUS_ENABLED = "true";
+    process.env.BOSUN_PROVIDER_NEBIUS_BASE_URL = "https://nebius.example/v1";
 
     const mod = await import("../server/ui-server.mjs");
     const server = await mod.startTelegramUiServer({
@@ -1151,6 +1211,126 @@ describeUiServer("ui-server mini app", () => {
           defaultModel: "gemini-2.5-pro",
         }),
       }));
+
+      const openrouterProvider = json.items.find((entry) => entry.providerId === "openrouter");
+      expect(openrouterProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const perplexityProvider = json.items.find((entry) => entry.providerId === "perplexity");
+      expect(perplexityProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const deepinfraProvider = json.items.find((entry) => entry.providerId === "deepinfra");
+      expect(deepinfraProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const groqProvider = json.items.find((entry) => entry.providerId === "groq");
+      expect(groqProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const togetherProvider = json.items.find((entry) => entry.providerId === "together");
+      expect(togetherProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const xaiProvider = json.items.find((entry) => entry.providerId === "xai");
+      expect(xaiProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const fireworksProvider = json.items.find((entry) => entry.providerId === "fireworks");
+      expect(fireworksProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const cerebrasProvider = json.items.find((entry) => entry.providerId === "cerebras");
+      expect(cerebrasProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const sambanovaProvider = json.items.find((entry) => entry.providerId === "sambanova");
+      expect(sambanovaProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
+
+      const nebiusProvider = json.items.find((entry) => entry.providerId === "nebius");
+      expect(nebiusProvider).toEqual(expect.objectContaining({
+        adapterId: "openai-native",
+        runtimeOwnership: "native",
+        enabled: true,
+        auth: expect.objectContaining({
+          authenticated: true,
+          canRun: true,
+          preferredMode: "apiKey",
+        }),
+      }));
     } finally {
       await new Promise((resolve) => server.close(resolve));
       if (savedOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -1159,12 +1339,72 @@ describeUiServer("ui-server mini app", () => {
       else process.env.ANTHROPIC_API_KEY = savedAnthropicApiKey;
       if (savedGeminiApiKey === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = savedGeminiApiKey;
+      if (savedOpenrouterApiKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = savedOpenrouterApiKey;
+      if (savedPerplexityApiKey === undefined) delete process.env.PERPLEXITY_API_KEY;
+      else process.env.PERPLEXITY_API_KEY = savedPerplexityApiKey;
+      if (savedDeepinfraApiKey === undefined) delete process.env.DEEPINFRA_API_KEY;
+      else process.env.DEEPINFRA_API_KEY = savedDeepinfraApiKey;
+      if (savedGroqApiKey === undefined) delete process.env.GROQ_API_KEY;
+      else process.env.GROQ_API_KEY = savedGroqApiKey;
+      if (savedTogetherApiKey === undefined) delete process.env.TOGETHER_API_KEY;
+      else process.env.TOGETHER_API_KEY = savedTogetherApiKey;
+      if (savedXaiApiKey === undefined) delete process.env.XAI_API_KEY;
+      else process.env.XAI_API_KEY = savedXaiApiKey;
+      if (savedFireworksApiKey === undefined) delete process.env.FIREWORKS_API_KEY;
+      else process.env.FIREWORKS_API_KEY = savedFireworksApiKey;
+      if (savedCerebrasApiKey === undefined) delete process.env.CEREBRAS_API_KEY;
+      else process.env.CEREBRAS_API_KEY = savedCerebrasApiKey;
+      if (savedSambanovaApiKey === undefined) delete process.env.SAMBANOVA_API_KEY;
+      else process.env.SAMBANOVA_API_KEY = savedSambanovaApiKey;
+      if (savedNebiusApiKey === undefined) delete process.env.NEBIUS_API_KEY;
+      else process.env.NEBIUS_API_KEY = savedNebiusApiKey;
       if (savedDefaultProvider === undefined) delete process.env.BOSUN_PROVIDER_DEFAULT;
       else process.env.BOSUN_PROVIDER_DEFAULT = savedDefaultProvider;
       if (savedOllamaEnabled === undefined) delete process.env.BOSUN_PROVIDER_OLLAMA_ENABLED;
       else process.env.BOSUN_PROVIDER_OLLAMA_ENABLED = savedOllamaEnabled;
       if (savedOllamaBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_OLLAMA_BASE_URL;
       else process.env.BOSUN_PROVIDER_OLLAMA_BASE_URL = savedOllamaBaseUrl;
+      if (savedOpenrouterEnabled === undefined) delete process.env.BOSUN_PROVIDER_OPENROUTER_ENABLED;
+      else process.env.BOSUN_PROVIDER_OPENROUTER_ENABLED = savedOpenrouterEnabled;
+      if (savedOpenrouterBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_OPENROUTER_BASE_URL;
+      else process.env.BOSUN_PROVIDER_OPENROUTER_BASE_URL = savedOpenrouterBaseUrl;
+      if (savedPerplexityEnabled === undefined) delete process.env.BOSUN_PROVIDER_PERPLEXITY_ENABLED;
+      else process.env.BOSUN_PROVIDER_PERPLEXITY_ENABLED = savedPerplexityEnabled;
+      if (savedPerplexityBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_PERPLEXITY_BASE_URL;
+      else process.env.BOSUN_PROVIDER_PERPLEXITY_BASE_URL = savedPerplexityBaseUrl;
+      if (savedDeepinfraEnabled === undefined) delete process.env.BOSUN_PROVIDER_DEEPINFRA_ENABLED;
+      else process.env.BOSUN_PROVIDER_DEEPINFRA_ENABLED = savedDeepinfraEnabled;
+      if (savedDeepinfraBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_DEEPINFRA_BASE_URL;
+      else process.env.BOSUN_PROVIDER_DEEPINFRA_BASE_URL = savedDeepinfraBaseUrl;
+      if (savedGroqEnabled === undefined) delete process.env.BOSUN_PROVIDER_GROQ_ENABLED;
+      else process.env.BOSUN_PROVIDER_GROQ_ENABLED = savedGroqEnabled;
+      if (savedGroqBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_GROQ_BASE_URL;
+      else process.env.BOSUN_PROVIDER_GROQ_BASE_URL = savedGroqBaseUrl;
+      if (savedTogetherEnabled === undefined) delete process.env.BOSUN_PROVIDER_TOGETHER_ENABLED;
+      else process.env.BOSUN_PROVIDER_TOGETHER_ENABLED = savedTogetherEnabled;
+      if (savedTogetherBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_TOGETHER_BASE_URL;
+      else process.env.BOSUN_PROVIDER_TOGETHER_BASE_URL = savedTogetherBaseUrl;
+      if (savedXaiEnabled === undefined) delete process.env.BOSUN_PROVIDER_XAI_ENABLED;
+      else process.env.BOSUN_PROVIDER_XAI_ENABLED = savedXaiEnabled;
+      if (savedXaiBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_XAI_BASE_URL;
+      else process.env.BOSUN_PROVIDER_XAI_BASE_URL = savedXaiBaseUrl;
+      if (savedFireworksEnabled === undefined) delete process.env.BOSUN_PROVIDER_FIREWORKS_ENABLED;
+      else process.env.BOSUN_PROVIDER_FIREWORKS_ENABLED = savedFireworksEnabled;
+      if (savedFireworksBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_FIREWORKS_BASE_URL;
+      else process.env.BOSUN_PROVIDER_FIREWORKS_BASE_URL = savedFireworksBaseUrl;
+      if (savedCerebrasEnabled === undefined) delete process.env.BOSUN_PROVIDER_CEREBRAS_ENABLED;
+      else process.env.BOSUN_PROVIDER_CEREBRAS_ENABLED = savedCerebrasEnabled;
+      if (savedCerebrasBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_CEREBRAS_BASE_URL;
+      else process.env.BOSUN_PROVIDER_CEREBRAS_BASE_URL = savedCerebrasBaseUrl;
+      if (savedSambanovaEnabled === undefined) delete process.env.BOSUN_PROVIDER_SAMBANOVA_ENABLED;
+      else process.env.BOSUN_PROVIDER_SAMBANOVA_ENABLED = savedSambanovaEnabled;
+      if (savedSambanovaBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_SAMBANOVA_BASE_URL;
+      else process.env.BOSUN_PROVIDER_SAMBANOVA_BASE_URL = savedSambanovaBaseUrl;
+      if (savedNebiusEnabled === undefined) delete process.env.BOSUN_PROVIDER_NEBIUS_ENABLED;
+      else process.env.BOSUN_PROVIDER_NEBIUS_ENABLED = savedNebiusEnabled;
+      if (savedNebiusBaseUrl === undefined) delete process.env.BOSUN_PROVIDER_NEBIUS_BASE_URL;
+      else process.env.BOSUN_PROVIDER_NEBIUS_BASE_URL = savedNebiusBaseUrl;
     }
   }, 15000);
 

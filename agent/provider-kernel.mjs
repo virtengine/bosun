@@ -46,6 +46,36 @@ function resolveProviderConfigAliases(config = {}) {
     copilotOAuth: providers.copilotOAuth && typeof providers.copilotOAuth === "object"
       ? providers.copilotOAuth
       : providers.copilot,
+    openrouter: providers.openrouter && typeof providers.openrouter === "object"
+      ? providers.openrouter
+      : {},
+    perplexity: providers.perplexity && typeof providers.perplexity === "object"
+      ? providers.perplexity
+      : {},
+    deepinfra: providers.deepinfra && typeof providers.deepinfra === "object"
+      ? providers.deepinfra
+      : {},
+    groq: providers.groq && typeof providers.groq === "object"
+      ? providers.groq
+      : {},
+    together: providers.together && typeof providers.together === "object"
+      ? providers.together
+      : {},
+    xai: providers.xai && typeof providers.xai === "object"
+      ? providers.xai
+      : {},
+    fireworks: providers.fireworks && typeof providers.fireworks === "object"
+      ? providers.fireworks
+      : {},
+    cerebras: providers.cerebras && typeof providers.cerebras === "object"
+      ? providers.cerebras
+      : {},
+    sambanova: providers.sambanova && typeof providers.sambanova === "object"
+      ? providers.sambanova
+      : {},
+    nebius: providers.nebius && typeof providers.nebius === "object"
+      ? providers.nebius
+      : {},
     gemini: providers.gemini && typeof providers.gemini === "object"
       ? providers.gemini
       : providers.geminiGenerateContent,
@@ -87,6 +117,36 @@ export function buildProviderKernelSettings(config = {}) {
   setProviderSetting(flattened, "BOSUN_PROVIDER_OLLAMA_BASE_URL", providers.ollama?.baseUrl);
   setProviderSetting(flattened, "BOSUN_PROVIDER_COPILOT_OAUTH_ENABLED", providers.copilot?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_COPILOT_OAUTH_MODEL", providers.copilot?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENROUTER_ENABLED", providers.openrouter?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENROUTER_MODEL", providers.openrouter?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_OPENROUTER_BASE_URL", providers.openrouter?.baseUrl || providers.openrouter?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_ENABLED", providers.perplexity?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_MODEL", providers.perplexity?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_BASE_URL", providers.perplexity?.baseUrl || providers.perplexity?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_DEEPINFRA_ENABLED", providers.deepinfra?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_DEEPINFRA_MODEL", providers.deepinfra?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_DEEPINFRA_BASE_URL", providers.deepinfra?.baseUrl || providers.deepinfra?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_GROQ_ENABLED", providers.groq?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_GROQ_MODEL", providers.groq?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_GROQ_BASE_URL", providers.groq?.baseUrl || providers.groq?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_TOGETHER_ENABLED", providers.together?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_TOGETHER_MODEL", providers.together?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_TOGETHER_BASE_URL", providers.together?.baseUrl || providers.together?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_XAI_ENABLED", providers.xai?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_XAI_MODEL", providers.xai?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_XAI_BASE_URL", providers.xai?.baseUrl || providers.xai?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_FIREWORKS_ENABLED", providers.fireworks?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_FIREWORKS_MODEL", providers.fireworks?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_FIREWORKS_BASE_URL", providers.fireworks?.baseUrl || providers.fireworks?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_CEREBRAS_ENABLED", providers.cerebras?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_CEREBRAS_MODEL", providers.cerebras?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_CEREBRAS_BASE_URL", providers.cerebras?.baseUrl || providers.cerebras?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_SAMBANOVA_ENABLED", providers.sambanova?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_SAMBANOVA_MODEL", providers.sambanova?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_SAMBANOVA_BASE_URL", providers.sambanova?.baseUrl || providers.sambanova?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_NEBIUS_ENABLED", providers.nebius?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_NEBIUS_MODEL", providers.nebius?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_NEBIUS_BASE_URL", providers.nebius?.baseUrl || providers.nebius?.endpoint);
   setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_ENABLED", providers.gemini?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_MODEL", providers.gemini?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_BASE_URL", providers.gemini?.baseUrl || providers.gemini?.endpoint);
@@ -105,6 +165,16 @@ function resolveKernelProviderSettings(config = {}, providerId = "") {
     "openai-compatible": providers.openaiCompatible,
     ollama: providers.ollama,
     "copilot-oauth": providers.copilot,
+    openrouter: providers.openrouter,
+    perplexity: providers.perplexity,
+    deepinfra: providers.deepinfra,
+    groq: providers.groq,
+    together: providers.together,
+    xai: providers.xai,
+    fireworks: providers.fireworks,
+    cerebras: providers.cerebras,
+    sambanova: providers.sambanova,
+    nebius: providers.nebius,
     "gemini-generate-content": providers.gemini,
   };
   const providerConfig = providerConfigById[normalizedProviderId];

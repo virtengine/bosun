@@ -14340,9 +14340,14 @@
             "function": "tasks.update",
             "args": {
               "taskId": "{{$data?.item?.taskId || $data?.taskId || ''}}",
+              "metaDeleteKeys": [
+                "autoRecovery",
+                "worktreeFailure",
+                "consecutiveRecoveryFailures",
+                "blockedReason"
+              ],
               "fields": {
-                "blockedReason": null,
-                "meta": "{{(() => { const cur = Object.assign({}, $data?.item?.meta || $data?.meta || {}); delete cur.autoRecovery; delete cur.worktreeFailure; delete cur.consecutiveRecoveryFailures; delete cur.blockedReason; return cur; })()}}"
+                "blockedReason": null
               }
             }
           },
@@ -14532,7 +14537,7 @@
             "command": "node",
             "args": [
               "-e",
-              "\n        const fs = require(\"node:fs\");\n        const path = require(\"node:path\");\n        const { pathToFileURL } = require(\"node:url\");\n        let repoRoot = process.cwd();\n        const mirrorMarker = (path.sep + \".bosun\" + path.sep + \"workspaces\" + path.sep).toLowerCase();\n        if (repoRoot.toLowerCase().includes(mirrorMarker)) {\n          const r = path.resolve(repoRoot, \"..\", \"..\", \"..\", \"..\");\n          if (fs.existsSync(path.join(r, \"kanban\", \"kanban-adapter.mjs\"))) repoRoot = r;\n        }\n        const kanbanUrl = pathToFileURL(path.join(repoRoot, \"kanban\", \"kanban-adapter.mjs\")).href;\n        import(kanbanUrl)\n          .then(k => k.listTasks(undefined, { status: \"blocked\" }))\n          .then(tasks => {\n            const limit = parseInt(process.env.MAX_PER_SWEEP || \"20\");\n            const blocked = (tasks || [])\n              .map(t => {\n                const meta = t && typeof t.meta === \"object\" ? t.meta : {};\n                const worktreeFailure = meta && typeof meta.worktreeFailure === \"object\" ? meta.worktreeFailure : {};\n                const branch = t?.branch || t?.branchName || t?.metadata?.branch || meta?.branch || worktreeFailure?.branch || null;\n                const repoRoot = t?.repoRoot || t?.workspace || t?.metadata?.repoRoot || t?.metadata?.workspace || meta?.repoRoot || meta?.workspace || worktreeFailure?.repoRoot || null;\n                const worktreePath = t?.worktreePath || t?.metadata?.worktreePath || meta?.worktreePath || worktreeFailure?.worktreePath || null;\n                const baseBranch = t?.baseBranch || t?.metadata?.baseBranch || meta?.baseBranch || worktreeFailure?.baseBranch || null;\n                const defaultTargetBranch = t?.defaultTargetBranch || t?.metadata?.defaultTargetBranch || meta?.defaultTargetBranch || worktreeFailure?.defaultTargetBranch || null;\n                return {\n                  taskId:       t?.id,\n                  taskTitle:    t?.title || t?.id,\n                  branch,\n                  repoRoot,\n                  worktreePath,\n                  repository:   t?.repository || t?.metadata?.repository || meta?.repository || null,\n                  baseBranch,\n                  defaultTargetBranch,\n                  meta,\n                };\n              })\n              .filter(t => t && t.taskId && t.branch && t.repoRoot)\n              .slice(0, limit)\n              ;\n            console.log(JSON.stringify(blocked));\n          })\n          .catch(e => { console.error(e.message); process.exit(1); });\n      "
+              "\n        const fs = require(\"node:fs\");\n        const path = require(\"node:path\");\n        const { pathToFileURL } = require(\"node:url\");\n        let repoRoot = process.cwd();\n        const mirrorMarker = (path.sep + \".bosun\" + path.sep + \"workspaces\" + path.sep).toLowerCase();\n        if (repoRoot.toLowerCase().includes(mirrorMarker)) {\n          const r = path.resolve(repoRoot, \"..\", \"..\", \"..\", \"..\");\n          if (fs.existsSync(path.join(r, \"kanban\", \"kanban-adapter.mjs\"))) repoRoot = r;\n        }\n        const kanbanUrl = pathToFileURL(path.join(repoRoot, \"kanban\", \"kanban-adapter.mjs\")).href;\n        import(kanbanUrl)\n          .then(k => k.listTasks(undefined, { status: \"blocked\" }))\n          .then(tasks => {\n            const limit = parseInt(process.env.MAX_PER_SWEEP || \"20\");\n            const blocked = (tasks || [])\n              .map(t => {\n                const meta = t && typeof t.meta === \"object\" ? t.meta : {};\n                const worktreeFailure = meta && typeof meta.worktreeFailure === \"object\" ? meta.worktreeFailure : {};\n                const branch = t?.branch || t?.branchName || t?.metadata?.branch || meta?.branch || worktreeFailure?.branch || null;\n                const repoRoot = t?.repoRoot || t?.workspace || t?.metadata?.repoRoot || t?.metadata?.workspace || meta?.repoRoot || meta?.workspace || worktreeFailure?.repoRoot || null;\n                const worktreePath = t?.worktreePath || t?.metadata?.worktreePath || meta?.worktreePath || worktreeFailure?.worktreePath || null;\n                const baseBranch = t?.baseBranch || t?.metadata?.baseBranch || meta?.baseBranch || worktreeFailure?.baseBranch || null;\n                const defaultTargetBranch = t?.defaultTargetBranch || t?.metadata?.defaultTargetBranch || meta?.defaultTargetBranch || worktreeFailure?.defaultTargetBranch || null;\n                const minimalMeta = {};\n                if (worktreeFailure && typeof worktreeFailure === \"object\") {\n                  minimalMeta.worktreeFailure = {\n                    branch: worktreeFailure?.branch || branch || null,\n                    repoRoot: worktreeFailure?.repoRoot || repoRoot || null,\n                    worktreePath: worktreeFailure?.worktreePath || worktreePath || null,\n                    baseBranch: worktreeFailure?.baseBranch || baseBranch || null,\n                    defaultTargetBranch: worktreeFailure?.defaultTargetBranch || defaultTargetBranch || null,\n                  };\n                }\n                if (typeof meta?.blockedReason === \"string\" && meta.blockedReason.trim()) {\n                  minimalMeta.blockedReason = meta.blockedReason.trim();\n                }\n                if (meta?.autoRecovery && typeof meta.autoRecovery === \"object\") {\n                  minimalMeta.autoRecovery = {\n                    active: meta.autoRecovery.active === true,\n                    recoveredAt: meta.autoRecovery.recoveredAt || null,\n                    recoveredStatus: meta.autoRecovery.recoveredStatus || null,\n                  };\n                }\n                return {\n                  taskId:       t?.id,\n                  taskTitle:    t?.title || t?.id,\n                  branch,\n                  repoRoot,\n                  worktreePath,\n                  repository:   t?.repository || t?.metadata?.repository || meta?.repository || null,\n                  baseBranch,\n                  defaultTargetBranch,\n                  meta: minimalMeta,\n                };\n              })\n              .filter(t => t && t.taskId && t.branch && t.repoRoot)\n              .slice(0, limit)\n              ;\n            console.log(JSON.stringify(blocked));\n          })\n          .catch(e => { console.error(e.message); process.exit(1); });\n      "
             ],
             "env": {
               "MAX_PER_SWEEP": "{{maxPerSweep}}"
@@ -16081,12 +16086,16 @@
             "function": "tasks.update",
             "args": {
               "taskId": "{{taskId}}",
+              "metaDeleteKeys": [
+                "autoRecovery",
+                "worktreeFailure",
+                "blockedReason"
+              ],
               "fields": {
                 "cooldownUntil": null,
                 "blockedReason": null,
                 "blockedContext": null,
-                "repairState": "completed",
-                "meta": "{{(() => { const current = ($data?.meta && typeof $data.meta === 'object') ? $data.meta : {}; const next = { ...current }; delete next.autoRecovery; delete next.worktreeFailure; delete next.blockedReason; return next; })()}}"
+                "repairState": "completed"
               }
             }
           },
@@ -16156,10 +16165,14 @@
             "function": "tasks.update",
             "args": {
               "taskId": "{{taskId}}",
+              "metaDeleteKeys": [
+                "autoRecovery",
+                "worktreeFailure",
+                "blockedReason"
+              ],
               "fields": {
                 "cooldownUntil": null,
-                "blockedReason": null,
-                "meta": "{{(() => { const current = ($data?.meta && typeof $data.meta === 'object') ? $data.meta : {}; const next = { ...current }; delete next.autoRecovery; delete next.worktreeFailure; delete next.blockedReason; return next; })()}}"
+                "blockedReason": null
               }
             }
           },
@@ -39191,9 +39204,14 @@
             "function": "tasks.update",
             "args": {
               "taskId": "{{$data?.item?.taskId || $data?.taskId || ''}}",
+              "metaDeleteKeys": [
+                "autoRecovery",
+                "worktreeFailure",
+                "consecutiveRecoveryFailures",
+                "blockedReason"
+              ],
               "fields": {
-                "blockedReason": null,
-                "meta": "{{(() => { const cur = Object.assign({}, $data?.item?.meta || $data?.meta || {}); delete cur.autoRecovery; delete cur.worktreeFailure; delete cur.consecutiveRecoveryFailures; delete cur.blockedReason; return cur; })()}}"
+                "blockedReason": null
               }
             }
           },
@@ -39366,7 +39384,7 @@
             "command": "node",
             "args": [
               "-e",
-              "\n        const fs = require(\"node:fs\");\n        const path = require(\"node:path\");\n        const { pathToFileURL } = require(\"node:url\");\n        let repoRoot = process.cwd();\n        const mirrorMarker = (path.sep + \".bosun\" + path.sep + \"workspaces\" + path.sep).toLowerCase();\n        if (repoRoot.toLowerCase().includes(mirrorMarker)) {\n          const r = path.resolve(repoRoot, \"..\", \"..\", \"..\", \"..\");\n          if (fs.existsSync(path.join(r, \"kanban\", \"kanban-adapter.mjs\"))) repoRoot = r;\n        }\n        const kanbanUrl = pathToFileURL(path.join(repoRoot, \"kanban\", \"kanban-adapter.mjs\")).href;\n        import(kanbanUrl)\n          .then(k => k.listTasks(undefined, { status: \"blocked\" }))\n          .then(tasks => {\n            const limit = parseInt(process.env.MAX_PER_SWEEP || \"20\");\n            const blocked = (tasks || [])\n              .map(t => {\n                const meta = t && typeof t.meta === \"object\" ? t.meta : {};\n                const worktreeFailure = meta && typeof meta.worktreeFailure === \"object\" ? meta.worktreeFailure : {};\n                const branch = t?.branch || t?.branchName || t?.metadata?.branch || meta?.branch || worktreeFailure?.branch || null;\n                const repoRoot = t?.repoRoot || t?.workspace || t?.metadata?.repoRoot || t?.metadata?.workspace || meta?.repoRoot || meta?.workspace || worktreeFailure?.repoRoot || null;\n                const worktreePath = t?.worktreePath || t?.metadata?.worktreePath || meta?.worktreePath || worktreeFailure?.worktreePath || null;\n                const baseBranch = t?.baseBranch || t?.metadata?.baseBranch || meta?.baseBranch || worktreeFailure?.baseBranch || null;\n                const defaultTargetBranch = t?.defaultTargetBranch || t?.metadata?.defaultTargetBranch || meta?.defaultTargetBranch || worktreeFailure?.defaultTargetBranch || null;\n                return {\n                  taskId:       t?.id,\n                  taskTitle:    t?.title || t?.id,\n                  branch,\n                  repoRoot,\n                  worktreePath,\n                  repository:   t?.repository || t?.metadata?.repository || meta?.repository || null,\n                  baseBranch,\n                  defaultTargetBranch,\n                  meta,\n                };\n              })\n              .filter(t => t && t.taskId && t.branch && t.repoRoot)\n              .slice(0, limit)\n              ;\n            console.log(JSON.stringify(blocked));\n          })\n          .catch(e => { console.error(e.message); process.exit(1); });\n      "
+              "\n        const fs = require(\"node:fs\");\n        const path = require(\"node:path\");\n        const { pathToFileURL } = require(\"node:url\");\n        let repoRoot = process.cwd();\n        const mirrorMarker = (path.sep + \".bosun\" + path.sep + \"workspaces\" + path.sep).toLowerCase();\n        if (repoRoot.toLowerCase().includes(mirrorMarker)) {\n          const r = path.resolve(repoRoot, \"..\", \"..\", \"..\", \"..\");\n          if (fs.existsSync(path.join(r, \"kanban\", \"kanban-adapter.mjs\"))) repoRoot = r;\n        }\n        const kanbanUrl = pathToFileURL(path.join(repoRoot, \"kanban\", \"kanban-adapter.mjs\")).href;\n        import(kanbanUrl)\n          .then(k => k.listTasks(undefined, { status: \"blocked\" }))\n          .then(tasks => {\n            const limit = parseInt(process.env.MAX_PER_SWEEP || \"20\");\n            const blocked = (tasks || [])\n              .map(t => {\n                const meta = t && typeof t.meta === \"object\" ? t.meta : {};\n                const worktreeFailure = meta && typeof meta.worktreeFailure === \"object\" ? meta.worktreeFailure : {};\n                const branch = t?.branch || t?.branchName || t?.metadata?.branch || meta?.branch || worktreeFailure?.branch || null;\n                const repoRoot = t?.repoRoot || t?.workspace || t?.metadata?.repoRoot || t?.metadata?.workspace || meta?.repoRoot || meta?.workspace || worktreeFailure?.repoRoot || null;\n                const worktreePath = t?.worktreePath || t?.metadata?.worktreePath || meta?.worktreePath || worktreeFailure?.worktreePath || null;\n                const baseBranch = t?.baseBranch || t?.metadata?.baseBranch || meta?.baseBranch || worktreeFailure?.baseBranch || null;\n                const defaultTargetBranch = t?.defaultTargetBranch || t?.metadata?.defaultTargetBranch || meta?.defaultTargetBranch || worktreeFailure?.defaultTargetBranch || null;\n                const minimalMeta = {};\n                if (worktreeFailure && typeof worktreeFailure === \"object\") {\n                  minimalMeta.worktreeFailure = {\n                    branch: worktreeFailure?.branch || branch || null,\n                    repoRoot: worktreeFailure?.repoRoot || repoRoot || null,\n                    worktreePath: worktreeFailure?.worktreePath || worktreePath || null,\n                    baseBranch: worktreeFailure?.baseBranch || baseBranch || null,\n                    defaultTargetBranch: worktreeFailure?.defaultTargetBranch || defaultTargetBranch || null,\n                  };\n                }\n                if (typeof meta?.blockedReason === \"string\" && meta.blockedReason.trim()) {\n                  minimalMeta.blockedReason = meta.blockedReason.trim();\n                }\n                if (meta?.autoRecovery && typeof meta.autoRecovery === \"object\") {\n                  minimalMeta.autoRecovery = {\n                    active: meta.autoRecovery.active === true,\n                    recoveredAt: meta.autoRecovery.recoveredAt || null,\n                    recoveredStatus: meta.autoRecovery.recoveredStatus || null,\n                  };\n                }\n                return {\n                  taskId:       t?.id,\n                  taskTitle:    t?.title || t?.id,\n                  branch,\n                  repoRoot,\n                  worktreePath,\n                  repository:   t?.repository || t?.metadata?.repository || meta?.repository || null,\n                  baseBranch,\n                  defaultTargetBranch,\n                  meta: minimalMeta,\n                };\n              })\n              .filter(t => t && t.taskId && t.branch && t.repoRoot)\n              .slice(0, limit)\n              ;\n            console.log(JSON.stringify(blocked));\n          })\n          .catch(e => { console.error(e.message); process.exit(1); });\n      "
             ],
             "env": {
               "MAX_PER_SWEEP": "{{maxPerSweep}}"
@@ -40815,12 +40833,16 @@
             "function": "tasks.update",
             "args": {
               "taskId": "{{taskId}}",
+              "metaDeleteKeys": [
+                "autoRecovery",
+                "worktreeFailure",
+                "blockedReason"
+              ],
               "fields": {
                 "cooldownUntil": null,
                 "blockedReason": null,
                 "blockedContext": null,
-                "repairState": "completed",
-                "meta": "{{(() => { const current = ($data?.meta && typeof $data.meta === 'object') ? $data.meta : {}; const next = { ...current }; delete next.autoRecovery; delete next.worktreeFailure; delete next.blockedReason; return next; })()}}"
+                "repairState": "completed"
               }
             }
           },
@@ -40890,10 +40912,14 @@
             "function": "tasks.update",
             "args": {
               "taskId": "{{taskId}}",
+              "metaDeleteKeys": [
+                "autoRecovery",
+                "worktreeFailure",
+                "blockedReason"
+              ],
               "fields": {
                 "cooldownUntil": null,
-                "blockedReason": null,
-                "meta": "{{(() => { const current = ($data?.meta && typeof $data.meta === 'object') ? $data.meta : {}; const next = { ...current }; delete next.autoRecovery; delete next.worktreeFailure; delete next.blockedReason; return next; })()}}"
+                "blockedReason": null
               }
             }
           },

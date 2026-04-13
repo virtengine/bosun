@@ -13,7 +13,7 @@
 
 import { loadConfig } from "../config/config.mjs";
 import { execPrimaryPrompt, getPrimaryAgentName } from "../agent/primary-agent.mjs";
-import { resolveSharedOAuthToken as resolveVoiceOAuthToken } from "../agent/provider-auth-state.mjs";
+import { resolveVoiceOAuthToken } from "./voice-auth-manager.mjs";
 import {
   beginVoiceTurnTrace as beginVoiceTurnTraceState,
   completeVoiceTurnTrace as completeVoiceTurnTraceState,

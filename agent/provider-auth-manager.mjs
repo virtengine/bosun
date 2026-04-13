@@ -75,6 +75,86 @@ const PROVIDER_CREDENTIAL_BLUEPRINTS = Object.freeze({
       templates: {},
     },
   },
+  openrouter: {
+    apiKey: {
+      label: "OpenRouter API Key",
+      envKeys: ["OPENROUTER_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  perplexity: {
+    apiKey: {
+      label: "Perplexity API Key",
+      envKeys: ["PERPLEXITY_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  deepinfra: {
+    apiKey: {
+      label: "DeepInfra API Key",
+      envKeys: ["DEEPINFRA_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  groq: {
+    apiKey: {
+      label: "Groq API Key",
+      envKeys: ["GROQ_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  together: {
+    apiKey: {
+      label: "Together API Key",
+      envKeys: ["TOGETHER_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  xai: {
+    apiKey: {
+      label: "xAI API Key",
+      envKeys: ["XAI_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  fireworks: {
+    apiKey: {
+      label: "Fireworks API Key",
+      envKeys: ["FIREWORKS_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  cerebras: {
+    apiKey: {
+      label: "Cerebras API Key",
+      envKeys: ["CEREBRAS_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  sambanova: {
+    apiKey: {
+      label: "SambaNova API Key",
+      envKeys: ["SAMBANOVA_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
+  nebius: {
+    apiKey: {
+      label: "Nebius API Key",
+      envKeys: ["NEBIUS_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
   "openai-codex-subscription": {
     oauth: {
       label: "OpenAI OAuth Session",

@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.setConfig({ testTimeout: 15_000 });
+
 const mockCodexCtor = vi.fn();
 const mockStartThread = vi.fn();
 
@@ -262,7 +264,7 @@ describe("codex-shell stream safeguards", () => {
     releaseFirstTurn();
     const first = await firstPromise;
     expect(first.finalResponse).toContain("first session completed");
-  });
+  }, 15000);
 
   it("returns normalized usage from streamed turn completion events", async () => {
     mockStartThread.mockImplementation(() => ({

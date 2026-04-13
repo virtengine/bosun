@@ -176,7 +176,7 @@
               "name": { "type": "string" },
               "providerId": {
                 "type": "string",
-                "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth"]
+                "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"]
               },
               "enabled": { "type": "boolean", "default": true },
               "weight": {
@@ -1432,7 +1432,7 @@
       "properties": {
         "defaultProvider": {
           "type": "string",
-          "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth"],
+          "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"],
           "default": "openai-responses"
         },
         "defaultModel": {
@@ -1527,6 +1527,105 @@
           "properties": {
             "enabled": { "type": "boolean", "default": false },
             "defaultModel": { "type": "string" }
+          }
+        },
+        "openrouter": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "perplexity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "deepinfra": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "groq": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "together": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "xai": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "fireworks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "cerebras": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "sambanova": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "nebius": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "gemini": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
           }
         }
       }

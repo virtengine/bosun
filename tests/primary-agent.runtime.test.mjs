@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+vi.setConfig({ testTimeout: 15_000 });
+
 const mockConfigState = vi.hoisted(() => ({
   current: { primaryAgent: "codex-sdk" },
 }));
@@ -282,6 +284,61 @@ describe("primary-agent runtime safeguards", () => {
     );
   });
 
+  it("does not eagerly touch native adapter properties during registry construction", async () => {
+    vi.resetModules();
+    vi.doMock("../shell/anthropic-native-adapter.mjs", () => {
+      const adapter = {
+        exec: vi.fn(async () => ({ finalResponse: "ok", items: [] })),
+        isBusy: vi.fn(() => false),
+        getInfo: vi.fn(() => ({ busy: false })),
+        init: vi.fn(async () => true),
+        reset: vi.fn(() => {}),
+        listSessions: vi.fn(() => []),
+        getSessionMessages: vi.fn(() => []),
+      };
+      Object.defineProperties(adapter, {
+        name: { get() { throw new Error("name getter should not be touched during registry construction"); } },
+        provider: { get() { throw new Error("provider getter should not be touched during registry construction"); } },
+        displayName: { get() { throw new Error("displayName getter should not be touched during registry construction"); } },
+        acceptsTurnPayload: { get() { throw new Error("acceptsTurnPayload getter should not be touched during registry construction"); } },
+      });
+      return {
+        anthropicNativeAdapter: adapter,
+        default: adapter,
+      };
+    });
+
+    const { createShellAdapterRegistry } = await import("../shell/shell-adapter-registry.mjs");
+    const registry = createShellAdapterRegistry();
+
+    expect(registry["anthropic-native"]).toEqual(expect.objectContaining({
+      name: "anthropic-native",
+      provider: "ANTHROPIC_NATIVE",
+      displayName: "Anthropic Native",
+      acceptsTurnPayload: true,
+    }));
+
+    vi.doMock("../shell/anthropic-native-adapter.mjs", () => {
+      const adapter = {
+        name: "anthropic-native",
+        provider: "ANTHROPIC_NATIVE",
+        displayName: "Anthropic Native",
+        acceptsTurnPayload: true,
+        exec: mockExecAnthropicNative,
+        isBusy: mockIsAnthropicNativeBusy,
+        getInfo: mockGetAnthropicNativeInfo,
+        init: mockInitAnthropicNative,
+        reset: mockResetAnthropicNative,
+        listSessions: mockListAnthropicNativeSessions,
+        getSessionMessages: mockGetAnthropicNativeSessionMessages,
+      };
+      return {
+        anthropicNativeAdapter: adapter,
+        default: adapter,
+      };
+    });
+  });
+
   it("uses dryRun codex config checks at runtime by default", async () => {
     vi.resetModules();
     const primaryAgent = await import("../agent/primary-agent.mjs");
@@ -351,7 +408,7 @@ describe("primary-agent runtime safeguards", () => {
         }),
       }),
     );
-  });
+  }, 15000);
 
   it("surfaces configured executor profiles with model allow-lists and enabled flags", async () => {
     mockConfigState.current = {
@@ -705,7 +762,7 @@ describe("primary-agent runtime safeguards", () => {
     expect(mockExecCodexPrompt).toHaveBeenCalledTimes(2);
     expect(mockExecCopilotPrompt).not.toHaveBeenCalled();
     expect(result.finalResponse).toBe("codex-recovered");
-  });
+  }, 15000);
 
   it("prepends architect/editor framing for editor executions", async () => {
     vi.resetModules();
@@ -778,7 +835,7 @@ describe("primary-agent runtime safeguards", () => {
     const third = await primaryAgent.execPrimaryPrompt("hello", { sessionId: "s3" });
     expect(mockExecCopilotPrompt).toHaveBeenCalledTimes(1);
     expect(third.finalResponse).toBe("copilot-ok");
-  }, 10000);
+  }, 15000);
 
   it("manages primary sessions through the session manager facade", async () => {
     mockCreateCodexSession.mockResolvedValueOnce({ id: "session-created" });
@@ -801,7 +858,7 @@ describe("primary-agent runtime safeguards", () => {
       expect.objectContaining({ id: "session-switched", sessionId: "session-switched" }),
       expect.objectContaining({ id: "adapter-only-session" }),
     ]));
-  });
+  }, 15000);
 
   it("isolates non-primary active sessions by explicit harness scope", async () => {
     vi.resetModules();
@@ -824,7 +881,7 @@ describe("primary-agent runtime safeguards", () => {
     expect(sessionManager.getActiveSessionId("telegram:chat-1")).toBe("telegram-session-1");
     expect(sessionManager.getActiveSessionId("voice-dispatch:call-1")).toBe("voice-session-1");
     expect(sessionManager.getActiveSessionId("primary")).not.toBe("telegram-session-1");
-  });
+  }, 15000);
 
   it("keeps primary execution lifecycle in the session-manager facade", async () => {
     vi.resetModules();

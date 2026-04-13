@@ -61,18 +61,41 @@ const NATIVE_PROVIDER_ADAPTERS = new Map([
   ["ollama", "openai-native"],
   ["anthropic-messages", "anthropic-native"],
   ["gemini-generate-content", "gemini-native"],
+  ["openrouter", "openai-native"],
+  ["perplexity", "openai-native"],
+  ["deepinfra", "openai-native"],
+  ["groq", "openai-native"],
+  ["together", "openai-native"],
+  ["xai", "openai-native"],
+  ["fireworks", "openai-native"],
+  ["cerebras", "openai-native"],
+  ["sambanova", "openai-native"],
+  ["nebius", "openai-native"],
 ]);
 
 export function normalizeProviderAdapterName(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if ([
+    "anthropic-native",
+    "gemini-native",
+    "openai-native",
+    "codex-sdk",
+    "copilot-sdk",
+    "claude-sdk",
+    "gemini-sdk",
+    "opencode-sdk",
+  ].includes(normalized)) {
+    return normalized;
+  }
   const adapterId = resolveProviderAdapterId(value);
   if (adapterId) return adapterId;
-  const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "anthropic-native") return "anthropic-native";
   if (normalized === "gemini-native") return "gemini-native";
   if (normalized === "openai-native") return "openai-native";
   if (normalized === "github-copilot") return "copilot-sdk";
   if (normalized === "claude_code" || normalized === "claude-code") return "claude-sdk";
   if (normalized === "google-gemini" || normalized === "gemini" || normalized === "gemini-sdk") return "gemini-sdk";
+  if (["openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius"].includes(normalized)) return "openai-native";
   if (normalized === "open-code" || normalized === "opencode" || normalized === "opencode-sdk") return "opencode-sdk";
   if (normalized === "copilot" || normalized === "copilot-sdk") return "copilot-sdk";
   if (normalized === "claude" || normalized === "claude-sdk" || normalized === "anthropic") return "claude-sdk";
@@ -82,12 +105,13 @@ export function normalizeProviderAdapterName(value) {
 
 export function executorToAdapterName(executor) {
   const key = normalizeExecutorKey(executor);
-  const definition = getBuiltinProviderDefinition(key);
-  if (definition?.adapterId) return definition.adapterId;
+  if (key === "codex" || key === "openai") return "codex-sdk";
   if (key === "copilot") return "copilot-sdk";
   if (key === "claude" || key === "anthropic") return "claude-sdk";
   if (key === "gemini") return "gemini-sdk";
   if (key === "opencode" || key === "ollama" || key === "openai-compatible") return "opencode-sdk";
+  const definition = getBuiltinProviderDefinition(key);
+  if (definition?.adapterId) return definition.adapterId;
   return "codex-sdk";
 }
 
@@ -115,6 +139,18 @@ function resolveRuntimeAdapterId(providerId, definition, options = {}, entry = n
   const explicitAdapterId = toTrimmedString(entry?.adapterId || "");
   if (explicitAdapterId) {
     return normalizeProviderAdapterName(explicitAdapterId);
+  }
+  if (
+    options.preferNativeAdapters !== true
+    && entry
+    && !toTrimmedString(entry?.providerId)
+    && !toTrimmedString(entry?.adapterId)
+    && toTrimmedString(entry?.executor)
+  ) {
+    const legacyAdapterId = executorToAdapterName(entry.executor);
+    if (legacyAdapterId) {
+      return legacyAdapterId;
+    }
   }
   const normalizedProviderId = normalizeProviderDefinitionId(providerId, "") || providerId;
   const preferredNativeAdapterId = NATIVE_PROVIDER_ADAPTERS.get(normalizedProviderId);

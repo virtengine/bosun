@@ -3,11 +3,21 @@ import ANTHROPIC_MESSAGES_PROVIDER from "./anthropic-messages.mjs";
 import AZURE_OPENAI_RESPONSES_PROVIDER from "./azure-openai-responses.mjs";
 import CLAUDE_SUBSCRIPTION_SHIM_PROVIDER from "./claude-subscription-shim.mjs";
 import COPILOT_OAUTH_PROVIDER from "./copilot-oauth.mjs";
+import CEREBRAS_PROVIDER from "./cerebras.mjs";
+import DEEPINFRA_PROVIDER from "./deepinfra.mjs";
+import FIREWORKS_PROVIDER from "./fireworks.mjs";
 import GEMINI_GENERATE_CONTENT_PROVIDER from "./gemini-generate-content.mjs";
+import GROQ_PROVIDER from "./groq.mjs";
+import NEBIUS_PROVIDER from "./nebius.mjs";
 import OLLAMA_PROVIDER from "./ollama.mjs";
 import OPENAI_CODEX_SUBSCRIPTION_PROVIDER from "./openai-codex-subscription.mjs";
 import OPENAI_COMPATIBLE_PROVIDER from "./openai-compatible.mjs";
 import OPENAI_RESPONSES_PROVIDER from "./openai-responses.mjs";
+import OPENROUTER_PROVIDER from "./openrouter.mjs";
+import PERPLEXITY_PROVIDER from "./perplexity.mjs";
+import SAMBANOVA_PROVIDER from "./sambanova.mjs";
+import TOGETHER_PROVIDER from "./together.mjs";
+import XAI_PROVIDER from "./xai.mjs";
 
 export {
   createProviderDriver,
@@ -41,11 +51,21 @@ export {
   AZURE_OPENAI_RESPONSES_PROVIDER,
   CLAUDE_SUBSCRIPTION_SHIM_PROVIDER,
   COPILOT_OAUTH_PROVIDER,
+  CEREBRAS_PROVIDER,
+  DEEPINFRA_PROVIDER,
+  FIREWORKS_PROVIDER,
   GEMINI_GENERATE_CONTENT_PROVIDER,
+  GROQ_PROVIDER,
+  NEBIUS_PROVIDER,
   OLLAMA_PROVIDER,
   OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
   OPENAI_COMPATIBLE_PROVIDER,
   OPENAI_RESPONSES_PROVIDER,
+  OPENROUTER_PROVIDER,
+  PERPLEXITY_PROVIDER,
+  SAMBANOVA_PROVIDER,
+  TOGETHER_PROVIDER,
+  XAI_PROVIDER,
 };
 
 export const BUILTIN_PROVIDER_DRIVERS = Object.freeze([
@@ -58,6 +78,16 @@ export const BUILTIN_PROVIDER_DRIVERS = Object.freeze([
   OLLAMA_PROVIDER,
   COPILOT_OAUTH_PROVIDER,
   GEMINI_GENERATE_CONTENT_PROVIDER,
+  OPENROUTER_PROVIDER,
+  PERPLEXITY_PROVIDER,
+  DEEPINFRA_PROVIDER,
+  GROQ_PROVIDER,
+  TOGETHER_PROVIDER,
+  XAI_PROVIDER,
+  FIREWORKS_PROVIDER,
+  CEREBRAS_PROVIDER,
+  SAMBANOVA_PROVIDER,
+  NEBIUS_PROVIDER,
 ]);
 
 export const BUILTIN_PROVIDER_DEFINITIONS = BUILTIN_PROVIDER_DRIVERS;
@@ -76,6 +106,28 @@ const LEGACY_PROVIDER_ALIASES = Object.freeze({
   gemini: "gemini-generate-content",
   "gemini-sdk": "gemini-generate-content",
   "google-gemini": "gemini-generate-content",
+  openrouter: "openrouter",
+  "openrouter-api": "openrouter",
+  perplexity: "perplexity",
+  pplx: "perplexity",
+  deepinfra: "deepinfra",
+  "deep-infra": "deepinfra",
+  groq: "groq",
+  "groq-api": "groq",
+  together: "together",
+  "together-ai": "together",
+  xai: "xai",
+  "x-ai": "xai",
+  grok: "xai",
+  fireworks: "fireworks",
+  "fireworks-ai": "fireworks",
+  cerebras: "cerebras",
+  "cerebras-ai": "cerebras",
+  sambanova: "sambanova",
+  "samba-nova": "sambanova",
+  samba: "sambanova",
+  nebius: "nebius",
+  "nebius-ai": "nebius",
   opencode: "openai-compatible",
   "opencode-sdk": "openai-compatible",
   "open-code": "openai-compatible",

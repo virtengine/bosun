@@ -6593,7 +6593,7 @@ const BOSUN_FUNCTION_REGISTRY = Object.freeze({
   },
   "tasks.update": {
     description: "Update a task's status or fields",
-    params: ["taskId", "status", "fields"],
+    params: ["taskId", "status", "fields", "metaDeleteKeys", "metaPatch"],
     async invoke(args, ctx, engine) {
       const kanban = engine?.services?.kanban;
       if (!kanban || typeof kanban.updateTask !== "function") {
@@ -6602,6 +6602,21 @@ const BOSUN_FUNCTION_REGISTRY = Object.freeze({
       const update = {};
       if (args.status) update.status = args.status;
       if (args.fields && typeof args.fields === "object") Object.assign(update, args.fields);
+      const metaDeleteKeys = Array.isArray(args.metaDeleteKeys)
+        ? args.metaDeleteKeys.map((entry) => String(entry || "").trim()).filter(Boolean)
+        : [];
+      const metaPatch = args.metaPatch && typeof args.metaPatch === "object" && !Array.isArray(args.metaPatch)
+        ? args.metaPatch
+        : null;
+      if ((metaDeleteKeys.length > 0 || metaPatch) && typeof kanban.getTask === "function") {
+        const currentTask = await kanban.getTask(args.taskId).catch(() => null);
+        const currentMeta = currentTask?.meta && typeof currentTask.meta === "object" && !Array.isArray(currentTask.meta)
+          ? { ...currentTask.meta }
+          : {};
+        for (const key of metaDeleteKeys) delete currentMeta[key];
+        if (metaPatch) Object.assign(currentMeta, metaPatch);
+        update.meta = currentMeta;
+      }
       return kanban.updateTask(args.taskId, update);
     },
   },
