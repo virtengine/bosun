@@ -38,6 +38,7 @@ const mockSessionAbort = vi.fn();
 const mockEventSubscribe = vi.fn();
 const mockCreateOpencode = vi.fn();
 const mockCreateOpencodeClient = vi.fn();
+const SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 5_000;
 
 /** Build a mock client that all SDK tests share */
 function makeMockClient() {
@@ -226,7 +227,7 @@ describe("execOpencodePrompt() — happy path", () => {
     expect(result.finalResponse).toContain("done!");
     expect(result.items).toBeInstanceOf(Array);
     expect(result.usage).toBeNull();
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("calls onEvent with formatted strings", async () => {
     const events = [];
@@ -258,7 +259,7 @@ describe("execOpencodePrompt() — happy path", () => {
 
     expect(result.finalResponse).toBe("response text");
     expect(events.some((e) => e.includes("Running") && e.includes("go test"))).toBe(true);
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("records canonical lifecycle and stream telemetry for the legacy entrypoint", async () => {
     mockSessionCreate.mockResolvedValue({ data: { id: "uuid-telemetry" } });
@@ -299,7 +300,7 @@ describe("execOpencodePrompt() — happy path", () => {
     expect(events.some((event) => event.eventType === "shell.stream.event")).toBe(true);
     expect(events.some((event) => event.providerId === "openai-compatible")).toBe(true);
     expect(getActiveSessionId()).toBe("telemetry-session");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("enriches prompt with statusData context", async () => {
     await execOpencodePrompt("do work", {
@@ -312,7 +313,7 @@ describe("execOpencodePrompt() — happy path", () => {
     const text = body?.parts?.[0]?.text || "";
     expect(text).toContain("Orchestrator Status");
     expect(text).toContain("VE-42");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("does not enrich prompt when statusData is absent", async () => {
     await execOpencodePrompt("bare message", { sessionId: "bare-session" });
@@ -320,7 +321,7 @@ describe("execOpencodePrompt() — happy path", () => {
     const text = callArg[0]?.body?.parts?.[0]?.text || "";
     expect(text).not.toContain("Orchestrator Status");
     expect(text).toContain("bare message");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("includes model config when OPENCODE_MODEL is set", async () => {
     process.env.OPENCODE_MODEL = "anthropic/claude-sonnet-5";
@@ -329,14 +330,14 @@ describe("execOpencodePrompt() — happy path", () => {
     expect(body?.model?.providerID).toBe("anthropic");
     expect(body?.model?.modelID).toBe("claude-sonnet-5");
     delete process.env.OPENCODE_MODEL;
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("omits model when OPENCODE_MODEL is not set", async () => {
     delete process.env.OPENCODE_MODEL;
     await execOpencodePrompt("no model", { sessionId: "no-model-session" });
     const body = mockSessionPrompt.mock.calls[0][0]?.body;
     expect(body).not.toHaveProperty("model");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("allows Bosun-selected OpenCode runs even when agent-sdk primary is codex", async () => {
     const { resolveAgentSdkConfig } = await import("../agent/agent-sdk.mjs");
@@ -352,7 +353,7 @@ describe("execOpencodePrompt() — happy path", () => {
 
     expect(result.finalResponse).toContain("done!");
     expect(result.items).toBeInstanceOf(Array);
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 });
 
 describe("execOpencodePrompt() — busy guard", () => {
@@ -558,7 +559,7 @@ describe("Session management — listSessions / switchSession / createSession", 
     await execOpencodePrompt("test", { sessionId: "switch-a", persistent: true });
     await switchSession("switch-b");
     expect(getActiveSessionId()).toBe("switch-b");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 });
 
 describe("Event formatting — formatOpencodeEvent (via onEvent)", () => {
