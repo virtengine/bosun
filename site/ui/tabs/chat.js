@@ -9,7 +9,7 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge, Avatar, LinearProgress, Grid } from "@mui/material";
+import { Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge, Avatar, LinearProgress, Grid, Collapse } from "@mui/material";
 
 /* ─── Inner error boundary for complex sub-components ─── */
 class ChatSafeBoundary extends Component {
@@ -301,6 +301,8 @@ import {
 } from "../components/agent-selector.js";
 import {
   addPendingMessage,
+  agentStatus as streamingAgentStatus,
+  clearAgentStatus,
   confirmMessage,
   rejectMessage,
   markUserMessageSent,
@@ -615,6 +617,7 @@ export function ChatTab() {
   const fileInputRef = useRef(null);
   const sendMenuRef = useRef(null);
   const chatDropDepthRef = useRef(0);
+  const lastAppliedRouteSessionIdRef = useRef(null);
   const [showSendMenu, setShowSendMenu] = useState(false);
   const [stoppingAgent, setStoppingAgent] = useState(false);
   const routeSessionId = String(routeParams.value?.sessionId || "").trim();
@@ -787,14 +790,20 @@ export function ChatTab() {
       setRouteParams({}, { replace: true, skipGuard: true });
       return;
     }
+    if (lastAppliedRouteSessionIdRef.current === routeSessionId && sessionId && sessionId !== routeSessionId) {
+      return;
+    }
     if (sessionId === routeSessionId) return;
+    lastAppliedRouteSessionIdRef.current = routeSessionId;
     selectedSessionId.value = routeSessionId;
   }, [isLoadingSessionList, routeSessionId, sessionId]);
 
   useEffect(() => {
     if (sessionId) {
+      lastAppliedRouteSessionIdRef.current = sessionId;
       setRouteParams({ sessionId }, { replace: true, skipGuard: true });
     } else {
+      lastAppliedRouteSessionIdRef.current = null;
       setRouteParams({}, { replace: true, skipGuard: true });
     }
   }, [sessionId]);
@@ -932,6 +941,8 @@ export function ChatTab() {
             body: JSON.stringify({
               content: msg,
               mode: outboundMode,
+              agent: activeAgent.value || undefined,
+              providerSelection: activeAgent.value || undefined,
               agentProfileId: activeManualAgentId.value || undefined,
               model: selectedModel.value || undefined,
               ...(deliveryMode ? { deliveryMode } : {}),
@@ -945,6 +956,7 @@ export function ChatTab() {
           confirmMessage(tempId);
         } catch (err) {
           rejectMessage(tempId, err.message || "Send failed");
+          clearAgentStatus(sessionId);
           throw err;
         }
 
@@ -977,7 +989,6 @@ export function ChatTab() {
                 mode: outboundMode,
                 agent: activeAgent.value || undefined,
                 providerSelection: activeAgent.value || undefined,
-                agentProfileId: activeManualAgentId.value || undefined,
                 model: selectedModel.value || undefined,
                 ...(deliveryMode ? { deliveryMode } : {}),
                 attachments,
@@ -986,6 +997,7 @@ export function ChatTab() {
             confirmMessage(tempId);
           } catch (err) {
             rejectMessage(tempId, err.message || "Send failed");
+            clearAgentStatus(newId);
           }
 
           loadSessionMessages(newId, { limit: 50 });
@@ -1042,8 +1054,9 @@ export function ChatTab() {
           method: "POST",
           body: JSON.stringify({}),
         });
+        clearAgentStatus(sessionId);
+        optimisticMarkIdle();
         if (stopResult?.stopped) {
-          optimisticMarkIdle();
           showToast("Stopped current agent turn", "info");
         } else {
           showToast("No active agent turn to stop", "info");
@@ -1055,6 +1068,7 @@ export function ChatTab() {
           method: "POST",
           body: JSON.stringify({ command: "/stop" }),
         });
+        clearAgentStatus();
         optimisticMarkIdle();
         showToast("Agent stopped", "info");
       }
@@ -1079,7 +1093,6 @@ export function ChatTab() {
     const attachments = Array.isArray(pendingAttachments)
       ? pendingAttachments.filter(Boolean)
       : [];
-    const composerBusy = Boolean(activeAgentInfo.value?.busy);
     if ((!content && attachments.length === 0) || uploadingAttachments) return;
     setShowSendMenu(false);
     if (!sessionId || !composerBusy) {
@@ -1144,14 +1157,6 @@ export function ChatTab() {
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [showSendMenu]);
 
-  // Clear one-shot stop UI lock as soon as the selected agent reports idle.
-  useEffect(() => {
-    if (!stoppingAgent) return;
-    if (!activeAgentInfo.value?.busy) {
-      setStoppingAgent(false);
-    }
-  }, [stoppingAgent, activeAgentInfo.value?.busy]);
-
   /* ── Keyboard handling ── */
   function handleKeyDown(e) {
     // Slash menu navigation
@@ -1191,7 +1196,7 @@ export function ChatTab() {
     // Enter queues by default while the agent is busy; otherwise it sends.
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (activeAgentInfo.value?.busy) {
+      if (composerBusy) {
         handleAddToQueue();
       } else {
         handleSend();
@@ -1329,6 +1334,15 @@ export function ChatTab() {
   const sessionLifecycle = getSessionLifecycleState(activeSession);
   const sessionRuntime = getSessionRuntimeState(activeSession);
   const sessionHistory = getSessionHistoryState(activeSession);
+  const trackedAgentStatus = streamingAgentStatus.value || {};
+  const trackedSessionId = String(trackedAgentStatus.sessionId || "").trim();
+  const currentSessionId = String(sessionId || "").trim();
+  const sessionAgentBusy =
+    Boolean(currentSessionId)
+    && trackedSessionId === currentSessionId
+    && String(trackedAgentStatus.state || "").trim().toLowerCase() !== "idle";
+  const providerBusy = Boolean(activeAgentInfo.value?.busy);
+  const composerBusy = sessionAgentBusy || (!currentSessionId && providerBusy);
   const sessionFreshnessAt = getSessionRecencyTimestamp(activeSession);
   const sessionFreshnessLabel = sessionFreshnessAt ? new Date(sessionFreshnessAt).toLocaleString() : "unknown";
   const queuedFollowups = Array.isArray(activeSession?.metadata?.queuedFollowups)
@@ -1389,6 +1403,14 @@ export function ChatTab() {
     showToast("Session history deleted", "success");
     setRouteParams({}, { replace: true, skipGuard: true });
   }, [sessionId]);
+
+  // Clear one-shot stop UI lock as soon as the selected agent reports idle.
+  useEffect(() => {
+    if (!stoppingAgent) return;
+    if (!composerBusy) {
+      setStoppingAgent(false);
+    }
+  }, [composerBusy, stoppingAgent]);
 
   useEffect(() => {
     const key = String(sessionId || DRAFT_SESSION_KEY);
@@ -1829,7 +1851,7 @@ export function ChatTab() {
                 disabled=${sending}
                 title="Live voice mode"
               />
-              ${activeAgentInfo.value?.busy && !stoppingAgent && html`
+              ${composerBusy && !stoppingAgent && html`
                 <${IconButton}
                   onClick=${handleStop}
                   title="Stop agent"
@@ -1842,8 +1864,8 @@ export function ChatTab() {
                 <${IconButton}
                   color="primary"
                   disabled=${(!inputValue.trim() && pendingAttachments.length === 0) || uploadingAttachments}
-                  onClick=${activeAgentInfo.value?.busy ? handleAddToQueue : handleSend}
-                  title=${activeAgentInfo.value?.busy ? "Queue message (Enter)" : "Send (Enter)"}
+                  onClick=${composerBusy ? handleAddToQueue : handleSend}
+                  title=${composerBusy ? "Queue message (Enter)" : "Send (Enter)"}
                   size="small"
                 >➤<//>
                 <${IconButton}
@@ -1860,11 +1882,11 @@ export function ChatTab() {
                         <${ListItemIcon} sx=${{ minWidth: 28 }}>⊳<//>
                         <${ListItemText} primary="Stop and Send" />
                       <//>
-                      <${ListItemButton} selected=${activeAgentInfo.value?.busy} onClick=${handleAddToQueue}>
+                      <${ListItemButton} selected=${composerBusy} onClick=${handleAddToQueue}>
                         <${ListItemIcon} sx=${{ minWidth: 28 }}>+<//>
                         <${ListItemText} primary="Add to Queue" secondary="Enter" />
                       <//>
-                      <${ListItemButton} selected=${!activeAgentInfo.value?.busy} onClick=${handleSteerWithMessage}>
+                      <${ListItemButton} selected=${!composerBusy} onClick=${handleSteerWithMessage}>
                         <${ListItemIcon} sx=${{ minWidth: 28 }}>→<//>
                         <${ListItemText} primary="Steer with Message" secondary="Alt+Enter" />
                       <//>

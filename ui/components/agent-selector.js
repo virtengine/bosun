@@ -15,6 +15,10 @@ import {
 import { signal, computed, effect } from "@preact/signals";
 import htm from "htm";
 import { apiFetch } from "../modules/api.js";
+import {
+  loadSessionBranches,
+  updateSessionSurface,
+} from "../modules/session-surface.js";
 import { worktreeData, loadWorktrees } from "../modules/state.js";
 import { haptic } from "../modules/telegram.js";
 import { resolveIcon } from "../modules/icon-utils.js";
@@ -29,8 +33,6 @@ import {
   Menu,
   MenuItem,
   Select,
-  Switch,
-  FormControlLabel,
   Chip,
   Typography,
   Box,
@@ -41,6 +43,8 @@ import {
   ListItemIcon,
   ListItemText,
   Badge,
+  TextField,
+  CircularProgress,
 } from "@mui/material";
 
 const html = htm.bind(h);
@@ -65,11 +69,6 @@ export const agentSelectorLoading = signal(false);
 
 /** Agent runtime status (set externally or via WS events) */
 export const agentStatus = signal("idle"); // "idle" | "thinking" | "executing" | "streaming"
-
-/** Yolo (auto-approve) mode — skips confirmation prompts in supported agents */
-export const yoloMode = signal(false);
-// Hydrate from localStorage in browser
-try { if (typeof localStorage !== "undefined") yoloMode.value = localStorage.getItem("ve-yolo-mode") === "true"; } catch {}
 
 /** Selected model override — empty string means "default" */
 export const selectedModel = signal("");
@@ -1072,59 +1071,466 @@ export function AgentStatusBadge() {
 }
 
 /* ═══════════════════════════════════════════════
- *  YoloToggle
- *  MUI Switch + FormControlLabel
+ *  SessionSurfaceOptionPicker
+ *  Session-scoped execution target / permission dropdowns
  * ═══════════════════════════════════════════════ */
 
-function YoloToggle() {
-  const isYolo = yoloMode.value;
+function SessionSurfaceOptionPicker({
+  sessionId = "",
+  sessionWorkspace = "active",
+  requestKey = "",
+  surfaceState = null,
+  icon = "box",
+  tooltipTitle = "",
+  fallbackLabel = "Select",
+  onSessionUpdated = null,
+} = {}) {
+  const options = Array.isArray(surfaceState?.options) ? surfaceState.options : [];
+  const selected = surfaceState?.selected || options.find((option) => option?.available !== false) || null;
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const open = Boolean(anchorEl);
 
-  const toggle = useCallback(() => {
-    const next = !yoloMode.peek();
-    yoloMode.value = next;
-    try { localStorage.setItem("ve-yolo-mode", String(next)); } catch {}
-    haptic(next ? "medium" : "light");
-  }, []);
+  const handleSelect = useCallback(async (optionId) => {
+    const nextId = String(optionId || "").trim();
+    if (!sessionId || !requestKey || !nextId || saving) return;
+    if (nextId === String(selected?.id || "").trim()) {
+      setAnchorEl(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await updateSessionSurface(sessionId, {
+        workspace: sessionWorkspace,
+        [requestKey]: nextId,
+      });
+      onSessionUpdated?.(res?.session || null);
+      haptic("light");
+      setAnchorEl(null);
+    } catch (err) {
+      console.warn(`[agent-selector] Failed to update ${requestKey}:`, err);
+    } finally {
+      setSaving(false);
+    }
+  }, [onSessionUpdated, requestKey, saving, selected?.id, sessionId, sessionWorkspace]);
+
+  if (!sessionId || options.length <= 0) return null;
 
   return html`
-    <${Tooltip}
-      title=${isYolo
-        ? "Yolo ON — agent will auto-approve actions (disable to require confirmations)"
-        : "Enable Yolo mode — agent will skip confirmation prompts"}
-      arrow
-    >
-      <${FormControlLabel}
-        control=${html`
-          <${Switch}
-            checked=${isYolo}
-            onChange=${toggle}
-            size="small"
-            sx=${{
-              "& .MuiSwitch-switchBase.Mui-checked": {
-                color: "#ffa537",
-              },
-              "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": {
-                bgcolor: "rgba(255,140,0,0.55)",
-              },
-            }}
-          />
-        `}
-        label=${html`
-          <${Stack} direction="row" spacing=${0.5} alignItems="center">
-            <span style="font-size:13px;line-height:1">${resolveIcon("zap")}</span>
-            <${Typography} variant="body2" sx=${{ fontSize: 12, fontWeight: 600, color: isYolo ? "#ffa537" : "var(--tg-theme-hint-color, #888)" }}>
-              Yolo
-            </${Typography}>
-          </${Stack}>
-        `}
+    <${Tooltip} title=${tooltipTitle || fallbackLabel} arrow>
+      <${Chip}
+        label=${String(selected?.label || fallbackLabel).trim() || fallbackLabel}
+        size="small"
+        variant="outlined"
+        onClick=${(e) => setAnchorEl(e.currentTarget)}
+        disabled=${saving}
+        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon(icon)}</span>`}
         sx=${{
-          mx: 0,
           flexShrink: 0,
-          userSelect: "none",
-          "& .MuiFormControlLabel-label": { ml: 0 },
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 500,
+          color: "var(--tg-theme-text-color, #fff)",
+          borderColor: open ? "var(--tg-theme-button-color, #3b82f6)" : "rgba(255,255,255,0.08)",
+          bgcolor: selected ? "rgba(59,130,246,0.12)" : "transparent",
+          "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
         }}
       />
     </${Tooltip}>
+    <${Menu}
+      anchorEl=${anchorEl}
+      open=${open}
+      onClose=${() => !saving && setAnchorEl(null)}
+      anchorOrigin=${{ vertical: "top", horizontal: "left" }}
+      transformOrigin=${{ vertical: "bottom", horizontal: "left" }}
+      slotProps=${{ paper: { sx: { ...muiDarkPaper, minWidth: 260 } } }}
+    >
+      ${options.map((option) => {
+        const optionId = String(option?.id || "").trim();
+        const isSelected = optionId === String(selected?.id || "").trim();
+        const isAvailable = option?.available !== false;
+        return html`
+          <${MenuItem}
+            key=${optionId}
+            selected=${isSelected}
+            disabled=${saving || !isAvailable}
+            onClick=${() => handleSelect(optionId)}
+          >
+            <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+              ${isSelected
+                ? html`<${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14 }}>✓</${Typography}>`
+                : html`<${Box} sx=${{ width: 7, height: 7, borderRadius: "50%", bgcolor: isAvailable ? "#60a5fa" : "rgba(148,163,184,0.55)" }} />`}
+            </${ListItemIcon}>
+            <${ListItemText}
+              primary=${option?.label || optionId}
+              secondary=${option?.description || (!isAvailable ? "Unavailable in this surface." : "")}
+              primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+              secondaryTypographyProps=${{ fontSize: 11 }}
+            />
+          </${MenuItem}>
+        `;
+      })}
+    </${Menu}>
+  `;
+}
+
+function SessionExecutionTargetPicker(props = {}) {
+  return html`
+    <${SessionSurfaceOptionPicker}
+      sessionId=${props.sessionId}
+      sessionWorkspace=${props.sessionWorkspace}
+      onSessionUpdated=${props.onSessionUpdated}
+      requestKey="executionTarget"
+      surfaceState=${props.sessionSurface?.executionTarget || null}
+      icon="globe"
+      tooltipTitle="Continue in"
+      fallbackLabel="Local project"
+    />
+  `;
+}
+
+function SessionPermissionModePicker(props = {}) {
+  return html`
+    <${SessionSurfaceOptionPicker}
+      sessionId=${props.sessionId}
+      sessionWorkspace=${props.sessionWorkspace}
+      onSessionUpdated=${props.onSessionUpdated}
+      requestKey="permissionMode"
+      surfaceState=${props.sessionSurface?.permissionMode || null}
+      icon="shield"
+      tooltipTitle="Permissions"
+      fallbackLabel="Default Permissions"
+    />
+  `;
+}
+
+function repoDisplayLabel(repo = null) {
+  return String(repo?.displayName || repo?.name || repo?.path || "Repo").trim() || "Repo";
+}
+
+function branchSecondaryLabel(branch = null) {
+  const parts = [];
+  if (branch?.scope === "local") parts.push("Local");
+  if (branch?.scope === "remote") parts.push("Remote");
+  if (branch?.upstream) parts.push(branch.upstream);
+  if (branch?.shortHash) parts.push(branch.shortHash);
+  return parts.join(" · ");
+}
+
+function SessionRepoPicker({
+  sessionId = "",
+  sessionSurface = null,
+  sessionWorkspace = "active",
+  onSessionUpdated = null,
+} = {}) {
+  const repositorySurface = sessionSurface?.repository || null;
+  const availableRepos = Array.isArray(repositorySurface?.available) ? repositorySurface.available : [];
+  const currentRepo = repositorySurface?.selected || availableRepos[0] || null;
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const open = Boolean(anchorEl);
+
+  const handleSelect = useCallback(async (repoPath) => {
+    if (!sessionId || saving) return;
+    const nextRepoPath = String(repoPath || "").trim();
+    const currentRepoPath = String(currentRepo?.path || "").trim();
+    if (nextRepoPath === currentRepoPath) {
+      setAnchorEl(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await updateSessionSurface(sessionId, {
+        workspace: sessionWorkspace,
+        selectedRepoPath: nextRepoPath,
+      });
+      onSessionUpdated?.(res?.session || null);
+      haptic("light");
+      setAnchorEl(null);
+    } catch (err) {
+      console.warn("[agent-selector] Failed to update session repo:", err);
+    } finally {
+      setSaving(false);
+    }
+  }, [currentRepo?.path, onSessionUpdated, saving, sessionId, sessionWorkspace]);
+
+  if (!sessionId || availableRepos.length <= 0) return null;
+
+  return html`
+    <${Tooltip} title="Select the repo for this chat session" arrow>
+      <${Chip}
+        label=${repoDisplayLabel(currentRepo)}
+        size="small"
+        variant="outlined"
+        onClick=${(e) => setAnchorEl(e.currentTarget)}
+        disabled=${saving}
+        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon("box")}</span>`}
+        sx=${{
+          flexShrink: 0,
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 500,
+          color: "var(--tg-theme-text-color, #fff)",
+          borderColor: open ? "var(--tg-theme-button-color, #3b82f6)" : "rgba(255,255,255,0.08)",
+          bgcolor: currentRepo ? "rgba(59,130,246,0.12)" : "transparent",
+          "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
+        }}
+      />
+    </${Tooltip}>
+    <${Menu}
+      anchorEl=${anchorEl}
+      open=${open}
+      onClose=${() => !saving && setAnchorEl(null)}
+      anchorOrigin=${{ vertical: "top", horizontal: "left" }}
+      transformOrigin=${{ vertical: "bottom", horizontal: "left" }}
+      slotProps=${{ paper: { sx: { ...muiDarkPaper, minWidth: 280 } } }}
+    >
+      ${availableRepos.map((repo) => {
+        const isSelected = String(repo?.path || "") === String(currentRepo?.path || "");
+        const secondary = [
+          repo?.primary ? "Primary repo" : null,
+          repo?.branch ? `Branch: ${repo.branch}` : null,
+          repo?.path || null,
+        ].filter(Boolean).join(" · ");
+        return html`
+          <${MenuItem}
+            key=${repo?.id || repo?.path || repo?.name}
+            selected=${isSelected}
+            disabled=${saving}
+            onClick=${() => handleSelect(repo?.path || "")}
+          >
+            <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+              ${isSelected
+                ? html`<${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14 }}>✓</${Typography}>`
+                : html`<${Box} sx=${{ width: 7, height: 7, borderRadius: "50%", bgcolor: repo?.primary ? "#22c55e" : "rgba(148,163,184,0.8)" }} />`}
+            </${ListItemIcon}>
+            <${ListItemText}
+              primary=${repoDisplayLabel(repo)}
+              secondary=${secondary}
+              primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+              secondaryTypographyProps=${{ fontSize: 11 }}
+            />
+          </${MenuItem}>
+        `;
+      })}
+    </${Menu}>
+  `;
+}
+
+function SessionBranchPicker({
+  sessionId = "",
+  sessionSurface = null,
+  sessionWorkspace = "active",
+  onSessionUpdated = null,
+} = {}) {
+  const repositorySurface = sessionSurface?.repository || null;
+  const selectedRepo = repositorySurface?.selected || null;
+  const repoPath = String(selectedRepo?.path || sessionSurface?.branch?.repoPath || "").trim();
+  const currentBranchName = String(sessionSurface?.branch?.selected || sessionSurface?.branch?.current || selectedRepo?.branch || "").trim();
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [branchState, setBranchState] = useState(() => ({
+    current: currentBranchName || null,
+    available: Array.isArray(sessionSurface?.branch?.available) ? sessionSurface.branch.available : [],
+  }));
+  const open = Boolean(anchorEl);
+
+  useEffect(() => {
+    setBranchState({
+      current: String(sessionSurface?.branch?.current || currentBranchName || "").trim() || null,
+      available: Array.isArray(sessionSurface?.branch?.available) ? sessionSurface.branch.available : [],
+    });
+  }, [currentBranchName, sessionSurface?.branch?.available, sessionSurface?.branch?.current]);
+
+  const refreshBranches = useCallback(async () => {
+    if (!sessionId || !repoPath) return;
+    setLoading(true);
+    try {
+      const res = await loadSessionBranches(sessionId, {
+        workspace: sessionWorkspace,
+        repoPath,
+      });
+      setBranchState({
+        current: String(res?.branch?.current || currentBranchName || "").trim() || null,
+        available: Array.isArray(res?.branch?.available) ? res.branch.available : [],
+      });
+    } catch (err) {
+      console.warn("[agent-selector] Failed to load session branches:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [currentBranchName, repoPath, sessionId, sessionWorkspace]);
+
+  const handleSelect = useCallback(async (branchName) => {
+    const nextBranch = String(branchName || "").trim();
+    if (!sessionId || !repoPath || !nextBranch || saving) return;
+    if (nextBranch === currentBranchName) {
+      setAnchorEl(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await updateSessionSurface(sessionId, {
+        workspace: sessionWorkspace,
+        selectedRepoPath: repoPath,
+        branch: nextBranch,
+      });
+      onSessionUpdated?.(res?.session || null);
+      haptic("light");
+      setAnchorEl(null);
+    } catch (err) {
+      console.warn("[agent-selector] Failed to update session branch:", err);
+    } finally {
+      setSaving(false);
+    }
+  }, [currentBranchName, onSessionUpdated, repoPath, saving, sessionId, sessionWorkspace]);
+
+  const availableBranches = Array.isArray(branchState.available) ? branchState.available : [];
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const currentBranch =
+    availableBranches.find((branch) => String(branch?.name || "").trim() === currentBranchName)
+    || (currentBranchName ? { name: currentBranchName, current: true } : null);
+  const filteredBranches = availableBranches.filter((branch) => {
+    const branchName = String(branch?.name || "").trim();
+    if (!branchName) return false;
+    if (currentBranch && branchName === currentBranch.name) return false;
+    if (!normalizedQuery) return true;
+    const haystack = `${branchName} ${branchSecondaryLabel(branch)}`.toLowerCase();
+    return haystack.includes(normalizedQuery);
+  });
+
+  useEffect(() => {
+    if (!open) {
+      setQuery("");
+      return;
+    }
+    refreshBranches();
+  }, [open, refreshBranches]);
+
+  if (!sessionId || !repoPath) return null;
+
+  return html`
+    <${Tooltip} title="Select the branch for the current session repo" arrow>
+      <${Chip}
+        label=${currentBranchName || "Branch"}
+        size="small"
+        variant="outlined"
+        onClick=${async (e) => {
+          setAnchorEl(e.currentTarget);
+          setQuery("");
+          await refreshBranches();
+        }}
+        disabled=${saving}
+        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon("git-branch")}</span>`}
+        sx=${{
+          flexShrink: 0,
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 500,
+          color: "var(--tg-theme-text-color, #fff)",
+          borderColor: open ? "var(--tg-theme-button-color, #3b82f6)" : "rgba(255,255,255,0.08)",
+          bgcolor: currentBranchName ? "rgba(59,130,246,0.12)" : "transparent",
+          "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
+        }}
+      />
+    </${Tooltip}>
+    <${Menu}
+      anchorEl=${anchorEl}
+      open=${open}
+      onClose=${() => !saving && setAnchorEl(null)}
+      anchorOrigin=${{ vertical: "top", horizontal: "left" }}
+      transformOrigin=${{ vertical: "bottom", horizontal: "left" }}
+      slotProps=${{ paper: { sx: { ...muiDarkPaper, minWidth: 320 } } }}
+    >
+      <${Box} sx=${{ px: 1, pt: 1, pb: 0.5 }} onClick=${(e) => e.stopPropagation()}>
+        <${TextField}
+          autoFocus
+          fullWidth
+          size="small"
+          placeholder="Search branches"
+          value=${query}
+          onInput=${(e) => setQuery(e.target.value)}
+          onKeyDown=${(e) => e.stopPropagation()}
+        />
+      </${Box}>
+      <${Divider} />
+      ${loading
+        ? html`
+            <${MenuItem} disabled>
+              <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+                <${CircularProgress} size=${14} />
+              </${ListItemIcon}>
+              <${ListItemText}
+                primary="Loading branches"
+                secondary=${repoDisplayLabel(selectedRepo)}
+                primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+                secondaryTypographyProps=${{ fontSize: 11 }}
+              />
+            </${MenuItem}>
+          `
+        : null}
+      ${currentBranch
+        ? html`
+            <${MenuItem}
+              selected=${true}
+              disabled=${saving}
+              onClick=${() => handleSelect(currentBranch.name)}
+            >
+              <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+                <${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14 }}>✓</${Typography}>
+              </${ListItemIcon}>
+              <${ListItemText}
+                primary=${currentBranch.name}
+                secondary=${branchSecondaryLabel(currentBranch) || "Current branch"}
+                primaryTypographyProps=${{ fontSize: 13, fontWeight: 600 }}
+                secondaryTypographyProps=${{ fontSize: 11 }}
+              />
+            </${MenuItem}>
+            <${Divider} />
+          `
+        : null}
+      ${filteredBranches.length > 0
+        ? filteredBranches.map((branch) => html`
+            <${MenuItem}
+              key=${branch?.name}
+              disabled=${saving}
+              onClick=${() => handleSelect(branch?.name)}
+            >
+              <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+                <${Box} sx=${{ width: 7, height: 7, borderRadius: "50%", bgcolor: branch?.scope === "local" ? "#22c55e" : "#60a5fa" }} />
+              </${ListItemIcon}>
+              <${ListItemText}
+                primary=${branch?.name}
+                secondary=${branchSecondaryLabel(branch)}
+                primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+                secondaryTypographyProps=${{ fontSize: 11 }}
+              />
+            </${MenuItem}>
+          `)
+        : (!loading
+            ? html`
+                <${MenuItem} disabled>
+                  <${ListItemText}
+                    primary="No matching branches"
+                    secondary="Try a different search or refresh the repo branch inventory."
+                    primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+                    secondaryTypographyProps=${{ fontSize: 11 }}
+                  />
+                </${MenuItem}>
+              `
+            : null)}
+      <${Divider} />
+      <${MenuItem} disabled>
+        <${ListItemText}
+          primary="Create and checkout"
+          secondary="Branch creation will hook into backend git actions once available."
+          primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+          secondaryTypographyProps=${{ fontSize: 11 }}
+        />
+      </${MenuItem}>
+    </${Menu}>
   `;
 }
 
@@ -1348,7 +1754,12 @@ export function RepoPicker() {
  *  Combines all selectors into a single row
  * ═══════════════════════════════════════════════ */
 
-export function ChatInputToolbar() {
+export function ChatInputToolbar({
+  sessionId = "",
+  sessionSurface = null,
+  sessionWorkspace = "active",
+  onSessionUpdated = null,
+} = {}) {
   // Inject styles on first mount
   useEffect(() => {
     injectAgentSelectorStyles();
@@ -1366,11 +1777,31 @@ export function ChatInputToolbar() {
     <div class="chat-input-toolbar">
       <${AgentPicker} />
       <${AgentModeSelector} />
-      <${ManualAgentPicker} />
       <${ModelPicker} />
-      <${WorkspaceModePicker} />
-      <${RepoPicker} />
-      <${YoloToggle} />
+      <${SessionRepoPicker}
+        sessionId=${sessionId}
+        sessionSurface=${sessionSurface}
+        sessionWorkspace=${sessionWorkspace}
+        onSessionUpdated=${onSessionUpdated}
+      />
+      <${SessionBranchPicker}
+        sessionId=${sessionId}
+        sessionSurface=${sessionSurface}
+        sessionWorkspace=${sessionWorkspace}
+        onSessionUpdated=${onSessionUpdated}
+      />
+      <${SessionExecutionTargetPicker}
+        sessionId=${sessionId}
+        sessionSurface=${sessionSurface}
+        sessionWorkspace=${sessionWorkspace}
+        onSessionUpdated=${onSessionUpdated}
+      />
+      <${SessionPermissionModePicker}
+        sessionId=${sessionId}
+        sessionSurface=${sessionSurface}
+        sessionWorkspace=${sessionWorkspace}
+        onSessionUpdated=${onSessionUpdated}
+      />
       <${Box} sx=${{ flex: 1, minWidth: 8 }} />
       <${AgentStatusBadge} />
     </div>

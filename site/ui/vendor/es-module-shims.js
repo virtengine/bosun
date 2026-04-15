@@ -565,7 +565,6 @@
       }
       window.addEventListener('message', cb, false);
       // Feature checking with careful avoidance of unnecessary work - all gated on initial import map supports check. CSS gates on JSON feature check, Wasm instance phase gates on wasm source phase check.
-      const wasmBytesLiteral = JSON.stringify(wasmBytes).replace(/</g, "\\u003C");
       const importMapTest = `<script nonce=${nonce || ''}>${
       policy ? 't=(window.trustedTypes||window.TrustedTypes).createPolicy("es-module-shims",{createScript:s=>s});' : ''
     }b=(s,type='text/javascript')=>URL.createObjectURL(new Blob([s],{type}));c=u=>import(u).then(()=>true,()=>false);i=innerText=>${
@@ -576,7 +575,7 @@
       supportsImportMaps && jsonModulesEnabled ? `c(b(\`import"\${b('{}','text/json')}"with{type:"json"}\`))` : 'false'
     };sp=${
       supportsImportMaps && wasmSourcePhaseEnabled ?
-        `c(b(\`import source x from "\${b(new Uint8Array(${wasmBytesLiteral}),'application/wasm')\}"\`))`
+        `c(b(\`import source x from "\${b(new Uint8Array(${JSON.stringify(wasmBytes)}),'application/wasm')\}"\`))`
       : 'false'
     };Promise.all([${supportsImportMaps ? 'true' : "c('x')"},${supportsImportMaps ? "c('y')" : false},cm,${
       supportsImportMaps && cssModulesEnabled ?
@@ -584,7 +583,7 @@
       : 'false'
     },sp,${
       supportsImportMaps && wasmInstancePhaseEnabled ?
-        `${wasmSourcePhaseEnabled ? 'sp.then(s=>s?' : ''}c(b(\`import"\${b(new Uint8Array(${wasmBytesLiteral}),'application/wasm')\}"\`))${wasmSourcePhaseEnabled ? ':false)' : ''}`
+        `${wasmSourcePhaseEnabled ? 'sp.then(s=>s?' : ''}c(b(\`import"\${b(new Uint8Array(${JSON.stringify(wasmBytes)}),'application/wasm')\}"\`))${wasmSourcePhaseEnabled ? ':false)' : ''}`
       : 'false'
     }]).then(a=>parent.postMessage(['${msgTag}'].concat(a),'*'))<${''}/script>`;
 
@@ -911,7 +910,7 @@
     }
   };
 
-  const urlJsString = url => JSON.stringify(String(url));
+  const urlJsString = url => `'${url.replace(/'/g, "\\'")}'`;
 
   let resolvedSource, lastIndex;
   const pushStringTo = (load, originalIndex, dynamicImportEndStack) => {

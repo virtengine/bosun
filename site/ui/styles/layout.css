@@ -515,16 +515,6 @@
     padding-bottom: 0;
   }
 
-  .app-header-toolbar {
-    width: 100%;
-    min-width: 0;
-    box-sizing: border-box;
-  }
-
-  .app-header .MuiToolbar-root > * {
-    min-width: 0;
-  }
-
   .app-header-logo {
     width: 34px;
     height: 34px;
@@ -539,32 +529,6 @@
   }
 
   .header-status {
-    display: none;
-  }
-
-  .app-header-workspace {
-    min-width: 0;
-  }
-
-  .app-header-status-stack {
-    min-width: 0;
-    gap: 6px !important;
-    flex-shrink: 1;
-  }
-
-  .app-header-status-stack .MuiChip-root,
-  .app-header-status-stack .connection-badge {
-    min-width: 0;
-    flex-shrink: 1;
-  }
-
-  .app-header-status-stack .connection-badge-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .app-header-freshness {
     display: none;
   }
 
@@ -615,9 +579,7 @@
   }
 
   .app-header-user,
-  .header-freshness,
-  .app-header-latency-chip,
-  .app-header-user-chip {
+  .header-freshness {
     display: none;
   }
 
@@ -628,94 +590,6 @@
 
   .fab {
     display: none;
-  }
-}
-
-.inspector-collapse-btn {
-  align-self: flex-end;
-  width: 32px;
-  height: 32px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  cursor: pointer;
-  margin: 10px 10px 0 auto;
-}
-
-.inspector-collapse-btn:hover,
-.inspector-collapse-btn:focus-visible {
-  color: var(--text-primary);
-  border-color: var(--accent);
-}
-
-.app-breadcrumbs {
-  display: none;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin-left: 12px;
-  color: var(--text-muted);
-  font-size: 0.8rem;
-}
-
-.app-breadcrumb-part {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.app-breadcrumb-part span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 220px;
-}
-
-.app-breadcrumb-separator {
-  opacity: 0.55;
-}
-
-@media (min-width: 768px) and (max-width: 1199px) {
-  .app-tablet-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "main";
-  }
-
-  :root[data-desktop="true"] .app-shell,
-  .app-shell {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "main";
-  }
-
-  .app-main {
-    grid-area: main;
-    min-width: 0;
-  }
-
-  .main-panel {
-    min-width: 0;
-  }
-
-  .app-shell[data-has-rail="true"] .session-rail,
-  .app-shell[data-has-inspector="true"] .inspector {
-    display: none;
-  }
-
-  .bottom-nav {
-    display: none;
-  }
-}
-
-@media (max-width: 420px) {
-  .app-breadcrumbs {
-    display: none;
-  }
-
-  .app-header-status-stack {
-    gap: 4px !important;
   }
 }
 
@@ -1154,7 +1028,12 @@
   display: none;
 }
 
-@media (min-width: 768px) and (max-width: 1399px) {
+@media (min-width: 768px) and (max-width: 1199px) {
+  .app-tablet-grid {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    grid-template-areas: "sidebar main";
+  }
   .tablet-action-bar {
     display: flex;
     gap: 8px;
@@ -1497,6 +1376,92 @@
   background: var(--bg-secondary);
 }
 
+.inspector-ctx-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.inspector-ctx-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.inspector-ctx-pct-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(59, 130, 246, 0.1);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.inspector-ctx-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.inspector-ctx-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  min-width: 2px;
+}
+
+.inspector-ctx-summary {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.inspector-ctx-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.inspector-ctx-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-hint);
+  margin-bottom: 1px;
+}
+
+.inspector-ctx-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.inspector-ctx-row-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inspector-ctx-tokens {
+  color: var(--text-hint);
+  font-size: 10px;
+}
+
+.inspector-ctx-pct {
+  color: var(--text-bright);
+  font-weight: 600;
+  min-width: 32px;
+  text-align: right;
+}
+
 .inspector-pill-row {
   display: flex;
   flex-wrap: wrap;
@@ -1573,7 +1538,6 @@
   .app-breadcrumbs {
     display: inline-flex;
   }
-
   /* Desktop: bottom nav is hidden, so remove reserved chat bottom padding. */
   .app-shell[data-tab="chat"] .main-content {
     padding-bottom: 0;
@@ -1588,10 +1552,6 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-  }
-
-  .bottom-nav {
-    display: none;
   }
 }
 
@@ -2137,5 +2097,167 @@ body.is-resizing * {
   .sidebar-nav-item,
   .connection-pill {
     transition-duration: 50ms !important;
+  }
+}
+
+
+.inspector-collapse-btn {
+  align-self: flex-end;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin: 10px 10px 0 auto;
+}
+
+.inspector-collapse-btn:hover,
+.inspector-collapse-btn:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.app-breadcrumbs {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: 12px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.app-breadcrumb-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.app-breadcrumb-part span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.app-breadcrumb-separator {
+  opacity: 0.55;
+}
+
+@media (min-width: 768px) and (max-width: 1199px) {
+  .app-tablet-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main";
+  }
+  :root[data-desktop="true"] .app-shell,
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main";
+  }
+
+  .app-main {
+    grid-area: main;
+    min-width: 0;
+  }
+
+  .main-panel {
+    min-width: 0;
+  }
+
+  .app-shell[data-has-rail="true"] .session-rail,
+  .app-shell[data-has-inspector="true"] .inspector {
+    display: none;
+  }
+
+  .bottom-nav {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-header .MuiToolbar-root {
+    min-height: 44px;
+    gap: 8px;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .app-header-toolbar {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .app-header .MuiToolbar-root > * {
+    min-width: 0;
+  }
+
+  .app-header .MuiTypography-h6 {
+    margin-left: 0 !important;
+    font-size: 0.95rem;
+    flex-shrink: 0;
+  }
+
+  .app-header-workspace {
+    margin-left: 0 !important;
+    min-width: 0;
+  }
+
+  .app-header-status-stack {
+    gap: 6px !important;
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  .app-header-status-stack .MuiChip-root,
+  .app-header-status-stack .connection-badge {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+
+  .app-header-status-stack .connection-badge-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-header-freshness {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .app-breadcrumbs {
+    display: none;
+  }
+
+  .app-header-status-stack {
+    gap: 4px !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-header-latency-chip,
+  .app-header-user-chip {
+    display: none;
+  }
+}
+
+@media (min-width: 1200px) {
+  .app-desktop-grid {
+    display: grid;
+    grid-template-columns: var(--sidebar-width, 240px) minmax(0, 1fr) var(--inspector-width, 320px);
+    grid-template-areas: "sidebar main inspector";
+  }
+
+  .app-breadcrumbs {
+    display: inline-flex;
+  }
+  .bottom-nav {
+    display: none;
   }
 }

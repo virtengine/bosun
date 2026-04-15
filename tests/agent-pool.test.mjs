@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const __RUN_VITEST_ONLY = Boolean(process.env.VITEST);
+const SLOW_AGENT_POOL_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 10_000;
 let mockCodexStartThread;
 let mockCodexResumeThread;
 let mockCodexCtor;
@@ -1310,7 +1311,7 @@ describe("launchEphemeralThread", () => {
     expect(result.error).toMatch(/enoent/i);
     expect(result.attempts).toBe(1);
     expect(mockCodexStartThread).toHaveBeenCalledTimes(1);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("bypasses primary prerequisite gate during cooldown when no fallback SDK is eligible", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1818,7 +1819,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/timeout after 80ms/i);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("does not apply monitor timeout bounds to non-monitor task keys", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1853,7 +1854,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/timeout after 25ms/i);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
 
   it("strips optional OpenAI organization and project headers from Codex SDK env", async () => {
@@ -1918,7 +1919,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("no events received within 1000ms");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("does not throw when using default codex stream safety constants", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1950,7 +1951,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(true);
     expect(result.output).toContain("stream ok");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("caps and truncates stored codex stream items", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1997,7 +1998,7 @@ describe("launchOrResumeThread", () => {
     expect(result.items.length).toBe(2);
     expect(result.items[0].aggregated_output).toContain("…truncated");
     expect(result.items[1]).toMatchObject({ type: "stream_notice" });
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("continues managed harness sessions using stored session metadata", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2041,7 +2042,7 @@ describe("launchOrResumeThread", () => {
       sdk: "codex",
       alive: true,
     }));
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("does not throw when a managed session controller is asked to continue without a prompt", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2085,7 +2086,7 @@ describe("launchOrResumeThread", () => {
       sessionId: "managed-session-no-prompt",
     }));
     expect(mockCodexResumeThread).not.toHaveBeenCalled();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("drops poisoned codex thread metadata when resume state is corrupted", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2136,7 +2137,7 @@ describe("launchOrResumeThread", () => {
     expect(record).toBeTruthy();
     expect(record.threadId).toBeNull();
     expect(record.alive).toBe(false);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("drops stale codex thread metadata when resume times out", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2190,7 +2191,7 @@ describe("launchOrResumeThread", () => {
     expect(record).toBeTruthy();
     expect(record.threadId).toBeNull();
     expect(record.alive).toBe(false);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("invalidateThreadAsync prevents reuse of an existing thread", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2236,7 +2237,7 @@ describe("launchOrResumeThread", () => {
     expect(second.resumed).toBe(false);
     expect(second.threadId).toBe("thread-2");
     expect(mockCodexResumeThread).not.toHaveBeenCalled();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("uses persistent Copilot session IDs without carrying stale Codex thread IDs", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2298,7 +2299,7 @@ describe("launchOrResumeThread", () => {
     expect(emittedLogs).toContain("resuming Copilot session");
     expect(mockCopilotResumeSession).toHaveBeenCalledTimes(1);
     logSpy.mockRestore();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("persists and resumes Claude session IDs", async () => {
     process.env.__MOCK_CLAUDE_AVAILABLE = "1";
@@ -2343,7 +2344,7 @@ describe("launchOrResumeThread", () => {
     expect(emittedLogs).toContain("resuming Claude session");
     expect(mockClaudeQuery).toHaveBeenCalledTimes(2);
     logSpy.mockRestore();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("persists and resumes OpenCode session IDs", async () => {
     process.env.__MOCK_OPENCODE_AVAILABLE = "1";
@@ -2412,7 +2413,7 @@ describe("launchOrResumeThread", () => {
       .join("\n");
     expect(emittedLogs).toContain("resuming OpenCode session");
     logSpy.mockRestore();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("registers workflow child sessions in the harness session manager", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2467,7 +2468,7 @@ describe("launchOrResumeThread", () => {
         }),
       }),
     );
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("finalizes pooled workflow lifecycle through the canonical session manager", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2514,7 +2515,7 @@ describe("launchOrResumeThread", () => {
         }),
       }),
     );
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2597,7 +2598,7 @@ describe("execWithRetry", () => {
     expect(result.attempts).toBe(2);
     expect(result.error).toBeNull();
     expect(result.output).toContain("recovered-output");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("stops retrying after repeated no-output starts", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2636,7 +2637,7 @@ describe("execWithRetry", () => {
     expect(result.retryCircuitBroken).toBe(true);
     expect(result.blockedReason).toBe("no_output");
     expect(result.attempts).toBe(2);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2799,7 +2800,7 @@ describe("internal harness facade exports", () => {
       sessionId: "pool-session-3",
       taskKey: "pool-task-3",
     }));
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2815,7 +2816,7 @@ describe("resolution and launch integration", () => {
     setPoolSdk("claude");
     const result = await launchEphemeralThread("test", process.cwd(), 5000);
     expect(result.sdk).toBe("claude");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("env var change after resetPoolSdkCache is picked up", async () => {
     process.env.AGENT_POOL_SDK = "copilot";

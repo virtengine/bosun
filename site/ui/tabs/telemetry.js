@@ -36,6 +36,9 @@ import {
 import {
   Card as LegacyCard, EmptyState, Badge,
 } from "../components/shared.js";
+import {
+  buildRepoAreaContentionViewModel,
+} from "../modules/repo-area-contention.js";
 
 // ── Colour palettes ──────────────────────────────────────────────────────────
 
@@ -696,6 +699,157 @@ function ShreddingPanel({ period }) {
     <//>
   `;
 }
+
+function DurableRuntimePanel({ summary = null }) {
+  const lifetimeTotals = summary?.lifetimeTotals && typeof summary.lifetimeTotals === "object"
+    ? summary.lifetimeTotals
+    : {};
+  const sessionHealth = summary?.sessionHealth && typeof summary.sessionHealth === "object"
+    ? summary.sessionHealth
+    : {};
+  const contextSummary = summary?.context && typeof summary.context === "object"
+    ? summary.context
+    : {};
+  const toolSummary = summary?.toolSummary && typeof summary.toolSummary === "object"
+    ? summary.toolSummary
+    : {};
+  const topTools = Array.isArray(toolSummary.topTools) ? toolSummary.topTools.slice(0, 3) : [];
+  return html`
+    <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" spacing=${1} sx=${{ mb: 1.5, flexWrap: "wrap" }}>
+        <${Box}>
+          <${Typography} variant="h6" gutterBottom>Durable Session Runtime<//>
+          <${Typography} variant="body2" color="text.secondary">
+            SQL-backed session lineage, context pressure, and lifetime execution totals.
+          <//>
+        <//>
+        <${Chip} size="small" variant="outlined" label="State ledger / SQLite" />
+      <//>
+
+      <${Stack} direction=${{ xs: "column", md: "row" }} spacing=${2}>
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>Session Ledger<//>
+          <${Typography} variant="caption" color="text.secondary" display="block">
+            Live ${formatCount(contextSummary.liveSessionCount || sessionHealth.live || summary?.activeSessionCount || 0)}
+            {" · "}Completed ${formatCount(contextSummary.completedSessionCount || sessionHealth.completed || summary?.completedSessionCount || 0)}
+            {" · "}Total ${formatCount(summary?.totalSessionCount || summary?.totalSessions || 0)}
+          <//>
+          <${Typography} variant="caption" color="text.secondary" display="block">
+            Editing ${formatCount(sessionHealth.editing || 0)}
+            {" · "}Blocked ${formatCount(sessionHealth.blocked || 0)}
+            {" · "}Stalled ${formatCount(sessionHealth.stalled || 0)}
+          <//>
+        <//>
+
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>Context Pressure<//>
+          <${Typography} variant="caption" color="text.secondary" display="block">
+            Near limit ${formatCount(contextSummary.sessionsNearContextLimit || 0)}
+            {" · "}High pressure ${formatCount(contextSummary.sessionsHighContextPressure || 0)}
+          <//>
+          <${Typography} variant="caption" color="text.secondary" display="block">
+            Max usage ${formatCount(contextSummary.maxContextUsagePercent || 0)}%
+            {" · "}Average ${formatCount(contextSummary.avgContextUsagePercent || 0)}%
+          <//>
+        <//>
+
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>Lifetime Totals<//>
+          <${Typography} variant="caption" color="text.secondary" display="block">
+            Attempts ${formatCount(lifetimeTotals.attemptsCount || 0)}
+            {" · "}Tokens ${formatCount(lifetimeTotals.tokenCount || 0)}
+          <//>
+          <${Typography} variant="caption" color="text.secondary" display="block">
+            Runtime ${formatDurationMs(lifetimeTotals.durationMs || 0)}
+          <//>
+        <//>
+      <//>
+
+      <${Paper} variant="outlined" sx=${{ p: 1.5, mt: 2 }}>
+        <${Typography} variant="subtitle2" gutterBottom>Top Durable Tools<//>
+        ${topTools.length
+          ? html`
+            <${Stack} direction="row" spacing=${1} flexWrap="wrap">
+              ${topTools.map((tool) => html`
+                <${Chip}
+                  key=${tool.name}
+                  size="small"
+                  variant="outlined"
+                  label=${`${tool.name || "tool"} · ${formatCount(tool.count || 0)}`}
+                />
+              `)}
+            <//>
+          `
+          : html`<${Typography} variant="caption" color="text.secondary">No durable tool summary recorded yet.<//>`}
+      <//>
+    <//>
+  `;
+}
+
+function RepoAreaContentionPanel() {
+  const model = buildRepoAreaContentionViewModel(telemetrySummary.value?.repoAreaContention || null);
+
+  return html`
+    <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" spacing=${1} sx=${{ mb: 1.5, flexWrap: "wrap" }}>
+        <${Box}>
+          <${Typography} variant="h6" gutterBottom>Repo-area lock contention<//>
+          <${Typography} variant="body2" color="text.secondary">${model.summary}<//>
+        <//>
+        <${Stack} direction="row" spacing=${1} alignItems="center">
+          <${Chip} size="small" color=${model.tone === "warning" ? "warning" : model.tone === "info" ? "info" : "success"} label=${model.totalEventsLabel} />
+          <${Chip} size="small" variant="outlined" label=${model.totalWaitLabel} />
+        <//>
+      <//>
+
+      ${model.hotAreas.length === 0 ? html`
+        <${EmptyState}
+          title=${model.headline}
+          description=${model.summary}
+        />
+      ` : html`
+        <${Stack} spacing=${1.25} sx=${{ mb: model.recentEvents.length ? 1.5 : 0 }}>
+          ${model.hotAreas.map((area) => html`
+            <${Paper} key=${area.area} variant="outlined" sx=${{ p: 1.25 }}>
+              <${Stack} direction="row" justifyContent="space-between" alignItems="center" spacing=${1} flexWrap="wrap">
+                <${Box}>
+                  <${Typography} variant="subtitle2">${area.area}<//>
+                  <${Typography} variant="caption" color="text.secondary">${area.avgWaitLabel} · last seen ${area.lastSeenLabel}<//>
+                <//>
+                <${Stack} direction="row" spacing=${0.75} alignItems="center" flexWrap="wrap">
+                  <${Chip} size="small" label=${area.eventsLabel} />
+                  <${Chip} size="small" variant="outlined" label=${area.waitingLabel} />
+                  <${Chip} size="small" variant="outlined" label=${area.activeLabel} />
+                  ${area.detailHref ? html`<${Button} size="small" href=${area.detailHref}>Details<//>` : null}
+                <//>
+              <//>
+            <//>
+          `)}
+        <//>
+      `}
+
+      ${model.recentEvents.length ? html`
+        <${Divider} sx=${{ my: 1.5 }} />
+        <${Typography} variant="subtitle2" gutterBottom>Recent contention samples<//>
+        <${Stack} spacing=${1}>
+          ${model.recentEvents.slice(0, 5).map((event) => html`
+            <${Stack} key=${event.taskId + event.area + (event.at || "")} direction="row" justifyContent="space-between" alignItems="center" spacing=${1}>
+              <${Box}>
+                <${Typography} variant="body2">${event.title}<//>
+                <${Typography} variant="caption" color="text.secondary">${event.subtitle}<//>
+              <//>
+              <${Stack} direction="row" spacing=${0.75} alignItems="center">
+                <${Typography} variant="caption" color="text.secondary">${event.lastSeenLabel}<//>
+                ${event.detailHref ? html`<${Button} size="small" href=${event.detailHref}>Task<//>` : null}
+              <//>
+            <//>
+          `)}
+        <//>
+      ` : null}
+    <//>
+  `;
+}
+
 // ── Main exported component ──────────────────────────────────────────────────
 
 export function TelemetryTab() {
@@ -806,6 +960,8 @@ export function TelemetryTab() {
         <//>
       ` : null}
 
+      <${DurableRuntimePanel} summary=${summary} />
+
       <!-- Activity trend chart -->
       <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
         <${Typography} variant="h6" gutterBottom>Activity Trend<//>
@@ -856,6 +1012,8 @@ export function TelemetryTab() {
             palette=${MCP_PALETTE} title="Top MCP Tools" />
         <//>
       <//>
+
+      <${RepoAreaContentionPanel} />
 
       <!-- Context Shredding Panel -->
       <${ShreddingPanel} period=${period} />

@@ -1,0 +1,127 @@
+#!/usr/bin/env node
+
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative, resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const ROOT = resolve(__dirname, "..");
+const SOURCE_ROOT = resolve(ROOT, "ui");
+const TARGET_ROOT = resolve(ROOT, "site", "ui");
+
+const ROOT_FILES = [
+  "app.js",
+  "app.legacy.js",
+  "app.monolith.js",
+  "styles.css",
+  "styles.monolith.css",
+  "logo.svg",
+  "logo.png",
+  "favicon.png",
+];
+
+const ROOT_DIRS = [
+  "components",
+  "modules",
+  "tabs",
+  "styles",
+  "assets",
+  "vendor",
+];
+
+function ensureParentDir(filePath) {
+  mkdirSync(dirname(filePath), { recursive: true });
+}
+
+function toPosixPath(filePath) {
+  return String(filePath || "").replace(/\\/g, "/");
+}
+
+function rewriteMirroredUiImports(sourceText, sourcePath, targetPath) {
+  if (!/\.(?:m?js)$/i.test(sourcePath)) return sourceText;
+
+  const sourceDir = dirname(sourcePath);
+  const targetDir = dirname(targetPath);
+
+  return sourceText.replace(/(\bfrom\s*|\bimport\s*\()\s*(['"])(\.[^'"]+)\2/g, (match, prefix, quote, specifier) => {
+    const resolvedImport = resolve(sourceDir, specifier);
+    if (resolvedImport === SOURCE_ROOT || resolvedImport.startsWith(SOURCE_ROOT + "\\")) {
+      return match;
+    }
+
+    let rewritten = toPosixPath(relative(targetDir, resolvedImport));
+    if (!rewritten.startsWith(".")) {
+      rewritten = "./" + rewritten;
+    }
+    return `${prefix}${quote}${rewritten}${quote}`;
+  });
+}
+
+function copyFileIfChanged(sourcePath, targetPath) {
+  const rawSource = readFileSync(sourcePath);
+  const source = /\.(?:m?js)$/i.test(sourcePath)
+    ? Buffer.from(
+      rewriteMirroredUiImports(rawSource.toString("utf8"), sourcePath, targetPath),
+      "utf8",
+    )
+    : rawSource;
+  if (existsSync(targetPath)) {
+    const current = readFileSync(targetPath);
+    if (Buffer.compare(source, current) === 0) {
+      return false;
+    }
+  }
+  ensureParentDir(targetPath);
+  writeFileSync(targetPath, source);
+  return true;
+}
+
+function syncDirectory(relativeDir, updatedPaths) {
+  const sourceDir = join(SOURCE_ROOT, relativeDir);
+  const targetDir = join(TARGET_ROOT, relativeDir);
+  if (!existsSync(sourceDir)) return;
+  const entries = readdirSync(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.endsWith(".bak")) continue;
+    const sourcePath = join(sourceDir, entry.name);
+    const targetPath = join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      syncDirectory(join(relativeDir, entry.name), updatedPaths);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (copyFileIfChanged(sourcePath, targetPath)) {
+      updatedPaths.push(targetPath);
+    }
+  }
+}
+
+export async function syncDemoUi({ silent = false } = {}) {
+  const updatedPaths = [];
+  for (const fileName of ROOT_FILES) {
+    const sourcePath = join(SOURCE_ROOT, fileName);
+    const targetPath = join(TARGET_ROOT, fileName);
+    if (!existsSync(sourcePath)) continue;
+    if (copyFileIfChanged(sourcePath, targetPath)) {
+      updatedPaths.push(targetPath);
+    }
+  }
+
+  for (const dirName of ROOT_DIRS) {
+    syncDirectory(dirName, updatedPaths);
+  }
+
+  if (!silent && updatedPaths.length > 0) {
+    console.log(`[demo-ui] synced ${updatedPaths.length} file(s)`);
+  }
+
+  return {
+    updatedPaths,
+    updated: updatedPaths.length > 0,
+  };
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  await syncDemoUi();
+}

@@ -4,9 +4,17 @@
  *  - Helpers for rendering icon text consistently
  * ───────────────────────────────────────────────────────────── */
 
-import { h } from "preact";
+import { h as _h } from "preact";
 import htm from "htm";
 import { ICONS } from "./icons.js";
+
+/* Guard: recover forwardRef objects that leak as element type */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function" && typeof type.render === "function") {
+    return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
 
 const html = htm.bind(h);
 const TOKEN_ICON_REGEX = /^:([a-zA-Z][a-zA-Z0-9_-]*):$/;

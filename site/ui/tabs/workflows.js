@@ -42,6 +42,7 @@ import {
   canUpdateCanvasEdgePortMapping,
 } from "./workflow-canvas-utils.mjs";
 import { createSession } from "../components/session-list.js";
+import { AppContextMenu } from "../components/context-menu.js";
 import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../modules/session-api.js";
 import { Card, Badge, EmptyState } from "../components/shared.js";
 import {
@@ -49,7 +50,7 @@ import {
   TextField, Select, MenuItem, FormControl, InputLabel, Switch,
   FormControlLabel, Tooltip, Paper, Divider, CircularProgress, Alert,
   Dialog, DialogTitle, DialogContent, DialogActions,
-  Tabs, Tab, Fab, Menu as MuiMenu,
+  Tabs, Tab, Fab,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
 } from "@mui/material";
 import { activeWorkspaceId } from "../components/workspace-switcher.js";
@@ -81,7 +82,7 @@ const selectedEdgeId = signal(null);
 const draggingNode = signal(null);
 const connectingFrom = signal(null);
 const viewMode = signal("list"); // "list" | "canvas" | "runs" | "code"
-const WORKFLOW_RUN_PAGE_SIZE = 20;
+const WORKFLOW_RUN_PAGE_SIZE = 50;
 const WORKFLOW_RUN_MAX_FETCH = 5000;
 const WORKFLOW_LIVE_POLL_MS = 3000;
 const WORKFLOW_LIVE_WS_BATCH_MS = 90;
@@ -1088,6 +1089,10 @@ async function openWorkflowCopilotChat(prompt, opts = {}) {
     const created = await createSession({
       type: "primary",
       reuseFresh: false,
+      workspaceId: activeWorkspaceId.value || undefined,
+      source: "workflow-copilot",
+      visibility: "hidden",
+      hiddenInLists: true,
       ...(opts?.title ? { title: String(opts.title) } : {}),
     });
     const session = created?.session || null;
@@ -2398,19 +2403,39 @@ function isWildcardPortType(type) {
   return normalized === "*" || normalized === "Any";
 }
 
+function normalizePortTypeForCompatibility(type) {
+  const normalized = String(type || "").trim();
+  if (!normalized) return "Any";
+  const lowered = normalized.toLowerCase();
+  if (["*", "any"].includes(lowered)) return "Any";
+  if (["taskdef"].includes(lowered)) return "json";
+  if (["json", "object"].includes(lowered)) return "json";
+  if (["string", "text"].includes(lowered)) return "string";
+  if (["boolean", "bool"].includes(lowered)) return "boolean";
+  if (["number", "numeric", "float", "int", "integer"].includes(lowered)) return "number";
+  return lowered;
+}
+
 function isPortConnectionCompatible(sourcePort, targetPort) {
   if (!sourcePort || !targetPort) return { compatible: true, reason: null };
   const sourceType = String(sourcePort.type || "Any").trim() || "Any";
   const targetType = String(targetPort.type || "Any").trim() || "Any";
+  const normalizedSourceType = normalizePortTypeForCompatibility(sourceType);
+  const normalizedTargetType = normalizePortTypeForCompatibility(targetType);
   const accepted = new Set(
     [targetType, ...(Array.isArray(targetPort.accepts) ? targetPort.accepts : [])]
-      .map((value) => String(value || "").trim())
+      .map((value) => normalizePortTypeForCompatibility(value))
       .filter(Boolean),
   );
-  if (isWildcardPortType(sourceType) || isWildcardPortType(targetType) || accepted.has("*") || accepted.has("Any")) {
+  if (
+    isWildcardPortType(sourceType)
+    || isWildcardPortType(targetType)
+    || accepted.has(normalizePortTypeForCompatibility("*"))
+    || accepted.has(normalizePortTypeForCompatibility("Any"))
+  ) {
     return { compatible: true, reason: null };
   }
-  if (sourceType === targetType || accepted.has(sourceType)) {
+  if (normalizedSourceType === normalizedTargetType || accepted.has(normalizedSourceType)) {
     return { compatible: true, reason: null };
   }
   return {
@@ -3575,7 +3600,7 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
     setSelectedNodeIds(new Set(group.nodeIds || []));
     selectedNodeId.value = null;
     selectedEdgeId.value = null;
-    setContextMenu({ x: e.clientX, y: e.clientY, groupId: group.id });
+    setContextMenu({ mouseX: e.clientX + 2, mouseY: e.clientY - 6, groupId: group.id });
   }, [groups]);
 
   const onNodeMouseDown = useCallback((nodeId, e) => {
@@ -3673,7 +3698,7 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
     }
     selectedNodeId.value = nodeId;
     setSelectedGroupId(null);
-    setContextMenu({ x: e.clientX, y: e.clientY, nodeId });
+    setContextMenu({ mouseX: e.clientX + 2, mouseY: e.clientY - 6, nodeId });
   }, [onGroupContextMenu, renderNodes]);
 
   // ── Port / connection interaction ─────────────────────────
@@ -4802,58 +4827,88 @@ function WorkflowCanvas({ workflow, onSave, nodeTypes: availableNodeTypes = [] }
       `}
 
       <!-- Context Menu -->
-      ${contextMenu && html`
-        <div class="wf-context-menu" style="position: fixed; left: ${contextMenu.x}px; top: ${contextMenu.y}px; z-index: 50;">
-          ${contextMenu.groupId ? html`
-            <${MenuItem} onClick=${() => { handleToggleActiveGroup(); setContextMenu(null); }}>
-              <span class="btn-icon">${resolveIcon(activeGroup?.collapsed ? "play" : "pause")}</span>
-              ${activeGroup?.collapsed ? "Expand Group" : "Collapse Group"}
-            <//>
-          ` : html`
-            <${MenuItem}
-              onClick=${() => {
-                const node = nodes.find((entry) => entry.id === contextMenu.nodeId) || null;
-                setContextMenu(null);
-                openWorkflowCopilotFromCanvas({
-                  intent: "node",
-                  nodeId: contextMenu.nodeId,
-                  title: `Ask Bosun about node ${node?.label || contextMenu.nodeId}`.trim(),
-                  successToast: "Opened node copilot chat",
-                });
-              }}
-            >
-              <span class="btn-icon">${resolveIcon("bot")}</span>
-              Ask Bosun About Node
-            <//>
-            <${MenuItem} onClick=${() => { setEditingNode(contextMenu.nodeId); setContextMenu(null); }}>
-              <span class="btn-icon">${resolveIcon("settings")}</span>
-              Edit Config
-            <//>
-            <${MenuItem} onClick=${() => duplicateNode(contextMenu.nodeId)}>
-              <span class="btn-icon">${resolveIcon("clipboard")}</span>
-              Duplicate
-            <//>
-          `}
-          ${selectedNodeIds.size > 1 && html`
-            <${MenuItem} onClick=${() => { handleCreateGroup(); setContextMenu(null); }}>
-              <span class="btn-icon">${resolveIcon("plus")}</span>
-              Create Group
-            <//>
-          `}
-          ${activeGroup && !contextMenu.groupId && html`
-            <${MenuItem} onClick=${() => { handleToggleActiveGroup(); setContextMenu(null); }}>
-              <span class="btn-icon">${resolveIcon(activeGroup.collapsed ? "play" : "pause")}</span>
-              ${activeGroup.collapsed ? "Expand Group" : "Collapse Group"}
-            <//>
-          `}
-          ${!contextMenu.groupId && html`
-            <${MenuItem} onClick=${() => { deleteNode(contextMenu.nodeId); }} sx=${{ color: '#ef4444' }}>
-              <span class="btn-icon">${resolveIcon("trash")}</span>
-              Delete
-            <//>
-          `}
-        </div>
-      `}
+      <${AppContextMenu}
+        menu=${contextMenu}
+        onClose=${() => setContextMenu(null)}
+        items=${[
+          contextMenu?.groupId
+            ? {
+                key: "toggle-group",
+                label: activeGroup?.collapsed ? "Expand Group" : "Collapse Group",
+                icon: activeGroup?.collapsed ? ":play:" : ":pause:",
+                onClick: () => {
+                  handleToggleActiveGroup();
+                  setContextMenu(null);
+                },
+              }
+            : {
+                key: "ask-node",
+                label: "Ask Bosun About Node",
+                icon: ":bot:",
+                hidden: !contextMenu?.nodeId,
+                onClick: () => {
+                  const node = nodes.find((entry) => entry.id === contextMenu.nodeId) || null;
+                  setContextMenu(null);
+                  openWorkflowCopilotFromCanvas({
+                    intent: "node",
+                    nodeId: contextMenu.nodeId,
+                    title: `Ask Bosun about node ${node?.label || contextMenu.nodeId}`.trim(),
+                    successToast: "Opened node copilot chat",
+                  });
+                },
+              },
+          {
+            key: "edit-node",
+            label: "Edit Config",
+            icon: ":settings:",
+            hidden: !contextMenu?.nodeId || Boolean(contextMenu?.groupId),
+            onClick: () => {
+              setEditingNode(contextMenu.nodeId);
+              setContextMenu(null);
+            },
+          },
+          {
+            key: "duplicate-node",
+            label: "Duplicate",
+            icon: ":clipboard:",
+            hidden: !contextMenu?.nodeId || Boolean(contextMenu?.groupId),
+            onClick: () => duplicateNode(contextMenu.nodeId),
+          },
+          {
+            key: "create-group",
+            label: "Create Group",
+            icon: ":plus:",
+            hidden: selectedNodeIds.size <= 1,
+            onClick: () => {
+              handleCreateGroup();
+              setContextMenu(null);
+            },
+          },
+          {
+            key: "toggle-active-group",
+            label: activeGroup?.collapsed ? "Expand Group" : "Collapse Group",
+            icon: activeGroup?.collapsed ? ":play:" : ":pause:",
+            hidden: !activeGroup || Boolean(contextMenu?.groupId),
+            onClick: () => {
+              handleToggleActiveGroup();
+              setContextMenu(null);
+            },
+          },
+          {
+            kind: "divider",
+            key: "delete-divider",
+            hidden: !contextMenu?.nodeId || Boolean(contextMenu?.groupId),
+          },
+          {
+            key: "delete-node",
+            label: "Delete",
+            icon: ":trash:",
+            danger: true,
+            hidden: !contextMenu?.nodeId || Boolean(contextMenu?.groupId),
+            onClick: () => deleteNode(contextMenu.nodeId),
+          },
+        ]}
+      />
 
       <${Dialog} open=${importDialogOpen} onClose=${() => setImportDialogOpen(false)} maxWidth="md" fullWidth>
         <${DialogTitle}>Import Workflow JSON</${DialogTitle}>
@@ -5973,6 +6028,7 @@ function WorkflowListView() {
   const tmpls = templates.value || [];
   const isWorkflowListLoading = workflowsLoading.value;
   const isTemplateListLoading = templatesLoading.value;
+  const [workflowCardContextMenu, setWorkflowCardContextMenu] = useState(null);
   const installedTemplateIds = new Set();
   wfs.forEach((wf) => {
     if (wf.metadata?.installedFrom) installedTemplateIds.add(wf.metadata.installedFrom);
@@ -6004,6 +6060,66 @@ function WorkflowListView() {
   const availableTemplateGroups = useMemo(() => {
     return groupItemsByWorkflowCategory(availableTemplates, (template) => template);
   }, [availableTemplates]);
+
+  const openWorkflowCardContextMenu = useCallback((workflow, event) => {
+    if (!workflow?.id) return;
+    setWorkflowCardContextMenu({
+      workflowId: workflow.id,
+      mouseX: event.clientX + 2,
+      mouseY: event.clientY - 6,
+    });
+  }, []);
+
+  const closeWorkflowCardContextMenu = useCallback(() => {
+    setWorkflowCardContextMenu(null);
+  }, []);
+
+  const handleWorkflowCardAction = useCallback(async (action) => {
+    const workflowId = String(workflowCardContextMenu?.workflowId || "").trim();
+    if (!workflowId) {
+      closeWorkflowCardContextMenu();
+      return;
+    }
+    const workflow = (workflows.value || []).find((entry) => String(entry?.id || "") === workflowId) || null;
+    closeWorkflowCardContextMenu();
+    if (!workflow) return;
+    if (action === "open") {
+      apiFetch("/api/workflows/" + workflow.id).then((data) => {
+        activeWorkflow.value = data?.workflow || workflow;
+        viewMode.value = "canvas";
+      }).catch(() => {
+        activeWorkflow.value = workflow;
+        viewMode.value = "canvas";
+      });
+      return;
+    }
+    if (action === "copy-id") {
+      try {
+        await navigator.clipboard.writeText(workflowId);
+      } catch {
+      }
+      return;
+    }
+    if (action === "run") {
+      if (!workflow.enabled) {
+        showToast("Workflow is paused. Resume it before running.", "warning");
+        return;
+      }
+      openExecuteDialog(workflow.id);
+      return;
+    }
+    if (action === "toggle") {
+      setWorkflowEnabled(workflow.id, !workflow.enabled);
+      return;
+    }
+    if (action === "export") {
+      exportWorkflow(workflow);
+      return;
+    }
+    if (action === "delete" && workflow.core !== true) {
+      if (confirm("Delete " + workflow.name + "?")) deleteWorkflow(workflow.id);
+    }
+  }, [closeWorkflowCardContextMenu, workflowCardContextMenu?.workflowId]);
 
   return html`
     <div style="padding: 0 4px;">
@@ -6081,6 +6197,11 @@ function WorkflowListView() {
                            activeWorkflow.value = d?.workflow || wf;
                            viewMode.value = "canvas";
                          }).catch(() => { activeWorkflow.value = wf; viewMode.value = "canvas"; });
+                       }}
+                       onContextMenu=${(event) => {
+                         event.preventDefault();
+                         event.stopPropagation();
+                         openWorkflowCardContextMenu(wf, event);
                        }}>
                     <div style="display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap;">
                       <span class="icon-inline" style="font-size: 14px; flex: 0 0 auto; margin-top: 1px;">${resolveIcon(getNodeMeta(wf.trigger || "action")?.icon) || ICONS.dot}</span>
@@ -6216,6 +6337,19 @@ function WorkflowListView() {
           `)}
         </div>
       `}
+      <${AppContextMenu}
+        menu=${workflowCardContextMenu}
+        onClose=${closeWorkflowCardContextMenu}
+        items=${[
+          { key: "open", label: "Open workflow", icon: ":workflow:", onClick: () => handleWorkflowCardAction("open") },
+          { key: "run", label: "Run now", icon: ":play:", onClick: () => handleWorkflowCardAction("run") },
+          { key: "toggle", label: "Pause or resume", icon: ":pause:", onClick: () => handleWorkflowCardAction("toggle") },
+          { key: "export", label: "Export", icon: ":save:", onClick: () => handleWorkflowCardAction("export") },
+          { key: "copy-id", label: "Copy ID", icon: ":copy:", onClick: () => handleWorkflowCardAction("copy-id") },
+          { kind: "divider", key: "workflow-danger-divider" },
+          { key: "delete", label: "Delete", icon: ":trash:", danger: true, onClick: () => handleWorkflowCardAction("delete") },
+        ]}
+      />
 
       ${!isWorkflowListLoading && wfs.length === 0 && html`
         <div style="text-align: center; padding: 40px 20px; background: var(--color-bg-secondary, #1a1f2e); border-radius: 12px; margin-bottom: 24px; border: 1px solid var(--color-border, #2a3040);">
@@ -6474,7 +6608,46 @@ function RunHistoryView() {
   const [selectedRunSnapshots, setSelectedRunSnapshots] = useState([]);
   const [runDiagnosticsLoading, setRunDiagnosticsLoading] = useState(false);
   const [runActionBusy, setRunActionBusy] = useState("");
+  const [runRowContextMenu, setRunRowContextMenu] = useState(null);
   const normalizedSearch = String(searchQuery || "").trim().toLowerCase();
+
+  const openRunRowContextMenu = useCallback((run, event) => {
+    if (!run?.runId) return;
+    setRunRowContextMenu({
+      runId: run.runId,
+      mouseX: event.clientX + 2,
+      mouseY: event.clientY - 6,
+    });
+  }, []);
+
+  const closeRunRowContextMenu = useCallback(() => {
+    setRunRowContextMenu(null);
+  }, []);
+
+  const handleRunRowAction = useCallback(async (action) => {
+    const runId = String(runRowContextMenu?.runId || "").trim();
+    if (!runId) {
+      closeRunRowContextMenu();
+      return;
+    }
+    const run = (workflowRuns.value || []).find((entry) => String(entry?.runId || "") === runId) || null;
+    closeRunRowContextMenu();
+    if (!run) return;
+    if (action === "open") {
+      loadRunDetail(run.runId, { workflowId: run.workflowId });
+      return;
+    }
+    if (action === "open-workflow") {
+      if (run.workflowId) openWorkflowCanvas(run.workflowId);
+      return;
+    }
+    if (action === "copy-id") {
+      try {
+        await navigator.clipboard.writeText(runId);
+      } catch {
+      }
+    }
+  }, [closeRunRowContextMenu, runRowContextMenu?.runId]);
 
   const loadApprovals = useCallback(async (statusOverride = approvalStatusFilter) => {
     setApprovalQueueLoading(true);
@@ -8552,6 +8725,11 @@ function RunHistoryView() {
                   selected=${selectedRunId.value === run.runId}
                   sx=${{ cursor: "pointer" }}
                   onClick=${() => loadRunDetail(run.runId, { workflowId: run.workflowId })}
+                  onContextMenu=${(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openRunRowContextMenu(run, event);
+                  }}
                 >
                   <${TableCell}>
                     <${Typography} variant="body2" sx=${{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>
@@ -8603,6 +8781,15 @@ function RunHistoryView() {
           <//>
         </div>
       `}
+      <${AppContextMenu}
+        menu=${runRowContextMenu}
+        onClose=${closeRunRowContextMenu}
+        items=${[
+          { key: "open-run", label: "Open run", icon: ":workflow:", onClick: () => handleRunRowAction("open") },
+          { key: "open-workflow", label: "Open workflow", icon: ":edit:", onClick: () => handleRunRowAction("open-workflow") },
+          { key: "copy-id", label: "Copy run ID", icon: ":copy:", onClick: () => handleRunRowAction("copy-id") },
+        ]}
+      />
     </div>
   `;
 }

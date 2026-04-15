@@ -358,6 +358,7 @@ function sanitizeWorkflowRunIdentityPayload(detail = null) {
   for (const path of taskObjectPaths) {
     const taskRecord = readWorkflowNestedValue(nextDetail, path);
     if (!taskRecord || typeof taskRecord !== "object") continue;
+    sanitizeWorkflowIdentityField(nextDetail, [...path, "taskId"], issues);
     sanitizeWorkflowIdentityField(nextDetail, [...path, "id"], issues);
     sanitizeWorkflowIdentityField(nextDetail, [...path, "task_id"], issues);
     sanitizeWorkflowIdentityField(nextDetail, [...path, "title"], issues);
@@ -1607,23 +1608,54 @@ function summarizePersistedTaskMeta(meta = {}) {
   return Object.keys(summary).length > 0 ? summary : undefined;
 }
 
-function isTaskLikePersistedValue(value) {
+function isTaskLikePersistedValue(value, { key = "" } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  return Boolean(
+  if (
+    Array.isArray(value?.nodes) ||
+    Array.isArray(value?.edges) ||
+    Array.isArray(value?._taskWorkflowEvents) ||
+    Array.isArray(value?.goalAncestry) ||
+    Array.isArray(value?.delegationAuditTrail) ||
+    Array.isArray(value?.delegationTrail) ||
+    (value?._workflowTeamState && typeof value._workflowTeamState === "object") ||
+    (value?.workflowTeamState && typeof value.workflowTeamState === "object") ||
+    (value?.delegationTopology && typeof value.delegationTopology === "object") ||
+    value.sessionId ||
+    value.threadId
+  ) {
+    return false;
+  }
+  const normalizedKey = String(key || "").trim().toLowerCase();
+  const keySignalsTask =
+    normalizedKey === "task" ||
+    normalizedKey === "taskinfo" ||
+    normalizedKey === "taskdetail" ||
+    normalizedKey.endsWith("task");
+  const hasTaskIdentity = Boolean(
     value.taskId ||
-    value.id ||
     value.taskTitle ||
-    value.title ||
     value.branch ||
     value.branchName ||
     value.repoRoot ||
     value.worktreePath ||
+    value.baseBranch ||
+    value.defaultTargetBranch ||
+    value.meta?.worktreeFailure,
+  );
+  if (!hasTaskIdentity) return false;
+  return keySignalsTask || Boolean(
+    value.branch ||
+    value.branchName ||
+    value.repoRoot ||
+    value.worktreePath ||
+    value.baseBranch ||
+    value.defaultTargetBranch ||
     value.meta?.worktreeFailure,
   );
 }
 
-function summarizePersistedTaskValue(value) {
-  if (!isTaskLikePersistedValue(value)) return value;
+function summarizePersistedTaskValue(value, { key = "" } = {}) {
+  if (!isTaskLikePersistedValue(value, { key })) return value;
   const taskSummary = cleanObject({
     taskId: truncatePersistedRunString(value.taskId || value.id, 160) || undefined,
     taskTitle: truncatePersistedRunString(value.taskTitle || value.title, 240) || undefined,
@@ -1682,7 +1714,9 @@ function summarizePersistedArray(value, { depth = 0, key = "" } = {}) {
 }
 
 function summarizePersistedObject(value, { depth = 0, key = "" } = {}) {
-  if (isTaskLikePersistedValue(value)) return summarizePersistedTaskValue(value);
+  if (isTaskLikePersistedValue(value, { key })) {
+    return summarizePersistedTaskValue(value, { key });
+  }
 
   if (
     Array.isArray(value?.results) &&

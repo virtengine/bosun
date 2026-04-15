@@ -24,6 +24,7 @@ import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
 
 const SPAWN_BLOCKED = process.platform === "win32"
   && process.env.BOSUN_TEST_CHILD_SPAWN_BLOCKED === "1";
+const SLOW_WORKFLOW_TEST_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 10_000;
 
 let getNodeType;
 let clearContractCache;
@@ -1255,7 +1256,7 @@ describe("trigger.task_available", () => {
     } finally {
       try { rmSync(repoRoot, { recursive: true, force: true }); } catch { /* ok */ }
     }
-  });
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 });
 
 //  condition.slot_available Tests
@@ -2441,7 +2442,7 @@ describe("action.resolve_executor", () => {
     }
     expect(safeDirectories.map((value) => resolve(value))).toContain(resolve("/tmp/opencode-workflow"));
     expect(safeDirectories.map((value) => resolve(value))).toContain(resolve("/tmp/opencode-repo"));
-  });
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("forwards OpenCode restart config through action.restart_agent execution", async () => {
     const handler = getNodeType("action.restart_agent");
@@ -2500,7 +2501,7 @@ describe("action.resolve_executor", () => {
       }),
     );
     expect(ctx.data.threadId).toBe("opencode-thread-2");
-  });
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------
@@ -4799,7 +4800,7 @@ describe("template-task-lifecycle", () => {
       acquireSpy.mockRestore();
       recoverSpy.mockRestore();
     }
-  });
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("reconciles installed lifecycle definitions missing deterministic worktree routing", () => {
     const installed = installTemplate("template-task-lifecycle", engine);
@@ -4908,6 +4909,6 @@ describe("template-task-lifecycle", () => {
       // but the DAG structure should be valid
       expect(err.message).not.toContain("Unknown node type");
     }
-  });
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 });
 }

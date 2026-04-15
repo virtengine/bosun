@@ -27,12 +27,14 @@ import {
 } from "../modules/session-api.js";
 import { formatDate, formatRelative, truncate } from "../modules/utils.js";
 import { resolveIcon } from "../modules/icon-utils.js";
+import { clearAgentStatus } from "../modules/streaming.js";
 import { showToast } from "../modules/state.js";
+import { AppContextMenu, useContextMenuState } from "./context-menu.js";
 import {
   List, ListItem, ListItemButton, ListItemText, ListItemIcon,
   ListItemSecondaryAction, Typography, Box, Stack, IconButton,
   Chip, Divider, TextField, InputAdornment, CircularProgress,
-  Tooltip, Menu, MenuItem, Paper, Skeleton, Button, Alert,
+  Tooltip, Paper, Skeleton, Button, Alert,
 } from "@mui/material";
 
 const html = htm.bind(h);
@@ -120,6 +122,41 @@ function clearUnavailableSelectedSession(targetSessionId) {
     sessionMessages.value = [];
     sessionPagination.value = null;
   }
+}
+
+function sessionLooksLikeTestLeak(session) {
+  if (!session || typeof session !== "object") return true;
+  const metadata =
+    session.metadata && typeof session.metadata === "object"
+      ? session.metadata
+      : {};
+  const identifiers = [
+    session.id,
+    session.taskId,
+    session.title,
+    session.taskTitle,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const hasWorkspaceAssignment = Boolean(
+    String(session?.workspaceId || session?.workspace || metadata?.workspaceId || "").trim()
+      || String(metadata?.workspaceDir || "").trim()
+      || String(metadata?.workspaceRoot || "").trim(),
+  );
+  const normalizedSource = String(metadata?.source || "").trim().toLowerCase();
+  if (metadata?.hiddenInLists === true || metadata?.hidden === true || metadata?.testSession === true) {
+    return true;
+  }
+  if (normalizedSource === "voice-http" || normalizedSource === "voice-http-tool" || normalizedSource === "vision-http") {
+    return true;
+  }
+  if (identifiers.some((value) => /^(?:null|undefined|\(null\)|session|null session)$/i.test(value))) {
+    return true;
+  }
+  if (!hasWorkspaceAssignment && (Number(session?.turnCount || 0) <= 0) && !String(session?.preview || session?.lastMessage || "").trim()) {
+    return true;
+  }
+  return false;
 }
 
 /* ─── Data loaders ─── */
@@ -531,16 +568,39 @@ export async function createSession(options = {}) {
   // Duplicate prevention: if a fresh empty session of same type exists, reuse it
   const existing = sessionsData.value || [];
   if (allowReuseFresh) {
-    const fresh = existing.find(
-      (s) =>
+    const freshCandidates = existing
+      .filter(
+        (s) =>
         s.type === type &&
         getSessionLifecycleState(s).isActive &&
+        !sessionLooksLikeTestLeak(s) &&
         (s.turnCount || 0) === 0 &&
         (!s.preview || s.preview.trim() === ""),
-    );
-    if (fresh) {
-      selectedSessionId.value = fresh.id;
-      return { ok: true, session: fresh };
+      )
+      .sort((left, right) => {
+        const leftTs = Date.parse(String(left?.lastActiveAt || left?.createdAt || "")) || 0;
+        const rightTs = Date.parse(String(right?.lastActiveAt || right?.createdAt || "")) || 0;
+        return rightTs - leftTs;
+      });
+    for (const fresh of freshCandidates) {
+      try {
+        const reusePath = buildSessionApiPath(fresh.id, "", {
+          workspace: resolveSessionWorkspaceHint(
+            fresh,
+            String(_lastLoadFilter?.workspace || "").trim() || "active",
+          ),
+          query: { limit: "1" },
+        });
+        const reuseCheck = reusePath
+          ? await apiFetch(reusePath, { _silent: true })
+          : null;
+        if (reuseCheck?.session?.id === fresh.id) {
+          selectedSessionId.value = fresh.id;
+          return { ok: true, session: fresh, reused: true };
+        }
+      } catch {
+        // Stale/orphan session shells should not block creating a real session.
+      }
     }
   }
 
@@ -567,7 +627,8 @@ export async function archiveSession(id) {
     const url = sessionPath(id, "archive");
     if (!url) return false;
     await apiFetch(url, { method: "POST" });
-    if (selectedSessionId.value === id) selectedSessionId.value = null;
+    clearAgentStatus(id);
+    clearUnavailableSelectedSession(id);
     await loadSessions(_lastLoadFilter);
     return true;
   } catch {
@@ -580,7 +641,8 @@ export async function deleteSession(id) {
     const url = sessionPath(id, "delete");
     if (!url) return false;
     await apiFetch(url, { method: "POST" });
-    if (selectedSessionId.value === id) selectedSessionId.value = null;
+    clearAgentStatus(id);
+    clearUnavailableSelectedSession(id);
     await loadSessions(_lastLoadFilter);
     return true;
   } catch {
@@ -595,6 +657,7 @@ export async function deleteSessionHistory(id) {
     const url = historyUrl || fallbackUrl;
     if (!url) return false;
     await apiFetch(url, { method: "POST" });
+    clearAgentStatus(id);
     clearUnavailableSelectedSession(id);
     await loadSessions(_lastLoadFilter);
     return true;
@@ -984,7 +1047,11 @@ export function SessionList({
 }) {
   const [search, setSearch] = useState("");
   const [revealedActions, setRevealedActions] = useState(null);
-  const [contextMenu, setContextMenu] = useState(null);
+  const {
+    contextMenu,
+    openContextMenu,
+    closeContextMenu,
+  } = useContextMenuState();
   const [uncontrolledSessionView, setUncontrolledSessionView] = useState(
     normalizeSessionViewFilter(sessionView),
   );
@@ -1088,10 +1155,10 @@ export function SessionList({
     (id) => {
       selectedSessionId.value = id;
       setRevealedActions(null);
-      setContextMenu(null);
+      closeContextMenu();
       if (onSelect) onSelect(id);
     },
-    [onSelect],
+    [onSelect, closeContextMenu],
   );
 
   const handleRetry = useCallback(() => {
@@ -1114,67 +1181,61 @@ export function SessionList({
 
   const handleArchive = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     await archiveSession(id);
-  }, []);
+  }, [closeContextMenu]);
 
   const handleDelete = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     await deleteSession(id);
-  }, []);
+  }, [closeContextMenu]);
 
   const handleResume = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     await resumeSession(id);
-  }, []);
+  }, [closeContextMenu]);
 
   const handleReopenHistory = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     const reopened = await reopenSessionHistory(id);
     if (!reopened) {
       showToast("Could not reopen session history", "error");
       return;
     }
     if (onSelect) onSelect(id);
-  }, [onSelect]);
+  }, [closeContextMenu, onSelect]);
 
   const handleRevealFolder = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     const revealedPath = await revealSessionFolder(id);
     if (!revealedPath) {
       showToast("Session folder is not available", "error");
       return;
     }
     showToast("Opened session folder", "success");
-  }, []);
+  }, [closeContextMenu]);
 
   const handleDeleteHistory = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     const deleted = await deleteSessionHistory(id);
     if (!deleted) {
       showToast("Could not delete session history", "error");
       return;
     }
     showToast("Session history deleted", "success");
-  }, []);
+  }, [closeContextMenu]);
 
   const handleContextMenu = useCallback((id, event) => {
     setRevealedActions(null);
-    setContextMenu({
+    openContextMenu({
       id,
-      mouseX: event.clientX + 2,
-      mouseY: event.clientY - 6,
-    });
-  }, []);
-
-  const closeContextMenu = useCallback(() => {
-    setContextMenu(null);
-  }, []);
+    }, event);
+  }, [openContextMenu]);
 
   const handleContextAction = useCallback(async (action) => {
     const targetId = contextMenu?.id;
@@ -1250,8 +1311,8 @@ export function SessionList({
   const handleListClick = useCallback((e) => {
     if (e.target.closest(".session-item-wrapper")) return;
     setRevealedActions(null);
-    setContextMenu(null);
-  }, []);
+    closeContextMenu();
+  }, [closeContextMenu]);
 
   const emptyTitle = hasSearch
     ? "No matching sessions"
@@ -1557,62 +1618,61 @@ export function SessionList({
         </${Box}>
       `}
 
-      <${Menu}
-        open=${Boolean(contextMenu)}
+      <${AppContextMenu}
+        menu=${contextMenu}
         onClose=${closeContextMenu}
-        anchorReference="anchorPosition"
-        anchorPosition=${contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
-      >
-        <${MenuItem} onClick=${() => handleContextAction("open")}>
-          ${resolveIcon(":chat:")}
-          ${(() => {
-            const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
-            const historyState = getSessionHistoryState(target);
-            return historyState.isHistoric ? " Open transcript" : " Open";
-          })()}
-        </${MenuItem}>
-        ${(() => {
+        items=${(() => {
           const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
           const historyState = getSessionHistoryState(target);
-          return historyState.isHistoric
-            ? html`<${MenuItem} onClick=${() => handleContextAction("reopen")}>${resolveIcon(":history:")} ${historyState.reopenLabel}</${MenuItem}>`
-            : null;
+          return [
+            {
+              key: "open",
+              label: historyState.isHistoric ? "Open transcript" : "Open",
+              icon: ":chat:",
+              onClick: () => handleContextAction("open"),
+            },
+            {
+              key: "reopen",
+              label: historyState.reopenLabel,
+              icon: ":history:",
+              hidden: !historyState.isHistoric,
+              onClick: () => handleContextAction("reopen"),
+            },
+            { key: "rename", label: "Edit title", icon: ":edit:", onClick: () => handleContextAction("rename") },
+            {
+              key: "archive",
+              label: target?.status === "archived" ? "Resume work" : "Archive",
+              icon: target?.status === "archived" ? ":workflow:" : ":box:",
+              onClick: () => handleContextAction("archive"),
+            },
+            {
+              key: "reveal",
+              label: "Reveal folder",
+              icon: ":folder:",
+              hidden: !historyState.canRevealFolder,
+              onClick: () => handleContextAction("reveal"),
+            },
+            { key: "copy-id", label: "Copy ID", icon: ":copy:", onClick: () => handleContextAction("copy-id") },
+            { kind: "divider", key: "danger-divider" },
+            {
+              key: "delete-history",
+              label: historyState.deleteLabel,
+              icon: ":trash:",
+              danger: true,
+              hidden: !historyState.canDeleteHistory,
+              onClick: () => handleContextAction("delete-history"),
+            },
+            {
+              key: "delete",
+              label: "Delete session",
+              icon: ":trash:",
+              danger: true,
+              hidden: historyState.canDeleteHistory,
+              onClick: () => handleContextAction("delete"),
+            },
+          ];
         })()}
-        <${MenuItem} onClick=${() => handleContextAction("rename")}>${resolveIcon(":edit:")} Edit title</${MenuItem}>
-        <${MenuItem} onClick=${() => handleContextAction("archive")}>
-          ${(() => {
-            const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
-            return target?.status === "archived"
-              ? html`${resolveIcon(":workflow:")} Resume work`
-              : html`${resolveIcon(":box:")} Archive`;
-          })()}
-        </${MenuItem}>
-        ${(() => {
-          const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
-          const historyState = getSessionHistoryState(target);
-          return historyState.canRevealFolder
-            ? html`<${MenuItem} onClick=${() => handleContextAction("reveal")}>${resolveIcon(":folder:")} Reveal folder</${MenuItem}>`
-            : null;
-        })()}
-        <${MenuItem} onClick=${() => handleContextAction("copy-id")}>${resolveIcon(":copy:")} Copy ID</${MenuItem}>
-        <${Divider} />
-        ${(() => {
-          const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
-          const historyState = getSessionHistoryState(target);
-          if (historyState.canDeleteHistory) {
-            return html`
-              <${MenuItem} onClick=${() => handleContextAction("delete-history")} sx=${{ color: "error.main" }}>
-                ${resolveIcon(":trash:")} ${historyState.deleteLabel}
-              </${MenuItem}>
-            `;
-          }
-          return html`
-            <${MenuItem} onClick=${() => handleContextAction("delete")} sx=${{ color: "error.main" }}>
-              ${resolveIcon(":trash:")} Delete session
-            </${MenuItem}>
-          `;
-        })()}
-      </${Menu}>
+      />
     </${Paper}>
   `;
 }

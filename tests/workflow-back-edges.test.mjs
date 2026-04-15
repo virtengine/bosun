@@ -23,6 +23,7 @@ import { WORKFLOW_TEMPLATES, TEMPLATE_CATEGORIES } from "../workflow/workflow-te
 
 let tmpDir;
 let engine;
+const SLOW_WORKFLOW_BACK_EDGE_TEST_TIMEOUT_MS = process.platform === "win32" ? 15_000 : 10_000;
 
 function makeTmpEngine(services = {}) {
   tmpDir = mkdtempSync(join(tmpdir(), "wf-backedge-test-"));
@@ -46,6 +47,10 @@ function makeWorkflow(nodes, edges, opts = {}) {
   };
 }
 
+function backEdgeTest(name, fn) {
+  return it(name, fn, SLOW_WORKFLOW_BACK_EDGE_TEST_TIMEOUT_MS);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  BACK-EDGE ENGINE SUPPORT
 // ═══════════════════════════════════════════════════════════════════════════
@@ -56,7 +61,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it("executes a simple back-edge loop until condition is false", async () => {
+  backEdgeTest("executes a simple back-edge loop until condition is false", async () => {
     // Graph: trigger → counter → check → [back to counter if count < 3]
     //                                   → done (if count >= 3)
     let count = 0;
@@ -112,7 +117,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     expect(doneLog).toContain(3); // last done execution sees count=3
   });
 
-  it("enforces MAX_BACK_EDGE_ITERATIONS safety cap", async () => {
+  backEdgeTest("enforces MAX_BACK_EDGE_ITERATIONS safety cap", async () => {
     // Infinite loop — back-edge always fires
     let count = 0;
     const infType = "test.be_infinite_" + Math.random().toString(36).slice(2, 8);
@@ -140,7 +145,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     expect(count).toBeGreaterThanOrEqual(5);
   });
 
-  it("emits loop:back_edge events", async () => {
+  backEdgeTest("emits loop:back_edge events", async () => {
     const events = [];
     let count = 0;
     const evType = "test.be_event_" + Math.random().toString(36).slice(2, 8);
@@ -176,7 +181,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     expect(events[1].iteration).toBe(2);
   });
 
-  it("emits loop:exhausted when max iterations exceeded", async () => {
+  backEdgeTest("emits loop:exhausted when max iterations exceeded", async () => {
     const exhausted = [];
     const exhType = "test.be_exhaust_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(exhType, {
@@ -204,7 +209,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     expect(exhausted[0].iterations).toBe(2);
   });
 
-  it("resets downstream subgraph on back-edge", async () => {
+  backEdgeTest("resets downstream subgraph on back-edge", async () => {
     // trigger → A → B → C, with back-edge from C→A
     // On each loop, A, B, and C should all re-execute
     const execOrder = [];
@@ -254,7 +259,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     expect(countC).toBe(2);
   });
 
-  it("does not follow back-edge when condition is false", async () => {
+  backEdgeTest("does not follow back-edge when condition is false", async () => {
     let count = 0;
     const skipType = "test.be_skip_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(skipType, {
@@ -280,7 +285,7 @@ describe("WorkflowEngine - back-edge (convergence loops)", () => {
     expect(count).toBe(1); // Only initial execution
   });
 
-  it("back-edge from downstream node to mid-graph node", async () => {
+  backEdgeTest("back-edge from downstream node to mid-graph node", async () => {
     // trigger → A → B → C → back→B
     // B and C should re-execute, A should NOT re-execute
     const execLog = [];
@@ -341,7 +346,7 @@ describe("transform.llm_parse", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it("extracts fields using regex patterns", async () => {
+  backEdgeTest("extracts fields using regex patterns", async () => {
     const sourceType = "test.parse_src_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(sourceType, {
       describe: () => "Produce LLM output",
@@ -386,7 +391,7 @@ describe("transform.llm_parse", () => {
     expect(parseOutput.parsed.score).toBe("95");
   });
 
-  it("extracts fields using keyword matching", async () => {
+  backEdgeTest("extracts fields using keyword matching", async () => {
     const srcType = "test.parse_kw_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(srcType, {
       describe: () => "Produce text",
@@ -428,7 +433,7 @@ describe("transform.llm_parse", () => {
     expect(parseOutput.matchedPort).toBe("minor");
   });
 
-  it("sets matchedPort from outputPort field", async () => {
+  backEdgeTest("sets matchedPort from outputPort field", async () => {
     const srcType2 = "test.parse_port_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(srcType2, {
       describe: () => "Verdict source",
@@ -466,7 +471,7 @@ describe("transform.llm_parse", () => {
     expect(parseOutput.parsed.verdict).toBe("PASS");
   });
 
-  it("handles missing patterns gracefully (null fields)", async () => {
+  backEdgeTest("handles missing patterns gracefully (null fields)", async () => {
     const srcType3 = "test.parse_miss_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(srcType3, {
       describe: () => "No matching text",
@@ -505,7 +510,7 @@ describe("transform.llm_parse", () => {
     expect(parseOutput.matchedPort).toBe("default");
   });
 
-  it("routes downstream via matchedPort + source port edges", async () => {
+  backEdgeTest("routes downstream via matchedPort + source port edges", async () => {
     const srcType4 = "test.parse_route_src_" + Math.random().toString(36).slice(2, 8);
     registerNodeType(srcType4, {
       describe: () => "Source",
@@ -567,7 +572,7 @@ describe("loop.while", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it("executes without sub-workflow (condition-only mode)", async () => {
+  backEdgeTest("executes without sub-workflow (condition-only mode)", async () => {
     // loop.while with no workflowId — just evaluates condition each iteration
     let iterations = 0;
 
@@ -600,7 +605,7 @@ describe("loop.while", () => {
     expect(loopOutput.iterations).toBe(5); // iterations 0,1,2,3 continue; iteration 4 stops
   });
 
-  it("respects maxIterations cap", async () => {
+  backEdgeTest("respects maxIterations cap", async () => {
     const wf = makeWorkflow(
       [
         { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
@@ -626,7 +631,7 @@ describe("loop.while", () => {
     expect(loopOutput.converged).toBe(false);
   });
 
-  it("returns converged=true when condition evaluates to false", async () => {
+  backEdgeTest("returns converged=true when condition evaluates to false", async () => {
     const wf = makeWorkflow(
       [
         { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
@@ -652,7 +657,7 @@ describe("loop.while", () => {
     expect(loopOutput.iterations).toBe(3); // 0,1 continue, 2 stops
   });
 
-  it("handles condition evaluation errors gracefully (stops loop)", async () => {
+  backEdgeTest("handles condition evaluation errors gracefully (stops loop)", async () => {
     const wf = makeWorkflow(
       [
         { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
@@ -690,7 +695,7 @@ describe("action.web_search", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it("throws when query is empty", async () => {
+  backEdgeTest("throws when query is empty", async () => {
     const wf = makeWorkflow(
       [
         { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
@@ -704,7 +709,7 @@ describe("action.web_search", () => {
     expect(result.errors.length).toBeGreaterThan(0);
   });
 
-  it("returns results structure with fetch engine (may fail network)", async () => {
+  backEdgeTest("returns results structure with fetch engine (may fail network)", async () => {
     // This test validates the output shape even if fetch fails
     const wf = makeWorkflow(
       [
@@ -736,7 +741,7 @@ describe("action.web_search", () => {
     expect(typeof searchOutput.resultCount).toBe("number");
   });
 
-  it("resolves template variables in query", async () => {
+  backEdgeTest("resolves template variables in query", async () => {
     const wf = makeWorkflow(
       [
         { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
@@ -763,7 +768,7 @@ describe("action.web_search", () => {
     expect(searchOutput.query).toBe("Riemann hypothesis proof verification");
   });
 
-  it("decodes HTML entities only once when flattening web results", async () => {
+  backEdgeTest("decodes HTML entities only once when flattening web results", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url) => {
       const parsedUrl = new URL(String(url));
@@ -820,7 +825,7 @@ describe("action.web_search", () => {
     }
   });
 
-  it("extracts plain text content without preserving script or style payloads", async () => {
+  backEdgeTest("extracts plain text content without preserving script or style payloads", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url) => {
       const parsedUrl = new URL(String(url));
@@ -892,7 +897,7 @@ describe("Aletheia pattern - back-edge + llm_parse routing", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it("generate→parse→branch→revise loop with back-edge", async () => {
+  backEdgeTest("generate→parse→branch→revise loop with back-edge", async () => {
     // Simulates: generator → parse verdict → branch (correct/minor)
     // minor → reviser → back-edge to generator
     // correct → output

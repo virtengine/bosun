@@ -1,9 +1,17 @@
 /* ─────────────────────────────────────────────────────────────
  *  Tab: Control — executor, commands, routing, quick commands
  * ────────────────────────────────────────────────────────────── */
-import { h } from "preact";
+import { h as _h } from "preact";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import htm from "htm";
+
+/* Guard: recover when a React-style forwardRef object leaks into h(). */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function") {
+    if (typeof type.render === "function") return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
 
 const html = htm.bind(h);
 

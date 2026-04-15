@@ -9,15 +9,17 @@ import { h } from "preact";
 import {
   useState,
   useEffect,
+  useRef,
   useCallback,
 } from "preact/hooks";
-import { signal, computed } from "@preact/signals";
+import { signal, computed, effect } from "@preact/signals";
 import htm from "htm";
 import { apiFetch } from "../modules/api.js";
 import {
   loadSessionBranches,
   updateSessionSurface,
 } from "../modules/session-surface.js";
+import { worktreeData, loadWorktrees } from "../modules/state.js";
 import { haptic } from "../modules/telegram.js";
 import { resolveIcon } from "../modules/icon-utils.js";
 import {
@@ -35,6 +37,7 @@ import {
   Typography,
   Box,
   Stack,
+  IconButton,
   Tooltip,
   Divider,
   ListItemIcon,
@@ -58,7 +61,7 @@ export const availableAgents = signal([]); // Array<{ id, name, provider, availa
 export const manualAgents = signal([]);
 
 /** Currently active agent adapter id */
-export const activeAgent = signal("");
+export const activeAgent = signal("codex-sdk");
 export const activeManualAgentId = signal("");
 
 /** Whether agent data is currently loading */
@@ -71,6 +74,14 @@ export const agentStatus = signal("idle"); // "idle" | "thinking" | "executing" 
 export const selectedModel = signal("");
 try { if (typeof localStorage !== "undefined") selectedModel.value = localStorage.getItem("ve-selected-model") || ""; } catch {}
 try { if (typeof localStorage !== "undefined") activeManualAgentId.value = localStorage.getItem("ve-active-manual-agent") || ""; } catch {}
+
+/** Agent run context — "workspace" = parent workspace dir, "worktree" = specific repo/worktree */
+export const agentRunMode = signal("workspace"); // "workspace" | "worktree"
+try { if (typeof localStorage !== "undefined") agentRunMode.value = localStorage.getItem("ve-agent-run-mode") || "workspace"; } catch {}
+
+/** Selected repo/worktree path for agent execution (empty = use workspace default) */
+export const selectedRepo = signal("");
+try { if (typeof localStorage !== "undefined") selectedRepo.value = localStorage.getItem("ve-selected-repo") || ""; } catch {}
 
 /** Computed: resolved active agent object */
 export const activeAgentInfo = computed(() => {
@@ -97,14 +108,6 @@ const AGENT_ICONS = {
   "codex-sdk": "zap",
   "copilot-sdk": "bot",
   "claude-sdk": "cpu",
-  "azure-openai-responses": "globe",
-  "openai-responses": "zap",
-  "openai-codex-subscription": "zap",
-  "anthropic-messages": "cpu",
-  "claude-subscription-shim": "cpu",
-  "openai-compatible": "monitor",
-  "ollama": "monitor",
-  "copilot-oauth": "bot",
 };
 
 // Mirrors EXECUTOR_MODEL_REGISTRY in task-complexity.mjs — keep in sync
@@ -151,18 +154,6 @@ const EXECUTOR_DISPLAY_NAMES = {
   "claude-sdk":  "Claude",
 };
 
-function resolveAgentIconKey(agent = {}) {
-  return agent?.providerId || agent?.id || agent?.provider || "";
-}
-
-function resolveAgentSubtitle(agent = {}) {
-  const explicit = String(agent?.subtitle || "").trim();
-  if (explicit) return explicit;
-  const providerLabel = String(agent?.providerLabel || agent?.provider || agent?.providerId || "").trim();
-  const modelLabel = String(agent?.defaultModel || agent?.modelCatalog?.defaultModel || "").trim();
-  return [providerLabel, modelLabel].filter(Boolean).join(" · ");
-}
-
 /**
  * Convert a model string like "gpt-5.3-codex" → "GPT-5.3 Codex"
  * or "claude-opus-4.6" → "Claude Opus 4.6"
@@ -180,51 +171,6 @@ function buildLabel(model) {
       return seg.charAt(0).toUpperCase() + seg.slice(1);
     })
     .join(" ");
-}
-
-function formatApiStyleLabel(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized || normalized === "provider-default") return "";
-  if (normalized === "responses") return "Responses API";
-  if (normalized === "chat-completions") return "Chat Completions API";
-  return normalized;
-}
-
-function buildRuntimeModelEntries(agentInfo = null, currentAgentId = "") {
-  const structuredModels = Array.isArray(agentInfo?.modelEntries)
-    ? agentInfo.modelEntries
-        .map((entry) => ({
-          value: String(entry?.id || "").trim(),
-          label: String(entry?.label || entry?.name || entry?.id || "").trim(),
-          apiStyle: String(entry?.apiStyle || "").trim() || null,
-        }))
-        .filter((entry) => entry.value)
-    : [];
-  if (structuredModels.length > 0) {
-    return [{ value: "", label: "Default", apiStyle: null }, ...structuredModels];
-  }
-  const apiModels = Array.isArray(agentInfo?.models) ? agentInfo.models : [];
-  if (apiModels.length > 0) {
-    return [
-      { value: "", label: "Default", apiStyle: null },
-      ...apiModels.map((model) => ({
-        value: model,
-        label: buildLabel(model),
-        apiStyle: null,
-      })),
-    ];
-  }
-  const providerSdkKey = agentInfo?.provider
-    ? agentInfo.provider.toLowerCase() + "-sdk"
-    : null;
-  const staticList = AGENT_MODELS[currentAgentId]
-    || (providerSdkKey && AGENT_MODELS[providerSdkKey])
-    || AGENT_MODELS["codex-sdk"];
-  return staticList.map((entry) => ({
-    value: entry.value,
-    label: entry.label,
-    apiStyle: null,
-  }));
 }
 
 const STATUS_CONFIG = {
@@ -479,19 +425,17 @@ export async function loadAvailableAgents() {
     }
   } catch (err) {
     console.warn("[agent-selector] Failed to load agents:", err);
+    // Provide sensible fallback agents for offline/dev mode
     if (availableAgents.value.length === 0) {
-      availableAgents.value = [];
-      manualAgents.value = [];
+      availableAgents.value = [
+        { id: "codex-sdk", name: "Codex", provider: "openai", available: true, busy: false, models: AGENT_MODELS["codex-sdk"].map((m) => m.value).filter(Boolean), capabilities: ["agent", "plan"] },
+        { id: "copilot-sdk", name: "Copilot", provider: "github", available: true, busy: false, models: AGENT_MODELS["copilot-sdk"].map((m) => m.value).filter(Boolean), capabilities: ["ask", "agent", "plan"] },
+        { id: "claude-sdk", name: "Claude", provider: "anthropic", available: true, busy: false, models: AGENT_MODELS["claude-sdk"].map((m) => m.value).filter(Boolean), capabilities: ["ask", "agent", "plan"] },
+      ];
     }
   } finally {
     agentSelectorLoading.value = false;
   }
-}
-
-function handleAgentInventoryRefreshEvent() {
-  loadAvailableAgents().catch((err) => {
-    console.warn("[agent-selector] Failed to refresh agents:", err);
-  });
 }
 
 function setActiveManualAgent(agentId) {
@@ -728,7 +672,19 @@ export function ModelPicker() {
   // Build model entries: prefer live API list, fall back to static registry.
   // For custom executor IDs (e.g. "copilot-claude"), derive the right static list
   // from the agent's provider field ("COPILOT" → "copilot-sdk").
-  const modelEntries = buildRuntimeModelEntries(agentInfo, current);
+  const apiModels = agentInfo?.models;
+  const providerSdkKey = agentInfo?.provider
+    ? agentInfo.provider.toLowerCase() + "-sdk"   // "COPILOT" → "copilot-sdk"
+    : null;
+  const staticList = AGENT_MODELS[current]
+    || (providerSdkKey && AGENT_MODELS[providerSdkKey])
+    || AGENT_MODELS["codex-sdk"];
+  const modelEntries = apiModels && apiModels.length > 0
+    ? [
+        { value: "", label: "Default" },
+        ...apiModels.map((m) => ({ value: m, label: buildLabel(m) })),
+      ]
+    : staticList;
 
   // When executor changes, reset model if the stored value isn't in the new list
   useEffect(() => {
@@ -737,7 +693,7 @@ export function ModelPicker() {
       selectedModel.value = "";
       try { localStorage.setItem("ve-selected-model", ""); } catch {}
     }
-  }, [current, model, modelEntries]);
+  }, [current]);
 
   const handleOpen = useCallback((e) => {
     setAnchorEl(e.currentTarget);
@@ -754,8 +710,7 @@ export function ModelPicker() {
     setAnchorEl(null);
   }, []);
 
-  const selectedEntry = modelEntries.find((entry) => entry.value === model);
-  const displayLabel = selectedEntry?.label || (model ? buildLabel(model) : "Default");
+  const displayLabel = model ? buildLabel(model) : "Default";
 
   return html`
     <${Tooltip} title="Model override (Default = executor decides)" arrow>
@@ -797,11 +752,7 @@ export function ModelPicker() {
             ? html`<${ListItemIcon} sx=${{ minWidth: "28px !important" }}><${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14 }}>✓</${Typography}></${ListItemIcon}>`
             : html`<${ListItemIcon} sx=${{ minWidth: "28px !important" }} />`
           }
-          <${ListItemText}
-            primary=${m.label}
-            secondary=${m.apiStyle ? formatApiStyleLabel(m.apiStyle) : null}
-            secondaryTypographyProps=${{ fontSize: 11 }}
-          />
+          <${ListItemText}>${m.label}</${ListItemText}>
         </${MenuItem}>
       `)}
     </${Menu}>
@@ -862,6 +813,7 @@ export function AgentPicker() {
   const currentName = EXECUTOR_DISPLAY_NAMES[current]
     || (currentAgent ? String(currentAgent.name || "").replace(/\s*\(busy\)\s*$/i, "").trim() : "")
     || "Executor";
+  const providerColor = currentAgent ? (PROVIDER_COLORS[currentAgent.provider?.toLowerCase()] || "#666") : "#666";
 
   return html`
     <${Tooltip} title="Select AI executor" arrow>
@@ -871,7 +823,7 @@ export function AgentPicker() {
         variant="outlined"
         onClick=${handleOpen}
         disabled=${loading}
-        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon(AGENT_ICONS[resolveAgentIconKey(currentAgent || { id: current })] || "bot")}</span>`}
+        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon(AGENT_ICONS[current] || "bot")}</span>`}
         sx=${{
           flexShrink: 0,
           cursor: "pointer",
@@ -900,8 +852,8 @@ export function AgentPicker() {
         const rawName = EXECUTOR_DISPLAY_NAMES[agent.id] || agent.name || "";
         const name = String(rawName).replace(/\s*\(busy\)\s*$/i, "").trim() || "Executor";
         const isActive = agent.id === current;
+        const pColor = PROVIDER_COLORS[agent.provider?.toLowerCase()] || "#666";
         const statusColor = agent.busy ? "#eab308" : agent.available ? "#22c55e" : "#6b7280";
-        const secondary = resolveAgentSubtitle(agent);
 
         return html`
           <${MenuItem}
@@ -914,12 +866,12 @@ export function AgentPicker() {
                 width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
                 borderRadius: "6px", bgcolor: "rgba(255,255,255,0.04)", fontSize: 18,
               }}>
-                ${resolveIcon(AGENT_ICONS[resolveAgentIconKey(agent)] || "bot")}
+                ${resolveIcon(AGENT_ICONS[agent.id] || "bot")}
               </${Box}>
             </${ListItemIcon}>
             <${ListItemText}
               primary=${name}
-              secondary=${secondary || agent.provider || ""}
+              secondary=${agent.provider || ""}
               primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
               secondaryTypographyProps=${{ fontSize: 11, color: "var(--tg-theme-hint-color, #888)" }}
             />
@@ -1449,6 +1401,14 @@ function SessionBranchPicker({
     return haystack.includes(normalizedQuery);
   });
 
+  useEffect(() => {
+    if (!open) {
+      setQuery("");
+      return;
+    }
+    refreshBranches();
+  }, [open, refreshBranches]);
+
   if (!sessionId || !repoPath) return null;
 
   return html`
@@ -1575,6 +1535,221 @@ function SessionBranchPicker({
 }
 
 /* ═══════════════════════════════════════════════
+ *  WorkspaceModePicker
+ *  Chip → Menu: choose between "Workspace" (parent workspace dir)
+ *  and "Worktree" (specific repo/worktree). Persisted to localStorage.
+ * ═══════════════════════════════════════════════ */
+
+export function WorkspaceModePicker() {
+  const mode = agentRunMode.value;
+  const [anchorEl, setAnchorEl] = useState(null);
+  const open = Boolean(anchorEl);
+
+  const handleOpen = useCallback((e) => { setAnchorEl(e.currentTarget); }, []);
+  const handleClose = useCallback(() => { setAnchorEl(null); }, []);
+
+  const handleSelect = useCallback((value) => {
+    agentRunMode.value = value;
+    try { localStorage.setItem("ve-agent-run-mode", value); } catch {}
+    // Clear repo selection when switching back to workspace mode
+    if (value === "workspace") {
+      selectedRepo.value = "";
+      try { localStorage.setItem("ve-selected-repo", ""); } catch {}
+    }
+    haptic("light");
+    setAnchorEl(null);
+  }, []);
+
+  const isWorktree = mode === "worktree";
+
+  return html`
+    <${Tooltip} title="Run context: Workspace = parent workspace dir, Worktree = specific repo" arrow>
+      <${Chip}
+        label=${isWorktree ? "Worktree" : "Workspace"}
+        size="small"
+        variant=${isWorktree ? "filled" : "outlined"}
+        onClick=${handleOpen}
+        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon(isWorktree ? "git-branch" : "folder")}</span>`}
+        sx=${{
+          flexShrink: 0,
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 500,
+          color: "var(--tg-theme-text-color, #fff)",
+          borderColor: open ? "var(--tg-theme-button-color, #3b82f6)" : "rgba(255,255,255,0.08)",
+          bgcolor: isWorktree ? "rgba(59,130,246,0.12)" : "transparent",
+          "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
+        }}
+      />
+    </${Tooltip}>
+    <${Menu}
+      anchorEl=${anchorEl}
+      open=${open}
+      onClose=${handleClose}
+      anchorOrigin=${{ vertical: "top", horizontal: "left" }}
+      transformOrigin=${{ vertical: "bottom", horizontal: "left" }}
+      slotProps=${{ paper: { sx: { ...muiDarkPaper, minWidth: 200 } } }}
+    >
+      ${[
+        { value: "workspace", label: "Workspace", desc: "Launch in parent workspace directory", icon: "folder" },
+        { value: "worktree", label: "Worktree", desc: "Launch inside a specific repo/worktree", icon: "git-branch" },
+      ].map(({ value, label, desc, icon }) => html`
+        <${MenuItem}
+          key=${value}
+          selected=${mode === value}
+          onClick=${() => handleSelect(value)}
+        >
+          <${ListItemIcon} sx=${{ minWidth: "36px !important" }}>
+            <${Box} sx=${{
+              width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center",
+              borderRadius: "6px", bgcolor: "rgba(255,255,255,0.04)", fontSize: 16,
+            }}>
+              ${resolveIcon(icon)}
+            </${Box}>
+          </${ListItemIcon}>
+          <${ListItemText}
+            primary=${label}
+            secondary=${desc}
+            primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+            secondaryTypographyProps=${{ fontSize: 11 }}
+          />
+          ${mode === value && html`<${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14, ml: 1 }}>✓</${Typography}>`}
+        </${MenuItem}>
+      `)}
+    </${Menu}>
+  `;
+}
+
+/* ═══════════════════════════════════════════════
+ *  RepoPicker
+ *  Chip → Menu: select which worktree/repo the agent runs in.
+ *  Default is "Workspace" (empty = parent workspace dir).
+ *  Loads worktrees lazily on first open. Required when mode = "worktree".
+ * ═══════════════════════════════════════════════ */
+
+export function RepoPicker() {
+  const mode = agentRunMode.value;
+  const current = selectedRepo.value;
+  const worktrees = worktreeData.value;
+  const [anchorEl, setAnchorEl] = useState(null);
+  const open = Boolean(anchorEl);
+
+  const needsRepo = mode === "worktree" && !current;
+
+  const handleOpen = useCallback((e) => {
+    // Lazy-load worktrees on first open
+    if (worktrees.length === 0) loadWorktrees();
+    setAnchorEl(e.currentTarget);
+  }, [worktrees.length]);
+
+  const handleClose = useCallback(() => { setAnchorEl(null); }, []);
+
+  const handleSelect = useCallback((value) => {
+    selectedRepo.value = value;
+    try { localStorage.setItem("ve-selected-repo", value); } catch {}
+    haptic("light");
+    setAnchorEl(null);
+  }, []);
+
+  // Derive repo display name from last segment of path
+  const repoName = (path) => {
+    if (!path) return "";
+    const seg = path.replace(/\\/g, "/").split("/").filter(Boolean);
+    return seg[seg.length - 1] || path;
+  };
+
+  const currentLabel = current ? repoName(current) : "Workspace";
+
+  return html`
+    <${Tooltip}
+      title=${needsRepo
+        ? "⚠ Worktree mode requires a repo selection"
+        : "Select repo: Workspace = use parent workspace dir"}
+      arrow
+    >
+      <${Chip}
+        label=${currentLabel}
+        size="small"
+        variant=${current ? "filled" : "outlined"}
+        onClick=${handleOpen}
+        icon=${html`<span style="font-size:13px;line-height:1">${resolveIcon("box")}</span>`}
+        sx=${{
+          flexShrink: 0,
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 500,
+          color: needsRepo ? "#f97316" : "var(--tg-theme-text-color, #fff)",
+          borderColor: needsRepo
+            ? "#f97316"
+            : open ? "var(--tg-theme-button-color, #3b82f6)" : "rgba(255,255,255,0.08)",
+          bgcolor: current ? "rgba(59,130,246,0.12)" : "transparent",
+          "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
+        }}
+      />
+    </${Tooltip}>
+    <${Menu}
+      anchorEl=${anchorEl}
+      open=${open}
+      onClose=${handleClose}
+      anchorOrigin=${{ vertical: "top", horizontal: "left" }}
+      transformOrigin=${{ vertical: "bottom", horizontal: "left" }}
+      slotProps=${{ paper: { sx: { ...muiDarkPaper, minWidth: 240 } } }}
+    >
+      <${MenuItem}
+        selected=${!current}
+        onClick=${() => handleSelect("")}
+      >
+        <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+          ${!current ? html`<${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14 }}>✓</${Typography}>` : null}
+        </${ListItemIcon}>
+        <${ListItemText}
+          primary="Workspace (default)"
+          secondary="Use parent workspace directory"
+          primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+          secondaryTypographyProps=${{ fontSize: 11 }}
+        />
+      </${MenuItem}>
+      ${worktrees.length > 0 ? html`<${Divider} />` : null}
+      ${worktrees.length > 0
+        ? worktrees.map((wt) => {
+            const name = repoName(wt.path);
+            const isActive = current === wt.path;
+            const statusColor = wt.status === "active" ? "#22c55e" : wt.status === "stale" ? "#eab308" : "#6b7280";
+            return html`
+              <${MenuItem}
+                key=${wt.path}
+                selected=${isActive}
+                onClick=${() => handleSelect(wt.path)}
+              >
+                <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+                  ${isActive ? html`<${Typography} sx=${{ color: "var(--tg-theme-button-color, #3b82f6)", fontWeight: 700, fontSize: 14 }}>✓</${Typography}>` : null}
+                </${ListItemIcon}>
+                <${ListItemText}
+                  primary=${name}
+                  secondary=${wt.branch || wt.path}
+                  primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+                  secondaryTypographyProps=${{ fontSize: 11 }}
+                />
+                <${Box} sx=${{ width: 7, height: 7, borderRadius: "50%", bgcolor: statusColor, flexShrink: 0, ml: 1 }} />
+              </${MenuItem}>
+            `;
+          })
+        : html`
+          <${MenuItem} disabled>
+            <${ListItemText}
+              primary="No worktrees found"
+              secondary="Create a worktree from the Infra tab."
+              primaryTypographyProps=${{ fontSize: 13 }}
+              secondaryTypographyProps=${{ fontSize: 11 }}
+            />
+          </${MenuItem}>
+        `
+      }
+    </${Menu}>
+  `;
+}
+
+/* ═══════════════════════════════════════════════
  *  ChatInputToolbar
  *  Combines all selectors into a single row
  * ═══════════════════════════════════════════════ */
@@ -1598,19 +1773,10 @@ export function ChatInputToolbar({
     }
   }, []);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    window.addEventListener("ve:agents-refresh", handleAgentInventoryRefreshEvent);
-    return () => {
-      window.removeEventListener("ve:agents-refresh", handleAgentInventoryRefreshEvent);
-    };
-  }, []);
-
   return html`
     <div class="chat-input-toolbar">
       <${AgentPicker} />
       <${AgentModeSelector} />
-      <${ManualAgentPicker} />
       <${ModelPicker} />
       <${SessionRepoPicker}
         sessionId=${sessionId}

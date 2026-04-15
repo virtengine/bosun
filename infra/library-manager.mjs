@@ -1111,6 +1111,81 @@ export function listIndexedSkillEntries(rootDir, options = {}) {
   return Array.isArray(index?.skills) ? index.skills : [];
 }
 
+function parseBooleanLike(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (["true", "yes", "on", "1"].includes(normalized)) return true;
+  if (["false", "no", "off", "0"].includes(normalized)) return false;
+  return fallback;
+}
+
+function extractSkillCommentMetadata(markdown = "") {
+  const text = String(markdown || "");
+  const tagsMatch = /<!--\s*tags:\s*(.+?)\s*-->/i.exec(text);
+  const importantMatch = /<!--\s*(?:important|eager)\s*:\s*(true|false|yes|no|on|off|1|0)\s*-->/i.exec(text);
+  const h1Match = /^#\s+(?:Skill:\s*)?(.+)$/im.exec(text);
+
+  return {
+    title: String(h1Match?.[1] || "").trim(),
+    tags: String(tagsMatch?.[1] || "")
+      .split(/[,\s]+/)
+      .map((tag) => tag.trim().toLowerCase())
+      .filter(Boolean),
+    important: parseBooleanLike(importantMatch?.[1], false),
+  };
+}
+
+function extractDiscoveredSkillMetadata(content = "", fileName = "") {
+  const { attrs } = parseSimpleFrontmatter(content);
+  const commentMeta = extractSkillCommentMetadata(content);
+  const h1Match = content.match(/^#\s+(?:Skill:\s*)?(.+)$/im);
+  const title = String(
+    getFrontmatterValue(attrs, ["title", "name"])
+    || commentMeta.title
+    || (h1Match ? h1Match[1].trim() : "")
+    || basename(fileName, extname(fileName)),
+  ).trim();
+  const frontmatterTags = parseJsonishArray(getFrontmatterValue(attrs, ["tags"]) || "");
+  const important = parseBooleanLike(
+    getFrontmatterValue(attrs, ["important"]),
+    commentMeta.important,
+  );
+
+  return {
+    title,
+    tags: frontmatterTags.length > 0 ? frontmatterTags : commentMeta.tags,
+    important,
+  };
+}
+
+function buildDiscoveredSkillId(fullPath, fileName, title, seenIds) {
+  const stem = basename(fileName, extname(fileName));
+  const parentStem = basename(resolve(fullPath, ".."));
+  const baseId = slugify(
+    title
+    || (stem.toLowerCase() === "skill" ? parentStem : stem)
+    || fileName,
+  ) || "skill";
+  return ensureUniqueId(baseId, seenIds);
+}
+
+export function resolveRepositorySkillTrust(workspaceRoot, options = {}) {
+  const root = resolve(workspaceRoot || getBosunHomeDir());
+  const trustMode = String(options?.trustMode || "").trim().toLowerCase();
+  const allowCrossClientExpansion = options?.allowCrossClientExpansion === true
+    || options?.trustCrossClientSkills === true
+    || trustMode === "allow"
+    || trustMode === "trusted";
+
+  return {
+    workspaceRoot: root,
+    crossClientSkillsDir: resolve(root, ".agents", "skills"),
+    trustMode: allowCrossClientExpansion ? "allow" : "catalog-only",
+    allowCrossClientExpansion,
+  };
+}
+
 /**
  * Scan the workspace (and global bosun home) skill directories and return
  * discovered skill entries split into trusted/catalog-only and blocked lists.
@@ -1118,20 +1193,26 @@ export function listIndexedSkillEntries(rootDir, options = {}) {
  * @param {string} workspaceRoot - Absolute path to the workspace root
  * @returns {{ entries: object[], blockedEntries: object[] }}
  */
-export function discoverLocalSkillCatalog(workspaceRoot) {
+export function discoverLocalSkillCatalog(workspaceRoot, options = {}) {
   const root = resolve(workspaceRoot || getBosunHomeDir());
   const resolvedBosunHome = resolve(getBosunHomeDir());
+  const trust = resolveRepositorySkillTrust(root, options);
 
   // Directories to scan: workspace .bosun/skills first, then global if different
   const scanDirs = [];
   const workspaceSkillDir = resolve(root, ".bosun", "skills");
   scanDirs.push({ dir: workspaceSkillDir, sourceKind: "workspace", rootRef: root });
 
-  if (resolvedBosunHome !== root) {
-    const globalSkillDir = resolve(resolvedBosunHome, ".bosun", "skills");
-    if (globalSkillDir !== workspaceSkillDir) {
-      scanDirs.push({ dir: globalSkillDir, sourceKind: "global", rootRef: resolvedBosunHome });
+    if (resolvedBosunHome !== root) {
+      const globalSkillDir = resolve(resolvedBosunHome, ".bosun", "skills");
+      if (globalSkillDir !== workspaceSkillDir) {
+        scanDirs.push({ dir: globalSkillDir, sourceKind: "global", rootRef: resolvedBosunHome });
+      }
     }
+
+  const crossClientSkillsDir = trust.crossClientSkillsDir;
+  if (existsSync(crossClientSkillsDir)) {
+    scanDirs.push({ dir: crossClientSkillsDir, sourceKind: "cross-client", rootRef: root });
   }
 
   const entries = [];
@@ -1143,15 +1224,22 @@ export function discoverLocalSkillCatalog(workspaceRoot) {
 
     let files = [];
     try {
-      files = readdirSync(dir)
-        .filter((name) => /\.md$/i.test(name))
-        .sort((a, b) => a.localeCompare(b));
+      if (sourceKind === "cross-client") {
+        files = walkFilesRecursive(dir)
+          .filter((filePath) => basename(filePath).toLowerCase() === "skill.md")
+          .sort((a, b) => a.localeCompare(b));
+      } else {
+        files = readdirSync(dir)
+          .filter((name) => /\.md$/i.test(name))
+          .map((name) => resolve(dir, name))
+          .sort((a, b) => a.localeCompare(b));
+      }
     } catch {
       continue;
     }
 
-    for (const fileName of files) {
-      const fullPath = resolve(dir, fileName);
+    for (const fullPath of files) {
+      const fileName = basename(fullPath);
       let content = "";
       try {
         content = readFileSync(fullPath, "utf8");
@@ -1166,17 +1254,8 @@ export function discoverLocalSkillCatalog(workspaceRoot) {
       } catch { /* ignore */ }
       const contentLength = content.length;
 
-      const { attrs } = parseSimpleFrontmatter(content);
-      const h1Match = content.match(/^#\s+(.+)$/m);
-      const title = String(
-        getFrontmatterValue(attrs, ["title", "name"])
-        || (h1Match ? h1Match[1].trim() : "")
-        || basename(fileName, ".md"),
-      ).trim();
-      const tags = parseJsonishArray(getFrontmatterValue(attrs, ["tags"]) || "");
-      const important = Boolean(getFrontmatterValue(attrs, ["important"]));
-      const baseId = slugify(basename(fileName, ".md"));
-      const id = ensureUniqueId(baseId, seenIds);
+      const { title, tags, important } = extractDiscoveredSkillMetadata(content, fileName);
+      const id = buildDiscoveredSkillId(fullPath, fileName, title, seenIds);
 
       const safetyResult = evaluateMarkdownSafety(content, { path: relPath, sourceKind }, {});
 
@@ -1199,12 +1278,14 @@ export function discoverLocalSkillCatalog(workspaceRoot) {
         continue;
       }
 
-      const catalogOnly = (safetyResult.safety?.score ?? 0) > 0;
+      const catalogOnly = sourceKind === "cross-client"
+        ? !trust.allowCrossClientExpansion
+        : (safetyResult.safety?.score ?? 0) > 0;
       const trusted = !catalogOnly;
       const trustState = catalogOnly ? "catalog-only" : "trusted";
-      const trustReason = catalogOnly
-        ? uniqueStrings(safetyResult.safety?.reasons || []).join("; ")
-        : "";
+      const trustReason = sourceKind === "cross-client"
+        ? (trusted ? "operator-trusted" : "cross-client skill catalog requires trust")
+        : (catalogOnly ? uniqueStrings(safetyResult.safety?.reasons || []).join("; ") : "");
 
       entries.push({
         id,
@@ -1224,7 +1305,7 @@ export function discoverLocalSkillCatalog(workspaceRoot) {
     }
   }
 
-  return { entries, blockedEntries };
+  return { entries, blockedEntries, trust };
 }
 
 export function resolveLibraryPlan(rootDir, criteria = {}, opts = {}) {
@@ -1365,11 +1446,21 @@ function extForType(type) {
 /**
  * List all entries from the manifest, optionally filtered.
  */
-export function listEntries(rootDir, { type, tags, scope, search } = {}) {
+export function listEntries(rootDir, { type, tags, scope, search, stabilityTier, installSurface, includeExperimental = true } = {}) {
   const { entries } = loadManifest(rootDir);
   let filtered = entries;
   if (type) filtered = filtered.filter((e) => e.type === type);
   if (scope) filtered = filtered.filter((e) => e.scope === scope || e.scope === "global");
+  if (stabilityTier) {
+    const expected = String(stabilityTier).trim().toLowerCase();
+    filtered = filtered.filter((e) => String(e?.stabilityTier || "").trim().toLowerCase() === expected);
+  } else if (includeExperimental === false) {
+    filtered = filtered.filter((e) => String(e?.stabilityTier || "").trim().toLowerCase() !== "experimental");
+  }
+  if (installSurface) {
+    const expected = String(installSurface).trim().toLowerCase();
+    filtered = filtered.filter((e) => String(e?.installSurface || "").trim().toLowerCase() === expected);
+  }
   if (tags && tags.length) {
     const tagSet = new Set(tags.map((t) => t.toLowerCase()));
     filtered = filtered.filter((e) => e.tags.some((t) => tagSet.has(t)));
@@ -1451,6 +1542,8 @@ export function upsertEntry(rootDir, data, content, options = {}) {
     tags: data.tags || existing?.tags || [],
     scope: data.scope || existing?.scope || "global",
     workspace: data.workspace ?? existing?.workspace ?? null,
+    stabilityTier: data.stabilityTier || existing?.stabilityTier || null,
+    installSurface: data.installSurface || existing?.installSurface || null,
     meta: { ...(existing?.meta || {}), ...(data.meta || {}) },
     createdAt: existing?.createdAt || nowISO(),
     updatedAt: nowISO(),
@@ -2262,6 +2355,8 @@ export function syncAutoDiscoveredLibraryEntries(rootDir) {
       url: mcp.transport === "url" ? mcp.url : undefined,
       env: Object.keys(mcp.env || {}).length ? mcp.env : undefined,
       source: "autodiscovered",
+      stabilityTier: "experimental",
+      installSurface: "autodiscovered",
       tags: ["autodiscovered", "codex-config", "mcp"],
     };
 
@@ -2271,6 +2366,8 @@ export function syncAutoDiscoveredLibraryEntries(rootDir) {
       name: mcp.name,
       description: content.description,
       tags: uniqueStrings(["mcp", "autodiscovered", "codex-config"]),
+      stabilityTier: "experimental",
+      installSurface: "autodiscovered",
       meta: {
         autoSync: {
           kind: "codex-mcp-config",
@@ -2813,6 +2910,8 @@ function importRepositoryMcpEntries(rootDir, checkoutDir, context) {
       url: mcp.transport === "url" ? mcp.url : undefined,
       env: Object.keys(mcp.env || {}).length ? mcp.env : undefined,
       source: "imported",
+      stabilityTier: "experimental",
+      installSurface: "repository-import",
       tags: ["imported", "mcp", sourceId || "external"],
     };
     upsertEntry(rootDir, {
@@ -2821,6 +2920,8 @@ function importRepositoryMcpEntries(rootDir, checkoutDir, context) {
       name: mcp.name,
       description: content.description,
       tags: uniqueStrings(["imported", "mcp", sourceId || "external"]),
+      stabilityTier: "experimental",
+      installSurface: "repository-import",
       meta: {
         sourceId: sourceId || null,
         repoUrl,

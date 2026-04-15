@@ -598,6 +598,17 @@ async function main() {
   } catch (err) {
     console.warn(`  :alert:  demo-default sync skipped: ${err.message}`);
   }
+
+  // Keep the mirrored demo UI source surfaces aligned with ui/.
+  try {
+    const { syncDemoUi } = await import("./tools/sync-demo-ui.mjs");
+    const { updatedPaths } = await syncDemoUi({ silent: true });
+    if (updatedPaths.length > 0) {
+      console.log(`  :check: Demo UI synced (${updatedPaths.length} files)`);
+    }
+  } catch (err) {
+    console.warn(`  :alert:  demo-ui sync skipped: ${err.message}`);
+  }
 }
 
 main().catch((err) => {

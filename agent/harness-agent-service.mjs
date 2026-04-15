@@ -316,15 +316,24 @@ export function createHarnessAgentService(options = {}) {
     options.sessionManager && typeof options.sessionManager === "object"
       ? options.sessionManager
       : getBosunSessionManager();
-  const adapters =
+  let adapters =
     options.adapters && typeof options.adapters === "object"
       ? options.adapters
-      : createShellAdapterRegistry();
-  const providerKernel =
+      : null;
+  const getAdapters = () => {
+    if (!adapters) {
+      adapters = createShellAdapterRegistry();
+    }
+    return adapters;
+  };
+  let providerKernel =
     options.providerKernel && typeof options.providerKernel.createExecutionSession === "function"
       ? options.providerKernel
-      : createProviderKernel({
-        adapters,
+      : null;
+  const getProviderKernel = () => {
+    if (!providerKernel) {
+      providerKernel = createProviderKernel({
+        adapters: getAdapters(),
         getConfig: typeof options.getConfig === "function" ? options.getConfig : () => loadConfig() || {},
         config: options.config,
         env: options.env || process.env,
@@ -335,6 +344,9 @@ export function createHarnessAgentService(options = {}) {
         toolSources: options.toolSources,
         includeBuiltinBosunTools: options.includeBuiltinBosunTools,
       });
+    }
+    return providerKernel;
+  };
 
   const interactiveSessions = new Map();
   const interactiveAbortControllers = new Map();
@@ -417,7 +429,7 @@ export function createHarnessAgentService(options = {}) {
       return next;
     }
 
-    const providerSession = providerKernel.createExecutionSession({
+    const providerSession = getProviderKernel().createExecutionSession({
       selectionId,
       provider: selectionId,
       adapterName: selectionId,

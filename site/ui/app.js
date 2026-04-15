@@ -523,6 +523,7 @@ const WorkflowsTab = lazyTab("./tabs/workflows.js", "WorkflowsTab", () => import
 const LibraryTab = lazyTab("./tabs/library.js", "LibraryTab", () => import("./tabs/library.js"));
 const LibraryMarketplaceTab = lazyTab("./tabs/library.js", "LibraryMarketplaceTab", () => import("./tabs/library.js"));
 const ManualFlowsTab = lazyTab("./tabs/manual-flows.js", "ManualFlowsTab", () => import("./tabs/manual-flows.js"));
+const ContextCompressionLabTab = lazyTab("./tabs/context-compression-lab.js", "ContextCompressionLabTab", () => import("./tabs/context-compression-lab.js"));
 
 /* ── Shared components ── */
 
@@ -810,11 +811,17 @@ const TAB_COMPONENTS = {
   telemetry: TelemetryTab,
   workflows: WorkflowsTab,
   "manual-flows": ManualFlowsTab,
+  "context-compression-lab": ContextCompressionLabTab,
   library: LibraryTab,
   marketplace: LibraryMarketplaceTab,
   settings: SettingsTab,
   integrations: IntegrationsTab,
 };
+
+const HIDDEN_TAB_CONFIG = {
+  "context-compression-lab": { id: "context-compression-lab", label: "Compression Lab" },
+};
+
 function getMaxFreshnessMs(rawFreshness) {
   if (typeof rawFreshness === "number") {
     return Number.isFinite(rawFreshness) ? rawFreshness : null;
@@ -881,7 +888,11 @@ function Header() {
   const latency = wsLatency.value;
   const reconnect = wsReconnectIn.value;
   const freshness = getMaxFreshnessMs(dataFreshness.value);
-  const activeConfig = TAB_CONFIG.find((tab) => tab.id === activeTab.value) || TAB_CONFIG[0] || { id: "dashboard", label: "Dashboard" };
+  const activeConfig =
+    TAB_CONFIG.find((tab) => tab.id === activeTab.value)
+    || HIDDEN_TAB_CONFIG[activeTab.value]
+    || TAB_CONFIG[0]
+    || { id: "dashboard", label: "Dashboard" };
   const sessionId = selectedSessionId.value;
   const activeSession = (sessionsData.value || []).find((session) => session?.id === sessionId);
   const breadcrumbParts = [activeConfig.label];
@@ -1236,7 +1247,11 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
   const [logState, setLogState] = useState("idle");
   const [insights, setInsights] = useState(null);
   const [insightState, setInsightState] = useState("idle");
-  const workspaceHint = resolveSessionWorkspaceHint(session, "active");
+  const sessionWorkspaceFallback =
+    activeTab.value === "chat"
+      ? "active"
+      : "all";
+  const workspaceHint = resolveSessionWorkspaceHint(session, sessionWorkspaceFallback);
   const lastActiveLabel = lastActive ? formatRelative(lastActive) : "—";
   const apiStatusLabel = inferUiConnected() ? "Connected" : "Offline";
   const wsStatusLabel = wsConnected.value ? "Live" : "Closed";

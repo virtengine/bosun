@@ -42,6 +42,24 @@ function buildDiffApiPath({
   return buildSessionApiPath(sessionId, "diff", params) || "";
 }
 
+function buildDiffRequest({ diffPath = "", taskSnapshot = null, taskId = "" } = {}) {
+  if (!diffPath) return null;
+  if (taskId && taskSnapshot && typeof taskSnapshot === "object") {
+    return {
+      path: diffPath,
+      options: {
+        method: "POST",
+        body: JSON.stringify({ task: taskSnapshot }),
+        _silent: true,
+      },
+    };
+  }
+  return {
+    path: diffPath,
+    options: { _silent: true },
+  };
+}
+
 const EXT_ICONS = {
   js: "terminal", mjs: "terminal", cjs: "terminal",
   ts: "terminal", tsx: "terminal",
@@ -358,6 +376,7 @@ export function DiffViewer({
   workspace = "active",
   activitySummary = null,
   title = "",
+  taskSnapshot = null,
   turnId = "",
   turnIndex = null,
   embedded = false,
@@ -373,9 +392,13 @@ export function DiffViewer({
     () => buildDiffApiPath({ sessionId, taskId, workspace, turnId, turnIndex }),
     [sessionId, taskId, workspace, turnId, turnIndex],
   );
+  const diffRequest = useMemo(
+    () => buildDiffRequest({ diffPath, taskSnapshot, taskId }),
+    [diffPath, taskSnapshot, taskId],
+  );
 
   const loadDiff = useCallback(() => {
-    if (!diffPath) {
+    if (!diffRequest?.path) {
       setDiffData(null);
       setSourceMeta(null);
       setLoading(false);
@@ -384,7 +407,7 @@ export function DiffViewer({
     }
     setLoading(true);
     setError(null);
-    return apiFetch(diffPath, { _silent: true })
+    return apiFetch(diffRequest.path, diffRequest.options)
       .then((res) => {
         setDiffData(res?.diff || null);
         setSourceMeta(res?.source || null);
@@ -395,11 +418,11 @@ export function DiffViewer({
       .finally(() => {
         setLoading(false);
       });
-  }, [diffPath]);
+  }, [diffRequest]);
 
   useEffect(() => {
     let active = true;
-    if (!diffPath) {
+    if (!diffRequest?.path) {
       setDiffData(null);
       setSourceMeta(null);
       setLoading(false);
@@ -410,7 +433,7 @@ export function DiffViewer({
     }
     setLoading(true);
     setError(null);
-    apiFetch(diffPath, { _silent: true })
+    apiFetch(diffRequest.path, diffRequest.options)
       .then((res) => {
         if (!active) return;
         setDiffData(res?.diff || null);
@@ -425,7 +448,7 @@ export function DiffViewer({
     return () => {
       active = false;
     };
-  }, [diffPath]);
+  }, [diffRequest]);
 
   if (!sessionId && !taskId) {
     return html`

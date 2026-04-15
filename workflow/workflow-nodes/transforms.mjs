@@ -76,6 +76,14 @@ import {
   trimLogText,
 } from "./definitions.mjs";
 
+let _mcpAdapter = null;
+async function getMcpAdapter() {
+  if (!_mcpAdapter) {
+    _mcpAdapter = await import("../mcp-workflow-adapter.mjs");
+  }
+  return _mcpAdapter;
+}
+
 registerNodeType("transform.json_parse", {
   describe: () => "Parse JSON from a previous node's output",
   schema: {

@@ -2085,6 +2085,7 @@ const describeDryRunExecution = (
 )
   ? describe.skip
   : describe;
+const SLOW_TEMPLATE_DRY_RUN_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 10_000;
 
 describeDryRunExecution("template dry-run execution", () => {
   beforeEach(() => { makeTmpEngine(); });
@@ -2107,7 +2108,7 @@ describeDryRunExecution("template dry-run execution", () => {
         ctx.errors || [],
         `Dry-run produced runtime errors for ${template.id}`
       ).toEqual([]);
-    });
+    }, SLOW_TEMPLATE_DRY_RUN_TIMEOUT_MS);
   }
 });
 

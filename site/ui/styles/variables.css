@@ -64,8 +64,14 @@
     --tg-safe-area-inset-right,
     env(safe-area-inset-right, 0px)
   );
-  --content-safe-top: var(--tg-content-safe-area-inset-top, 0px);
-  --content-safe-bottom: var(--tg-content-safe-area-inset-bottom, 0px);
+  --content-safe-top: var(
+    --tg-content-safe-area-inset-top,
+    var(--safe-top)
+  );
+  --content-safe-bottom: var(
+    --tg-content-safe-area-inset-bottom,
+    var(--safe-bottom)
+  );
 
   /* Viewport from Telegram */
   --viewport-height: var(--tg-viewport-height, 100vh);

@@ -1838,7 +1838,7 @@ export function AgentsTab() {
     const sessions = sessionsData.value || [];
     if (current || sessions.length === 0) return;
     const activeSession =
-      sessions.find((s) => s.status === "active" || s.status === "running") ||
+      sessions.find((s) => isActiveSessionRecord(s)) ||
       sessions[0];
     if (activeSession?.id) {
       selectedSessionId.value = activeSession.id;
@@ -1848,7 +1848,7 @@ export function AgentsTab() {
   useEffect(() => {
     let active = true;
     const refreshTaskSessions = async () => {
-      if (!active) return;
+      if (!active || document.hidden) return;
       const sessions = await loadSessions({ type: "task", workspace: "all" });
       if (!active) return;
       if (Array.isArray(sessions)) {
@@ -1856,7 +1856,7 @@ export function AgentsTab() {
       }
     };
     void refreshTaskSessions();
-    const interval = setInterval(refreshTaskSessions, 5000);
+    const interval = setInterval(refreshTaskSessions, 15000);
     return () => {
       active = false;
       clearInterval(interval);
@@ -1900,6 +1900,7 @@ export function AgentsTab() {
   useEffect(() => {
     let cancelled = false;
     const loadAgentMonitor = async () => {
+      if (cancelled || document.hidden) return;
       try {
         const [statusPayload, livenessPayload, errorPayload, recentEventsPayload] = await Promise.all([
           apiFetch("/api/agents/events/status"),
@@ -1919,7 +1920,7 @@ export function AgentsTab() {
     void loadAgentMonitor();
     const interval = setInterval(() => {
       void loadAgentMonitor();
-    }, 5000);
+    }, 15000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -3371,7 +3372,7 @@ function FleetSessionsPanel({ slots, sessions = [], taskFallbackEntries = [], on
                               }}
                             >
                               <span class="fleet-session-id-pill-text mono">${sessionId.slice(0, 8)}</span>
-                              <span class="fleet-session-id-pill-icon" aria-hidden="true">${copiedSessionId === sessionId ? "✓" : ICONS.copy}</span>
+                              <span class="fleet-session-id-pill-icon fleet-icon-clamp" aria-hidden="true">${copiedSessionId === sessionId ? "✓" : ICONS.copy}</span>
                             </button>`
                           : null}
                         ${entry.slot?.branch
@@ -3535,7 +3536,7 @@ export function FleetSessionsTab() {
   useEffect(() => {
     let active = true;
     const refreshTaskSessions = async () => {
-      if (!active) return;
+      if (!active || document.hidden) return;
       const sessions = await loadSessions({ type: "task", workspace: "all" });
       if (!active) return;
       if (Array.isArray(sessions)) {
@@ -3543,7 +3544,7 @@ export function FleetSessionsTab() {
       }
     };
     void refreshTaskSessions();
-    const interval = setInterval(refreshTaskSessions, 5000);
+    const interval = setInterval(refreshTaskSessions, 15000);
     return () => {
       active = false;
       clearInterval(interval);
@@ -3553,7 +3554,7 @@ export function FleetSessionsTab() {
   useEffect(() => {
     let active = true;
     const loadFallbackTasks = () => {
-      if (!active) return;
+      if (!active || document.hidden) return;
       apiFetch("/api/tasks?limit=1000", { _silent: true })
         .then((res) => {
           if (!active) return;
@@ -3569,7 +3570,7 @@ export function FleetSessionsTab() {
         });
     };
     loadFallbackTasks();
-    const interval = setInterval(loadFallbackTasks, 5000);
+    const interval = setInterval(loadFallbackTasks, 20000);
     return () => {
       active = false;
       clearInterval(interval);

@@ -121,18 +121,6 @@ function scheduleGetRequest(task, signal) {
   });
 }
 
-function resolveApiErrorMessage(status, text, payload) {
-  if (payload && typeof payload === "object") {
-    const message = String(
-      payload.message || payload.detail || payload.reason || payload.error || "",
-    ).trim();
-    if (message) return message;
-  }
-  const normalizedText = String(text || "").trim();
-  if (normalizedText && !normalizedText.startsWith("{")) return normalizedText;
-  return normalizedText || `Request failed (${status})`;
-}
-
 /* ─── REST API Client ─── */
 
 /**
@@ -171,6 +159,20 @@ async function readApiErrorBody(response) {
   } catch {
     return { text, payload: null };
   }
+}
+
+function resolveApiErrorMessage(status, text, payload) {
+  if (payload && typeof payload === "object") {
+    const message = String(
+      payload.message || payload.detail || payload.reason || payload.error || "",
+    ).trim();
+    if (message) return message;
+  }
+  const normalizedText = String(text || "").trim();
+  if (normalizedText && !normalizedText.startsWith("{")) return normalizedText;
+  if (status === 401) return "Unauthorized.";
+  if (status === 403) return "Forbidden.";
+  return normalizedText || `Request failed (${status})`;
 }
 
 function createApiError(status, body = {}) {

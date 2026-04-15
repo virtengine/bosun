@@ -125,6 +125,15 @@ function _cacheClearGroup(group) {
   }
 }
 
+function getRetainedLoaderFallback(url, currentValue, applyCachedValue = null) {
+  const cached = _cacheGet(url);
+  const fallback = cached?.data ?? currentValue ?? null;
+  if (cached && typeof applyCachedValue === "function") {
+    applyCachedValue(cached.data);
+  }
+  return { cached, fallback };
+}
+
 /** Tracks last-fetch timestamps per data group for "Updated Xs ago" UI. */
 export const dataFreshness = signal({});
 function _markFresh(group) {
@@ -277,7 +286,12 @@ function normalizeRetryQueuePayload(payload) {
 export async function loadRetryQueue() {
   const url = "/api/retry-queue";
   if (_cacheFresh(url, "retry-queue")) return;
-  const res = await apiFetch(url, { _silent: true }).catch(() => ({ ok: false, items: [], count: 0, stats: null }));
+  const fallback = retryQueueData.value ?? { ok: false, items: [], count: 0, stats: null };
+  const cached = _cacheGet(url);
+  if (cached?.data) {
+    retryQueueData.value = cached.data;
+  }
+  const res = await apiFetch(url, { _silent: true }).catch(() => (cached?.data ?? fallback));
   retryQueueData.value = normalizeRetryQueuePayload(res);
   _cacheSet(url, retryQueueData.value);
   _markFresh("retry-queue");
@@ -605,11 +619,12 @@ export async function loadStatus() {
   const url = "/api/status";
   const cached = _cacheGet(url);
   if (_cacheFresh(url, "status")) return;
+  const fallback = cached?.data ?? statusData.value ?? null;
   if (cached) { statusData.value = cached.data; connected.value = true; }
   const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    data: null,
+    data: fallback,
   }));
-  statusData.value = res.data ?? res ?? null;
+  statusData.value = res.data ?? fallback;
   const embeddedServerState = res?.serverState ?? statusData.value?.serverState ?? null;
   if (embeddedServerState) {
     serverStateData.value = embeddedServerState;
@@ -645,16 +660,14 @@ export async function loadExecutor() {
   if (_cacheFresh(url, "executor")) return;
   const fallback = cached?.data ?? executorData.value ?? null;
   if (cached) executorData.value = cached.data;
-  const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    data: fallback,
-  }));
+  const res = await apiFetch(url, { _silent: true }).catch(() => fallback);
   executorData.value = res ?? fallback;
   _cacheSet(url, executorData.value);
   _markFresh("executor");
 }
 
 /** Large page size for kanban mode to load all tasks in one request */
-export const KANBAN_PAGE_SIZE = 200;
+export const KANBAN_PAGE_SIZE = 500;
 
 /** Load tasks with current filter/page/sort → tasksData + tasksTotalPages */
 export async function loadTasks(options = {}) {
@@ -676,6 +689,17 @@ export async function loadTasks(options = {}) {
     params.set("priority", tasksPriority.value);
   if (tasksSearch.value) params.set("search", tasksSearch.value);
   if (tasksSort.value) params.set("sort", tasksSort.value);
+  if (options?.fullRuntime === true) {
+    params.set("includeStartGuards", "1");
+    params.set("includeBlockedDiagnostics", "1");
+    params.set("includeWorkflowRuns", "1");
+    params.set("includeSupervisorDiagnostics", "1");
+  } else {
+    params.set("includeStartGuards", "0");
+    params.set("includeBlockedDiagnostics", "0");
+    params.set("includeWorkflowRuns", "0");
+    params.set("includeSupervisorDiagnostics", "0");
+  }
 
   const res = await apiFetch(`/api/tasks?${params}`, { _silent: true }).catch(
     (err) => {
@@ -748,13 +772,14 @@ export function updateTaskManualState(taskId, isManual, reason = "") {
 /** Load active agents → agentsData */
 export async function loadAgents() {
   const url = "/api/agents";
-  const cached = _cacheGet(url);
   if (_cacheFresh(url, "agents")) return;
-  if (cached) agentsData.value = cached.data;
+  const { fallback } = getRetainedLoaderFallback(url, agentsData.value, (cachedData) => {
+    agentsData.value = cachedData;
+  });
   const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    data: [],
+    data: fallback ?? [],
   }));
-  agentsData.value = res.data || [];
+  agentsData.value = res.data ?? fallback ?? [];
   _cacheSet(url, agentsData.value);
   _markFresh("agents");
 }
@@ -762,16 +787,25 @@ export async function loadAgents() {
 /** Load worktrees → worktreeData */
 export async function loadWorktrees() {
   const url = "/api/worktrees";
-  const cached = _cacheGet(url);
   if (_cacheFresh(url, "worktrees")) return;
-  if (cached) worktreeData.value = cached.data;
+  const { fallback } = getRetainedLoaderFallback(url, worktreeData.value, (cachedData) => {
+    worktreeData.value = cachedData;
+  });
+  const fallbackRows = Array.isArray(fallback)
+    ? fallback
+    : Array.isArray(fallback?.data)
+      ? fallback.data
+      : [];
+  const fallbackStats = !Array.isArray(fallback) && fallback && typeof fallback === "object"
+    ? fallback.stats ?? null
+    : null;
   const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    data: [],
-    stats: null,
+    data: fallbackRows,
+    stats: fallbackStats,
   }));
   const payload = res?.stats
     ? { data: res.data || [], stats: res.stats }
-    : res.data || [];
+    : res.data ?? fallbackRows;
   worktreeData.value = payload;
   _cacheSet(url, payload);
   _markFresh("worktrees");
@@ -782,11 +816,12 @@ export async function loadInfra() {
   const url = "/api/infra";
   const cached = _cacheGet(url);
   if (_cacheFresh(url, "infra")) return;
+  const fallback = cached?.data ?? infraData.value ?? null;
   if (cached) infraData.value = cached.data;
   const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    data: null,
+    data: fallback,
   }));
-  infraData.value = res.data ?? res ?? null;
+  infraData.value = res.data ?? fallback;
   const embeddedServerState = res?.serverState ?? infraData.value?.serverState ?? null;
   if (embeddedServerState) {
     serverStateData.value = embeddedServerState;
@@ -801,20 +836,25 @@ export async function loadInfra() {
 export async function loadLogs(options = {}) {
   const url = `/api/logs?lines=${logsLines.value}`;
   const force = Boolean(options?.force);
+  const cached = _cacheGet(url);
   if (!force && _cacheFresh(url, "logs")) return;
-  const res = await apiFetch(url, { _silent: true }).catch(() => ({ data: null }));
-  logsData.value = res.data ?? res ?? null;
+  const fallback = cached?.data ?? logsData.value ?? null;
+  if (cached && !force) logsData.value = cached.data;
+  const res = await apiFetch(url, { _silent: true }).catch(() => ({ data: fallback }));
+  logsData.value = res.data ?? fallback;
   _cacheSet(url, logsData.value);
   _markFresh("logs");
 }
 
 /** Load git branches + diff → gitBranches, gitDiff */
 export async function loadGit() {
+  const branchFallback = Array.isArray(gitBranches.value) ? gitBranches.value : [];
+  const diffFallback = typeof gitDiff.value === "string" ? gitDiff.value : "";
   const [branches, diff] = await Promise.all([
     apiFetch("/api/git/branches", { _silent: true }).catch(() => ({
-      data: [],
+      data: branchFallback,
     })),
-    apiFetch("/api/git/diff", { _silent: true }).catch(() => ({ data: "" })),
+    apiFetch("/api/git/diff", { _silent: true }).catch(() => ({ data: diffFallback })),
   ]);
   const branchRows = Array.isArray(branches?.data)
     ? branches.data
@@ -824,7 +864,7 @@ export async function loadGit() {
         ? branches.branches
         : [];
   gitBranches.value = branchRows;
-  gitDiff.value = typeof diff?.data === "string" ? diff.data : (typeof diff === "string" ? diff : "");
+  gitDiff.value = typeof diff?.data === "string" ? diff.data : (typeof diff === "string" ? diff : diffFallback);
 }
 
 /** Load agent log file list → agentLogFiles */
@@ -846,8 +886,9 @@ export async function loadAgentLogFileList(options = {}) {
   const path = params.toString()
     ? `/api/agent-logs?${params}`
     : "/api/agent-logs";
+  const fallback = Array.isArray(agentLogFiles.value) ? agentLogFiles.value : [];
   const res = await apiFetch(path, { _silent: true }).catch(() => ({
-    data: [],
+    data: fallback,
     pagination: {
       total: 0,
       offset,
@@ -857,7 +898,7 @@ export async function loadAgentLogFileList(options = {}) {
       nextOffset: 0,
     },
   }));
-  agentLogFiles.value = res.data || [];
+  agentLogFiles.value = res.data ?? fallback;
   const pagination = res?.pagination || {
     total: agentLogFiles.value.length,
     offset,
@@ -885,8 +926,9 @@ export async function loadAgentLogTailData(options = {}) {
   const query = String(agentLogQuery.value || "").trim();
   if (query) params.set("query", query);
   const url = `/api/agent-logs/tail?${params}`;
+  const cached = _cacheGet(url);
+  const fallback = cached?.data ?? agentLogTail.value ?? null;
   if (!options?.force && _cacheFresh(url, "logs")) {
-    const cached = _cacheGet(url);
     if (cached) {
       agentLogTail.value = cached.data;
       return;
@@ -894,8 +936,8 @@ export async function loadAgentLogTailData(options = {}) {
   }
   const res = await apiFetch(url, {
     _silent: true,
-  }).catch(() => ({ data: null }));
-  agentLogTail.value = res.data ?? res ?? null;
+  }).catch(() => ({ data: fallback }));
+  agentLogTail.value = res.data ?? res ?? fallback;
   _cacheSet(url, agentLogTail.value);
   _markFresh("logs");
 }
@@ -920,12 +962,15 @@ export async function loadAgentContextData(query) {
 export async function loadSharedWorkspaces() {
   const url = "/api/shared-workspaces";
   if (_cacheFresh(url, "workspaces")) return;
+  const { fallback } = getRetainedLoaderFallback(url, sharedWorkspaces.value, (cachedData) => {
+    sharedWorkspaces.value = cachedData;
+  });
   const res = await apiFetch(url, { _silent: true }).catch(
     () => ({
-      data: [],
+      data: Array.isArray(fallback) ? fallback : [],
     }),
   );
-  sharedWorkspaces.value = res.data || res.workspaces || [];
+  sharedWorkspaces.value = res.data ?? res.workspaces ?? fallback ?? [];
   _cacheSet(url, sharedWorkspaces.value);
   _markFresh("workspaces");
 }
@@ -934,12 +979,21 @@ export async function loadSharedWorkspaces() {
 export async function loadPresence() {
   const url = "/api/presence";
   if (_cacheFresh(url, "presence")) return;
+  const fallback = {
+    instances: Array.isArray(presenceInstances.value) ? presenceInstances.value : [],
+    coordinator: coordinatorInfo.value ?? null,
+  };
+  const cached = _cacheGet(url);
+  if (cached?.data && typeof cached.data === "object") {
+    presenceInstances.value = Array.isArray(cached.data.instances) ? cached.data.instances : fallback.instances;
+    coordinatorInfo.value = cached.data.coordinator ?? fallback.coordinator;
+  }
   const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    data: null,
+    data: cached?.data ?? fallback,
   }));
-  const data = res.data || res || {};
-  presenceInstances.value = data.instances || [];
-  coordinatorInfo.value = data.coordinator || null;
+  const data = res.data ?? res ?? fallback;
+  presenceInstances.value = data.instances || fallback.instances;
+  coordinatorInfo.value = data.coordinator ?? fallback.coordinator;
   _cacheSet(url, data);
   _markFresh("presence");
 }
@@ -947,13 +1001,16 @@ export async function loadPresence() {
 /** Load project summary → projectSummary */
 export async function loadProjectSummary() {
   const url = "/api/project-summary";
+  const cached = _cacheGet(url);
   if (_cacheFresh(url, "projects")) return;
+  const fallback = cached?.data ?? projectSummary.value ?? null;
+  if (cached) projectSummary.value = cached.data;
   const res = await apiFetch(url, { _silent: true }).catch(
     () => ({
-      data: null,
+      data: fallback,
     }),
   );
-  projectSummary.value = res.data ?? res ?? null;
+  projectSummary.value = res.data ?? fallback;
   _cacheSet(url, projectSummary.value);
   _markFresh("projects");
 }
@@ -961,11 +1018,12 @@ export async function loadProjectSummary() {
 /** Load config (routing, regions, etc.) → configData */
 export async function loadConfig() {
   const url = "/api/config";
+  const cached = _cacheGet(url);
   if (_cacheFresh(url, "config")) return;
-  const res = await apiFetch(url, { _silent: true }).catch(() => ({
-    ok: false,
-  }));
-  configData.value = res?.ok ? res : null;
+  const fallback = cached?.data ?? configData.value ?? null;
+  if (cached?.data) configData.value = cached.data;
+  const res = await apiFetch(url, { _silent: true }).catch(() => null);
+  configData.value = res?.ok ? res : fallback;
   _cacheSet(url, configData.value);
   _markFresh("config");
 }

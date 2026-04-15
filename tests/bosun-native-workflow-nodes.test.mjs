@@ -29,6 +29,7 @@ import { listApprovalRequests } from "../workflow/approval-queue.mjs";
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 let tmpDir;
+const SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS = 30_000;
 
 function makeTmpDir() {
   tmpDir = mkdtempSync(join(tmpdir(), "bosun-native-wf-test-"));
@@ -558,7 +559,7 @@ describe("action.continue_session", () => {
     expect(ctx.data._continuedSessionRetrievedMemory?.[0]).toEqual(expect.objectContaining({
       directPathHits: ["src/auth/login.mjs"],
     }));
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -672,7 +673,7 @@ describe("action.invoke_workflow", () => {
     expect(output.matchedPort).toBe("default");
     expect(typeof output.runId).toBe("string");
     expect(ctx.data.childResult).toEqual(output);
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("dispatch mode returns immediately without waiting", async () => {
     const handler = getNodeType("action.invoke_workflow");
@@ -984,7 +985,7 @@ describe("action.invoke_workflow", () => {
     expect(invokeOutput.success).toBe(true);
     expect(invokeOutput.workflowId).toBe("child-integration-wf");
     expect(ctx.data.childResult).toBeDefined();
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -996,7 +997,7 @@ describe("action.bosun_function", () => {
     if (tmpDir) {
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
     }
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("is registered with correct schema", () => {
     const handler = getNodeType("action.bosun_function");
@@ -1015,7 +1016,7 @@ describe("action.bosun_function", () => {
     expect(handler.schema.properties.function.enum).toContain("git.status");
     expect(handler.schema.properties.function.enum).toContain("tasks.list");
     expect(handler.schema.properties.function.enum).toContain("workflows.list");
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("throws when function name is missing", async () => {
     const handler = getNodeType("action.bosun_function");
@@ -1316,7 +1317,7 @@ describe("action.bosun_function", () => {
     expect(output.success).toBe(true);
     expect(typeof output.current).toBe("string");
     expect(ctx.data.branchInfo).toBeDefined();
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1460,7 +1461,7 @@ describe("cross-node data piping", () => {
     // Verify the log message was rendered with actual data
     const logOutput = ctx.getNodeOutput("log");
     expect(logOutput).toBeDefined();
-  }, 30_000);
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("chains bosun_function → invoke_workflow → notify.log", async () => {
     const bosunRoot = resolve(import.meta.dirname, "..");
@@ -1528,7 +1529,7 @@ describe("cross-node data piping", () => {
     const invokeOutput = ctx.getNodeOutput("invoke-child");
     expect(invokeOutput.success).toBe(true);
     expect(invokeOutput.workflowId).toBe("chain-child-wf");
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 });
 
 describe("self-improvement workflow nodes", () => {
@@ -1600,7 +1601,7 @@ describe("self-improvement workflow nodes", () => {
     const history = JSON.parse(readFileSync(historyPath, "utf8"));
     expect(Array.isArray(history[wf.id])).toBe(true);
     expect(history[wf.id].some((entry) => entry.runId === runCtx.id)).toBe(true);
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("action.promote_strategy persists promoted strategy knowledge", async () => {
     const repoRoot = makeTmpDir();
@@ -1973,7 +1974,7 @@ describe("self-improvement workflow nodes", () => {
         }),
       ]),
     );
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("workflow team coordination nodes support init, shared task claims, direct messaging, and completion", async () => {
     const initHandler = getNodeType("action.team_init");

@@ -20942,7 +20942,7 @@
           "type": "condition.expression",
           "label": "High Churn?",
           "config": {
-            "expression": "{{hot-files.maxChurn}} > {{churnThreshold}}"
+            "expression": "Number($ctx.getNodeOutput('hot-files')?.maxChurn || 0) > Number($data?.churnThreshold || 0)"
           },
           "position": {
             "x": 1500,
@@ -45454,7 +45454,7 @@
           "type": "condition.expression",
           "label": "High Churn?",
           "config": {
-            "expression": "{{hot-files.maxChurn}} > {{churnThreshold}}"
+            "expression": "Number($ctx.getNodeOutput('hot-files')?.maxChurn || 0) > Number($data?.churnThreshold || 0)"
           },
           "position": {
             "x": 1500,

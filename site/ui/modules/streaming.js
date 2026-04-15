@@ -19,6 +19,13 @@
 import { signal, computed } from "@preact/signals";
 import { wsConnected, onWsMessage, wsSend } from "./api.js";
 import { apiFetch } from "./api.js";
+import {
+  buildCanonicalSessionApiPath,
+  getSessionRuntimeState,
+  normalizeSessionEventPayload,
+  normalizeSessionsUpdatePayload,
+  resolveSessionWorkspaceHint,
+} from "./session-api.js";
 
 /* ── Helpers ────────────────────────────────────────────── */
 
@@ -487,11 +494,16 @@ export async function loadHistoryChunked(sessionId, opts = {}) {
   const allMessages = [];
   let offset = 0;
   let hasMore = true;
+  const workspace = resolveSessionWorkspaceHint(opts?.session, opts?.workspace || "active");
 
   try {
     while (hasMore) {
+      const path = buildCanonicalSessionApiPath(sessionId, "", {
+        workspace,
+        query: { offset, limit: chunkSize },
+      });
       const res = await apiFetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}?offset=${offset}&limit=${chunkSize}`,
+        path,
         { _silent: true },
       );
       const messages = res?.session?.messages || res?.messages || [];
@@ -539,6 +551,13 @@ export const agentStatusText = computed(() => {
 let _idleTimer = null;
 const IDLE_TIMEOUT = 120000;
 
+function _clearIdleTimer() {
+  if (_idleTimer) {
+    clearTimeout(_idleTimer);
+    _idleTimer = null;
+  }
+}
+
 /**
  * Internal: transition agent state and reset idle timer.
  * Only updates the signal when the logical state actually changes
@@ -572,7 +591,7 @@ function _setAgentState(state, adapter, sessionId) {
 
   // Always reset idle timer — even if we didn't update the signal,
   // we want to push back the "return to idle" deadline.
-  if (_idleTimer) clearTimeout(_idleTimer);
+  _clearIdleTimer();
   if (state !== "idle") {
     _idleTimer = setTimeout(() => {
       if (agentStatus.value.state !== "idle") {
@@ -586,6 +605,166 @@ function _setAgentState(state, adapter, sessionId) {
       }
     }, IDLE_TIMEOUT);
   }
+}
+
+function _isCompletionReason(reason) {
+  const normalized = String(reason || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("agent-response")
+    || normalized.includes("agent-error")
+    || normalized.includes("agent-stopped")
+    || normalized.includes("session-turn-finished")
+    || normalized.includes("session-completed")
+    || normalized.includes("session-ended")
+    || normalized.includes("session-archived")
+    || normalized.includes("session-deleted")
+    || normalized.includes("session-paused")
+    || normalized.includes("session-resumed")
+    || normalized.includes("completed")
+    || normalized.includes("finished")
+    || normalized.includes("archived")
+    || normalized.includes("deleted")
+    || normalized.includes("failed")
+    || normalized.includes("error")
+    || normalized.includes("stopped")
+    || normalized.includes("ended")
+  );
+}
+
+function _handleSessionMessageRecord({ sessionId = "", session = {}, message = null } = {}) {
+  if (!message || typeof message !== "object") return false;
+
+  const role = String(message.role || "").toLowerCase();
+  const type = String(message.type || "").toLowerCase();
+  const content = String(message.content || "").toLowerCase();
+  const lifecycle = String(message?.meta?.lifecycle || "").toLowerCase();
+  const adapter = String(session?.type || "").trim();
+  const resolvedSessionId = String(session?.id || sessionId || "").trim();
+  const sessionStatus = String(
+    session?.status || session?.lifecycleStatus || session?.runtimeState || "active",
+  ).trim().toLowerCase() || "active";
+
+  if (sessionStatus !== "active") {
+    if (!resolvedSessionId || agentStatus.value.sessionId === resolvedSessionId) {
+      clearAgentStatus(resolvedSessionId);
+    }
+    return true;
+  }
+
+  const isCompletionEvent =
+    type === "turn.completed" ||
+    type === "session.completed" ||
+    lifecycle === "turn_completed" ||
+    lifecycle === "session_completed" ||
+    content.includes("turn completed") ||
+    content.includes("session completed") ||
+    content.includes("evt[turn.completed]") ||
+    content.includes("evt[session.completed]") ||
+    content.includes("session.idle");
+
+  if (isCompletionEvent) {
+    clearAgentStatus(resolvedSessionId);
+    return true;
+  }
+
+  if (role === "assistant" || type === "agent_message") {
+    _setAgentState("streaming", adapter, resolvedSessionId);
+  } else if (type === "tool_call") {
+    _setAgentState("executing", adapter, resolvedSessionId);
+  } else if (type === "tool_result") {
+    _setAgentState("streaming", adapter, resolvedSessionId);
+  } else if (type === "system") {
+    if (
+      content.includes("running:") ||
+      content.includes("command done:") ||
+      content.includes("command_execution")
+    ) {
+      _setAgentState("executing", adapter, resolvedSessionId);
+    } else {
+      _setAgentState("thinking", adapter, resolvedSessionId);
+    }
+  } else if (type === "error" || type === "stream_error") {
+    clearAgentStatus(resolvedSessionId);
+  } else {
+    return false;
+  }
+
+  return true;
+}
+
+function _handleCanonicalSessionEvent(payload) {
+  const normalized = normalizeSessionEventPayload(payload);
+  const session = normalized.session || {};
+  const event = normalized.event || {};
+  const sessionId = String(normalized.sessionId || normalized.taskId || "").trim();
+
+  if (event.kind === "state") {
+    const reason = String(event.reason || "").trim().toLowerCase();
+    const sessionStatus = String(
+      session?.status || session?.lifecycleStatus || session?.runtimeState || "",
+    ).trim().toLowerCase();
+    if (_isCompletionReason(reason) || (sessionStatus && sessionStatus !== "active")) {
+      clearAgentStatus(sessionId);
+    }
+    return true;
+  }
+
+  if (event.kind === "message" && event.message && typeof event.message === "object") {
+    return _handleSessionMessageRecord({
+      sessionId,
+      session: session && typeof session === "object"
+        ? { ...session, id: session.id || sessionId }
+        : { id: sessionId },
+      message: event.message,
+    });
+  }
+
+  return false;
+}
+
+function _handleSessionSnapshot(payload) {
+  const currentSessionId = String(agentStatus.value.sessionId || "").trim();
+  if (!currentSessionId) return false;
+
+  const sessions = normalizeSessionsUpdatePayload(payload);
+  const currentSession = sessions.find((session) => {
+    const sessionId = String(session?.id || session?.sessionId || "").trim();
+    const taskId = String(session?.taskId || "").trim();
+    return sessionId === currentSessionId || taskId === currentSessionId;
+  });
+  if (!currentSession) return false;
+
+  const lifecycle = String(
+    currentSession?.lifecycleStatus || currentSession?.status || "",
+  ).trim().toLowerCase();
+  const runtime = getSessionRuntimeState(currentSession);
+  if (lifecycle && lifecycle !== "active") {
+    clearAgentStatus(currentSessionId);
+    return true;
+  }
+  if (runtime.key === "stopped" || runtime.key === "failed" || runtime.key === "error") {
+    clearAgentStatus(currentSessionId);
+    return true;
+  }
+  return false;
+}
+
+export function clearAgentStatus(sessionId = "") {
+  const current = agentStatus.value || {};
+  const targetSessionId = String(sessionId || "").trim();
+  const currentSessionId = String(current.sessionId || "").trim();
+  if (targetSessionId && currentSessionId && currentSessionId !== targetSessionId) {
+    return;
+  }
+  _clearIdleTimer();
+  agentStatus.value = {
+    state: "idle",
+    adapter: "",
+    sessionId: "",
+    startedAt: 0,
+    lastEventAt: Date.now(),
+  };
 }
 
 /**
@@ -604,76 +783,33 @@ export function markUserMessageSent(adapter, sessionId) {
  */
 export function startAgentStatusTracking() {
   return onWsMessage((msg) => {
+    if (msg.type === "session:event") {
+      if (_handleCanonicalSessionEvent(msg.payload)) return;
+    }
+
+    if (msg.type === "sessions:update") {
+      if (_handleSessionSnapshot(msg.payload)) return;
+    }
+
     if (msg.type === "invalidate") {
       const payload = msg.payload || {};
       const reason = String(payload.reason || "").toLowerCase();
       const sessionId = String(payload.sessionId || payload.taskId || "");
-      const isCompletionSignal =
-        reason === "agent-response" ||
-        reason === "agent-error";
+      const isCompletionSignal = _isCompletionReason(reason);
       if (isCompletionSignal) {
         if (!sessionId || agentStatus.value.sessionId === sessionId) {
-          _setAgentState("idle", "", "");
+          clearAgentStatus(sessionId);
         }
       }
       return;
     }
 
     if (msg.type !== "session-message") return;
-    const payload = msg.payload;
-    if (!payload) return;
-
-    const message = payload.message || payload;
-    const role = String(message.role || "").toLowerCase();
-    const type = String(message.type || "").toLowerCase();
-    const content = String(message.content || "").toLowerCase();
-    const lifecycle = String(message?.meta?.lifecycle || "").toLowerCase();
-    const adapter = payload.session?.type || "";
-    const sessionId = payload.session?.id || payload.sessionId || payload.taskId || "";
-    const sessionStatus = payload.session?.status || "active";
-
-    if (sessionStatus !== "active") {
-      if (!sessionId || agentStatus.value.sessionId === sessionId) {
-        _setAgentState("idle", "", "");
-      }
-      return;
-    }
-
-    const isCompletionEvent =
-      type === "turn.completed" ||
-      type === "session.completed" ||
-      lifecycle === "turn_completed" ||
-      lifecycle === "session_completed" ||
-      content.includes("turn completed") ||
-      content.includes("session completed") ||
-      content.includes("evt[turn.completed]") ||
-      content.includes("evt[session.completed]") ||
-      content.includes("session.idle");
-
-    if (isCompletionEvent) {
-      _setAgentState("idle", "", "");
-      return;
-    }
-
-    if (role === "assistant" || type === "agent_message") {
-      _setAgentState("streaming", adapter, sessionId);
-    } else if (type === "tool_call") {
-      _setAgentState("executing", adapter, sessionId);
-    } else if (type === "tool_result") {
-      _setAgentState("streaming", adapter, sessionId);
-    } else if (type === "system") {
-      if (
-        content.includes("running:") ||
-        content.includes("command done:") ||
-        content.includes("command_execution")
-      ) {
-        _setAgentState("executing", adapter, sessionId);
-      } else {
-        _setAgentState("thinking", adapter, sessionId);
-      }
-    } else if (type === "error" || type === "stream_error") {
-      _setAgentState("idle", "", "");
-    }
+    _handleSessionMessageRecord({
+      sessionId: msg?.payload?.session?.id || msg?.payload?.sessionId || msg?.payload?.taskId || "",
+      session: msg?.payload?.session || {},
+      message: msg?.payload?.message || msg?.payload || null,
+    });
   });
 }
 /* ═══ Pattern 8 — Flicker Filter ═══════════════════════════ */

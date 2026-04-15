@@ -24228,7 +24228,9 @@ async function handleApi(req, res, url) {
       const logDir = resolveAgentWorkLogDir();
       const metricsPath = resolve(logDir, "agent-metrics.jsonl");
       const metrics = await readJsonlTail(metricsPath, 100_000, 50_000_000);
-      const summary = summarizeTelemetry(metrics, days) || {};
+      const summary = summarizeTelemetry(metrics, days)
+        || summarizeTelemetry(metrics, Number.POSITIVE_INFINITY)
+        || {};
 
       const runtimeStats = getRuntimeStats();
       const lifetimeTotals = {

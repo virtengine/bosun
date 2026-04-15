@@ -4,13 +4,23 @@
  *  Toggle, Stepper, SliderControl
  * ────────────────────────────────────────────────────────────── */
 
-import { h } from "preact";
+import { h as _h } from "preact";
 import {
   useState,
   useRef,
   useCallback,
 } from "preact/hooks";
 import htm from "htm";
+
+/* Guard: recover forwardRef objects that leak as element type */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function" && typeof type.render === "function") {
+    return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
+
+const html = htm.bind(h);
 
 import {
   ToggleButton,
@@ -30,7 +40,6 @@ import {
   Button,
 } from "@mui/material";
 
-const html = htm.bind(h);
 const PTR_OPT_OUT_SELECTOR = '[data-ptr-ignore="true"], [data-disable-pull-to-refresh="true"]';
 
 import { ICONS } from "../modules/icons.js";

@@ -635,6 +635,68 @@ export function buildSessionApiPath(sessionId, action = "", opts = {}) {
   return qs ? `${path}?${qs}` : path;
 }
 
+export const buildCanonicalSessionApiPath = buildSessionApiPath;
+
+export function buildSessionsApiPath(opts = {}) {
+  const params = new URLSearchParams();
+
+  const workspace = normalizeWorkspaceHint(opts?.workspace);
+  if (workspace) params.set("workspace", workspace);
+
+  if (opts?.includeHidden === true) params.set("includeHidden", "true");
+
+  for (const key of ["type", "status"]) {
+    const value = String(opts?.[key] || "").trim();
+    if (value) params.set(key, value);
+  }
+
+  if (opts?.query && typeof opts.query === "object") {
+    for (const [key, value] of Object.entries(opts.query)) {
+      if (value == null) continue;
+      const stringValue = String(value).trim();
+      if (!stringValue) continue;
+      params.set(key, stringValue);
+    }
+  }
+
+  const qs = params.toString();
+  return qs ? `/api/sessions?${qs}` : "/api/sessions";
+}
+
+export const buildCanonicalSessionsApiPath = buildSessionsApiPath;
+
+export function normalizeSessionsUpdatePayload(payload) {
+  const sessions = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.sessions)
+      ? payload.sessions
+      : [];
+  return sessions.filter((session) => session && typeof session === "object");
+}
+
+export function normalizeSessionEventPayload(payload = {}) {
+  const session =
+    payload?.session && typeof payload.session === "object"
+      ? { ...payload.session }
+      : {};
+  const event =
+    payload?.event && typeof payload.event === "object"
+      ? { ...payload.event }
+      : { kind: "message", ...(payload?.message ? { message: payload.message } : {}) };
+  const sessionId = String(
+    payload?.sessionId || session?.id || payload?.session?.id || payload?.taskId || "",
+  ).trim();
+  const taskId = String(
+    payload?.taskId || session?.taskId || payload?.session?.taskId || sessionId,
+  ).trim();
+  return {
+    sessionId,
+    taskId,
+    session,
+    event,
+  };
+}
+
 
 
 

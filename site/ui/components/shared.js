@@ -4,7 +4,7 @@
  *  MUI Material edition — preserves all export signatures.
  * ────────────────────────────────────────────────────────────── */
 
-import { h } from "preact";
+import { h as _h } from "preact";
 import { createPortal } from "preact/compat";
 import {
   useState,
@@ -13,6 +13,14 @@ import {
   useCallback,
 } from "preact/hooks";
 import htm from "htm";
+
+/* Guard: recover forwardRef objects that leak as element type */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function" && typeof type.render === "function") {
+    return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
 
 const html = htm.bind(h);
 
