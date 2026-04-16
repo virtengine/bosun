@@ -1,9 +1,10 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTimeout } from "./timeout-helper.mjs";
 
 const __RUN_VITEST_ONLY = Boolean(process.env.VITEST);
-const SLOW_AGENT_POOL_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 10_000;
+const SLOW_AGENT_POOL_TEST_TIMEOUT_MS = testTimeout(10_000);
 let mockCodexStartThread;
 let mockCodexResumeThread;
 let mockCodexCtor;

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
 
-vi.setConfig({ testTimeout: 15_000 });
+vi.setConfig({ testTimeout: testTimeout(15_000) });
 
-const SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
+const SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS = testTimeout(15_000);
 
 const mockConfigState = vi.hoisted(() => ({
   current: { primaryAgent: "codex-sdk" },

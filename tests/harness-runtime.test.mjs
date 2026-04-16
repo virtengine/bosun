@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
 
 import { createInternalHarnessSession } from "../agent/internal-harness-runtime.mjs";
 import { createProviderKernel } from "../agent/provider-kernel.mjs";
 import { createBosunSessionManager } from "../agent/session-manager.mjs";
 import { createToolOrchestrator } from "../agent/tool-orchestrator.mjs";
 
-const HARNESS_RUNTIME_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
+const HARNESS_RUNTIME_TEST_TIMEOUT_MS = testTimeout(30_000);
 
 function createBenchRuntime() {
   const providerKernel = createProviderKernel({

@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
 
-vi.setConfig({ testTimeout: 15_000 });
+vi.setConfig({ testTimeout: testTimeout(15_000) });
+
+const SLOW_CODEX_SHELL_CONCURRENT_SESSION_TEST_TIMEOUT_MS = testTimeout(15_000);
 
 const mockCodexCtor = vi.fn();
 const mockStartThread = vi.fn();
@@ -264,7 +267,7 @@ describe("codex-shell stream safeguards", () => {
     releaseFirstTurn();
     const first = await firstPromise;
     expect(first.finalResponse).toContain("first session completed");
-  }, 15000);
+  }, SLOW_CODEX_SHELL_CONCURRENT_SESSION_TEST_TIMEOUT_MS);
 
   it("returns normalized usage from streamed turn completion events", async () => {
     mockStartThread.mockImplementation(() => ({

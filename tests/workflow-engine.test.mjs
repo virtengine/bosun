@@ -22,14 +22,17 @@ import {
 } from "../workflow/approval-queue.mjs";
 import { _resetSingleton as resetSessionTracker, getSessionTracker } from "../infra/session-tracker.mjs";
 
-vi.setConfig({ testTimeout: process.platform === "win32" ? 120_000 : 30_000 });
+import { testTimeout } from "./timeout-helper.mjs";
 
-const SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
-const SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
-const SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
-const SLOW_WORKFLOW_ENGINE_CONCURRENCY_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 60_000;
-const SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
-const FAST_WORKFLOW_ENGINE_TIMER_CLEANUP_ASSERTION_MS = process.platform === "win32" ? 20_000 : 15_000;
+vi.setConfig({ testTimeout: testTimeout(30_000) });
+
+const SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS = testTimeout(30_000);
+const SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS = testTimeout(30_000);
+const SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS = testTimeout(30_000);
+const SLOW_WORKFLOW_ENGINE_CONCURRENCY_TEST_TIMEOUT_MS = testTimeout(60_000);
+const SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS = testTimeout(30_000);
+const FAST_WORKFLOW_ENGINE_TIMER_CLEANUP_ASSERTION_MS = testTimeout(15_000);
+const SLOW_WORKFLOW_ENGINE_TRACE_TIMEOUT_MS = testTimeout(30_000);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -10336,7 +10339,7 @@ describe("WorkflowEngine.getTaskTraceEvents", () => {
     expect(parentSpan.attributes["bosun.task.id"]).toBe("TASK-WF-TRACE");
     expect(childSpan.attributes["bosun.task.id"]).toBe("TASK-WF-TRACE");
     expect(childSpan.attributes["bosun.workflow.parent_run_id"]).toBe(parentCtx.id);
-  }, 30_000);
+  }, SLOW_WORKFLOW_ENGINE_TRACE_TIMEOUT_MS);
   it("records DAGState revisions and preserves completed nodes when replanning from a failed boundary", async () => {
     let attempts = 0;
     registerNodeType("test.replan_once", {

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -6,7 +7,7 @@ import { WorkflowEngine } from "../workflow/workflow-engine.mjs";
 import { installTemplate } from "../workflow/workflow-templates.mjs";
 import "../workflow/workflow-nodes.mjs";
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: testTimeout(30_000) });
 
 let tmpDir;
 let engine;

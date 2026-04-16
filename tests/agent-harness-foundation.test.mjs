@@ -31,8 +31,9 @@ import {
 } from "../agent/provider-kernel.mjs";
 import { createQueryEngine } from "../agent/query-engine.mjs";
 import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
 
-const SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS = process.platform === "win32" ? 75_000 : 45_000;
+const SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS = testTimeout(45_000);
 
 describe("provider registry foundation", () => {
   const adapters = {

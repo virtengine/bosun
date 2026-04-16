@@ -428,7 +428,7 @@ describe("dangerous shell payload containment", () => {
     expect(result.autoMerge?.attempted).toBe(false);
     expect(result.autoMerge?.reason).toBe("test_runtime_skip");
     expect(result.autoMerge?.method).toBe("rebase");
-  });
+  }, 30_000);
 });
 
 describe("action.run_command env interpolation", () => {

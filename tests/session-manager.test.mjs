@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
 
-vi.setConfig({ testTimeout: process.platform === "win32" ? 45_000 : 15_000 });
-const SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 15_000;
+vi.setConfig({ testTimeout: testTimeout(15_000) });
+const SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS = testTimeout(15_000);
 
 import { createSessionReplayStore } from "../agent/session-replay.mjs";
 import { createSessionSnapshotStore } from "../agent/session-snapshot-store.mjs";

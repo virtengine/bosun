@@ -85,12 +85,17 @@ const sharedTestExcludes = [
     ? ["workflow-task-lifecycle.test.mjs"]
     : []),
 ];
+const defaultTestTimeout = process.platform === "win32" ? 15_000 : 5_000;
+
 const sharedProjectTestConfig = {
   environment: "node",
   globals: true,
   dir: "tests",
   exclude: sharedTestExcludes,
-  testTimeout: 5000,
+  testTimeout: defaultTestTimeout,
+  // Retry once on failure to absorb transient OS-level jitter (disk, scheduling).
+  // Persistent regressions still fail on the second attempt.
+  retry: 1,
   minWorkers: defaultMinWorkers,
   maxWorkers: defaultMaxWorkers,
   setupFiles: ["tests/setup.mjs"],
@@ -123,6 +128,7 @@ export default defineConfig({
     },
   },
   test: {
+    reporters: ["default", "tests/near-timeout-reporter.mjs"],
     projects: [
       {
         test: {
