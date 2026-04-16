@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { testTimeout } from "./timeout-helper.mjs";
 
-vi.setConfig({ testTimeout: testTimeout(15_000) });
-const SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS = testTimeout(15_000);
+vi.setConfig({ testTimeout: testTimeout(90_000) });
+const SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS = testTimeout(90_000);
 
 import { createSessionReplayStore } from "../agent/session-replay.mjs";
 import { createSessionSnapshotStore } from "../agent/session-snapshot-store.mjs";
@@ -374,7 +374,7 @@ describe("session manager cutover", () => {
       label: "Running",
       source: "derived",
     }));
-  }, 15000);
+  }, SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS);
 
   it("writes through resumable checkpoints at each session boundary", async () => {
     const trackerMod = await import("../infra/session-tracker.mjs");

@@ -23,6 +23,8 @@ const DEFAULT_HEAVY_SUITES = [
   "tests/opencode-shell.test.mjs",
   "tests/preflight.test.mjs",
   "tests/review-agent.test.mjs",
+  "tests/session-manager.test.mjs",
+  "tests/primary-agent.runtime.test.mjs",
 ];
 
 const ISOLATED_PROJECT_SUITES = new Set([
@@ -34,6 +36,8 @@ const ISOLATED_PROJECT_SUITES = new Set([
   "tests/agent-pool.test.mjs",
   "tests/bosun-native-workflow-nodes.test.mjs",
   "tests/workflow-templates-e2e.test.mjs",
+  "tests/session-manager.test.mjs",
+  "tests/primary-agent.runtime.test.mjs",
 ]);
 
 function shouldIncludeWorkflowGuaranteedSuite() {

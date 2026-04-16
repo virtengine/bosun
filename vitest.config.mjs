@@ -76,6 +76,8 @@ const isolatedProjectSuites = [
   "agent-pool.test.mjs",
   "bosun-native-workflow-nodes.test.mjs",
   "workflow-templates-e2e.test.mjs",
+  "session-manager.test.mjs",
+  "primary-agent.runtime.test.mjs",
 ];
 const sharedTestExcludes = [
   "**/node_modules/**",
