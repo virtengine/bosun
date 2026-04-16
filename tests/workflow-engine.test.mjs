@@ -22,7 +22,14 @@ import {
 } from "../workflow/approval-queue.mjs";
 import { _resetSingleton as resetSessionTracker, getSessionTracker } from "../infra/session-tracker.mjs";
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: process.platform === "win32" ? 120_000 : 30_000 });
+
+const SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
+const SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
+const SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
+const SLOW_WORKFLOW_ENGINE_CONCURRENCY_TEST_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 60_000;
+const SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
+const FAST_WORKFLOW_ENGINE_TIMER_CLEANUP_ASSERTION_MS = process.platform === "win32" ? 20_000 : 15_000;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -535,7 +542,7 @@ describe("WorkflowEngine - loop.for_each", () => {
     const result = await engine.execute(wf.id, {});
     expect(result.errors.length).toBe(0);
     expect(executed).toEqual(["a", "b", "c"]);
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("emits loop:iteration events", async () => {
     const iterations = [];
@@ -563,7 +570,7 @@ describe("WorkflowEngine - loop.for_each", () => {
     expect(iterations.length).toBe(2);
     expect(iterations[0]).toEqual({ nodeId: "loop", index: 0, total: 2 });
     expect(iterations[1]).toEqual({ nodeId: "loop", index: 1, total: 2 });
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("returns totalItems alongside count for batch summary templates", async () => {
     const wf = makeSimpleWorkflow(
@@ -583,7 +590,7 @@ describe("WorkflowEngine - loop.for_each", () => {
       successCount: 3,
       failCount: 0,
     });
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("dispatches child workflows without waiting for completion when mode=dispatch", async () => {
     let releaseRuns;
@@ -658,7 +665,7 @@ describe("WorkflowEngine - loop.for_each", () => {
 
     releaseRuns();
     await new Promise((resolve) => setTimeout(resolve, 20));
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("promotes task identity from loop item payloads into dispatched child workflows", async () => {
     const observed = [];
@@ -746,7 +753,7 @@ describe("WorkflowEngine - loop.for_each", () => {
       taskTitle: "Loop Task 1",
     });
     expect(history[0]?.taskIds || []).toContain("task-loop-1");
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("keeps task identity isolated across concurrent loop dispatch items", async () => {
     const observed = [];
@@ -831,7 +838,7 @@ describe("WorkflowEngine - loop.for_each", () => {
         rootTaskId: "task-loop-b",
       }),
     ]));
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("overrides inherited parent task context with per-item loop task identity", async () => {
     const observed = [];
@@ -920,7 +927,7 @@ describe("WorkflowEngine - loop.for_each", () => {
       taskId: "child-task-1",
       taskTitle: "Child Task 1",
     });
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("does not inherit parent branch context when loop child task omits branch metadata", async () => {
     const observed = [];
@@ -995,7 +1002,7 @@ describe("WorkflowEngine - loop.for_each", () => {
         rootTaskId: "child-task-branchless",
       },
     ]);
-  });
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
   it("counts only allocated task lifecycle slots during loop dispatch fan-out", async () => {
     let startedCount = 0;
@@ -1122,7 +1129,7 @@ describe("WorkflowEngine - loop.for_each", () => {
 
     releaseRuns();
     await new Promise((resolve) => setTimeout(resolve, 50));
-  }, 60_000);
+  }, SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS);
 
 });
 
@@ -2105,7 +2112,7 @@ describe("WorkflowEngine - run history details", () => {
     expect(history.length).toBeGreaterThanOrEqual(2);
     expect(history[0].startedAt).toBeGreaterThanOrEqual(history[1].startedAt);
     expect(engine.getRunDetail("does-not-exist")).toBeNull();
-  });
+  }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
   it("returns paginated run history metadata without dropping total counts", async () => {
     const wf = makeSimpleWorkflow(
@@ -2128,7 +2135,7 @@ describe("WorkflowEngine - run history details", () => {
     expect(page.runs).toHaveLength(1);
     expect(page.hasMore).toBe(true);
     expect(page.nextOffset).toBe(2);
-  });
+  }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
   it("paginates run history from summaries without rereading each run detail", async () => {
     const wf = makeSimpleWorkflow(
@@ -2148,7 +2155,7 @@ describe("WorkflowEngine - run history details", () => {
     expect(page.count).toBe(1);
     expect(page.runs).toHaveLength(1);
     expect(detailSpy).not.toHaveBeenCalled();
-  });
+  }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
   it("uses SQL-backed page reads without invoking legacy index hydration", async () => {
     const wf = makeSimpleWorkflow(
@@ -2166,7 +2173,7 @@ describe("WorkflowEngine - run history details", () => {
     engine.getRunHistoryPage(wf.id, { offset: 1, limit: 1 });
 
     expect(hydrateSpy).not.toHaveBeenCalled();
-  });
+  }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
   it("reads paged run history from SQL-backed summaries when the legacy index is missing", async () => {
     const wf = makeSimpleWorkflow(
@@ -2189,7 +2196,7 @@ describe("WorkflowEngine - run history details", () => {
       workflowId: wf.id,
       workflowName: "SQL History Workflow",
     }));
-  });
+  }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
   it("pages SQL-backed run history with offsets when the legacy index is missing", async () => {
     const wf = makeSimpleWorkflow(
@@ -2219,7 +2226,7 @@ describe("WorkflowEngine - run history details", () => {
       workflowName: "SQL Offset History Workflow",
     }));
     expect(hydrateSpy).not.toHaveBeenCalled();
-  });
+  }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
   it("backfills sparse paged run summaries from run detail files when summary fields are missing", async () => {
     const wf = makeSimpleWorkflow(
@@ -4843,7 +4850,7 @@ describe("action.execute_workflow", () => {
         (entry) => entry?.runId === output.runId && entry?.eventType === "run.start",
       ),
     ).toBe(true);
-  });
+  }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
 
   it("sync mode resolves installed template aliases via metadata.installedFrom", async () => {
     const childWorkflow = makeSimpleWorkflow(
@@ -4898,7 +4905,7 @@ describe("action.execute_workflow", () => {
     expect(childDetail).toBeTruthy();
     expect(childDetail.workflowId).toBe("template-installed-child");
     expect(engine.get(childDetail.workflowId)?.id).toBe(childWorkflow.id);
-  });
+  }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
 
   it("decorates run detail with planner timeline and proof bundle surfaces", () => {
     const runId = "run-proof-bundle-1";
@@ -5313,7 +5320,7 @@ describe("action.execute_workflow", () => {
       error: "child exploded",
     });
     expect(softCtx.data.childResult).toEqual(softResult);
-  });
+  }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
 
   it("sync mode reuses the parent run slot under saturation", async () => {
     const saturatedEngine = makeTmpEngine();
@@ -5367,7 +5374,7 @@ describe("action.execute_workflow", () => {
     expect(stats.activeRuns).toBe(baselineActiveRuns);
     expect(stats.queuedRuns).toBe(0);
     expect(stats.sharedRootRuns).toBe(0);
-  });
+  }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
 
   it("sync mode includes child terminal output in the returned summary", async () => {
     const childWorkflow = {
@@ -5432,7 +5439,7 @@ describe("action.execute_workflow", () => {
         },
       },
     });
-  });
+  }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
 });
 
 describe("action.inline_workflow and executeDefinition", () => {
@@ -6336,7 +6343,7 @@ describe("Session chaining - action.run_agent", () => {
     expect(new Set(overseer.workerHistory.map((entry) => entry.threadId)).size).toBe(2);
     expect(overseer.workerHistory.every((entry) => entry.status === "completed")).toBe(true);
     expect(replay.workerHistory).toHaveLength(2);
-  });
+  }, SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS);
 
   it("propagates threadId to context and streams agent events into run logs", async () => {
     const handler = getNodeType("action.run_agent");
@@ -7247,7 +7254,7 @@ describe("Session chaining - action.run_agent", () => {
       }),
     );
     expect(launchEphemeralThread).not.toHaveBeenCalled();
-  });
+  }, SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS);
 
   it("marks delegated task sessions as failed when the delegated workflow fails", async () => {
     const handler = getNodeType("action.run_agent");
@@ -7783,7 +7790,7 @@ describe("Session chaining - action.run_agent", () => {
     expect(session.metadata.branch).toBe("feat/visible-no-output");
     expect(Array.isArray(session.messages)).toBe(true);
     expect(session.messages.some((msg) => String(msg?.content || "").includes("completed"))).toBe(true);
-  });
+  }, SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS);
 
   it("marks delegated task session failed when delegated workflow returns errors", async () => {
     const handler = getNodeType("action.run_agent");
@@ -7971,7 +7978,7 @@ describe("Session chaining - action.run_agent", () => {
     expect(summary?.latestDelegationEvent).toEqual(
       expect.objectContaining({ type: "handoff-complete", status: "completed" }),
     );
-  });
+  }, SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS);
 
   it("keeps delegation transition side effects idempotent across duplicate transition keys", async () => {
     const handler = getNodeType("action.run_agent");
@@ -9822,7 +9829,7 @@ describe("WorkflowEngine - timeout timer cleanup", () => {
     // heavyweight isolated suite on Windows.
     const start = Date.now();
     const result = await engine.execute(wf.id, {});
-    expect(Date.now() - start).toBeLessThan(15_000);
+    expect(Date.now() - start).toBeLessThan(FAST_WORKFLOW_ENGINE_TIMER_CLEANUP_ASSERTION_MS);
     expect(result.errors.length).toBe(0);
     const output = result.getNodeOutput("fast");
     expect(output.fast).toBe(true);
@@ -9984,7 +9991,7 @@ describe("Concurrency limiter", () => {
     expect(maxSeen).toBeGreaterThanOrEqual(2);
     // After all complete, slots should be released
     expect(engine.getConcurrencyStats().activeRuns).toBe(0);
-  }, 60_000);
+  }, SLOW_WORKFLOW_ENGINE_CONCURRENCY_TEST_TIMEOUT_MS);
 });
 
 

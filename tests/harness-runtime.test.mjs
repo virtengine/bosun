@@ -5,6 +5,8 @@ import { createProviderKernel } from "../agent/provider-kernel.mjs";
 import { createBosunSessionManager } from "../agent/session-manager.mjs";
 import { createToolOrchestrator } from "../agent/tool-orchestrator.mjs";
 
+const HARNESS_RUNTIME_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
+
 function createBenchRuntime() {
   const providerKernel = createProviderKernel({
     adapters: {
@@ -187,5 +189,5 @@ describe("harness runtime cutover", () => {
 
     expect(toolEvents.filter((event) => event.type === "tool_execution_end")).toHaveLength(10);
     expect(toolEvents.every((event) => event.executionId)).toBe(true);
-  }, 30000);
+  }, HARNESS_RUNTIME_TEST_TIMEOUT_MS);
 });

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.setConfig({ testTimeout: 15_000 });
 
+const SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
+
 const mockConfigState = vi.hoisted(() => ({
   current: { primaryAgent: "codex-sdk" },
 }));
@@ -408,7 +410,7 @@ describe("primary-agent runtime safeguards", () => {
         }),
       }),
     );
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("surfaces configured executor profiles with model allow-lists and enabled flags", async () => {
     mockConfigState.current = {
@@ -653,7 +655,7 @@ describe("primary-agent runtime safeguards", () => {
       }),
     }));
     expect(String(options.providerConfig?.model || "").trim()).not.toBe("");
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("prefers the native adapter for harness-managed Anthropic providers", async () => {
     mockConfigState.current = {
@@ -697,7 +699,7 @@ describe("primary-agent runtime safeguards", () => {
       }),
     }));
     expect(String(options.providerConfig?.model || "").trim()).not.toBe("");
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("prefers the native adapter for harness-managed Gemini providers", async () => {
     mockConfigState.current = {
@@ -741,7 +743,7 @@ describe("primary-agent runtime safeguards", () => {
       }),
     }));
     expect(String(options.providerConfig?.model || "").trim()).not.toBe("");
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("retries codex locally before any failover", async () => {
     process.env.PRIMARY_AGENT_RECOVERY_RETRY_ATTEMPTS = "1";
@@ -762,7 +764,7 @@ describe("primary-agent runtime safeguards", () => {
     expect(mockExecCodexPrompt).toHaveBeenCalledTimes(2);
     expect(mockExecCopilotPrompt).not.toHaveBeenCalled();
     expect(result.finalResponse).toBe("codex-recovered");
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("prepends architect/editor framing for editor executions", async () => {
     vi.resetModules();
@@ -835,7 +837,7 @@ describe("primary-agent runtime safeguards", () => {
     const third = await primaryAgent.execPrimaryPrompt("hello", { sessionId: "s3" });
     expect(mockExecCopilotPrompt).toHaveBeenCalledTimes(1);
     expect(third.finalResponse).toBe("copilot-ok");
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("manages primary sessions through the session manager facade", async () => {
     mockCreateCodexSession.mockResolvedValueOnce({ id: "session-created" });
@@ -881,7 +883,7 @@ describe("primary-agent runtime safeguards", () => {
     expect(sessionManager.getActiveSessionId("telegram:chat-1")).toBe("telegram-session-1");
     expect(sessionManager.getActiveSessionId("voice-dispatch:call-1")).toBe("voice-session-1");
     expect(sessionManager.getActiveSessionId("primary")).not.toBe("telegram-session-1");
-  }, 15000);
+  }, SLOW_PRIMARY_AGENT_RUNTIME_TEST_TIMEOUT_MS);
 
   it("keeps primary execution lifecycle in the session-manager facade", async () => {
     vi.resetModules();

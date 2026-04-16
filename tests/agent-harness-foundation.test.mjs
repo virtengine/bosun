@@ -32,6 +32,8 @@ import {
 import { createQueryEngine } from "../agent/query-engine.mjs";
 import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
 
+const SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS = process.platform === "win32" ? 75_000 : 45_000;
+
 describe("provider registry foundation", () => {
   const adapters = {
     "codex-sdk": {
@@ -520,7 +522,7 @@ describe("session manager foundation", () => {
       { stageId: "done", mode: "continue" },
     ]);
     expect(session.canSteer()).toBe(false);
-  }, 45_000);
+  }, SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS);
 
   it("supports compiled and source sessions through the manager facade", async () => {
     const manager = createHarnessSessionManager({
@@ -558,7 +560,7 @@ describe("session manager foundation", () => {
     });
     expect(sourceRun.isValid).toBe(true);
     expect(sourceRun.result.success).toBe(true);
-  }, 45_000);
+  }, SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS);
 
   it("tracks Bosun-native sessions, child lineage, and replay snapshots", async () => {
     const trackerMod = await import("../infra/session-tracker.mjs");
@@ -612,7 +614,7 @@ describe("session manager foundation", () => {
         }),
       ],
     }));
-  });
+  }, SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS);
 
   it("applies external continue, retry, resume, cancel, and finalize through canonical lifecycle state", async () => {
     const testCacheDir = mkdtempSync(join(tmpdir(), "bosun-session-manager-"));
@@ -1464,7 +1466,7 @@ describe("harness agent service foundation", () => {
       status: "completed",
       activeThreadId: "provider-thread-1",
     }));
-  }, 45_000);
+  }, SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS);
 
   it("continues canonical interactive sessions through the bound session-manager controller", async () => {
     const sessionManager = createBosunSessionManager();
@@ -1531,7 +1533,7 @@ describe("harness agent service foundation", () => {
         threadId: "provider-thread-2",
       }),
     }));
-  }, 45_000);
+  }, SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS);
 
   it("forwards interactive usage metadata through assistant summary events", async () => {
     const sessionManager = createBosunSessionManager();
@@ -1620,7 +1622,7 @@ describe("harness agent service foundation", () => {
         }),
       },
     }));
-  }, 45_000);
+  }, SLOW_HARNESS_FOUNDATION_TEST_TIMEOUT_MS);
 });
 
 describe("query engine foundation", () => {

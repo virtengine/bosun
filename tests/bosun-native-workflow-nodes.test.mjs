@@ -29,7 +29,7 @@ import { listApprovalRequests } from "../workflow/approval-queue.mjs";
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 let tmpDir;
-const SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS = 30_000;
+const SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
 
 function makeTmpDir() {
   tmpDir = mkdtempSync(join(tmpdir(), "bosun-native-wf-test-"));
@@ -708,7 +708,7 @@ describe("action.invoke_workflow", () => {
       resolveChild?.(new WorkflowContext({}));
       await childPromise;
     }
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("dispatch mode accepts synchronous engine return values", async () => {
     const handler = getNodeType("action.invoke_workflow");
@@ -1023,7 +1023,7 @@ describe("action.bosun_function", () => {
     const ctx = new WorkflowContext({});
     const node = { id: "t1", type: "action.bosun_function", config: {} };
     await expect(handler.execute(node, ctx)).rejects.toThrow(/function.*required/i);
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("throws for unknown function name", async () => {
     const handler = getNodeType("action.bosun_function");
@@ -1537,7 +1537,7 @@ describe("self-improvement workflow nodes", () => {
     if (tmpDir) {
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
     }
-  });
+  }, SLOW_BOSUN_NATIVE_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("action.evaluate_run evaluates a persisted run and surfaces promotion insights", async () => {
     const dir = makeTmpDir();

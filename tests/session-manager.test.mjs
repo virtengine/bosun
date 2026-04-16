@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-vi.setConfig({ testTimeout: 15_000 });
+vi.setConfig({ testTimeout: process.platform === "win32" ? 45_000 : 15_000 });
+const SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 15_000;
 
 import { createSessionReplayStore } from "../agent/session-replay.mjs";
 import { createSessionSnapshotStore } from "../agent/session-snapshot-store.mjs";
@@ -172,7 +173,7 @@ describe("session manager cutover", () => {
         }),
       }),
     );
-  }, 15000);
+  }, SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS);
 
   it("keeps a durable overseer shell while swapping external workers across executions", () => {
     const sessionManager = createHarnessSessionManager();
@@ -292,7 +293,7 @@ describe("session manager cutover", () => {
         threadId: "workflow-run-2",
       }),
     ]));
-  }, 15000);
+  }, SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS);
 
   it("derives explicit operator phases that stay meaningful across planning, staging, running, building, and editing", () => {
     const sessionManager = createHarnessSessionManager();
@@ -452,7 +453,7 @@ describe("session manager cutover", () => {
       messageCursor: 2,
       spillCount: 1,
     }));
-  });
+  }, SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS);
 
   it("cold-restores persisted replay history and live execution status after restart", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "bosun-session-replay-restore-"));

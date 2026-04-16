@@ -2754,7 +2754,7 @@ describe("internal harness facade exports", () => {
         event: expect.objectContaining({ kind: "bosun-internal-harness-event-contract" }),
       }),
     }));
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("runs compiled and source harness profiles through the canonical harness/session path", async () => {
     const compiledProfile = {

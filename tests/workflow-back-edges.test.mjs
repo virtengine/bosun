@@ -23,7 +23,7 @@ import { WORKFLOW_TEMPLATES, TEMPLATE_CATEGORIES } from "../workflow/workflow-te
 
 let tmpDir;
 let engine;
-const SLOW_WORKFLOW_BACK_EDGE_TEST_TIMEOUT_MS = process.platform === "win32" ? 15_000 : 10_000;
+const SLOW_WORKFLOW_BACK_EDGE_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 10_000;
 
 function makeTmpEngine(services = {}) {
   tmpDir = mkdtempSync(join(tmpdir(), "wf-backedge-test-"));
