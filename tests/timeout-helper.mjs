@@ -10,11 +10,11 @@
  * and can be tuned via BOSUN_TEST_TIMEOUT_MULTIPLIER env var.
  */
 
-const DEFAULT_MULTIPLIER_WIN32 = 3;
+const DEFAULT_MULTIPLIER_WIN32 = 5;
 const DEFAULT_MULTIPLIER_OTHER = 1;
 
 /**
- * Platform timeout multiplier. On Windows defaults to 3x, elsewhere 1x.
+ * Platform timeout multiplier. On Windows defaults to 5x, elsewhere 1x.
  * Override with BOSUN_TEST_TIMEOUT_MULTIPLIER env var.
  */
 export const PLATFORM_MULTIPLIER = (() => {

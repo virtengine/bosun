@@ -155,6 +155,10 @@ export default defineConfig({
           // Run one at a time to avoid OOM when two heavy forks share system memory.
           maxWorkers: parseWorkerCount(process.env.BOSUN_VITEST_ISOLATED_MAX_WORKERS, 1),
           minWorkers: 1,
+          // Isolated suites are long-running deterministic tests. A retry on a
+          // 3-minute timeout costs 6 minutes and rarely recovers — these tests
+          // fail from genuine budget exhaustion, not OS-level jitter.
+          retry: 0,
           sequence: { groupOrder: 2 },
         },
       },

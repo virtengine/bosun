@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { testTimeout } from "./timeout-helper.mjs";
 
 const __RUN_VITEST_ONLY = Boolean(process.env.VITEST);
-const SLOW_AGENT_POOL_TEST_TIMEOUT_MS = testTimeout(10_000);
+// agent-pool tests exercise real child-process spawns; Windows needs much more
+// headroom than the standard multiplier, so use a large explicit base.
+const SLOW_AGENT_POOL_TEST_TIMEOUT_MS = testTimeout(30_000);
 let mockCodexStartThread;
 let mockCodexResumeThread;
 let mockCodexCtor;

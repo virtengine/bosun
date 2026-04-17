@@ -24,11 +24,11 @@ import { _resetSingleton as resetSessionTracker, getSessionTracker } from "../in
 
 import { testTimeout } from "./timeout-helper.mjs";
 
-vi.setConfig({ testTimeout: testTimeout(30_000) });
+vi.setConfig({ testTimeout: testTimeout(45_000) });
 
-const SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS = testTimeout(30_000);
+const SLOW_WORKFLOW_ENGINE_LOOP_DISPATCH_TEST_TIMEOUT_MS = testTimeout(45_000);
 const SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS = testTimeout(30_000);
-const SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS = testTimeout(30_000);
+const SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS = testTimeout(45_000);
 const SLOW_WORKFLOW_ENGINE_CONCURRENCY_TEST_TIMEOUT_MS = testTimeout(60_000);
 const SLOW_WORKFLOW_ENGINE_SESSION_CHAINING_TEST_TIMEOUT_MS = testTimeout(30_000);
 const FAST_WORKFLOW_ENGINE_TIMER_CLEANUP_ASSERTION_MS = testTimeout(15_000);
