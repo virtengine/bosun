@@ -235,10 +235,16 @@ should_fast_run_full_suite() {
 
 if should_fast_run_full_suite; then
   echo "[hooks] large diff detected (${#CHANGED_FILES[@]} files, ${#CHANGED_RUNTIME[@]} runtime, ${#CHANGED_TESTS[@]} tests) — skipping discovery and running the full suite immediately"
+  echo "[hooks] heavy isolated suites (workflow-engine, ui-server, session-manager, etc.) are deferred to CI; set BOSUN_PREPUSH_INCLUDE_HEAVY=1 to include them locally"
   export BOSUN_VITEST_HEAP_MB="${BOSUN_PREPUSH_FULL_SUITE_VITEST_HEAP_MB:-6144}"
   export BOSUN_VITEST_MAX_WORKERS="${BOSUN_PREPUSH_FULL_SUITE_VITEST_MAX_WORKERS:-4}"
   export BOSUN_VITEST_MIN_WORKERS="${BOSUN_PREPUSH_FULL_SUITE_VITEST_MIN_WORKERS:-2}"
   export BOSUN_VITEST_GROUP_BATCH_SIZE="${BOSUN_PREPUSH_FULL_SUITE_GROUP_BATCH_SIZE:-50}"
+  if [ "${BOSUN_PREPUSH_INCLUDE_HEAVY:-0}" = "1" ] || [ "${BOSUN_RUN_HEAVY_TESTS:-0}" = "1" ]; then
+    export BOSUN_VITEST_INCLUDE_HEAVY=1
+  else
+    export BOSUN_VITEST_INCLUDE_HEAVY=0
+  fi
   npm run test:all
   echo "[hooks] pre-push checks passed ✓"
   exit 0

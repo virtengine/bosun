@@ -47,6 +47,25 @@ function shouldIncludeWorkflowGuaranteedSuite() {
   return process.platform !== "win32";
 }
 
+// Heavy isolated suites (workflow-engine, ui-server, etc.) exercise real I/O,
+// real timers, and sqlite — on Windows they take tens of minutes. Skip them by
+// default for local `npm test` so the run stays usable for iteration. CI and
+// explicit opt-in (BOSUN_VITEST_INCLUDE_HEAVY=1, BOSUN_RUN_HEAVY_TESTS=1, CI=1)
+// still run the full set.
+function shouldIncludeHeavyIsolatedSuites() {
+  const explicit = String(process.env.BOSUN_VITEST_INCLUDE_HEAVY || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(explicit)) return true;
+  if (["0", "false", "no", "off"].includes(explicit)) return false;
+  if (String(process.env.BOSUN_RUN_HEAVY_TESTS || "").trim() === "1") return true;
+  const ci = String(process.env.CI || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(ci)) return true;
+  return process.platform !== "win32";
+}
+
+function isDeferredLocalHeavySuite(suite) {
+  return ISOLATED_PROJECT_SUITES.has(suite);
+}
+
 function parseCsvEnv(value) {
   return String(value || "")
     .split(",")
@@ -80,16 +99,24 @@ function resolveHeavySuites(allSuites) {
 export function buildVitestFullSuitePlan({ startDir = process.cwd() } = {}) {
   const allSuites = listVitestSuiteFiles({ startDir });
   const includeGuaranteed = shouldIncludeWorkflowGuaranteedSuite();
+  const includeHeavy = shouldIncludeHeavyIsolatedSuites();
   const runnableSuites = allSuites.filter((suite) => (
     suite !== "tests/workflow-guaranteed.test.mjs" || includeGuaranteed
   ));
-  const heavySuites = resolveHeavySuites(runnableSuites);
+  const heavySuitesAll = resolveHeavySuites(runnableSuites);
+  const deferredHeavySuites = includeHeavy
+    ? []
+    : heavySuitesAll.filter((suite) => isDeferredLocalHeavySuite(suite));
+  const heavySuites = includeHeavy
+    ? heavySuitesAll
+    : heavySuitesAll.filter((suite) => !isDeferredLocalHeavySuite(suite));
   const heavySet = new Set(heavySuites);
-  const groupedSuites = runnableSuites.filter((suite) => !heavySet.has(suite));
+  const groupedSuites = runnableSuites.filter((suite) => !heavySet.has(suite) && !deferredHeavySuites.includes(suite));
   return {
-    allSuites: runnableSuites,
+    allSuites: runnableSuites.filter((suite) => !deferredHeavySuites.includes(suite)),
     groupedSuites,
     heavySuites,
+    deferredHeavySuites,
   };
 }
 
@@ -160,8 +187,8 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
     return 0;
   }
 
-  const { groupedSuites, heavySuites, allSuites } = buildVitestFullSuitePlan({ startDir });
-  if (allSuites.length === 0) {
+  const { groupedSuites, heavySuites, allSuites, deferredHeavySuites = [] } = buildVitestFullSuitePlan({ startDir });
+  if (allSuites.length === 0 && deferredHeavySuites.length === 0) {
     console.log("[vitest-full-suite] no Vitest suites found");
     return 0;
   }
@@ -171,6 +198,14 @@ function runFullSuite({ startDir = process.cwd() } = {}) {
     && allSuites.includes("tests/workflow-guaranteed.test.mjs")
   ) {
     console.log("[vitest-full-suite] skipping tests/workflow-guaranteed.test.mjs on Windows local runs (set BOSUN_VITEST_INCLUDE_GUARANTEED=1 to include it)");
+  }
+  if (deferredHeavySuites.length > 0) {
+    console.log(
+      `[vitest-full-suite] skipping ${deferredHeavySuites.length} heavy isolated suite(s) on Windows local run — set BOSUN_VITEST_INCLUDE_HEAVY=1 (or CI=1) to include them:`,
+    );
+    for (const suite of deferredHeavySuites) {
+      console.log(`[vitest-full-suite]   - ${suite}`);
+    }
   }
 
   const groupedMaxWorkers = Number.parseInt(
