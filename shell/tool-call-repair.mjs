@@ -51,6 +51,19 @@
 
 function toStr(v) { return String(v ?? "").trim(); }
 
+function isAzureEndpoint(rawEndpoint) {
+  const candidate = toStr(rawEndpoint);
+  if (!candidate) return false;
+
+  try {
+    const parsed = new URL(candidate.includes("://") ? candidate : `https://${candidate}`);
+    const host = toStr(parsed.hostname).toLowerCase();
+    return host === "azure.com" || host.endsWith(".azure.com");
+  } catch {
+    return false;
+  }
+}
+
 function tryParseJson(s) {
   if (typeof s !== "string") return { ok: false, error: "Not a string" };
   try {
@@ -187,7 +200,7 @@ async function callRepairApi(repairPrompt, execOptions, repairModel) {
   const pc        = execOptions?.providerConfig ?? {};
   const rawEndpoint = toStr(pc.endpoint || pc.baseUrl || "");
   const model     = toStr(repairModel || pc.repairModel || pc.summaryModel || "gpt-4o-mini");
-  const isAzure   = rawEndpoint.includes(".azure.com") || Boolean(toStr(pc.deployment));
+  const isAzure   = isAzureEndpoint(rawEndpoint) || Boolean(toStr(pc.deployment));
 
   let url;
   if (isAzure && rawEndpoint) {
