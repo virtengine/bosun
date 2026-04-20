@@ -45,6 +45,7 @@ function buildProfileSlug(value, fallback = "session") {
     }
   }
   while (result.endsWith("-")) result = result.slice(0, -1);
+  while (result.startsWith("-")) result = result.slice(1);
   return result || fallback;
 }
 

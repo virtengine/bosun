@@ -94,8 +94,8 @@ function getManualFlowWorkflowId(templateId) {
       result += "-";
     }
   }
-  while (result.endsWith("-")) result = result.slice(0, -1);
   while (result.startsWith("-")) result = result.slice(1);
+  while (result.endsWith("-")) result = result.slice(0, -1);
   return `manual-flow.${result || "custom"}`;
 }
 
