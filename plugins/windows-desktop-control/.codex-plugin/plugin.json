@@ -1,0 +1,42 @@
+{
+  "name": "windows-desktop-control",
+  "version": "0.1.0",
+  "description": "Windows desktop control tools for Codex using UI Automation, screenshots, and input fallbacks.",
+  "author": {
+    "name": "Bosun Contributors",
+    "email": "hello@virtengine.com",
+    "url": "https://github.com/virtengine/bosun"
+  },
+  "homepage": "https://github.com/virtengine/bosun/tree/main/plugins/windows-desktop-control",
+  "repository": "https://github.com/virtengine/bosun",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "windows",
+    "desktop",
+    "mcp",
+    "uiautomation"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Windows Desktop Control",
+    "shortDescription": "Control native Windows apps through Codex.",
+    "longDescription": "Adds a local MCP server for multi-display screenshots, window placement, input, app launch, and UI Automation inspection and invocation on Windows.",
+    "developerName": "Bosun",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/virtengine/bosun/tree/main/plugins/windows-desktop-control",
+    "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "defaultPrompt": [
+      "Inspect the available Windows displays, move a target app onto a chosen display, and describe the visible controls.",
+      "Launch Notepad on a secondary display, type a note, and save a display-specific screenshot.",
+      "Use UI Automation when possible, then fall back to display-relative clicks only if needed."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

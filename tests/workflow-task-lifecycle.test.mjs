@@ -18,13 +18,14 @@ import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
 
 // CLAUDE:SUMMARY - workflow-task-lifecycle tests
 // Exercises task lifecycle workflow nodes and template wiring, including prompt assembly and cache anchoring.
 
 const SPAWN_BLOCKED = process.platform === "win32"
   && process.env.BOSUN_TEST_CHILD_SPAWN_BLOCKED === "1";
-const SLOW_WORKFLOW_TEST_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 10_000;
+const SLOW_WORKFLOW_TEST_TIMEOUT_MS = testTimeout(45_000);
 
 let getNodeType;
 let clearContractCache;

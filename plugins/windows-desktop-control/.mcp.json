@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "windows_desktop_control": {
+      "command": "node",
+      "args": [
+        "./scripts/windows-desktop-mcp-server.mjs"
+      ],
+      "env": {
+        "WINDOWS_DESKTOP_ALLOWED_APPS": "notepad.exe,calc.exe,mspaint.exe,explorer.exe"
+      }
+    }
+  }
+}

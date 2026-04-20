@@ -115,16 +115,24 @@ describe("vitest-runner", () => {
   it("isolates heavyweight suites from the grouped full-suite batch", () => {
     const previous = process.env.BOSUN_VITEST_INCLUDE_GUARANTEED;
     delete process.env.BOSUN_VITEST_INCLUDE_GUARANTEED;
-    const { groupedSuites, heavySuites } = buildVitestFullSuitePlan({ startDir: repoRoot });
+    const {
+      groupedSuites,
+      heavySuites,
+      deferredHeavySuites = [],
+    } = buildVitestFullSuitePlan({ startDir: repoRoot });
 
-    expect(heavySuites).toContain("tests/workflow-engine.test.mjs");
-    expect(heavySuites).toContain("tests/workflow-templates-e2e.test.mjs");
     expect(groupedSuites).not.toContain("tests/workflow-engine.test.mjs");
     expect(groupedSuites).not.toContain("tests/workflow-templates-e2e.test.mjs");
     if (process.platform === "win32") {
+      expect(heavySuites).not.toContain("tests/workflow-engine.test.mjs");
+      expect(heavySuites).not.toContain("tests/workflow-templates-e2e.test.mjs");
+      expect(deferredHeavySuites).toContain("tests/workflow-engine.test.mjs");
+      expect(deferredHeavySuites).toContain("tests/workflow-templates-e2e.test.mjs");
       expect(heavySuites).not.toContain("tests/workflow-guaranteed.test.mjs");
       expect(groupedSuites).not.toContain("tests/workflow-guaranteed.test.mjs");
     } else {
+      expect(heavySuites).toContain("tests/workflow-engine.test.mjs");
+      expect(heavySuites).toContain("tests/workflow-templates-e2e.test.mjs");
       expect(heavySuites).toContain("tests/workflow-guaranteed.test.mjs");
       expect(groupedSuites).not.toContain("tests/workflow-guaranteed.test.mjs");
     }
@@ -132,7 +140,12 @@ describe("vitest-runner", () => {
 
     process.env.BOSUN_VITEST_INCLUDE_GUARANTEED = "1";
     const explicitPlan = buildVitestFullSuitePlan({ startDir: repoRoot });
-    expect(explicitPlan.heavySuites).toContain("tests/workflow-guaranteed.test.mjs");
+    if (process.platform === "win32") {
+      expect(explicitPlan.heavySuites).not.toContain("tests/workflow-guaranteed.test.mjs");
+      expect(explicitPlan.deferredHeavySuites || []).toContain("tests/workflow-guaranteed.test.mjs");
+    } else {
+      expect(explicitPlan.heavySuites).toContain("tests/workflow-guaranteed.test.mjs");
+    }
     expect(explicitPlan.groupedSuites).not.toContain("tests/workflow-guaranteed.test.mjs");
 
     if (previous == null) delete process.env.BOSUN_VITEST_INCLUDE_GUARANTEED;
