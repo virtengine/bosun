@@ -108,6 +108,22 @@ function toTrimmedString(value) {
   return String(value ?? "").trim();
 }
 
+function trimTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === "/") end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
+function isAzureHostname(url) {
+  if (!url) return false;
+  try {
+    const host = new URL(url.includes("://") ? url : `https://${url}`).hostname.toLowerCase();
+    return host === "azure.com" || host.endsWith(".azure.com");
+  } catch {
+    return false;
+  }
+}
+
 function cloneJson(value) {
   if (value == null) return value ?? null;
   return JSON.parse(JSON.stringify(value));
@@ -134,8 +150,7 @@ function resolveCredentials(execOptions) {
     "";
 
   const isAzure =
-    (effectiveEndpoint.includes(".azure.com") ||
-      effectiveEndpoint.includes(".cognitiveservices.azure.com") ||
+    (isAzureHostname(effectiveEndpoint) ||
       Boolean(toTrimmedString(pc.deployment))) &&
     Boolean(effectiveEndpoint);
 
@@ -172,8 +187,7 @@ function resolveEndpointUrl(execOptions, apiStyle = "responses") {
   const apiVersion = toTrimmedString(pc.apiVersion) || RESPONSES_API_VERSION_DEFAULT;
 
   const isAzure =
-    (rawEndpoint.includes(".azure.com") ||
-      rawEndpoint.includes(".cognitiveservices.azure.com") ||
+    (isAzureHostname(rawEndpoint) ||
       Boolean(toTrimmedString(pc.deployment))) &&
     Boolean(rawEndpoint);
 
@@ -185,9 +199,7 @@ function resolveEndpointUrl(execOptions, apiStyle = "responses") {
 
   if (isAzure && !hasOpenAIVersionPath) {
     // Classic Azure OpenAI Service: /openai/deployments/{deployment}/...
-    const base = rawEndpoint
-      .replace(/\/+$/, "")
-      .replace(/\/openai$/, "");
+    const base = trimTrailingSlashes(rawEndpoint).replace(/\/openai$/, "");
     if (apiStyle === "responses") {
       return `${base}/openai/deployments/${deployment}/responses?api-version=${apiVersion}`;
     }
@@ -197,7 +209,7 @@ function resolveEndpointUrl(execOptions, apiStyle = "responses") {
   // OpenAI-compatible path (standard OpenAI, Azure AI Foundry with /openai/v1, etc.)
   // Normalise: strip trailing slash and any trailing /v1 so we can re-add a
   // canonical /v1/ prefix.  Keep /openai if present (Azure AI Foundry needs it).
-  const baseUrl = (rawEndpoint || OPENAI_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = trimTrailingSlashes(rawEndpoint || OPENAI_BASE_URL);
   const clean = baseUrl.replace(/\/v\d+$/, "");
   if (apiStyle === "responses") return `${clean}/v1/responses`;
   return `${clean}/v1/chat/completions`;
@@ -1033,7 +1045,7 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
       const rawEndpoint = toTrimmedString(pc.endpoint || pc.baseUrl || env.OPENAI_BASE_URL || "");
       const usesDeploymentPath = !/\/openai\/v\d+\/?$/.test(rawEndpoint);
       if (usesDeploymentPath) {
-        const base = rawEndpoint.replace(/\/+$/, "").replace(/\/openai$/, "");
+        const base = trimTrailingSlashes(rawEndpoint).replace(/\/openai$/, "");
         const resolved = await resolveAzureDeploymentName(base, model, credentials.apiKey);
         if (resolved !== model) {
           execOptions = { ...execOptions, providerConfig: { ...pc, deployment: resolved } };

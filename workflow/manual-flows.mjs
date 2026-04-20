@@ -80,12 +80,23 @@ function ensureDirs(rootDir) {
 }
 
 function getManualFlowWorkflowId(templateId) {
-  const normalized = String(templateId || "custom")
-    .trim()
-    .replace(/[^a-zA-Z0-9_.-]+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-  return `manual-flow.${normalized || "custom"}`;
+  const src = String(templateId || "custom").trim();
+  let result = "";
+  for (const ch of src) {
+    const lower = ch.toLowerCase();
+    if (
+      (lower >= "a" && lower <= "z") ||
+      (lower >= "0" && lower <= "9") ||
+      ch === "_" || ch === "." || ch === "-"
+    ) {
+      result += ch;
+    } else if (result.length > 0 && result[result.length - 1] !== "-") {
+      result += "-";
+    }
+  }
+  while (result.endsWith("-")) result = result.slice(0, -1);
+  while (result.startsWith("-")) result = result.slice(1);
+  return `manual-flow.${result || "custom"}`;
 }
 
 function cloneJson(value) {

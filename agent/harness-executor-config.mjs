@@ -5,12 +5,17 @@ function toTrimmedString(value) {
 }
 
 function sanitizeId(value, fallback = "harness-executor") {
-  const normalized = toTrimmedString(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-  return normalized || fallback;
+  const src = toTrimmedString(value).toLowerCase();
+  let result = "";
+  for (const ch of src) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) {
+      result += ch;
+    } else if (result.length > 0 && result[result.length - 1] !== "-") {
+      result += "-";
+    }
+  }
+  while (result.endsWith("-")) result = result.slice(0, -1);
+  return result || fallback;
 }
 
 function uniqueStrings(values = []) {

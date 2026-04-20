@@ -35,8 +35,17 @@ function uniqueStrings(values) {
 }
 
 function buildProfileSlug(value, fallback = "session") {
-  const normalized = String(value || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return normalized || fallback;
+  const src = String(value || "").trim().toLowerCase();
+  let result = "";
+  for (const ch of src) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch === "." || ch === "_") {
+      result += ch;
+    } else if (result.length > 0 && result[result.length - 1] !== "-") {
+      result += "-";
+    }
+  }
+  while (result.endsWith("-")) result = result.slice(0, -1);
+  return result || fallback;
 }
 
 function normalizeText(value) {

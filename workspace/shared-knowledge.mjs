@@ -157,8 +157,24 @@ function normalizeScopeLevel(value) {
 function extractPathCandidatesFromText(value, repoRoot = knowledgeState.repoRoot || process.cwd()) {
   const text = normalizeText(value);
   if (!text) return [];
-  const matches = text.match(/[A-Za-z0-9_/\\-]+(?:\.[A-Za-z0-9_/\\-]+)*\.[A-Za-z0-9]{1,8}/g) || [];
-  return normalizeRelatedPaths(matches, { repoRoot, maxItems: 24 });
+  const candidates = [];
+  let start = -1;
+  for (let i = 0; i <= text.length; i++) {
+    const ch = i < text.length ? text[i] : "";
+    const isPathChar =
+      ch === "/" || ch === "\\" || ch === "." || ch === "-" || ch === "_" ||
+      (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9");
+    if (isPathChar) {
+      if (start < 0) start = i;
+    } else {
+      if (start >= 0) {
+        const token = text.slice(start, i);
+        if (token.includes(".")) candidates.push(token);
+        start = -1;
+      }
+    }
+  }
+  return normalizeRelatedPaths(candidates, { repoRoot, maxItems: 24 });
 }
 
 function getScopeIdentifier(entry, scopeLevel = entry?.scopeLevel) {

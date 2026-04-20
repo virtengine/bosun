@@ -25,7 +25,7 @@ const PBKDF2_DIGEST = "sha512";
 const SALT = "bosun-credential-store-v2";
 const STORE_VERSION = 2;
 const STATIC_TYPES = new Set(["static", "env", "config"]);
-const TEMPLATE_PATTERN = /\{\{\s*([^}]+?)\s*\}\}/g;
+const TEMPLATE_PATTERN = /\{\{([^}]*)\}\}/g;
 
 function toTrimmedString(value) {
   return String(value ?? "").trim();
@@ -164,14 +164,14 @@ export function resolveCredentialTemplateValue(template, context = {}) {
   }
   if (typeof template !== "string") return template ?? null;
 
-  const exactMatch = template.match(/^\{\{\s*([^}]+?)\s*\}\}$/);
+  const exactMatch = template.match(/^\{\{([^}]*)\}\}$/);
   if (exactMatch) {
-    const resolved = getNestedValue(scopes, exactMatch[1]);
+    const resolved = getNestedValue(scopes, exactMatch[1].trim());
     return resolved === undefined ? "" : resolved;
   }
 
   return template.replace(TEMPLATE_PATTERN, (_match, rawPath) => {
-    const resolved = getNestedValue(scopes, rawPath);
+    const resolved = getNestedValue(scopes, rawPath.trim());
     if (resolved == null) return "";
     if (typeof resolved === "object") return JSON.stringify(resolved);
     return String(resolved);

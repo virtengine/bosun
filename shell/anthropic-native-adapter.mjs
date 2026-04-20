@@ -11,6 +11,12 @@ function toTrimmedString(value) {
   return String(value ?? "").trim();
 }
 
+function trimTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === "/") end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 function cloneJson(value) {
   if (value == null) return value ?? null;
   return JSON.parse(JSON.stringify(value));
@@ -88,9 +94,9 @@ function resolveEndpoint(execOptions = {}) {
     toTrimmedString(providerConfig.endpoint)
     || toTrimmedString(providerConfig.baseUrl)
     || DEFAULT_ENDPOINT;
-  if (/\/v1\/messages\/?$/i.test(raw)) return raw.replace(/\/+$/, "");
-  if (/\/v1\/?$/i.test(raw)) return `${raw.replace(/\/+$/, "")}/messages`;
-  return `${raw.replace(/\/+$/, "")}/v1/messages`;
+  if (/\/v1\/messages\/?$/i.test(raw)) return trimTrailingSlashes(raw);
+  if (/\/v1\/?$/i.test(raw)) return `${trimTrailingSlashes(raw)}/messages`;
+  return `${trimTrailingSlashes(raw)}/v1/messages`;
 }
 
 function stringifyStructuredValue(value) {

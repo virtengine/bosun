@@ -133,9 +133,7 @@ class TuiWsBridge {
 			if (Object.keys(headers).length > 0) {
 				wsOptions.headers = headers;
 			}
-			if (this._insecureTls) {
-				wsOptions.rejectUnauthorized = false;
-			}
+			wsOptions.rejectUnauthorized = !this._insecureTls;
 			this.ws = Object.keys(wsOptions).length > 0
 				? new this.WebSocketImpl(this._url, wsOptions)
 				: new this.WebSocketImpl(this._url);

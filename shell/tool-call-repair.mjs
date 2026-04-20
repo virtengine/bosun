@@ -51,6 +51,12 @@
 
 function toStr(v) { return String(v ?? "").trim(); }
 
+function trimTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === "/") end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 function isAzureEndpoint(rawEndpoint) {
   const candidate = toStr(rawEndpoint);
   if (!candidate) return false;
@@ -206,10 +212,10 @@ async function callRepairApi(repairPrompt, execOptions, repairModel) {
   if (isAzure && rawEndpoint) {
     const deployment = toStr(pc.deployment) || model;
     const apiVersion = toStr(pc.apiVersion) || "2025-03-01-preview";
-    url = `${rawEndpoint.replace(/\/+$/, "")}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+    url = `${trimTrailingSlashes(rawEndpoint)}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
   } else {
     const base = rawEndpoint || "https://api.openai.com";
-    url = `${base.replace(/\/+$/, "")}/v1/chat/completions`;
+    url = `${trimTrailingSlashes(base)}/v1/chat/completions`;
   }
 
   // Build auth headers

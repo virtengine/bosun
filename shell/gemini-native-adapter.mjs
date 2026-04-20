@@ -10,6 +10,12 @@ function toTrimmedString(value) {
   return String(value ?? "").trim();
 }
 
+function trimTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === "/") end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 function cloneJson(value) {
   if (value == null) return value ?? null;
   return JSON.parse(JSON.stringify(value));
@@ -76,16 +82,16 @@ function resolveBaseUrl(execOptions = {}) {
   const env = execOptions.env && typeof execOptions.env === "object"
     ? execOptions.env
     : process.env;
-  return (
+  return trimTrailingSlashes(
     toTrimmedString(providerConfig.baseUrl)
     || toTrimmedString(providerConfig.endpoint)
     || toTrimmedString(env.GEMINI_BASE_URL)
     || DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+  );
 }
 
 function resolveEndpoint(execOptions = {}, model = "", apiKey = "") {
-  const baseUrl = resolveBaseUrl(execOptions).replace(/\/+$/, "");
+  const baseUrl = trimTrailingSlashes(resolveBaseUrl(execOptions));
   const normalizedModel = encodeURIComponent(toTrimmedString(model));
   const normalizedKey = encodeURIComponent(apiKey);
   return `${baseUrl}/models/${normalizedModel}:generateContent?key=${normalizedKey}`;
