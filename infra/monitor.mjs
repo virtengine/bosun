@@ -896,6 +896,16 @@ async function ensureWorkflowAutomationEngine() {
             String(status || ""),
             options && typeof options === "object" ? options : {},
           ),
+        // Required by workflow action.update_task_status to persist patch fields
+        // such as blockedReason, branchName, prNumber, prUrl. Without this, the
+        // node's `typeof kanban.updateTask === "function"` guard evaluates false
+        // and blocked-state transitions land with empty blockedReason, which
+        // breaks downstream diagnosis (kanban UI / recovery / Telegram alerts).
+        updateTask: async (taskId, patch) =>
+          updateKanbanTask(
+            String(taskId || "").trim(),
+            patch && typeof patch === "object" ? patch : {},
+          ),
         listTasks: async (projectId, filters = {}) =>
           listKanbanTasks(String(projectId || ""), filters || {}),
         getTask: async (taskId) =>
