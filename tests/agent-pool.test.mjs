@@ -336,6 +336,7 @@ const ENV_KEYS = [
   "COPILOT_SDK_DISABLED",
   "CLAUDE_SDK_DISABLED",
   "OPENCODE_SDK_DISABLED",
+  "OPENAI_NATIVE_SDK_DISABLED",
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "OPENAI_ORGANIZATION",
@@ -391,6 +392,7 @@ function clearSdkEnv() {
   delete process.env.COPILOT_SDK_DISABLED;
   delete process.env.CLAUDE_SDK_DISABLED;
   delete process.env.OPENCODE_SDK_DISABLED;
+  delete process.env.OPENAI_NATIVE_SDK_DISABLED;
   delete process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_BASE_URL;
   delete process.env.OPENAI_ORGANIZATION;
@@ -611,14 +613,16 @@ describe("SDK resolution", () => {
   it("uses fallback chain when all preferred are disabled", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     // Claude not disabled → should pick claude
     resetPoolSdkCache();
     expect(getPoolSdkName()).toBe("claude");
   });
 
   it("defaults to codex when nothing is set", () => {
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     resetPoolSdkCache();
-    // No env vars → fallback chain starts at codex
+    // No env vars (with native SDK disabled to mirror legacy default) → fallback chain starts at codex
     expect(getPoolSdkName()).toBe("codex");
   });
 
@@ -627,6 +631,7 @@ describe("SDK resolution", () => {
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
     process.env.OPENCODE_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     resetPoolSdkCache();
     // All disabled → last resort codex
     expect(getPoolSdkName()).toBe("codex");
@@ -688,7 +693,8 @@ describe("SDK management", () => {
     expect(available).toContain("copilot");
     expect(available).toContain("claude");
     expect(available).toContain("opencode");
-    expect(available).toHaveLength(4);
+    expect(available).toContain("openai-native");
+    expect(available).toHaveLength(5);
   });
 
   it("getAvailableSdks excludes disabled SDKs", () => {
@@ -698,7 +704,8 @@ describe("SDK management", () => {
     expect(available).toContain("codex");
     expect(available).toContain("claude");
     expect(available).toContain("opencode");
-    expect(available).toHaveLength(3);
+    expect(available).toContain("openai-native");
+    expect(available).toHaveLength(4);
   });
 
   it("getAvailableSdks returns empty when all disabled", () => {
@@ -706,6 +713,7 @@ describe("SDK management", () => {
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
     process.env.OPENCODE_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     expect(getAvailableSdks()).toHaveLength(0);
   });
 });
@@ -724,7 +732,7 @@ describe("launchEphemeralThread", () => {
     );
     expect(result).toHaveProperty("sdk");
     expect(typeof result.sdk).toBe("string");
-    expect(["codex", "copilot", "claude", "opencode"]).toContain(result.sdk);
+    expect(["codex", "copilot", "claude", "opencode", "openai-native"]).toContain(result.sdk);
   });
 
   it("launches via opencode when requested through opencode-sdk alias", async () => {

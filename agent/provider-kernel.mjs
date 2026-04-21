@@ -496,8 +496,15 @@ export function createProviderKernel(options = {}) {
                   const adapterInput = targetAdapter.acceptsTurnPayload === true
                     ? payload
                     : extractMessageFromPayload(payload);
+                  // When the adapter consumes a plain string (acceptsTurnPayload !== true)
+                  // the rich payload — including the resolved tool definitions — is
+                  // discarded by extractMessageFromPayload. Forward payload.tools through
+                  // execOptions so string-mode adapters (e.g. openai-native) still receive
+                  // tools and don't degrade into a one-turn text-only reply.
+                  const payloadTools = Array.isArray(payload?.tools) ? payload.tools : null;
                   return targetAdapter.exec(adapterInput, {
                     ...execOptions,
+                    ...(payloadTools && !Array.isArray(execOptions.tools) ? { tools: payloadTools } : {}),
                     ...(explicitProviderId ? { provider: explicitProviderId } : {}),
                     ...(mergedProviderConfig ? { providerConfig: mergedProviderConfig } : {}),
                   });
