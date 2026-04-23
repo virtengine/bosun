@@ -1822,6 +1822,50 @@ describe("WorkflowEngine - run history details", () => {
     }));
   });
 
+  it("preserves task identity when completed run detail compaction truncates large data objects", async () => {
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "log", type: "notify.log", label: "Log", config: { message: "identity compaction coverage" } },
+      ],
+      [{ id: "e1", source: "trigger", target: "log" }],
+      { id: "wf-identity-compaction", name: "Identity Compaction Workflow" },
+    );
+
+    engine.save(wf);
+
+    const oversizedData = {};
+    for (let index = 0; index < 50; index += 1) {
+      oversizedData[`filler_${String(index).padStart(2, "0")}`] = `value-${index}`;
+    }
+    oversizedData.taskId = "task-identity-compaction-1";
+    oversizedData.taskTitle = "Identity survives compaction";
+    oversizedData.branchName = "task/identity-compaction";
+    oversizedData.task = {
+      id: "task-identity-compaction-1",
+      title: "Identity survives compaction",
+      branchName: "task/identity-compaction",
+      status: "done",
+    };
+
+    const ctx = await engine.execute(wf.id, oversizedData);
+
+    const summary = engine.getRunHistory(wf.id, 1)[0];
+    expect(summary?.runId).toBe(ctx.id);
+    expect(summary?.taskId).toBe("task-identity-compaction-1");
+    expect(summary?.taskIds || []).toContain("task-identity-compaction-1");
+    expect(summary?.taskTitle).toBe("Identity survives compaction");
+
+    const detail = engine.getRunDetail(ctx.id);
+    expect(detail?.detail?.data?._truncatedKeys).toBeGreaterThan(0);
+    expect(detail?.detail?.data?.taskId).toBe("task-identity-compaction-1");
+    expect(detail?.detail?.data?.taskTitle).toBe("Identity survives compaction");
+    expect(detail?.detail?.data?.branchName).toBe("task/identity-compaction");
+    expect(detail?.detail?.data?.task?.id).toBe("task-identity-compaction-1");
+    expect(detail?.detail?.data?.task?.title).toBe("Identity survives compaction");
+    expect(detail?.detail?.data?.task?.branch).toBe("task/identity-compaction");
+  });
+
   it("stores issue-advisor and DAGState failure context for continuation", async () => {
     registerNodeType("test.always_fail_for_dag", {
       describe: () => "Fails for DAGState coverage",
@@ -2552,6 +2596,64 @@ describe("WorkflowEngine - run history details", () => {
     ]);
   });
 
+  it("links persisted active runs into task topology at run start", async () => {
+    const taskStore = await import("../task/task-store.mjs");
+    const originalStorePath = taskStore.getStorePath();
+    const taskStoreDir = mkdtempSync(join(tmpdir(), "wf-engine-run-start-store-"));
+    const storePath = join(taskStoreDir, "kanban-state.json");
+
+    try {
+      taskStore.configureTaskStore({ storePath });
+      await taskStore._resetForTests();
+      taskStore.addTask({ id: "task-run-start-link", title: "Run Start Link", status: "inprogress" });
+
+      engine = makeTmpEngine({ kanban: {} });
+      const ctx = new WorkflowContext({
+        taskId: "task-run-start-link",
+        taskTitle: "Run Start Link",
+        task: {
+          id: "task-run-start-link",
+          title: "Run Start Link",
+        },
+        _workflowTaskId: "task-run-start-link",
+        _workflowSessionId: "workflow-session-1",
+        _workflowRootSessionId: "workflow-root-session-1",
+        _workflowParentSessionId: "workflow-parent-session-1",
+        _workflowRootRunId: "workflow-root-run-1",
+        _workflowParentRunId: "workflow-parent-run-1",
+      });
+      ctx.id = "run-start-link-1";
+      ctx.startedAt = Date.now() - 500;
+
+      engine._persistActiveRunState("run-start-link-1", "template-task-lifecycle", "Task Lifecycle", ctx);
+      await taskStore.waitForStoreWrites();
+
+      const storedTask = taskStore.getTask("task-run-start-link");
+      expect(storedTask?.latestRunId).toBe("run-start-link-1");
+      expect(storedTask?.workflowName).toBe("Task Lifecycle");
+      expect(storedTask?.sessionId).toBe("workflow-session-1");
+      expect(storedTask?.topology).toEqual(expect.objectContaining({
+        latestRunId: "run-start-link-1",
+        workflowName: "Task Lifecycle",
+        sessionId: "workflow-session-1",
+        rootRunId: "workflow-root-run-1",
+        parentRunId: "workflow-parent-run-1",
+      }));
+      expect(storedTask?.workflowRuns).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          runId: "run-start-link-1",
+          workflowName: "Task Lifecycle",
+          status: WorkflowStatus.RUNNING,
+        }),
+      ]));
+    } finally {
+      await taskStore.waitForStoreWrites();
+      await taskStore._resetForTests();
+      taskStore.configureTaskStore({ storePath: originalStorePath });
+      await removeDirWithRetries(taskStoreDir, { ignoreFinalEperm: true });
+    }
+  });
+
   it("scopes persisted run summaries to the current run identity", () => {
     const detail = {
       startedAt: 100,
@@ -2899,6 +3001,114 @@ describe("WorkflowEngine - run history details", () => {
     expect(recovered.activeNodeCount).toBe(0);
   });
 
+  it("includes existing paused resumable runs in the startup interrupted cohort", () => {
+    const wf = makeSimpleWorkflow(
+      [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
+      [],
+      { id: "wf-interrupted-startup-cohort", name: "Interrupted Startup Cohort Workflow" },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const historicalPausedRunId = "run-paused-existing";
+    const freshInterruptedRunId = "run-running-current";
+    const interruptedEvents = [];
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: historicalPausedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: 1500,
+            interruptedAt: 1500,
+            resumable: true,
+          },
+          {
+            runId: freshInterruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.RUNNING,
+            startedAt: 2000,
+            endedAt: null,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${historicalPausedRunId}.json`),
+      JSON.stringify({
+        id: historicalPausedRunId,
+        startedAt: 1000,
+        endedAt: 1500,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId: "task-historical-existing",
+        },
+        nodeStatuses: { trigger: NodeStatus.COMPLETED },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${freshInterruptedRunId}.json`),
+      JSON.stringify({
+        id: freshInterruptedRunId,
+        startedAt: 2000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId: "task-current-running",
+        },
+        nodeStatuses: { trigger: NodeStatus.RUNNING },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, "_active-runs.json"),
+      JSON.stringify([
+        {
+          runId: freshInterruptedRunId,
+          workflowId: wf.id,
+          workflowName: wf.name,
+          taskId: "task-current-running",
+        },
+      ], null, 2),
+      "utf8",
+    );
+
+    engine.on("runs:interrupted", (event) => interruptedEvents.push(event));
+
+    engine._detectInterruptedRuns();
+
+    expect(interruptedEvents).toHaveLength(1);
+    expect(interruptedEvents[0]?.runs.map((entry) => entry.runId).sort()).toEqual(
+      [freshInterruptedRunId, historicalPausedRunId].sort(),
+    );
+    expect(Array.from(engine._startupInterruptedRunIds || []).sort()).toEqual(
+      [freshInterruptedRunId, historicalPausedRunId].sort(),
+    );
+
+    const index = JSON.parse(readFileSync(join(runsDir, "index.json"), "utf8"));
+    const historical = index.runs.find((entry) => entry.runId === historicalPausedRunId);
+    expect(historical).toBeTruthy();
+    expect(historical.status).toBe(WorkflowStatus.PAUSED);
+    expect(historical.resumable).toBe(true);
+    expect(typeof historical.interruptedAt).toBe("number");
+  });
+
   it("marks interrupted task-lifecycle shell runs with unresolved task placeholders as non-resumable", () => {
     const wf = makeSimpleWorkflow(
       [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
@@ -3213,7 +3423,7 @@ describe("WorkflowEngine - run history details", () => {
     expect(older.resumeResult).toBe("duplicate_task_run");
   });
 
-  it("only resumes runs detected in the current interrupted-run scan", async () => {
+  it("prioritizes the current interrupted-run scan without starving older paused runs", async () => {
     const wf = makeSimpleWorkflow(
       [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
       [],
@@ -3302,15 +3512,20 @@ describe("WorkflowEngine - run history details", () => {
     );
 
     engine._detectInterruptedRuns();
-  const readSpy = vi.spyOn(engine, "_readRunDetailFile");
 
     const retrySpy = vi.spyOn(engine, "retryRun").mockResolvedValue({ resumed: true });
 
     await engine.resumeInterruptedRuns();
 
-    expect(retrySpy).toHaveBeenCalledTimes(1);
-    expect(retrySpy).toHaveBeenCalledWith(
+    expect(retrySpy).toHaveBeenCalledTimes(2);
+    expect(retrySpy).toHaveBeenNthCalledWith(
+      1,
       freshInterruptedRunId,
+      expect.objectContaining({ mode: expect.any(String) }),
+    );
+    expect(retrySpy).toHaveBeenNthCalledWith(
+      2,
+      historicalPausedRunId,
       expect.objectContaining({ mode: expect.any(String) }),
     );
 
@@ -3318,15 +3533,105 @@ describe("WorkflowEngine - run history details", () => {
     const historical = index.runs.find((entry) => entry.runId === historicalPausedRunId);
     const fresh = index.runs.find((entry) => entry.runId === freshInterruptedRunId);
     expect(historical).toBeTruthy();
-    expect(historical.resumable).toBe(true);
-    expect(historical.resumeResult).toBeUndefined();
+    expect(historical.resumable).toBe(false);
+    expect(historical.resumeResult).toBe("resumed");
     expect(fresh?.resumeResult).toBe("resumed");
-    expect(
-      readSpy.mock.calls.some(
-        ([runId]) => String(runId || "") === historicalPausedRunId,
-      ),
-    ).toBe(false);
-    readSpy.mockRestore();
+  });
+
+  it("does not block later interrupted resumes behind a long-running first retry", async () => {
+    const wf = makeSimpleWorkflow(
+      [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
+      [],
+      { id: "wf-resume-no-serial-block", name: "Resume Without Serial Blocking" },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const firstRunId = "run-interrupted-first";
+    const secondRunId = "run-interrupted-second";
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: firstRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: 1500,
+            interruptedAt: 2000,
+            resumable: true,
+            taskId: "task-resume-first",
+          },
+          {
+            runId: secondRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 2000,
+            endedAt: 2500,
+            interruptedAt: 2100,
+            resumable: true,
+            taskId: "task-resume-second",
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    for (const [runId, taskId, startedAt, endedAt] of [
+      [firstRunId, "task-resume-first", 1000, 1500],
+      [secondRunId, "task-resume-second", 2000, 2500],
+    ]) {
+      writeFileSync(
+        join(runsDir, `${runId}.json`),
+        JSON.stringify({
+          id: runId,
+          startedAt,
+          endedAt,
+          data: {
+            _workflowId: wf.id,
+            _workflowName: wf.name,
+            taskId,
+          },
+          nodeStatuses: { trigger: NodeStatus.COMPLETED },
+          nodeStatusEvents: [],
+          logs: [],
+          errors: [],
+        }, null, 2),
+        "utf8",
+      );
+    }
+
+    let releaseFirstRetry;
+    const firstRetryPending = new Promise((resolve) => {
+      releaseFirstRetry = resolve;
+    });
+    const retrySpy = vi.spyOn(engine, "retryRun").mockImplementation((runId) => {
+      if (runId === firstRunId) {
+        return firstRetryPending.then(() => ({ resumed: true }));
+      }
+      return Promise.resolve({ resumed: true });
+    });
+
+    const resumePromise = engine.resumeInterruptedRuns();
+
+    await vi.waitFor(() => {
+      expect(retrySpy).toHaveBeenCalledTimes(2);
+    });
+
+    const resumedRunIds = retrySpy.mock.calls.map(([runId]) => runId).sort();
+    expect(resumedRunIds).toEqual([firstRunId, secondRunId].sort());
+
+    releaseFirstRetry();
+    await resumePromise;
+
+    const index = JSON.parse(readFileSync(join(runsDir, "index.json"), "utf8"));
+    const first = index.runs.find((entry) => entry.runId === firstRunId);
+    const second = index.runs.find((entry) => entry.runId === secondRunId);
+    expect(first?.resumeResult).toBe("resumed");
+    expect(second?.resumeResult).toBe("resumed");
   });
 
   it("does not load the full execution ledger during interrupted-run dedupe", async () => {
@@ -4088,6 +4393,94 @@ describe("WorkflowEngine - run history details", () => {
     expect(retryRunSpy).toHaveBeenCalledWith(interruptedRunId, expect.objectContaining({
       mode: "from_scratch",
       _decisionReason: "task_claim_missing_on_resume",
+    }));
+  });
+
+  it("keeps localized resume when interrupted run detail still carries a claim token", async () => {
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "action.claim_task", label: "Claim Task", config: {} },
+        { id: "run-agent-tests", type: "action.run_agent", label: "Agent Tests", config: {} },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "claim-task" },
+        { id: "e2", source: "claim-task", target: "run-agent-tests" },
+      ],
+      { id: "wf-interrupted-task-claim-persisted", name: "Interrupted Task Claim Persisted Workflow" },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-interrupted-task-claim-persisted";
+    const { initTaskClaims } = await import("../task/task-claims.mjs");
+    await initTaskClaims({ repoRoot: tmpDir });
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId: "task-claim-persisted-1",
+          _claimToken: "claim-token-persisted-1",
+          _claimInstanceId: "wf-persisted-1",
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "run-agent-tests": NodeStatus.RUNNING,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": {
+            success: true,
+            taskId: "task-claim-persisted-1",
+            claimToken: "claim-token-persisted-1",
+            instanceId: "wf-persisted-1",
+          },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const retryRunSpy = vi.spyOn(engine, "retryRun").mockResolvedValue({
+      retryRunId: "retry-interrupted-task-claim-persisted",
+      mode: "from_failed",
+      originalRunId: interruptedRunId,
+      ctx: { id: "retry-interrupted-task-claim-persisted" },
+    });
+
+    await engine.resumeInterruptedRuns();
+
+    expect(retryRunSpy).toHaveBeenCalledTimes(1);
+    expect(retryRunSpy).toHaveBeenCalledWith(interruptedRunId, expect.objectContaining({
+      mode: "from_failed",
+      _decisionReason: "dag_state.localized_resume",
     }));
   });
 
@@ -6830,6 +7223,76 @@ describe("Session chaining - action.run_agent", () => {
         onEvent: expect.any(Function),
         systemPrompt: expect.any(String),
       }),
+    );
+  });
+
+  it("invalidates a stale task-key thread before retrying with a fresh managed session", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({
+      _workflowId: "template-task-lifecycle",
+      _workflowName: "Task Lifecycle",
+      worktreePath: "/tmp/test",
+      taskId: "TASK-STALE-1",
+      taskTitle: "Recover stale session",
+      task: {
+        id: "TASK-STALE-1",
+        title: "Recover stale session",
+        branchName: "feat/recover-stale-session",
+      },
+      _workflowParentSessionId: "TASK-STALE-1",
+      _workflowRootSessionId: "TASK-STALE-1",
+    });
+    ctx.id = "retry-run-1";
+
+    const invalidateThread = vi.fn();
+    const launchOrResumeThread = vi.fn()
+      .mockRejectedValueOnce(new Error("Cannot read properties of null (reading 'sessionId')"))
+      .mockResolvedValueOnce({
+        success: true,
+        output: "fresh retry succeeded",
+        sdk: "openai-native",
+        items: [],
+        threadId: "thread-fresh-1",
+      });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          invalidateThread,
+          launchOrResumeThread,
+        },
+      },
+    };
+    const node = {
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: { prompt: "Recover the task", autoRecover: true },
+    };
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.threadId).toBe("thread-fresh-1");
+    expect(result.sessionId).toBe("thread-fresh-1");
+    expect(ctx.data.sessionId).toBe("thread-fresh-1");
+    expect(ctx.data.threadId).toBe("thread-fresh-1");
+    expect(invalidateThread).toHaveBeenCalledTimes(1);
+    expect(invalidateThread).toHaveBeenCalledWith("template-task-lifecycle:retry-run-1:run-agent-plan");
+    expect(launchOrResumeThread).toHaveBeenCalledTimes(2);
+    expect(launchOrResumeThread.mock.calls[0][3]).toEqual(
+      expect.objectContaining({
+        taskKey: "template-task-lifecycle:retry-run-1:run-agent-plan",
+      }),
+    );
+    expect(launchOrResumeThread.mock.calls[1][3]).toEqual(
+      expect.objectContaining({
+        taskKey: "template-task-lifecycle:retry-run-1:run-agent-plan",
+      }),
+    );
+    expect(String(launchOrResumeThread.mock.calls[1][3]?.sessionId || "")).toContain(":fresh-");
+    expect(invalidateThread.mock.invocationCallOrder[0]).toBeLessThan(
+      launchOrResumeThread.mock.invocationCallOrder[1],
     );
   });
 

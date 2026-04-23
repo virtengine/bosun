@@ -2,6 +2,7 @@
   "mcpServers": {
     "windows_desktop_control": {
       "command": "node",
+      "cwd": ".",
       "args": [
         "./scripts/windows-desktop-mcp-server.mjs"
       ],

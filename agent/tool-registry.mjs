@@ -43,6 +43,26 @@ function normalizeNetworkHint(value) {
   return "inherit";
 }
 
+function normalizeToolSchema(definition = {}) {
+  const metadata = definition.metadata && typeof definition.metadata === "object"
+    ? definition.metadata
+    : {};
+  const parameters = definition.parameters && typeof definition.parameters === "object"
+    ? definition.parameters
+    : (metadata.parameters && typeof metadata.parameters === "object"
+        ? metadata.parameters
+        : null);
+  const inputSchema = definition.inputSchema && typeof definition.inputSchema === "object"
+    ? definition.inputSchema
+    : (metadata.inputSchema && typeof metadata.inputSchema === "object"
+        ? metadata.inputSchema
+        : null);
+  return {
+    parameters: parameters ? cloneJson(parameters) : null,
+    inputSchema: inputSchema ? cloneJson(inputSchema) : null,
+  };
+}
+
 export function mergeToolDefinitions(base = {}, overlay = {}) {
   const mergedAliases = uniqueStrings([
     ...asArray(base.aliases),
@@ -81,6 +101,7 @@ export function normalizeToolDefinition(definition = {}, options = {}) {
   ).filter((entry) => entry !== id);
   const description = normalizeText(definition.description || definition.summary);
   const source = normalizeText(definition.source || options.source) || "runtime";
+  const { parameters, inputSchema } = normalizeToolSchema(definition);
   return {
     id,
     name: normalizeText(definition.name || id) || id,
@@ -101,6 +122,8 @@ export function normalizeToolDefinition(definition = {}, options = {}) {
     retry: definition.retry && typeof definition.retry === "object"
       ? cloneJson(definition.retry)
       : null,
+    parameters,
+    inputSchema,
     metadata: definition.metadata && typeof definition.metadata === "object"
       ? cloneJson(definition.metadata)
       : {},

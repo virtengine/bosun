@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -49,6 +49,7 @@ const DEFAULT_STATUS = Object.freeze({
 
 const DEFAULT_ANALYTICS_DRAIN_BATCH = 256;
 const DEFAULT_PERSIST_BATCH_EVENTS = 512;
+const DEFAULT_RESTORE_MAX_BYTES = 16 * 1024 * 1024;
 const QUEUE_COMPACT_THRESHOLD = 1024;
 
 function scheduleBackground(fn) {
@@ -176,9 +177,51 @@ function isTerminalStatus(value) {
   );
 }
 
-function readJsonLines(filePath) {
-  if (!filePath || !existsSync(filePath)) return [];
-  return readFileSync(filePath, "utf8")
+function readJsonLines(filePath, options = {}) {
+  if (!filePath || !existsSync(filePath)) {
+    return {
+      entries: [],
+      fileBytes: 0,
+      readBytes: 0,
+      truncated: false,
+    };
+  }
+
+  const maxBytes = Number.isFinite(Number(options.maxBytes))
+    ? Math.max(0, Math.trunc(Number(options.maxBytes)))
+    : DEFAULT_RESTORE_MAX_BYTES;
+  const maxEvents = Number.isFinite(Number(options.maxEvents))
+    ? Math.max(1, Math.trunc(Number(options.maxEvents)))
+    : null;
+  const fileBytes = Math.max(0, Number(statSync(filePath).size || 0));
+  const readBytes = maxBytes > 0 ? Math.min(fileBytes, maxBytes) : fileBytes;
+  let raw = "";
+
+  if (readBytes <= 0) {
+    return {
+      entries: [],
+      fileBytes,
+      readBytes: 0,
+      truncated: fileBytes > 0,
+    };
+  }
+
+  if (readBytes === fileBytes) {
+    raw = readFileSync(filePath, "utf8");
+  } else {
+    const fd = openSync(filePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(readBytes);
+      readSync(fd, buffer, 0, readBytes, Math.max(0, fileBytes - readBytes));
+      raw = buffer.toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+    const firstNewline = raw.indexOf("\n");
+    raw = firstNewline >= 0 ? raw.slice(firstNewline + 1) : "";
+  }
+
+  let entries = raw
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
@@ -190,6 +233,19 @@ function readJsonLines(filePath) {
       }
     })
     .filter(Boolean);
+
+  let truncated = readBytes < fileBytes;
+  if (maxEvents != null && entries.length > maxEvents) {
+    entries = entries.slice(-maxEvents);
+    truncated = true;
+  }
+
+  return {
+    entries,
+    fileBytes,
+    readBytes,
+    truncated,
+  };
 }
 
 export class HarnessTelemetryRuntime {
@@ -202,6 +258,14 @@ export class HarnessTelemetryRuntime {
     this.maxPersistBatchEvents = Math.max(
       1,
       Math.trunc(Number(options.maxPersistBatchEvents) || DEFAULT_PERSIST_BATCH_EVENTS),
+    );
+    this.maxRestoreBytes = Math.max(
+      64 * 1024,
+      Math.trunc(Number(options.maxRestoreBytes) || DEFAULT_RESTORE_MAX_BYTES),
+    );
+    this.maxRestoreEvents = Math.max(
+      1,
+      Math.trunc(Number(options.maxRestoreEvents) || this.maxInMemoryEvents),
     );
     this.paths = options.paths || {};
     this.projector = options.projector;
@@ -427,7 +491,11 @@ export class HarnessTelemetryRuntime {
   }
 
   restoreFromDisk(options = {}) {
-    const entries = readJsonLines(options?.eventsPath || this.paths?.eventsPath);
+    const restore = readJsonLines(options?.eventsPath || this.paths?.eventsPath, {
+      maxBytes: options?.maxRestoreBytes ?? this.maxRestoreBytes,
+      maxEvents: options?.maxRestoreEvents ?? this.maxRestoreEvents,
+    });
+    const entries = restore.entries;
     if (entries.length === 0) {
       this.flushForeground();
       return {
@@ -443,6 +511,9 @@ export class HarnessTelemetryRuntime {
         lastEventAt: this.status.lastBufferedEventAt,
       };
     }
+    this.status.restoreTruncated = restore.truncated;
+    this.status.restoredFileBytes = restore.fileBytes;
+    this.status.restoredReadBytes = restore.readBytes;
     return this.load(entries, { source: "disk" });
   }
 

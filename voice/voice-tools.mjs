@@ -562,7 +562,6 @@ const VOICE_APPROVAL_REQUIRED_TOOLS = new Set([
   "update_task_status",
   "delegate_to_agent",
   "run_command",
-  "run_workspace_command",
   "bosun_slash_command",
   "invoke_mcp_tool",
   "create_workflow",
@@ -572,14 +571,27 @@ const VOICE_APPROVAL_REQUIRED_TOOLS = new Set([
   "sync_prompt_defaults",
 ]);
 
-function buildVoiceToolRegistryDefinitions() {
+function isVoiceLikeToolContext(context = {}) {
+  const surface = String(context?.surface || "").trim().toLowerCase();
+  const sessionType = String(context?.sessionType || "").trim().toLowerCase();
+  if (surface) {
+    return surface === "voice" || surface.startsWith("voice-");
+  }
+  if (sessionType) {
+    return sessionType === "voice" || sessionType.startsWith("voice");
+  }
+  return true;
+}
+
+function buildVoiceToolRegistryDefinitions(options = {}) {
+  const requireVoiceApprovals = options.requireVoiceApprovals !== false;
   return TOOL_DEFS.map((definition) => {
     const name = String(definition?.name || "").trim();
     return {
       id: name,
       name,
       description: String(definition?.description || "").trim() || null,
-      requiresApproval: VOICE_APPROVAL_REQUIRED_TOOLS.has(name),
+      requiresApproval: requireVoiceApprovals && VOICE_APPROVAL_REQUIRED_TOOLS.has(name),
       networkAccess: name === "invoke_mcp_tool" ? "restricted" : "inherit",
       handler: async (toolArgs, toolContext) => {
         const handler = TOOL_HANDLERS[name];
@@ -592,7 +604,7 @@ function buildVoiceToolRegistryDefinitions() {
   }).filter((entry) => entry.id);
 }
 
-async function buildVoiceToolRuntimeContext(toolName, context = {}) {
+async function buildVoiceToolRuntimeContext(toolName, context = {}, options = {}) {
   const cwd = await resolveToolCwd(context);
   const privileged = isPrivilegedVoiceContext(context);
   const defaultApprovalMode = (
@@ -608,9 +620,9 @@ async function buildVoiceToolRuntimeContext(toolName, context = {}) {
     repoRoot: String(context?.repoRoot || resolveAgentRepoRoot(cwd)).trim() || cwd,
     sessionId: String(context?.sessionId || "").trim() || null,
     runId: String(context?.runId || context?.sessionId || "").trim() || null,
-    surface: String(context?.surface || "voice").trim() || "voice",
-    sessionType: String(context?.sessionType || "voice").trim() || "voice",
-    requestedBy: String(context?.requestedBy || context?.userId || "voice").trim() || "voice",
+    surface: String(context?.surface || options.defaultSurface || "voice").trim() || "voice",
+    sessionType: String(context?.sessionType || options.defaultSessionType || "voice").trim() || "voice",
+    requestedBy: String(context?.requestedBy || context?.userId || options.defaultRequestedBy || "voice").trim() || "voice",
     approval: {
       ...(context?.approval && typeof context.approval === "object" ? context.approval : {}),
       mode: String(defaultApprovalMode).trim() || "auto",
@@ -646,7 +658,12 @@ export async function executeToolCall(toolName, args = {}, context = {}) {
     return { result: null, error: `Unknown tool: ${toolName}` };
   }
   try {
-    const runtimeContext = await buildVoiceToolRuntimeContext(normalizedToolName, context);
+    const voiceLikeContext = isVoiceLikeToolContext(context);
+    const runtimeContext = await buildVoiceToolRuntimeContext(normalizedToolName, context, {
+      defaultSurface: voiceLikeContext ? "voice" : "bosun-tool",
+      defaultSessionType: voiceLikeContext ? "voice" : "tool-bridge",
+      defaultRequestedBy: voiceLikeContext ? "voice" : "bosun-tool",
+    });
     const orchestrator = createToolOrchestrator({
       cwd: runtimeContext.cwd,
       repoRoot: runtimeContext.repoRoot,
@@ -656,8 +673,10 @@ export async function executeToolCall(toolName, args = {}, context = {}) {
         approvalScopeId: runtimeContext?.approval?.scopeId || runtimeContext?.runId || runtimeContext?.sessionId || normalizedToolName,
       },
       toolSources: [{
-        source: "voice",
-        definitions: buildVoiceToolRegistryDefinitions(),
+        source: voiceLikeContext ? "voice" : "bosun-tool",
+        definitions: buildVoiceToolRegistryDefinitions({
+          requireVoiceApprovals: voiceLikeContext,
+        }),
       }],
       truncation: {
         maxChars: 4000,

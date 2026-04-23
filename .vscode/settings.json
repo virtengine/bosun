@@ -13,5 +13,17 @@
   "github.copilot.chat.terminal.autoReplyToPrompts": true,
   "github.copilot.chat.tools.autoApprove": true,
   "github.copilot.chat.tools.runSubagent.enabled": true,
-  "github.copilot.chat.tools.searchSubagent.enabled": true
+  "github.copilot.chat.tools.searchSubagent.enabled": true,
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (UTF-8)": {
+      "source": "PowerShell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; chcp 65001 > $null"
+      ],
+      "icon": "terminal-powershell"
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "PowerShell (UTF-8)"
 }

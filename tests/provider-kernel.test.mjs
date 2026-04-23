@@ -253,6 +253,105 @@ describe("provider kernel cutover", () => {
     });
   });
 
+  it("aborts provider sessions even when the native runner never settles", async () => {
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: () => new Promise(() => {}),
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "openai-compatible",
+          openaiCompatible: {
+            enabled: true,
+            defaultModel: "qwen2.5-coder:latest",
+            baseUrl: "http://127.0.0.1:11434/v1",
+          },
+        },
+      },
+      env: {},
+    });
+
+    const session = kernel.createExecutionSession({
+      selectionId: "openai-compatible",
+      sessionId: "abort-provider-session",
+      threadId: "abort-provider-thread",
+      model: "qwen2.5-coder:latest",
+    });
+    const abortController = new AbortController();
+    const pendingTurn = session.runTurn("Abort if the native runner hangs.", {
+      abortController,
+    });
+
+    setTimeout(() => {
+      abortController.abort("first_event_timeout");
+    }, 20);
+
+    await expect(pendingTurn).rejects.toMatchObject({
+      name: "AbortError",
+      message: "first_event_timeout",
+    });
+  });
+
+  it("forwards resolved tools through execOptions for string-mode adapters", async () => {
+    const openaiNativeExec = vi.fn(async (message, options = {}) => ({
+      finalResponse: `native:${message}`,
+      sessionId: options.sessionId || "native-session",
+      threadId: options.threadId || "native-thread",
+      providerId: options.provider || null,
+    }));
+    const tools = [
+      { id: "list_tasks", description: "List tasks", parameters: { type: "object" } },
+      { id: "get_admin_help", description: "Help", parameters: { type: "object" } },
+    ];
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          // Intentionally omit acceptsTurnPayload so the kernel falls back to
+          // extractMessageFromPayload (the production registration for
+          // openai-native). This test guards against regressing the fix that
+          // forwards payload.tools through execOptions when the adapter does
+          // not consume the full turn payload.
+          exec: openaiNativeExec,
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "openai-compatible",
+          openaiCompatible: {
+            enabled: true,
+            defaultModel: "gpt-4o",
+            baseUrl: "https://api.example/v1",
+          },
+        },
+      },
+      env: {},
+    });
+
+    const session = kernel.createExecutionSession({
+      selectionId: "openai-compatible",
+      sessionId: "tools-session",
+      model: "gpt-4o",
+      toolOrchestrator: {
+        listTools: () => tools,
+      },
+    });
+
+    await session.runTurn("Use a tool to answer.");
+
+    expect(openaiNativeExec).toHaveBeenCalledTimes(1);
+    const passedExecOptions = openaiNativeExec.mock.calls[0][1];
+    expect(Array.isArray(passedExecOptions.tools)).toBe(true);
+    expect(passedExecOptions.tools).toEqual(tools);
+  });
+
   it("prefers the native adapter for harness-managed Anthropic providers and passes the full turn payload", async () => {
     const anthropicExec = vi.fn(async (payload, options = {}) => ({
       finalResponse: "anthropic-native:ok",
@@ -571,6 +670,113 @@ describe("provider kernel cutover", () => {
       providerId: "openrouter",
       sessionId: "openrouter-provider-session",
       threadId: "openrouter-provider-thread",
+    });
+  });
+
+  it("preserves explicit harness executor settings for non-primary native selections", async () => {
+    const openaiNativeExec = vi.fn(async (_message, options = {}) => ({
+      finalResponse: JSON.stringify({
+        endpoint: options.providerConfig?.endpoint || null,
+        apiVersion: options.providerConfig?.apiVersion || null,
+        selectionId: options.providerConfig?.selectionId || null,
+        provider: options.provider || null,
+      }),
+      items: [],
+      providerId: options.provider || null,
+      sessionId: options.sessionId || "azure-session",
+      threadId: options.threadId || "azure-thread",
+      usage: {
+        inputTokens: 8,
+        outputTokens: 4,
+        totalTokens: 12,
+      },
+    }));
+
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: openaiNativeExec,
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "azure-openai-responses",
+          azureOpenai: {
+            enabled: true,
+            defaultModel: "gpt-5.4",
+            endpoint: "https://primary.example/openai/v1",
+            deployment: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+        },
+        harness: {
+          enabled: true,
+          primaryExecutor: "azure-openai-responses",
+          executors: [
+            {
+              id: "azure-openai-responses",
+              name: "Azure Primary",
+              providerId: "azure-openai-responses",
+              enabled: true,
+              defaultModel: "gpt-5.4",
+              endpoint: "https://primary.example/openai/v1",
+              deployment: "https://primary.example/openai/v1",
+              apiVersion: "2024-12-01-preview",
+            },
+            {
+              id: "azure-openai-responses-2",
+              name: "Azure Secondary",
+              providerId: "azure-openai-responses",
+              enabled: true,
+              defaultModel: "gpt-5.4",
+              endpoint: "https://secondary.example/openai/v1",
+              deployment: "https://secondary.example/openai/v1",
+              apiVersion: "2024-10-01-preview",
+              authBindings: {
+                apiKeyEnv: "secondary-literal-key",
+              },
+            },
+          ],
+        },
+      },
+      env: {},
+    });
+
+    const runtime = kernel.resolveRuntime("azure-openai-responses-2", "openai-native");
+    const session = kernel.createExecutionSession({
+      adapterName: "openai-native",
+      selectionId: "azure-openai-responses-2",
+      sessionId: "azure-selection-session",
+      threadId: "azure-selection-thread",
+      model: "gpt-5.4",
+    });
+    const result = await session.runTurn("Stay on the secondary Azure executor.");
+
+    expect(runtime.selection).toEqual(expect.objectContaining({
+      providerId: "azure-openai-responses",
+      selectionId: "azure-openai-responses-2",
+      adapterName: "openai-native",
+    }));
+    expect(runtime.providerEntry).toEqual(expect.objectContaining({
+      id: "azure-openai-responses-2",
+      providerId: "azure-openai-responses",
+      endpoint: "https://secondary.example/openai/v1",
+      apiVersion: "2024-10-01-preview",
+    }));
+    expect(runtime.providerConfig).toEqual(expect.objectContaining({
+      endpoint: "https://secondary.example/openai/v1",
+      apiVersion: "2024-10-01-preview",
+      selectionId: "azure-openai-responses-2",
+    }));
+
+    expect(JSON.parse(result.finalResponse)).toEqual({
+      endpoint: "https://secondary.example/openai/v1",
+      apiVersion: "2024-10-01-preview",
+      selectionId: "azure-openai-responses-2",
+      provider: "azure-openai-responses",
     });
   });
 });

@@ -1,5 +1,5 @@
 import { h } from "preact";
-import { useState, useEffect, useCallback, useMemo } from "preact/hooks";
+import { useState, useEffect, useCallback, useMemo, useRef } from "preact/hooks";
 import htm from "htm";
 import { apiFetch } from "../modules/api.js";
 import { resolveIcon } from "../modules/icon-utils.js";
@@ -387,6 +387,10 @@ export function DiffViewer({
   const [sourceMeta, setSourceMeta] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // In-flight guard so concurrent renders / rapid prop churn don't fan out
+  // duplicate diff fetches (the diff endpoint is one of the most expensive
+  // on the server side).
+  const inFlightRef = useRef(false);
 
   const diffPath = useMemo(
     () => buildDiffApiPath({ sessionId, taskId, workspace, turnId, turnIndex }),
@@ -405,6 +409,8 @@ export function DiffViewer({
       setError("unavailable");
       return Promise.resolve();
     }
+    if (inFlightRef.current) return Promise.resolve();
+    inFlightRef.current = true;
     setLoading(true);
     setError(null);
     return apiFetch(diffRequest.path, diffRequest.options)
@@ -417,11 +423,13 @@ export function DiffViewer({
       })
       .finally(() => {
         setLoading(false);
+        inFlightRef.current = false;
       });
   }, [diffRequest]);
 
   useEffect(() => {
     let active = true;
+    let abortCtl = null;
     if (!diffRequest?.path) {
       setDiffData(null);
       setSourceMeta(null);
@@ -431,22 +439,38 @@ export function DiffViewer({
         active = false;
       };
     }
+    if (inFlightRef.current) {
+      // Coalesce: a previous fetch is still pending; let it complete instead
+      // of racing a second request to the same expensive endpoint.
+      return () => {
+        active = false;
+      };
+    }
+    inFlightRef.current = true;
     setLoading(true);
     setError(null);
-    apiFetch(diffRequest.path, diffRequest.options)
+    abortCtl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const requestOptions = abortCtl
+      ? { ...(diffRequest.options || {}), signal: abortCtl.signal }
+      : diffRequest.options;
+    apiFetch(diffRequest.path, requestOptions)
       .then((res) => {
         if (!active) return;
         setDiffData(res?.diff || null);
         setSourceMeta(res?.source || null);
       })
-      .catch(() => {
-        if (active) setError("unavailable");
+      .catch((err) => {
+        if (active && err?.name !== "AbortError") setError("unavailable");
       })
       .finally(() => {
         if (active) setLoading(false);
+        inFlightRef.current = false;
       });
     return () => {
       active = false;
+      if (abortCtl) {
+        try { abortCtl.abort(); } catch { /* noop */ }
+      }
     };
   }, [diffRequest]);
 

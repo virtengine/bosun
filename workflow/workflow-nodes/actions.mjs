@@ -57,6 +57,9 @@ import {
   shouldPersistPlannerPriorState,
 } from "./agent.mjs";
 import {
+  _completedWithPR,
+  _noCommitCounts,
+  _skipUntil,
   cfgOrCtx,
   deriveTaskBranch,
   ensureAgentPoolMod,
@@ -68,6 +71,9 @@ import {
   getWorkflowRuntimeState,
   isExistingBranchWorktreeError,
   isUnresolvedTemplateToken,
+  MAX_NO_COMMIT_ATTEMPTS,
+  NO_COMMIT_BASE_COOLDOWN_MS,
+  NO_COMMIT_MAX_COOLDOWN_MS,
   pickTaskString,
   pickGitRef,
   resolveTaskRepositoryRoot,
@@ -432,6 +438,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { getAgentToolConfig, getEffectiveTools } from "../../agent/agent-tool-config.mjs";
 import { getToolsPromptBlock } from "../../agent/agent-custom-tools.mjs";
 import { buildRelevantSkillsPromptBlock, findRelevantSkills } from "../../agent/bosun-skills.mjs";
+import { readHarnessExecutorFabric } from "../../agent/harness-executor-config.mjs";
 import { loadConfig, readConfigDocument } from "../../config/config.mjs";
 import { resolveRepoRoot as resolveConfiguredRepoRoot } from "../../config/repo-root.mjs";
 import { shouldRequireManagedPrePush } from "../../infra/guardrails.mjs";
@@ -780,6 +787,9 @@ const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
   /missing task (description|url)/i,
   /infrastructure[_ ]blocked/i,
   /repeated reconnect/i,
+  /(?:blocked:\s*)?tool(?:ing)? (?:session|invocation) failure/i,
+  /poisoned tool session/i,
+  /doom-loop protection/i,
   /startup-only/i,
   /connection refused/i,
   /connection reset/i,
@@ -799,6 +809,19 @@ const WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS = [
   /git push/i,
   /git commit/i,
 ];
+
+function collectWorkflowAgentResultFragments(result = {}) {
+  const fragments = [];
+  if (result?.error) fragments.push(String(result.error));
+  if (result?.output) fragments.push(String(result.output));
+  if (Array.isArray(result?.stream)) fragments.push(...result.stream.map((entry) => String(entry || "")));
+  if (Array.isArray(result?.items)) {
+    fragments.push(
+      ...result.items.map((entry) => String(entry?.summary || entry?.content || entry?.type || "")),
+    );
+  }
+  return fragments.filter((fragment) => String(fragment || "").trim());
+}
 
 function pickWorkflowPromptString(...values) {
   for (const value of values) {
@@ -1593,15 +1616,7 @@ function summarizeWorkflowTeamState(state) {
 }
 
 function classifyWorkflowAgentBlockedStatus(result = {}) {
-  const fragments = [];
-  if (result?.error) fragments.push(String(result.error));
-  if (result?.output) fragments.push(String(result.output));
-  if (Array.isArray(result?.stream)) fragments.push(...result.stream.map((entry) => String(entry || "")));
-  if (Array.isArray(result?.items)) {
-    fragments.push(
-      ...result.items.map((entry) => String(entry?.summary || entry?.content || entry?.type || "")),
-    );
-  }
+  const fragments = collectWorkflowAgentResultFragments(result);
   const text = fragments.join("\n");
   if (WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) {
     return "implementation_done_commit_blocked";
@@ -1636,6 +1651,31 @@ function isNullSessionIdCrash(error) {
 
 function resolveSuccessfulWorkflowAgentSessionStatus(result = {}) {
   return classifyWorkflowAgentBlockedStatus(result) || "completed";
+}
+
+function normalizeWorkflowAgentBlockedResult(result = {}) {
+  const blockedStatus = classifyWorkflowAgentBlockedStatus(result);
+  if (!blockedStatus) return result;
+
+  const normalized = { ...result };
+  const text = collectWorkflowAgentResultFragments(result).join("\n").trim();
+
+  if (blockedStatus === "implementation_done_commit_blocked") {
+    if (!String(normalized.implementationState || "").trim()) {
+      normalized.implementationState = blockedStatus;
+    }
+    if (!String(normalized.blockedReason || "").trim()) {
+      normalized.blockedReason = classifyPushBlockedReason(text, false);
+    }
+  } else if (!String(normalized.blockedReason || "").trim()) {
+    normalized.blockedReason = blockedStatus;
+  }
+
+  normalized.success = false;
+  if (!String(normalized.error || "").trim()) {
+    normalized.error = text || `Workflow agent blocked: ${normalized.blockedReason || blockedStatus}`;
+  }
+  return normalized;
 }
 
 function pickLatestMeaningfulSessionMessage(messages = []) {
@@ -2141,6 +2181,38 @@ function buildWorkflowChildRunOptions(ctx) {
     _parentRunId: String(ctx?.id || "").trim() || null,
     _rootRunId: String(sourceData._workflowRootRunId || sourceData._rootRunId || ctx?.id || "").trim() || String(ctx?.id || "").trim() || null,
   };
+}
+
+async function syncTaskDelegationTopology(taskId, topologyPatch = {}, workflowRun = null) {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!normalizedTaskId) return;
+  try {
+    const topologyUpdate =
+      topologyPatch && typeof topologyPatch === "object" && !Array.isArray(topologyPatch)
+        ? { ...topologyPatch }
+        : {};
+    const normalizedWorktreePath = String(topologyUpdate.worktreePath || "").trim() || null;
+    delete topologyUpdate.worktreePath;
+    const taskStoreMod = await ensureTaskStoreMod();
+    if (workflowRun && typeof taskStoreMod.linkTaskWorkflowRun === "function") {
+      taskStoreMod.linkTaskWorkflowRun(normalizedTaskId, workflowRun);
+    }
+    if (typeof taskStoreMod.updateTask !== "function") return;
+    const currentTask =
+      typeof taskStoreMod.getTask === "function"
+        ? taskStoreMod.getTask(normalizedTaskId)
+        : null;
+    if (!currentTask) return;
+    taskStoreMod.updateTask(normalizedTaskId, {
+      topology: {
+        ...(currentTask?.topology && typeof currentTask.topology === "object" ? currentTask.topology : {}),
+        ...topologyUpdate,
+      },
+      ...(normalizedWorktreePath ? { worktreePath: normalizedWorktreePath } : {}),
+    });
+  } catch {
+    // Keep task-store projection best-effort during workflow execution.
+  }
 }
 
 
@@ -3059,6 +3131,12 @@ registerNodeType("action.run_agent", {
         };
 
         const heartbeat = setInterval(() => {
+          if (tracker && trackedTaskId) {
+            tracker.touchSession(trackedTaskId);
+            if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
+              tracker.touchSession(delegateTrackerSessionId);
+            }
+          }
           const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
           ctx.log(node.id, `${passLabel || "Agent"} still running (${elapsedSec}s elapsed)`);
         }, WORKFLOW_AGENT_HEARTBEAT_MS);
@@ -3196,6 +3274,9 @@ registerNodeType("action.run_agent", {
             } catch (err) {
               if (!isNullSessionIdCrash(err)) throw err;
               const freshSessionId = `${managedSessionId || recoveryTaskKey}:fresh-${Date.now()}`;
+              if (recoveryTaskKey && typeof harnessAgentService.invalidateThread === "function") {
+                harnessAgentService.invalidateThread(recoveryTaskKey);
+              }
               ctx.log(
                 node.id,
                 `${passLabel || "Agent"} Recovery: stale session state detected, retrying with a fresh managed session (${freshSessionId})`.trim(),
@@ -3254,12 +3335,32 @@ registerNodeType("action.run_agent", {
               startTime: new Date(startedAt).toISOString(),
             }
           : null;
-        result = explicitTaskBackedRun
-          ? await traceTaskExecution(
-              tracedTaskMetadata,
-              () => traceAgentSession(tracedSessionMetadata, executeAgentPass),
-            )
-          : await executeAgentPass();
+        try {
+          result = explicitTaskBackedRun
+            ? await traceTaskExecution(
+                tracedTaskMetadata,
+                () => traceAgentSession(tracedSessionMetadata, executeAgentPass),
+              )
+            : await executeAgentPass();
+        } catch (err) {
+          const errorMessage = String(
+            err?.message || err || `Agent execution failed in node "${node.label || node.id}"`,
+          ).trim() || `Agent execution failed in node "${node.label || node.id}"`;
+          ctx.log(node.id, `${passLabel || "Agent"} threw: ${errorMessage}`, "warn");
+          result = {
+            success: false,
+            error: errorMessage,
+            output: err?.output,
+            sdk: err?.sdk,
+            items: Array.isArray(err?.items) ? err.items : [],
+            threadId: err?.threadId || err?.sessionId || null,
+            sessionId: err?.sessionId || err?.threadId || null,
+            attempts: err?.attempts,
+            continues: err?.continues,
+            resumed: err?.resumed === true,
+          };
+        }
+        result = normalizeWorkflowAgentBlockedResult(result);
         success = result?.success === true;
         ctx.log(node.id, `${passLabel || "Agent"} completed: success=${success} streamEvents=${streamEventCount}`);
 
@@ -3337,6 +3438,67 @@ registerNodeType("action.run_agent", {
           }
           tracker.endSession(childTrackerSessionId, deriveWorkflowAgentSessionStatus(result, { streamEventCount }));
         }
+        if (explicitTaskBackedRun && trackedTaskId) {
+          const taskTopology =
+            ctx.data?.task?.topology && typeof ctx.data.task.topology === "object"
+              ? ctx.data.task.topology
+              : ctx.data?.taskDetail?.topology && typeof ctx.data.taskDetail.topology === "object"
+                ? ctx.data.taskDetail.topology
+                : ctx.data?.taskInfo?.topology && typeof ctx.data.taskInfo.topology === "object"
+                  ? ctx.data.taskInfo.topology
+                  : {};
+          const workflowRunId = String(ctx.id || "").trim() || null;
+          const workflowId = String(ctx.data?._workflowId || "").trim() || null;
+          const workflowName = String(ctx.data?._workflowName || ctx.data?._workflowId || "").trim() || null;
+          const latestSessionId = String(threadId || childTrackerSessionId || managedSessionId || "").trim() || null;
+          const rootRunId = String(
+            ctx.data?._workflowRootRunId || ctx.data?._rootRunId || ctx.id || "",
+          ).trim() || workflowRunId;
+          const parentRunId = String(ctx.data?._workflowParentRunId || "").trim() || null;
+          const rootSessionId = String(workflowRootSessionId || trackedTaskId || "").trim() || trackedTaskId;
+          const parentSessionId = String(workflowParentSessionId || trackedTaskId || "").trim() || trackedTaskId;
+          const rootTaskId = String(
+            taskTopology?.rootTaskId || taskTopology?.graphRootTaskId || trackedTaskId || "",
+          ).trim() || trackedTaskId;
+          const parentTaskId = String(taskTopology?.parentTaskId || trackedTaskId || "").trim() || trackedTaskId;
+          const delegationDepth = Number(ctx.data?._workflowDelegationDepth || 0) + 1;
+
+          await syncTaskDelegationTopology(
+            trackedTaskId,
+            {
+              workflowId,
+              workflowName,
+              latestNodeId: node.id,
+              latestRunId: workflowRunId,
+              rootRunId,
+              parentRunId,
+              latestSessionId,
+              sessionId: latestSessionId,
+              rootSessionId,
+              parentSessionId,
+              rootTaskId,
+              parentTaskId,
+              delegationDepth,
+              worktreePath: String(ctx.data?.worktreePath || ctx.data?.task?.worktreePath || "").trim() || null,
+            },
+            {
+              runId: workflowRunId,
+              workflowId,
+              workflowName,
+              nodeId: node.id,
+              status: success ? "completed" : "failed",
+              taskId: trackedTaskId,
+              rootRunId,
+              parentRunId,
+              sessionId: latestSessionId,
+              rootSessionId,
+              parentSessionId,
+              rootTaskId,
+              parentTaskId,
+              delegationDepth,
+            },
+          );
+        }
         if (persistSession && threadId) {
           ctx.data.sessionId = threadId;
           ctx.data.threadId = threadId;
@@ -3371,6 +3533,8 @@ registerNodeType("action.run_agent", {
             output: result?.output,
             sdk: result?.sdk,
             items: result?.items,
+            blockedReason: result?.blockedReason,
+            implementationState: result?.implementationState,
             summary: digest.summary,
             narrative: digest.narrative,
             thoughts: digest.thoughts,
@@ -3386,6 +3550,8 @@ registerNodeType("action.run_agent", {
               result?.error ||
               `Agent execution failed in node "${node.label || node.id}"`,
             output: result?.output,
+            blockedReason: result?.blockedReason || null,
+            implementationState: result?.implementationState || null,
             sdk: result?.sdk,
             items: result?.items,
             threadId,
@@ -3405,6 +3571,8 @@ registerNodeType("action.run_agent", {
           ...finalizedSession,
           success: true,
           output: result?.output,
+          blockedReason: result?.blockedReason || null,
+          implementationState: result?.implementationState || null,
           summary: digest.summary,
           narrative: digest.narrative,
           thoughts: digest.thoughts,
@@ -4409,13 +4577,39 @@ registerNodeType("action.update_task_status", {
     }
 
     if (kanban?.updateTaskStatus) {
+      // When transitioning to "blocked" we MUST persist a non-empty blockedReason
+      // so downstream tooling (kanban UI, task-executor recovery, telegram alerts)
+      // can diagnose the failure. If the templated blockedReason resolved to an
+      // empty/unresolved-template string, fall back to a node-id derived sentinel.
+      let effectiveBlockedReason = blockedReason;
+      let effectiveBlockedReasonProvided = blockedReasonProvided;
+      if (status === "blocked") {
+        const candidate = String(blockedReason ?? "").trim();
+        const isUnresolved =
+          !candidate ||
+          isUnresolvedTemplateToken(candidate) ||
+          /^\{\{[\s\S]*\}\}$/.test(candidate);
+        if (isUnresolved) {
+          effectiveBlockedReason = `unspecified_failure:${node?.id || "unknown-node"}`;
+        }
+        effectiveBlockedReasonProvided = true;
+      }
+      if (status === "inprogress" && !effectiveBlockedReasonProvided) {
+        effectiveBlockedReason = null;
+        effectiveBlockedReasonProvided = true;
+      }
       await kanban.updateTaskStatus(taskId, status, updateOptions);
-      if ((status === "inreview" || status === "inprogress" || blockedReasonProvided) && typeof kanban.updateTask === "function") {
+      if (status === "inreview" || status === "done") {
+        _completedWithPR.add(taskId);
+        _noCommitCounts.delete(taskId);
+        _skipUntil.delete(taskId);
+      }
+      if ((status === "inreview" || status === "inprogress" || effectiveBlockedReasonProvided) && typeof kanban.updateTask === "function") {
         const patch = {};
         if (updateOptions.branchName) patch.branchName = updateOptions.branchName;
         if (updateOptions.prNumber) patch.prNumber = updateOptions.prNumber;
         if (updateOptions.prUrl) patch.prUrl = updateOptions.prUrl;
-        if (blockedReasonProvided) patch.blockedReason = String(blockedReason || "").trim() || null;
+        if (effectiveBlockedReasonProvided) patch.blockedReason = String(effectiveBlockedReason || "").trim() || null;
         if (Object.keys(patch).length > 0) {
           await kanban.updateTask(taskId, patch);
         }
@@ -8576,6 +8770,60 @@ registerNodeType("action.resolve_executor", {
       return process.env.COPILOT_MODEL || process.env.CLAUDE_MODEL || process.env.CODEX_MODEL || process.env.OPENCODE_MODEL || "";
     };
 
+    const selectHarnessExecutorDefault = () => {
+      if (normalizeSdkName(defaultSdk) !== "auto") return null;
+      try {
+        const config = loadConfig(["node", "bosun", "--repo-root", repoRoot]);
+        const runtime = String(config?.agentRuntime || "").trim().toLowerCase();
+        if (runtime !== "harness" || config?.harness?.enabled === false) return null;
+
+        const fabric = readHarnessExecutorFabric(config);
+        const selectedExecutor =
+          fabric.executors.find((entry) => entry.id === fabric.primaryExecutorId && entry.enabled !== false)
+          || fabric.executors.find((entry) => entry.enabled !== false)
+          || null;
+        const providerId = String(selectedExecutor?.providerId || "").trim();
+        if (!["azure-openai-responses", "openai-responses", "openai-compatible"].includes(providerId)) {
+          return null;
+        }
+
+        const model = modelOverride
+          || String(
+            selectedExecutor?.defaultModel
+            || selectedExecutor?.modelEntries?.find((entry) => entry.enabled !== false)?.id
+            || "",
+          ).trim()
+          || "";
+        const providerConfig = {
+          selectionId: selectedExecutor.id,
+          provider: providerId,
+          providerId,
+          ...(selectedExecutor.endpoint ? { endpoint: selectedExecutor.endpoint } : {}),
+          ...(selectedExecutor.baseUrl ? { baseUrl: selectedExecutor.baseUrl } : {}),
+          ...(selectedExecutor.deployment ? { deployment: selectedExecutor.deployment } : {}),
+          ...(selectedExecutor.apiVersion ? { apiVersion: selectedExecutor.apiVersion } : {}),
+          ...(selectedExecutor.authMode ? { authMode: selectedExecutor.authMode } : {}),
+          ...(selectedExecutor.workspace ? { workspace: selectedExecutor.workspace } : {}),
+          ...(selectedExecutor.organization ? { organization: selectedExecutor.organization } : {}),
+          ...(selectedExecutor.project ? { project: selectedExecutor.project } : {}),
+          ...(selectedExecutor.transport ? { transport: { ...selectedExecutor.transport } } : {}),
+          ...(model ? { model } : {}),
+        };
+
+        ctx.data.resolvedProvider = selectedExecutor.id;
+        ctx.data.resolvedProviderConfig = providerConfig;
+        return {
+          sdk: "openai-native",
+          model,
+          provider: selectedExecutor.id,
+          providerConfig,
+        };
+      } catch (err) {
+        ctx.log(node.id, `Harness executor default failed: ${err.message}`);
+        return null;
+      }
+    };
+
     const selectConfiguredExecutorDefault = async () => {
       if (normalizeSdkName(defaultSdk) !== "auto") return null;
       try {
@@ -8686,6 +8934,25 @@ registerNodeType("action.resolve_executor", {
       }
     } catch (err) {
       ctx.log(node.id, `Library profile resolution failed: ${err.message}`);
+    }
+
+    const harnessExecutorDefault = selectHarnessExecutorDefault();
+    if (harnessExecutorDefault) {
+      ctx.data.resolvedSdk = harnessExecutorDefault.sdk;
+      ctx.data.resolvedModel = harnessExecutorDefault.model;
+      ctx.log(
+        node.id,
+        `Executor harness default: sdk=${harnessExecutorDefault.sdk}, provider=${harnessExecutorDefault.provider}, model=${harnessExecutorDefault.model || ""}`,
+      );
+      return {
+        success: true,
+        sdk: harnessExecutorDefault.sdk,
+        model: harnessExecutorDefault.model,
+        provider: harnessExecutorDefault.provider,
+        providerConfig: harnessExecutorDefault.providerConfig,
+        tier: "harness_default",
+        profile: null,
+      };
     }
 
     const hasTaskRoutingContext = Boolean(
@@ -9128,6 +9395,52 @@ registerNodeType("action.acquire_worktree", {
         return true;
       };
 
+      const tryReuseExistingBranchWorktree = async (candidatePath, phaseLabel, logLabel = "Reusing existing branch worktree") => {
+        if (!candidatePath || !existsSync(candidatePath)) return null;
+        if (invalidateBrokenReusableWorktree(candidatePath, phaseLabel)) {
+          return null;
+        }
+        try {
+          const insideWorktree = execGitArgsSync(["rev-parse", "--is-inside-work-tree"], {
+            cwd: candidatePath,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          }).trim().toLowerCase();
+          if (insideWorktree !== "true") return null;
+          const currentBranch = execGitArgsSync(["rev-parse", "--abbrev-ref", "HEAD"], {
+            cwd: candidatePath,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          }).trim().replace(/^refs\/heads\//, "");
+          if (currentBranch && currentBranch !== "HEAD" && currentBranch !== branch) {
+            return null;
+          }
+        } catch {
+          return null;
+        }
+        fixGitConfigCorruption(repoRoot);
+        ctx.data.worktreePath = candidatePath;
+        ctx.data.baseBranch = baseBranch;
+        ctx.data._worktreeCreated = false;
+        ctx.data._worktreeManaged = true;
+        await persistRecoveryEvent({
+          outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
+          worktreePath: candidatePath,
+        });
+        ctx.log(node.id, `${logLabel}: ${candidatePath}`);
+        return {
+          success: true,
+          worktreePath: candidatePath,
+          created: false,
+          reused: true,
+          reusedExistingBranch: true,
+          branch,
+          baseBranch,
+        };
+      };
+
       const hasOriginRemote = () => {
         try {
           execGitArgsSync(["config", "--get", "remote.origin.url"], {
@@ -9161,7 +9474,36 @@ registerNodeType("action.acquire_worktree", {
       const worktreesDir = resolve(repoRoot, ".bosun", "worktrees");
       mkdirSync(worktreesDir, { recursive: true });
       // Keep managed worktree paths short on Windows to avoid MAX_PATH checkout failures.
-      const worktreePath = resolve(worktreesDir, deriveManagedWorktreeDirName(taskId, branch));
+      let worktreePath = resolve(worktreesDir, deriveManagedWorktreeDirName(taskId, branch));
+
+      const allocateRecoveryWorktreePath = (phaseLabel) => {
+        const originalPath = worktreePath;
+        const parentDir = dirname(originalPath);
+        const baseName = basename(originalPath);
+        const seed = Date.now().toString(36).slice(-8);
+        let candidatePath = "";
+        for (let index = 0; index < 8; index += 1) {
+          const suffix = index === 0 ? seed : `${seed}-${index}`;
+          const nextPath = resolve(parentDir, `${baseName}-recovery-${suffix}`);
+          if (!existsSync(nextPath)) {
+            candidatePath = nextPath;
+            break;
+          }
+        }
+        if (!candidatePath) {
+          candidatePath = resolve(parentDir, `${baseName}-recovery-${process.pid}`);
+        }
+        recoveryState.recreated = true;
+        recoveryState.phase = phaseLabel;
+        recoveryState.worktreePath = originalPath;
+        recoveryState.detectedIssues.add("path_still_present");
+        worktreePath = candidatePath;
+        ctx.log(
+          node.id,
+          `Managed worktree path remained after reset (${phaseLabel}); using recovery path: ${candidatePath}`,
+        );
+        return candidatePath;
+      };
 
       // Ensure long paths are enabled for this repo before checkout.
       try {
@@ -9175,9 +9517,10 @@ registerNodeType("action.acquire_worktree", {
         // Best-effort; older git builds or non-Windows hosts may ignore this.
       }
 
+      let recreatedManagedWorktree = false;
       if (existsSync(worktreePath)) {
         // Reuse existing worktree — pull latest base if possible
-        let recreatedManagedWorktree = invalidateBrokenReusableWorktree(worktreePath, "pre-reuse");
+        recreatedManagedWorktree = invalidateBrokenReusableWorktree(worktreePath, "pre-reuse");
         if (!recreatedManagedWorktree && existsSync(worktreePath)) {
           try {
             // Discard any dirty tracked files before rebasing so the pull
@@ -9228,6 +9571,9 @@ registerNodeType("action.acquire_worktree", {
           ctx.log(node.id, `Reusing worktree: ${worktreePath}`);
           return { success: true, worktreePath, created: false, reused: true, branch, baseBranch };
         }
+      }
+      if (recreatedManagedWorktree && existsSync(worktreePath)) {
+        allocateRecoveryWorktreePath("pre-create");
       }
 
       // Create fresh worktree
@@ -9290,9 +9636,13 @@ registerNodeType("action.acquire_worktree", {
         } else {
           const attachedPath = await findAttachedWorktreeForBranch();
           let recreatedAttachedWorktree = false;
+          let createdRecoveryWorktree = false;
           if (attachedPath && existsSync(attachedPath)) {
             if (invalidateBrokenReusableWorktree(attachedPath, "attached-branch")) {
               fixGitConfigCorruption(repoRoot);
+              if (existsSync(worktreePath)) {
+                allocateRecoveryWorktreePath("attached-branch");
+              }
               execGitArgsSync(
                 branchExistsLocally
                   ? ["worktree", "add", worktreePath, branch]
@@ -9323,6 +9673,33 @@ registerNodeType("action.acquire_worktree", {
             }
           }
           if (!recreatedAttachedWorktree) {
+            const racedPathReuse = await tryReuseExistingBranchWorktree(
+              worktreePath,
+              "path-exists-race",
+              "Reusing concurrently created worktree",
+            );
+            if (racedPathReuse) {
+              return racedPathReuse;
+            }
+          }
+          if (!recreatedAttachedWorktree && existsSync(worktreePath)) {
+            allocateRecoveryWorktreePath("path-exists-race");
+            try {
+              execGitArgsSync(
+                branchExistsLocally
+                  ? ["worktree", "add", worktreePath, branch]
+                  : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
+                { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
+              );
+              createdRecoveryWorktree = true;
+            } catch (recoveryErr) {
+              throw new Error(
+                `Worktree creation failed: ${formatExecSyncError(createErr)}; ` +
+                `recovery-path failed: ${formatExecSyncError(recoveryErr)}`,
+              );
+            }
+          }
+          if (!recreatedAttachedWorktree && !createdRecoveryWorktree) {
             // Branch already exists — attach worktree to existing branch.
             try {
               execGitArgsSync(
@@ -10776,6 +11153,163 @@ registerNodeType("action.promote_strategy", {
   },
 });
 
+registerNodeType("action.apply_self_improvement_ratchet", {
+  describe: () =>
+    "Apply the compare/keep/revert decision produced by action.evaluate_run: persist promoted candidates/baselines as knowledge, or record revert/hold decisions without mutating shared knowledge.",
+  schema: {
+    type: "object",
+    properties: {
+      evaluationNodeId: { type: "string", description: "Node ID that produced action.evaluate_run output." },
+      strategyId: { type: "string", description: "Optional strategy override for apply/revert decisions." },
+      repoRoot: { type: "string" },
+      targetFile: { type: "string" },
+      registryFile: { type: "string" },
+      scopeLevel: {
+        type: "string",
+        enum: ["team", "workspace", "session", "run"],
+        default: "workspace",
+      },
+      scope: { type: "string", description: "Optional topical scope for knowledge persistence." },
+      category: { type: "string", default: "strategy" },
+      outputVariable: { type: "string" },
+      tags: {
+        anyOf: [
+          { type: "array", items: { type: "string" } },
+          { type: "string" },
+        ],
+      },
+      agentId: { type: "string" },
+      agentType: { type: "string" },
+    },
+  },
+  async execute(node, ctx) {
+    const evaluationNodeId = String(ctx.resolve(node.config?.evaluationNodeId || "") || "").trim();
+    const evaluation =
+      (evaluationNodeId ? ctx.getNodeOutput?.(evaluationNodeId) : null)
+      || ctx.data?._lastRunEvaluation
+      || null;
+    if (!evaluation || typeof evaluation !== "object") {
+      throw new Error("action.apply_self_improvement_ratchet: evaluation result not found");
+    }
+
+    const ratchet = evaluation?.ratchet && typeof evaluation.ratchet === "object" ? evaluation.ratchet : null;
+    const promotionDecision = String(evaluation?.promotion?.decision || "").trim();
+    const fallbackDecision = promotionDecision === "promote_strategy"
+      ? "apply_candidate"
+      : promotionDecision === "capture_baseline"
+        ? "capture_baseline"
+        : promotionDecision === "investigate_regression"
+          ? "keep_baseline"
+          : "hold";
+    const decision = String(ratchet?.decision || fallbackDecision || "hold").trim() || "hold";
+
+    const requestedStrategyId = String(ctx.resolve(node.config?.strategyId || "") || "").trim() || null;
+    const selectedStrategy = resolveSelfImprovementStrategy(
+      evaluation,
+      requestedStrategyId,
+      ratchet?.targetStrategy || null,
+    );
+
+    const baseOutput = {
+      success: true,
+      decision,
+      strategyId: selectedStrategy?.strategyId || null,
+      strategy: selectedStrategy || null,
+      ratchet: ratchet || { decision },
+      summary: ratchet?.summary || evaluation?.promotion?.summary || decision,
+      runId: evaluation?.runId || ctx.data?._lastRunEvaluationRunId || ctx.id,
+      workflowId: evaluation?.workflowId || ctx.data?._workflowId || null,
+      score: evaluation?.score ?? null,
+      grade: evaluation?.grade || null,
+      persisted: false,
+      skipped: false,
+    };
+
+    const writeOutput = (output) => {
+      const outputVariable = String(ctx.resolve(node.config?.outputVariable || "") || "").trim();
+      if (outputVariable) {
+        ctx.data[outputVariable] = output;
+      }
+      ctx.data._lastSelfImprovementRatchet = output;
+      ctx.log(
+        node.id,
+        `Ratchet decision=${output.decision}` +
+          (output.strategyId ? ` strategy=${output.strategyId}` : "") +
+          (output.persisted ? " persisted" : output.skipped ? " skipped" : ""),
+      );
+      return output;
+    };
+
+    // Decisions that don't mutate shared knowledge — just record the outcome.
+    if (
+      decision === "hold" ||
+      decision === "keep_baseline" ||
+      decision === "revert_to_baseline"
+    ) {
+      return writeOutput({
+        ...baseOutput,
+        skipped: decision !== "revert_to_baseline",
+        reverted: decision === "revert_to_baseline",
+        reason:
+          decision === "revert_to_baseline"
+            ? "Reverted to baseline; no candidate persisted"
+            : decision === "keep_baseline"
+              ? "Held baseline; no candidate persisted"
+              : "No promotion recommended; held current state",
+      });
+    }
+
+    // Persist for apply_candidate / capture_baseline / promote_strategy decisions.
+    if (!selectedStrategy && decision !== "capture_baseline") {
+      return writeOutput({
+        ...baseOutput,
+        skipped: true,
+        reason: "No strategy candidate available to apply",
+      });
+    }
+
+    const status = decision === "capture_baseline" ? "baseline" : "promoted";
+    const persistResult = await persistSelfImprovementKnowledgeEntry(ctx, node, {
+      evaluation,
+      selectedStrategy: selectedStrategy || {
+        strategyId: `baseline-${evaluation?.workflowId || ctx.data?._workflowId || "unknown"}`,
+        recommendation: "Capture current run as baseline reference",
+        rationale: evaluation?.promotion?.rationale || evaluation?.promotion?.summary || "Baseline capture",
+        tags: ["baseline"],
+      },
+      decision,
+      repoRoot: ctx.resolve(node.config?.repoRoot || ""),
+      targetFile: ctx.resolve(node.config?.targetFile || ""),
+      registryFile: ctx.resolve(node.config?.registryFile || ""),
+      scopeLevel: ctx.resolve(node.config?.scopeLevel || "workspace"),
+      scope: ctx.resolve(node.config?.scope || ""),
+      category: ctx.resolve(node.config?.category || "strategy"),
+      status,
+      tags: ctx.resolve(node.config?.tags || ""),
+      agentId: ctx.resolve(node.config?.agentId || ""),
+      agentType: ctx.resolve(node.config?.agentType || ""),
+      contentLines: [
+        `Ratchet decision=${decision} for workflow ${evaluation?.workflowId || ctx.data?._workflowId || "unknown"}`,
+        selectedStrategy?.recommendation ? `Recommendation: ${selectedStrategy.recommendation}` : "",
+        selectedStrategy?.rationale ? `Rationale: ${selectedStrategy.rationale}` : "",
+        evaluation?.benchmark
+          ? `Benchmark: score=${evaluation.score}, grade=${evaluation.grade}`
+          : "",
+        evaluation?.promotion?.summary ? `Promotion summary: ${evaluation.promotion.summary}` : "",
+      ],
+    });
+
+    return writeOutput({
+      ...baseOutput,
+      persisted: !!persistResult?.success,
+      persistResult,
+      reason: persistResult?.success
+        ? `Applied ratchet decision ${decision}`
+        : persistResult?.reason || `Failed to persist ratchet decision ${decision}`,
+    });
+  },
+});
+
 registerNodeType("action.team_init", {
   describe: () =>
     "Initialize a workflow-local agent team roster, channels, and leadership state for team workflows.",
@@ -11523,9 +12057,10 @@ registerNodeType("action.detect_new_commits", {
       baseBranch: { type: "string", description: "Base branch for diff stats" },
     },
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
     const worktreePath = cfgOrCtx(node, ctx, "worktreePath");
     const baseBranch = cfgOrCtx(node, ctx, "baseBranch", "origin/main");
+    const kanban = engine?.services?.kanban || ctx.data?._services?.kanban;
 
     if (!worktreePath) {
       ctx.log(node.id, "action.detect_new_commits: worktreePath not set — skipping commit detection");
@@ -11595,6 +12130,78 @@ registerNodeType("action.detect_new_commits", {
     // Use hasNewCommits OR hasUnpushed — covers resumed worktrees
     const hasCommits = hasNewCommits || hasUnpushed;
 
+    const taskId = cfgOrCtx(node, ctx, "taskId") || ctx.data?.taskId || ctx.data?.task?.id || "";
+    const persistNoCommitState = async (patch) => {
+      if (!taskId || typeof kanban?.updateTask !== "function") return;
+      try {
+        await kanban.updateTask(taskId, patch);
+      } catch (err) {
+        ctx.log(node.id, `Failed to persist no-commit state for ${taskId}: ${err.message}`);
+      }
+    };
+    const syncNoCommitState = (patch) => {
+      ctx.data.consecutiveNoCommits = patch.consecutiveNoCommits;
+      ctx.data.cooldownUntil = patch.cooldownUntil;
+      if (ctx.data?.task && typeof ctx.data.task === "object") {
+        ctx.data.task.consecutiveNoCommits = patch.consecutiveNoCommits;
+        ctx.data.task.cooldownUntil = patch.cooldownUntil;
+      }
+    };
+
+    if (hasCommits && taskId) {
+      _noCommitCounts.delete(taskId);
+      _skipUntil.delete(taskId);
+      const patch = {
+        consecutiveNoCommits: 0,
+        cooldownUntil: null,
+      };
+      syncNoCommitState(patch);
+      await persistNoCommitState(patch);
+    }
+
+    if (!hasCommits && taskId) {
+      const count = Math.min((_noCommitCounts.get(taskId) || 0) + 1, MAX_NO_COMMIT_ATTEMPTS);
+      _noCommitCounts.set(taskId, count);
+      const retryExhausted = count >= MAX_NO_COMMIT_ATTEMPTS;
+      const cooldown = Math.min(
+        NO_COMMIT_BASE_COOLDOWN_MS * Math.pow(2, count - 1),
+        NO_COMMIT_MAX_COOLDOWN_MS,
+      );
+      const cooldownUntilMs = Date.now() + cooldown;
+      const patch = {
+        consecutiveNoCommits: count,
+        cooldownUntil: retryExhausted ? null : new Date(cooldownUntilMs).toISOString(),
+      };
+      if (retryExhausted) {
+        _skipUntil.delete(taskId);
+      } else {
+        _skipUntil.set(taskId, cooldownUntilMs);
+      }
+      syncNoCommitState(patch);
+      await persistNoCommitState(patch);
+      console.warn(
+        `[workflow-nodes] anti-thrash: task ${taskId.substring(0, 8)} no-commit bounce #${count} — cooldown ${Math.round(cooldown / 60000)}min`,
+      );
+
+      if (retryExhausted) {
+        ctx.data._noCommitRetryExhausted = true;
+        return {
+          success: true,
+          hasCommits,
+          hasNewCommits,
+          hasUnpushed,
+          commitCount,
+          preExecHead,
+          postExecHead,
+          diffStats,
+          retryExhausted: true,
+          blockedReason: "repeated_no_commit_runs",
+          consecutiveNoCommits: count,
+          cooldownUntil: null,
+        };
+      }
+    }
+
     ctx.data._hasNewCommits = hasCommits;
     ctx.data._postExecHead = postExecHead;
     ctx.data._commitCount = commitCount;
@@ -11614,6 +12221,8 @@ registerNodeType("action.detect_new_commits", {
       preExecHead,
       postExecHead,
       diffStats,
+      retryExhausted: false,
+      blockedReason: null,
     };
   },
 });

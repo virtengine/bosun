@@ -1801,6 +1801,67 @@ describe("kanban-adapter internal backend", () => {
     });
   });
 
+  it("preserves persisted anti-thrash cooldown fields in internal task listings", async () => {
+    const adapter = getKanbanAdapter();
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+
+    addTask({
+      id: "cooldown-task",
+      title: "Cooldown task",
+      status: "todo",
+      consecutiveNoCommits: 2,
+      cooldownUntil: retryAt,
+      workspace: "virtengine-gh",
+      repository: "virtengine/bosun",
+    });
+
+    const detail = await adapter.getTask("cooldown-task");
+    expect(detail).toMatchObject({
+      id: "cooldown-task",
+      consecutiveNoCommits: 2,
+      cooldownUntil: retryAt,
+    });
+
+    const listed = await adapter.listTasks("internal", { status: "todo" });
+    expect(listed.find((task) => task.id === "cooldown-task")).toMatchObject({
+      id: "cooldown-task",
+      consecutiveNoCommits: 2,
+      cooldownUntil: retryAt,
+    });
+  });
+
+  it("persists anti-thrash cooldown fields through internal updateTask", async () => {
+    const adapter = getKanbanAdapter();
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+
+    addTask({
+      id: "cooldown-update-task",
+      title: "Cooldown update task",
+      status: "todo",
+      workspace: "virtengine-gh",
+      repository: "virtengine/bosun",
+    });
+
+    await adapter.updateTask("cooldown-update-task", {
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    });
+
+    const detail = await adapter.getTask("cooldown-update-task");
+    expect(detail).toMatchObject({
+      id: "cooldown-update-task",
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    });
+
+    const listed = await adapter.listTasks("internal", { status: "todo" });
+    expect(listed.find((task) => task.id === "cooldown-update-task")).toMatchObject({
+      id: "cooldown-update-task",
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    });
+  });
+
   it("merges PR linkage updates idempotently without duplicating metadata records", async () => {
     const adapter = getKanbanAdapter();
 

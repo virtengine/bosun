@@ -75,7 +75,12 @@ function resolveWorkspacePath(inputPath, context = {}, options = {}) {
 
 async function callVoiceTool(toolName, args = {}, context = {}) {
   const mod = await import("../voice/voice-tools.mjs");
-  const response = await mod.executeToolCall(toolName, args, context);
+  const response = await mod.executeToolCall(toolName, args, {
+    ...context,
+    surface: toTrimmedString(context.surface || "") || "bosun-builtin",
+    sessionType: toTrimmedString(context.sessionType || "") || "tool-bridge",
+    requestedBy: toTrimmedString(context.requestedBy || context.source || "") || "bosun-builtin",
+  });
   if (response?.error) {
     const error = new Error(response.error);
     error.approval = response.approval || null;
@@ -411,6 +416,28 @@ function buildHarnessNativeDefinitions(options = {}) {
       id: "search_files",
       name: "search_files",
       description: "Search workspace files for a text pattern using ripgrep when available.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Text pattern to search for.",
+          },
+          pattern: {
+            type: "string",
+            description: "Alias for query.",
+          },
+          filePattern: {
+            type: "string",
+            description: "Optional glob filter, for example **/*.mjs.",
+          },
+          maxResults: {
+            type: "number",
+            description: "Maximum number of matches to return.",
+          },
+        },
+        required: ["query"],
+      },
       handler: async (args = {}, context = {}) => {
         const rootDir = resolveWorkspaceRoot(context, options);
         const query = toTrimmedString(args.query || args.pattern || "");

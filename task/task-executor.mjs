@@ -804,7 +804,8 @@ const INPROGRESS_RECOVERY_UNSTARTED_RESET_MS = 20 * 60 * 1000;
 /** Periodic in-progress recovery cadence while executor is running */
 const INPROGRESS_RECOVERY_INTERVAL_MS = 5 * 60 * 1000;
 const INPROGRESS_RECOVERY_HISTORY_LIMIT = 12;
-const WORKFLOW_RUN_RECOVERY_GRACE_MS = 15 * 60 * 1000;
+const WORKFLOW_RUN_RECOVERY_GRACE_MS = 60 * 60 * 1000; // 60 minutes — agent phases (plan/tests/implement) can run >15 min between dag updates
+const WORKFLOW_RUN_STARTUP_STALL_RECOVERY_MS = INPROGRESS_RECOVERY_UNSTARTED_RESET_MS;
 const UNRESOLVED_TEMPLATE_TOKEN_RE = /\{\{[^{}]+\}\}/;
 
 function normalizeSelector(value) {
@@ -4683,6 +4684,95 @@ class TaskExecutor {
     return null;
   }
 
+  _resolveWorkflowEvidenceTurnSessionId(candidate, taskId = "") {
+    const runId = String(candidate?.runId || "").trim();
+    const checkpoint = candidate?.detail?.latestCheckpoint || null;
+    const nodeId = String(checkpoint?.nodeId || "").trim();
+    const normalizedTaskId = normalizeTaskIdKey(taskId || candidate?.taskId);
+    if (!runId || !nodeId) return "";
+
+    const expectedSessionId = normalizedTaskId
+      ? `${normalizedTaskId}:agent:${runId}:${nodeId}:turn`
+      : "";
+    const sessionIds = new Set();
+    const addSessionIds = (values) => {
+      for (const value of Array.isArray(values) ? values : [values]) {
+        const sessionId = String(value || "").trim();
+        if (sessionId) sessionIds.add(sessionId);
+      }
+    };
+
+    addSessionIds(candidate?.detail?.sessionIds);
+    addSessionIds(candidate?.fallbackEntry?.sessionIds);
+
+    if (expectedSessionId && sessionIds.has(expectedSessionId)) {
+      return expectedSessionId;
+    }
+
+    const turnSuffix = `:${nodeId}:turn`;
+    for (const sessionId of sessionIds) {
+      if (!sessionId.endsWith(turnSuffix)) continue;
+      if (!normalizedTaskId) return sessionId;
+      if (sessionId.startsWith(`${normalizedTaskId}:agent:${runId}:`)) {
+        return sessionId;
+      }
+    }
+
+    return expectedSessionId;
+  }
+
+  _isStartupOnlyWorkflowEvidenceStalled(candidate) {
+    const checkpoint = candidate?.detail?.latestCheckpoint || null;
+    const eventType = String(checkpoint?.eventType || "").trim().toLowerCase();
+    const nodeId = String(checkpoint?.nodeId || "").trim();
+    if (eventType !== "agent.started" || !nodeId.startsWith("run-agent-")) {
+      return false;
+    }
+
+    const counters = checkpoint?.counters && typeof checkpoint.counters === "object"
+      ? checkpoint.counters
+      : {};
+    const toolCallCount = Number(counters.toolCallCount ?? checkpoint?.toolCallCount ?? 0) || 0;
+    const toolResultCount = Number(counters.toolResultCount ?? checkpoint?.toolResultCount ?? 0) || 0;
+    const spillCount = Number(counters.spillCount ?? checkpoint?.spillCount ?? 0) || 0;
+    if (toolCallCount > 0 || toolResultCount > 0 || spillCount > 0) {
+      return false;
+    }
+
+    const lastActivityMs = Number(candidate?.lastActivityMs || 0);
+    if (!Number.isFinite(lastActivityMs) || lastActivityMs <= 0) {
+      return false;
+    }
+    if (Date.now() - lastActivityMs < WORKFLOW_RUN_STARTUP_STALL_RECOVERY_MS) {
+      return false;
+    }
+
+    const turnSessionId = this._resolveWorkflowEvidenceTurnSessionId(
+      candidate,
+      candidate?.taskId || "",
+    );
+    const progress = turnSessionId
+      ? getSessionTracker().getProgressStatus(turnSessionId)
+      : {
+          status: "not_found",
+          totalEvents: 0,
+          hasEdits: false,
+          hasCommits: false,
+          elapsedMs: 0,
+        };
+    if (progress?.hasEdits || progress?.hasCommits) {
+      return false;
+    }
+
+    const totalEvents = Number(progress?.totalEvents || 0);
+    if (progress?.status === "not_found") {
+      return true;
+    }
+
+    const elapsedMs = Number(progress?.elapsedMs || 0);
+    return totalEvents <= 1 && elapsedMs >= WORKFLOW_RUN_STARTUP_STALL_RECOVERY_MS;
+  }
+
   _rankWorkflowEvidenceCandidate(candidate, expectedTaskId = "") {
     const runId = String(candidate?.runId || "").trim();
     if (!runId) return null;
@@ -4764,7 +4854,7 @@ class TaskExecutor {
       topology: 1,
       direct: 1,
     })[source] || 0;
-    return {
+    const ranked = {
       ...candidate,
       runId,
       detail,
@@ -4781,6 +4871,13 @@ class TaskExecutor {
       hasDagState: Boolean(dagState),
       hasDetail: Boolean(detail),
     };
+
+    if (ranked.hasRecentEvidence && this._isStartupOnlyWorkflowEvidenceStalled(ranked)) {
+      ranked.hasRecentEvidence = false;
+      ranked.startupStalled = true;
+    }
+
+    return ranked;
   }
 
   _compareWorkflowEvidenceCandidates(a, b) {

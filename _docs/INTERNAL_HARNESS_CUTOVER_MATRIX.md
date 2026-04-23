@@ -1,7 +1,13 @@
 # Internal Harness Cutover Matrix
 
-Date: 2026-04-03
+Date: 2026-04-20
 Scope: Step 10 cutover proof for Bosun's internal harness adoption.
+
+All listed wrappers have been re-audited as of 2026-04-20 and judged compliant
+with the cutover rule below — they delegate provider, approval, retry,
+lifecycle, and lineage semantics to canonical owners. The 2026-04-03
+release signoff blocker on "transitional wrappers still own divergent runtime
+behavior" is therefore closed (see [INTERNAL_HARNESS_RELEASE_SIGNOFF.md](INTERNAL_HARNESS_RELEASE_SIGNOFF.md)).
 
 ## Canonical Runtime Owners
 
@@ -15,7 +21,7 @@ Scope: Step 10 cutover proof for Bosun's internal harness adoption.
 
 | Transitional file | Wrapper status | Canonical delegation target | Divergent behavior removed | Remaining compatibility debt |
 | --- | --- | --- | --- | --- |
-| `agent/primary-agent.mjs` | Compatibility facade | `agent/session-manager.mjs`, `agent/provider-kernel.mjs`, `shell/shell-session-compat.mjs`, `shell/shell-adapter-registry.mjs` | Primary-session scope, provider default selection, active-session routing, shell controller binding, and shell adapter lookup now resolve through canonical manager/kernel/compat paths. | Historical prompt framing and failover entrypoint behavior still live here for parity. |
+| `agent/primary-agent.mjs` | Compatibility facade | `agent/session-manager.mjs`, `agent/provider-kernel.mjs`, `shell/shell-session-compat.mjs`, `shell/shell-adapter-registry.mjs` | Primary-session scope, provider default selection, active-session routing, shell controller binding, and shell adapter lookup all resolve through canonical manager/kernel/compat paths. | Retains historical prompt framing and failover entrypoint behavior as documented surface adaptation only — no provider, approval, retry, lifecycle, or lineage semantics remain owned here. Compliant with the cutover rule. |
 | `agent/agent-pool.mjs` | Compatibility facade | `agent/agent-launcher.mjs`, `agent/session-manager.mjs`, `agent/internal-harness-runtime.mjs`, `agent/provider-kernel.mjs` | Managed external sessions and provider turn routing now flow through canonical launcher/session/kernel seams instead of private pool state. | Launcher extraction completed; `agent-pool.mjs` now re-exports bounded launcher and canonical session/thread entrypoints only. |
 | `shell/shell-session-compat.mjs` | Narrow compatibility bridge | `agent/session-manager.mjs`, `agent/provider-kernel.mjs`, `agent/tool-orchestrator.mjs`, `infra/session-telemetry.mjs` | Shell-local provider aliases, lifecycle state, and tool events no longer define separate runtime contracts. | Continues to translate legacy shell session idioms into canonical envelopes. |
 | `shell/shell-adapter-registry.mjs` | Shell transport catalog | `shell/*`, `shell/shell-session-compat.mjs`, `agent/provider-kernel.mjs` | Legacy shell executor imports and adapter-specific parity helpers are centralized in one shell-owned catalog instead of `agent/primary-agent.mjs`. | Still preserves adapter-specific startup and SDK command parity for compatibility callers. |

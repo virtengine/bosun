@@ -83,3 +83,6 @@ _docs/internal-harness-v2/*
 output/playwright
 native/**/target/
 .cache-test-tool-logs/*
+.bosun-monitor/*.txt
+.bosun-monitor/*.log
+*.txt

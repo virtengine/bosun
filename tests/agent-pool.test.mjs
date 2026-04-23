@@ -14,6 +14,7 @@ let mockCopilotStart;
 let mockCopilotCreateSession;
 let mockCopilotResumeSession;
 let mockClaudeQuery;
+let mockCreateProviderKernel;
 let mockOpencodeExec;
 let mockLoadConfig;
 let mockMcpResolve;
@@ -41,6 +42,7 @@ const callMockCopilotStart = ensureMock("__agentPoolMockCopilotStart");
 const callMockCopilotCreateSession = ensureMock("__agentPoolMockCopilotCreateSession");
 const callMockCopilotResumeSession = ensureMock("__agentPoolMockCopilotResumeSession");
 const callMockClaudeQuery = ensureMock("__agentPoolMockClaudeQuery");
+const callMockCreateProviderKernel = ensureMock("__agentPoolMockCreateProviderKernel");
 const callMockOpencodeExec = ensureMock("__agentPoolMockOpencodeExec");
 const callMockLoadConfig = ensureMock("__agentPoolMockLoadConfig");
 const callMockMcpResolve = ensureMock("__agentPoolMockMcpResolve");
@@ -89,6 +91,7 @@ mockCopilotStart = vi.fn();
 mockCopilotCreateSession = vi.fn();
 mockCopilotResumeSession = vi.fn();
 mockClaudeQuery = vi.fn();
+mockCreateProviderKernel = vi.fn();
 mockOpencodeExec = vi.fn();
 mockLoadConfig = vi.fn();
 mockMcpResolve = vi.fn();
@@ -100,6 +103,7 @@ globalThis.__agentPoolMockCopilotStart = mockCopilotStart;
 globalThis.__agentPoolMockCopilotCreateSession = mockCopilotCreateSession;
 globalThis.__agentPoolMockCopilotResumeSession = mockCopilotResumeSession;
 globalThis.__agentPoolMockClaudeQuery = mockClaudeQuery;
+globalThis.__agentPoolMockCreateProviderKernel = mockCreateProviderKernel;
 globalThis.__agentPoolMockOpencodeExec = mockOpencodeExec;
 globalThis.__agentPoolMockLoadConfig = mockLoadConfig;
 globalThis.__agentPoolMockMcpResolve = mockMcpResolve;
@@ -302,6 +306,18 @@ vi.mock("../config/config.mjs", () => ({
   },
 }));
 
+vi.mock("../agent/provider-kernel.mjs", async () => {
+  const actual = await vi.importActual("../agent/provider-kernel.mjs");
+  return {
+    ...actual,
+    createProviderKernel: (...args) => {
+      const injected = callMockCreateProviderKernel(...args);
+      if (injected !== undefined) return injected;
+      return actual.createProviderKernel(...args);
+    },
+  };
+});
+
 vi.mock("../workflow/mcp-registry.mjs", () => ({
   resolveMcpServersForAgent: (...args) => {
     const candidate = globalThis.__agentPoolMockMcpResolve;
@@ -489,6 +505,7 @@ beforeEach(async () => {
   mockCopilotCreateSession.mockReset();
   mockCopilotResumeSession.mockReset();
   mockClaudeQuery.mockReset();
+  mockCreateProviderKernel.mockReset();
   mockOpencodeExec.mockReset();
   mockLoadConfig.mockReset();
   mockLoadConfig.mockReturnValue({});
@@ -643,6 +660,26 @@ describe("SDK resolution", () => {
     });
     resetPoolSdkCache();
     expect(getPoolSdkName()).toBe("opencode");
+  });
+
+  it("prefers openai-native when harness runtime is active even if primaryAgent still points at codex", () => {
+    mockLoadConfig.mockReturnValue({
+      agentRuntime: "harness",
+      primaryAgent: "codex-sdk",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-us",
+        executors: [
+          {
+            id: "azure-us",
+            providerId: "azure-openai-responses",
+            enabled: true,
+          },
+        ],
+      },
+    });
+    resetPoolSdkCache();
+    expect(getPoolSdkName()).toBe("openai-native");
   });
 });
 
@@ -1055,6 +1092,102 @@ describe("launchEphemeralThread", () => {
     expect(result.sdk).toBe("copilot");
     expect(result.error).toBeNull();
     expect(result.output).toContain("copilot-output");
+  });
+
+  it("fails openai-native launches that never emit a first event", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("openai-native");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores non-meaningful openai-native lifecycle events when waiting for the first event", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          execOptions.onEvent?.({
+            type: "session.turn.start",
+            sessionId: "test-native-session",
+            model: "gpt-test",
+            apiStyle: "responses",
+          });
+          execOptions.onEvent?.({
+            type: "session.compaction",
+            sessionId: "test-native-session",
+            strategy: "proactive",
+            removedCount: 1,
+            checkpointAdded: false,
+            newMessageCount: 1,
+          });
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("openai-native");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
   });
 
   it("skips a cooled-down SDK after timeout and retries it after cooldown expiry", async () => {

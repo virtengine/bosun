@@ -194,6 +194,17 @@ function resolveKernelProviderSettings(config = {}, providerId = "") {
   };
 }
 
+function isExplicitProviderSelection(providerEntry = null, normalizedSelectionId = "") {
+  const entryId = String(providerEntry?.id || "").trim();
+  const source = String(providerEntry?.source || "").trim().toLowerCase();
+  return Boolean(
+    source === "configured"
+    && entryId
+    && normalizedSelectionId
+    && entryId === normalizedSelectionId,
+  );
+}
+
 function renderProviderMessage(message = {}) {
   const role = String(message?.role || "user").trim().toUpperCase() || "USER";
   const lines = [];
@@ -348,32 +359,49 @@ export function createProviderKernel(options = {}) {
       ? providerEntry.auth.settings
       : {};
     const kernelProviderSettings = resolveKernelProviderSettings(kernelConfig, providerId);
+    const explicitSelection = isExplicitProviderSelection(providerEntry, normalizedSelectionId);
+    const preferredSettings = explicitSelection ? providerSettings : kernelProviderSettings;
+    const fallbackSettings = explicitSelection ? kernelProviderSettings : providerSettings;
     const providerOverrides = {
-      model: kernelProviderSettings.defaultModel || providerSettings.defaultModel || providerEntry?.defaultModel || resolvedSelection.model || null,
-      authMode: kernelProviderSettings.authMode || providerSettings.authMode || providerEntry?.auth?.preferredMode || null,
-      endpoint: kernelProviderSettings.endpoint || providerSettings.endpoint || null,
-      baseUrl: kernelProviderSettings.baseUrl || providerSettings.baseUrl || null,
-      deployment: kernelProviderSettings.deployment || providerSettings.deployment || null,
-      apiVersion: kernelProviderSettings.apiVersion || providerSettings.apiVersion || null,
-      workspace: kernelProviderSettings.workspace || providerSettings.workspace || null,
+      model:
+        preferredSettings.defaultModel
+        || fallbackSettings.defaultModel
+        || providerEntry?.defaultModel
+        || resolvedSelection.model
+        || null,
+      authMode:
+        preferredSettings.authMode
+        || preferredSettings.mode
+        || fallbackSettings.authMode
+        || fallbackSettings.mode
+        || providerEntry?.auth?.preferredMode
+        || null,
+      endpoint: preferredSettings.endpoint || fallbackSettings.endpoint || null,
+      baseUrl: preferredSettings.baseUrl || fallbackSettings.baseUrl || null,
+      deployment: preferredSettings.deployment || fallbackSettings.deployment || null,
+      apiVersion: preferredSettings.apiVersion || fallbackSettings.apiVersion || null,
+      workspace: preferredSettings.workspace || fallbackSettings.workspace || null,
     };
     const providerConfig = providerEntry?.providerId
       ? (
         typeof registry.buildSessionConfig === "function"
-          ? registry.buildSessionConfig(providerEntry.providerId, providerOverrides)
+          ? registry.buildSessionConfig(
+              explicitSelection ? normalizedSelectionId : providerEntry.providerId,
+              providerOverrides,
+            )
           : driver?.createSessionConfig({
               env: options.env || process.env,
               ...providerOverrides,
               settings: {
-                defaultModel: kernelProviderSettings.defaultModel || providerSettings.defaultModel || providerEntry?.defaultModel || null,
-                authMode: kernelProviderSettings.authMode || providerSettings.authMode || null,
-                endpoint: kernelProviderSettings.endpoint || providerSettings.endpoint || null,
-                baseUrl: kernelProviderSettings.baseUrl || providerSettings.baseUrl || null,
-                deployment: kernelProviderSettings.deployment || providerSettings.deployment || null,
-                apiVersion: kernelProviderSettings.apiVersion || providerSettings.apiVersion || null,
-                workspace: kernelProviderSettings.workspace || providerSettings.workspace || null,
-                organization: kernelProviderSettings.organization || providerSettings.organization || null,
-                project: kernelProviderSettings.project || providerSettings.project || null,
+                defaultModel: preferredSettings.defaultModel || fallbackSettings.defaultModel || providerEntry?.defaultModel || null,
+                authMode: preferredSettings.authMode || preferredSettings.mode || fallbackSettings.authMode || fallbackSettings.mode || null,
+                endpoint: preferredSettings.endpoint || fallbackSettings.endpoint || null,
+                baseUrl: preferredSettings.baseUrl || fallbackSettings.baseUrl || null,
+                deployment: preferredSettings.deployment || fallbackSettings.deployment || null,
+                apiVersion: preferredSettings.apiVersion || fallbackSettings.apiVersion || null,
+                workspace: preferredSettings.workspace || fallbackSettings.workspace || null,
+                organization: preferredSettings.organization || fallbackSettings.organization || null,
+                project: preferredSettings.project || fallbackSettings.project || null,
               },
             })
       )

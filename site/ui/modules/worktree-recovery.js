@@ -59,7 +59,16 @@ function buildWorktreeRecoveryViewModel(input = null) {
   }
 
   const events = state.recentEvents.map((event, index) => {
-    const pathLabel = event.branch || event.taskId || event.worktreePath || "unknown worktree";
+    const cleanLabel = (value) => {
+      const text = String(value || "").trim();
+      if (!text) return null;
+      if (text.includes("{{") || text.includes("}}")) return null;
+      return text;
+    };
+    const pathLabel = cleanLabel(event.branch)
+      || cleanLabel(event.taskId)
+      || cleanLabel(event.worktreePath)
+      || "unknown worktree";
     const issuesLabel = event.detectedIssues.length ? ` · ${event.detectedIssues.join(", ")}` : "";
     return {
       key: `${event.timestamp || "event"}-${index}`,

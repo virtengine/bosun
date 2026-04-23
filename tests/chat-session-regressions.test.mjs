@@ -68,7 +68,7 @@ describe("chat session regressions", () => {
     expect(source).toContain("const fallbackSessionPath = buildSessionApiPath(sessionId, \"\", {");
     expect(source).toContain('workspace: "all"');
     expect(source).toContain("const shouldRetryAll = shouldFallbackToAllSessions(");
-    expect(source).toContain("res = await apiFetch(fallbackSessionPath, { _silent: true });");
+    expect(source).toContain("res = await apiFetch(fallbackSessionPath, { _silent: true");
   });
 
   it("exposes workspace metadata in session summaries for UI routing", () => {

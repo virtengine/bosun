@@ -967,6 +967,37 @@ function getFirstEventTimeoutMs(totalTimeoutMs) {
   return resolveCodexStreamSafety(totalTimeoutMs).firstEventTimeoutMs;
 }
 
+const OPENAI_NATIVE_MEANINGFUL_EVENT_TYPES = new Set([
+  "session.stream.start",
+  "session.stream.delta",
+  "session.stream.complete",
+  "session.step.finish",
+  "session.turn.complete",
+  "session.turn.error",
+]);
+
+function isMeaningfulOpenaiNativeEvent(event) {
+  if (typeof event === "string") {
+    return event.trim().length > 0;
+  }
+  if (!event || typeof event !== "object") {
+    return false;
+  }
+
+  const eventType = String(event.type || event.eventType || "").trim().toLowerCase();
+  if (OPENAI_NATIVE_MEANINGFUL_EVENT_TYPES.has(eventType)) {
+    return true;
+  }
+
+  if (typeof event.delta === "string" && event.delta.trim()) return true;
+  if (typeof event.text === "string" && event.text.trim()) return true;
+  if (typeof event.error === "string" && event.error.trim()) return true;
+  if (Array.isArray(event.toolCalls) && event.toolCalls.length > 0) return true;
+  if (Array.isArray(event.toolResults) && event.toolResults.length > 0) return true;
+  if (Array.isArray(event.items) && event.items.length > 0) return true;
+  return false;
+}
+
 function normalizeHarnessTimeoutMs(timeoutMs) {
   const parsed = Number(timeoutMs);
   if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
@@ -1933,17 +1964,7 @@ function resolvePoolSdkName() {
   // 3. bosun.config.json → agentPool.sdk
   try {
     const config = loadConfig();
-    const configSdk = normalizePoolSdkName(
-      config?.agentPool?.sdk ||
-      config?.primaryAgent ||
-      ""
-    );
-    if (configSdk && SDK_ADAPTERS[configSdk] && !isDisabled(configSdk)) {
-      resolvedSdkName = configSdk;
-      logResolution(configSdk, "bosun.config.json");
-      return resolvedSdkName;
-    }
-    // 3b. agentRuntime: "harness" + an enabled native executor → use openai-native
+    // 3. agentRuntime: "harness" + an enabled native executor → use openai-native
     // by default. This routes workflow agent runs through the in-process kernel +
     // native adapter (Azure OpenAI / OpenAI Responses) instead of subprocess CLI
     // SDKs that may have transient stdin/auth failures.
@@ -1962,6 +1983,16 @@ function resolvePoolSdkName() {
           return resolvedSdkName;
         }
       }
+    }
+    const configSdk = normalizePoolSdkName(
+      config?.agentPool?.sdk ||
+      config?.primaryAgent ||
+      ""
+    );
+    if (configSdk && SDK_ADAPTERS[configSdk] && !isDisabled(configSdk)) {
+      resolvedSdkName = configSdk;
+      logResolution(configSdk, "bosun.config.json");
+      return resolvedSdkName;
     }
   } catch {
     // config.mjs not available — continue with fallback
@@ -3297,11 +3328,32 @@ function resolveHarnessNativeSelectionId(envInput = process.env) {
   return "";
 }
 
+function resolveRequestedNativeSelection(extra = {}, envInput = process.env) {
+  const providerConfig =
+    extra?.providerConfig && typeof extra.providerConfig === "object" && !Array.isArray(extra.providerConfig)
+      ? extra.providerConfig
+      : null;
+  const candidates = [
+    providerConfig?.selectionId,
+    extra?.selectionId,
+    extra?.providerSelection,
+    extra?.provider,
+    providerConfig?.provider,
+    providerConfig?.providerId,
+  ];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || "").trim();
+    if (!normalized || normalized === "openai-native") continue;
+    return normalized;
+  }
+  return resolveHarnessNativeSelectionId(envInput);
+}
+
 async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
   timeoutMs = Number(timeoutMs) || DEFAULT_TIMEOUT_MS;
   const {
     onEvent = null,
-    abortController = null,
+    abortController: externalAbortController = null,
     onThreadReady = null,
     resumeThreadId = null,
     envOverrides = null,
@@ -3321,8 +3373,19 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
       || "",
   ).trim() || null;
   const persistent = Boolean(logicalSessionId);
+  const providerConfig =
+    extra?.providerConfig && typeof extra.providerConfig === "object" && !Array.isArray(extra.providerConfig)
+      ? { ...extra.providerConfig }
+      : null;
+  const normalizedProvider = String(
+    extra?.provider || providerConfig?.provider || providerConfig?.providerId || "",
+  ).trim() || null;
   const trimmedModel = String(model || "").trim();
-  const selectionId = resolveHarnessNativeSelectionId(runtimeSessionEnv);
+  const selectionId = resolveRequestedNativeSelection({
+    ...extra,
+    provider: normalizedProvider,
+    providerConfig,
+  }, runtimeSessionEnv);
 
   if (persistent && typeof onThreadReady === "function") {
     try {
@@ -3332,6 +3395,31 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
     }
   }
 
+  const { controller, cleanup: clearAbortScope } = createScopedAbortController(
+    externalAbortController,
+    timeoutMs,
+  );
+  const firstEventTimeoutMs = getFirstEventTimeoutMs(timeoutMs);
+  let firstEventTimer = null;
+  let firstEventTimeoutHit = false;
+  let nativeEventCount = 0;
+  const handleNativeEvent = (event) => {
+    if (isMeaningfulOpenaiNativeEvent(event)) {
+      nativeEventCount += 1;
+      if (firstEventTimer) {
+        clearTimeout(firstEventTimer);
+        firstEventTimer = null;
+      }
+    }
+    if (typeof onEvent === "function") {
+      try {
+        onEvent(event);
+      } catch {
+        /* best effort */
+      }
+    }
+  };
+
   try {
     const providerKernel = createProviderKernel({
       adapters: {
@@ -3340,29 +3428,43 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
       getConfig: () => loadConfig() || {},
       env: runtimeSessionEnv,
       sessionManager: getBosunSessionManager(),
-      onEvent,
+      onEvent: handleNativeEvent,
     });
     const providerSession = providerKernel.createExecutionSession({
       adapterName: "openai-native",
-      selectionId: selectionId || "azure-openai-responses",
+      selectionId: selectionId || normalizedProvider || "azure-openai-responses",
+      ...(normalizedProvider ? { provider: normalizedProvider } : {}),
+      ...(providerConfig ? { providerConfig } : {}),
       sessionId: logicalSessionId,
       threadId: logicalSessionId,
-      model: trimmedModel || null,
+      model: trimmedModel || providerConfig?.model || null,
       cwd,
       repoRoot: cwd,
       taskKey: taskKey || logicalSessionId,
       sessionType: extra.sessionType || "task",
       sessionManager: getBosunSessionManager(),
-      onEvent,
+      onEvent: handleNativeEvent,
       subagentMaxParallel: extra.subagentMaxParallel,
     });
+
+    if (firstEventTimeoutMs) {
+      firstEventTimer = setTimeout(() => {
+        if (nativeEventCount > 0 || controller.signal.aborted) return;
+        firstEventTimeoutHit = true;
+        controller.abort("first_event_timeout");
+      }, firstEventTimeoutMs);
+      if (typeof firstEventTimer.unref === "function") {
+        firstEventTimer.unref();
+      }
+    }
+
     const result = await providerSession.runTurn(prompt, {
-      onEvent,
+      onEvent: handleNativeEvent,
       timeoutMs,
       sessionId: logicalSessionId,
       threadId: logicalSessionId,
-      abortController,
-      model: trimmedModel || null,
+      abortController: controller,
+      model: trimmedModel || providerConfig?.model || null,
       cwd,
       repoRoot: cwd,
       taskKey: taskKey || logicalSessionId,
@@ -3383,6 +3485,22 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
       threadId: persistent ? logicalSessionId : null,
     };
   } catch (err) {
+    const abortReason = controller.signal.aborted
+      ? String(controller.signal.reason || "")
+      : "";
+    if (abortReason === "first_event_timeout") {
+      const noEventsSuffix = firstEventTimeoutMs
+        ? ` (no events received within ${firstEventTimeoutMs}ms)`
+        : "";
+      return {
+        success: false,
+        output: "",
+        items: [],
+        error: `OpenAI Native execution error: first_event_timeout${noEventsSuffix}`,
+        sdk: "openai-native",
+        threadId: persistent ? logicalSessionId : null,
+      };
+    }
     return {
       success: false,
       output: "",
@@ -3391,6 +3509,12 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
       sdk: "openai-native",
       threadId: persistent ? logicalSessionId : null,
     };
+  } finally {
+      clearTimeout(firstEventTimer);
+    if (firstEventTimer) {
+      clearTimeout(firstEventTimer);
+    }
+    clearAbortScope();
   }
 }
 

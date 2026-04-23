@@ -71,6 +71,8 @@ export function validateTaskBatchPayload(payload) {
 export function isTaskBatchDispatchEligible(task) {
   if (!task || typeof task !== "object" || Array.isArray(task)) return false;
   if (String(task.status || "").trim().toLowerCase() !== "todo") return false;
+  const cooldownUntil = Date.parse(String(task.cooldownUntil || ""));
+  if (Number.isFinite(cooldownUntil) && Date.now() < cooldownUntil) return false;
 
   const description = typeof task.description === "string" ? task.description.trim() : "";
   const title = typeof task.title === "string" ? task.title.trim() : "";

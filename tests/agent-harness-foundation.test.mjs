@@ -139,6 +139,41 @@ describe("provider registry foundation", () => {
     }));
   });
 
+  it("prefers exact configured executor ids over builtin provider normalization", () => {
+    const options = {
+      adapters: {
+        ...adapters,
+        "openai-native": {
+          name: "openai-native",
+          displayName: "OpenAI Native",
+          provider: "OPENAI_NATIVE",
+        },
+      },
+      includeBuiltins: true,
+      preferNativeAdapters: true,
+      env: {},
+      settings: {},
+      configExecutors: [
+        {
+          id: "azure-openai-responses-2",
+          name: "Azure OpenAI Responses 2",
+          providerId: "azure-openai-responses",
+          adapterId: "openai-native",
+          enabled: true,
+          models: ["gpt-5.4"],
+          defaultModel: "gpt-5.4",
+        },
+      ],
+    };
+
+    expect(resolveProviderSelection("azure-openai-responses-2", options)).toEqual({
+      providerId: "azure-openai-responses",
+      adapterName: "openai-native",
+      selectionId: "azure-openai-responses-2",
+      model: "gpt-5.4",
+    });
+  });
+
   it("honors provider-kernel enablement and default provider selection", () => {
     const registry = createProviderRegistry({
       adapters,

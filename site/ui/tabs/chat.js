@@ -839,10 +839,13 @@ export function ChatTab() {
     const val = e.target.value;
     setInputValue(val);
 
-    // Auto-grow textarea
-    const el = e.target;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    // NOTE: do NOT manually set textarea height here. The MUI <TextField
+    // multiline maxRows={4}> wraps a TextareaAutosize that handles auto-grow
+    // internally via a hidden shadow textarea. Setting el.style.height
+    // ourselves forces a synchronous layout/reflow on every keystroke, which
+    // makes the chat composer feel "heavy" — especially while the
+    // InspectorPanel is also re-rendering. Letting MUI own the sizing keeps
+    // input latency at a single React commit.
 
     if (val.startsWith("/")) {
       setShowSlashMenu(true);

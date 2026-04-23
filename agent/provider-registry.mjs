@@ -442,6 +442,17 @@ export function resolveProviderSelection(name, options = {}) {
   const providers = Array.isArray(options.availableProviders)
     ? options.availableProviders
     : listRegisteredProviders(options);
+  const exactIdMatch = providers.find((entry) => entry.id === raw);
+  if (exactIdMatch) {
+    return normalizeProviderSelection({
+      providerId: exactIdMatch.providerId || normalizeProviderCapabilityId(exactIdMatch.id),
+      adapterName: normalizeProviderAdapterName(
+        exactIdMatch.adapterId || exactIdMatch.providerId || exactIdMatch.executor || exactIdMatch.provider,
+      ),
+      selectionId: exactIdMatch.id,
+      model: exactIdMatch.defaultModel,
+    });
+  }
   const directProviderId = normalizeProviderDefinitionId(raw, "");
   if (directProviderId) {
     const providerMatch = providers.find((entry) => entry.providerId === directProviderId);
@@ -455,7 +466,7 @@ export function resolveProviderSelection(name, options = {}) {
     }
   }
   const match = providers.find((entry) =>
-    entry.id === raw || entry.adapterId === normalizeProviderAdapterName(raw));
+    entry.adapterId === normalizeProviderAdapterName(raw));
   if (!match) return null;
   return normalizeProviderSelection({
     providerId: match.providerId || normalizeProviderCapabilityId(match.id),

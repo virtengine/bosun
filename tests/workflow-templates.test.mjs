@@ -1393,6 +1393,33 @@ describe("workflow setup profiles", () => {
     })).toBe(true);
   });
 
+  it("skips todo tasks whose persisted cooldownUntil is still active", () => {
+    const baseTask = {
+      id: "task-cooling-batch",
+      title: "Cooling batch candidate",
+      status: "todo",
+      draft: false,
+      description: "Dispatchable task metadata is present.",
+      branchName: "task/task-cooling-batch",
+      baseBranch: "origin/main",
+      repository: "virtengine/bosun",
+      workspace: "virtengine-gh",
+      meta: {
+        planner: { impact: 5 },
+      },
+    };
+
+    expect(isTaskBatchDispatchEligible({
+      ...baseTask,
+      cooldownUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      ...baseTask,
+      cooldownUntil: new Date(Date.now() - 10 * 60_000).toISOString(),
+    })).toBe(true);
+  });
+
   it("alerts Telegram only for failed batch items and logs the routine summary", () => {
     const batchProcessor = getTemplate("template-task-batch-processor");
     const recordNode = batchProcessor?.nodes?.find((node) => node.id === "record-results");

@@ -1788,6 +1788,17 @@ export class SessionTracker {
     emitSessionStateEvent(session, "session-status", { status: session.status });
   }
 
+  touchSession(sessionId) {
+    const session = this.#sessions.get(sessionId);
+    if (!session) return false;
+    session.lastActivityAt = Date.now();
+    session.lastActiveAt = new Date().toISOString();
+    this.#scheduleDerivedStateRefresh(session, { force: true });
+    this.#markDirty(sessionId);
+    persistSessionRecordToStateLedger(session);
+    return true;
+  }
+
   updateSessionMetadata(sessionId, updater) {
     const session = this.#sessions.get(sessionId);
     if (!session) return null;

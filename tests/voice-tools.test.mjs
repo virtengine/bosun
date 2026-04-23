@@ -238,6 +238,7 @@ vi.mock("../voice/voice-relay.mjs", () => ({
 let getToolDefinitions;
 let executeToolCall;
 let VOICE_TOOLS;
+let createBuiltinToolDefinitions;
 let execPrimaryPrompt;
 let setPrimaryAgent;
 let execPooledPrompt;
@@ -267,6 +268,7 @@ describe("voice-tools", () => {
       executeToolCall,
       VOICE_TOOLS,
     } = await import("../voice/voice-tools.mjs"));
+    ({ createBuiltinToolDefinitions } = await import("../agent/tool-builtin-catalog.mjs"));
     ({ execPrimaryPrompt, setPrimaryAgent } = await import("../agent/primary-agent.mjs"));
     ({ execPooledPrompt } = await import("../agent/agent-pool.mjs"));
     promptDefaults = await import("../agent/agent-prompts.mjs");
@@ -416,6 +418,36 @@ describe("voice-tools", () => {
       });
     });
 
+    it("delegate_to_agent skips voice-only approval defaults for workflow-agent contexts", async () => {
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        {
+          sessionId: "workflow-agent-1",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          approvalMode: "auto",
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/\{RESPONSE\}/i);
+      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
+      expect(callArgs?.[0]).toBe("ship it");
+    });
+
+    it("builtin bridged delegate_to_agent defaults to non-voice tool context", async () => {
+      vi.mocked(execPooledPrompt).mockClear();
+      const defs = createBuiltinToolDefinitions();
+      const delegateTool = defs.find((tool) => tool.id === "delegate_to_agent");
+      const result = await delegateTool.handler(
+        { message: "bridge this task" },
+        { sessionId: "workflow-tool-1" },
+      );
+      expect(result).toMatch(/\{RESPONSE\}/i);
+      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
+      expect(callArgs?.[0]).toBe("bridge this task");
+    });
+
     it("delegate_to_agent coerces session-bound ask mode to agent", async () => {
       const result = await executeToolCall(
         "delegate_to_agent",
@@ -542,6 +574,19 @@ describe("voice-tools", () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/blocked non-read-only workspace command|owner\/admin/i);
+      expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
+    });
+
+    it("run_workspace_command allows safe read-only commands without approval", async () => {
+      vi.mocked(execPooledPrompt).mockClear();
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "node --version" },
+        { sessionId: "workflow-session", approvalMode: "auto" },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/^v\d+/i);
       expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
     });
 

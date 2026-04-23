@@ -163,8 +163,13 @@ function resolveConfigDir(repoRoot) {
   //    explicitly passes `--config-dir .bosun`.  Without this, running from a
   //    directory outside the module (e.g. home dir) misses workspaces, .env
   //    vars (TELEGRAM_UI_PORT, TELEGRAM_MINIAPP_ENABLED, etc.), and task store.
+  //    NOTE: when repoRoot is empty, `resolve("")` collapses to process.cwd()
+  //    which often equals moduleRoot for source checkouts. Skipping the
+  //    equality guard in that case allows the module-local `.bosun` to be
+  //    picked up instead of falling through to the global AppData dir.
   const moduleRoot = detectBosunModuleRoot();
-  if (moduleRoot && resolve(moduleRoot) !== resolve(repoRoot || "")) {
+  const repoRootProvided = typeof repoRoot === "string" && repoRoot.trim() !== "";
+  if (moduleRoot && (!repoRootProvided || resolve(moduleRoot) !== resolve(repoRoot))) {
     const moduleLocalConfigDir = resolveRepoLocalBosunDir(moduleRoot);
     if (moduleLocalConfigDir) return moduleLocalConfigDir;
   }
