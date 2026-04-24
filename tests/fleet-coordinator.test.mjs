@@ -712,6 +712,35 @@ describe("shared-knowledge", () => {
       expect(secondResult.success).toBe(false);
       expect(String(secondResult.reason || "")).toContain("rate limited");
     });
+
+    it("allows concurrent writes from different agents when their throttle keys differ", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Session memory: first write for the shared scope should succeed for delta.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        sessionId: "session-shared",
+        agentId: "agent-delta",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Session memory: second write in the same session scope should still persist for epsilon when agent throttles are independent.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        sessionId: "session-shared",
+        agentId: "agent-epsilon",
+      });
+
+      const [firstResult, secondResult] = await Promise.all([
+        appendKnowledgeEntry(first),
+        appendKnowledgeEntry(second),
+      ]);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+    });
   });
 
   describe("readKnowledgeEntries", () => {

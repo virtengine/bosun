@@ -62,8 +62,7 @@ const knowledgeState = {
   sectionHeader: DEFAULT_SECTION_HEADER,
   entriesWritten: 0,
   lastWriteAt: null,
-  lastWriteByAgent: new Map(),
-  lastWriteByScope: new Map(),
+  lastWriteByThrottleKey: new Map(),
   entryHashes: new Set(),
 };
 
@@ -599,8 +598,7 @@ export function initSharedKnowledge(opts = {}) {
   knowledgeState.sectionHeader = opts.sectionHeader || DEFAULT_SECTION_HEADER;
   knowledgeState.entriesWritten = 0;
   knowledgeState.lastWriteAt = null;
-  knowledgeState.lastWriteByAgent = new Map();
-  knowledgeState.lastWriteByScope = new Map();
+  knowledgeState.lastWriteByThrottleKey = new Map();
   knowledgeState.entryHashes = new Set();
 }
 
@@ -828,11 +826,10 @@ export async function appendKnowledgeEntry(entry, options = {}) {
 
   const agentId = normalizeText(normalizedEntry.agentId || "unknown");
   const scopeThrottleKey = getScopeThrottleKey(normalizedEntry);
+  const throttleKey = `${agentId}::${scopeThrottleKey}`;
   const skipRateLimit = options?.skipRateLimit === true;
   const now = Date.now();
-  const lastWriteForAgent = knowledgeState.lastWriteByAgent.get(agentId) || 0;
-  const lastWriteForScope = knowledgeState.lastWriteByScope.get(scopeThrottleKey) || 0;
-  const lastRelevantWrite = Math.max(lastWriteForAgent, lastWriteForScope);
+  const lastRelevantWrite = knowledgeState.lastWriteByThrottleKey.get(throttleKey) || 0;
   if (!skipRateLimit && lastRelevantWrite) {
     const elapsed = now - lastRelevantWrite;
     if (elapsed < RATE_LIMIT_MS) {
@@ -882,8 +879,7 @@ export async function appendKnowledgeEntry(entry, options = {}) {
     knowledgeState.entryHashes.add(normalizedEntry.hash);
     knowledgeState.entriesWritten++;
     knowledgeState.lastWriteAt = Date.now();
-    knowledgeState.lastWriteByAgent.set(agentId, knowledgeState.lastWriteAt);
-    knowledgeState.lastWriteByScope.set(scopeThrottleKey, knowledgeState.lastWriteAt);
+    knowledgeState.lastWriteByThrottleKey.set(throttleKey, knowledgeState.lastWriteAt);
 
     return {
       success: true,
@@ -1070,5 +1066,8 @@ astWriteAt
   ].join("\n");
 }
 ession",
+  ].join("\n");
+}
+,
   ].join("\n");
 }
