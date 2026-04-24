@@ -646,6 +646,72 @@ describe("shared-knowledge", () => {
       const result = await appendKnowledgeEntry(entry);
       expect(result.success).toBe(false);
     });
+
+    it("allows concurrent writes from different agents and scopes", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Workspace memory: agent alpha can persist migration learnings independently.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        agentId: "agent-alpha",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Workspace memory: agent beta can persist fixture learnings without alpha blocking it.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-2",
+        agentId: "agent-beta",
+      });
+
+      const [firstResult, secondResult] = await Promise.all([
+        appendKnowledgeEntry(first),
+        appendKnowledgeEntry(second),
+      ]);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+
+      const entries = await readKnowledgeEntries();
+      expect(entries.map((entry) => entry.agentId)).toEqual(
+        expect.arrayContaining(["agent-alpha", "agent-beta"]),
+      );
+    });
+
+    it("rate limits burst writes from the same agent or scope", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Workspace memory: first write from gamma succeeds before burst protection kicks in.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        agentId: "agent-gamma",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Workspace memory: second gamma write should be throttled for duplicate burst protection.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        agentId: "agent-gamma",
+      });
+
+      const firstResult = await appendKnowledgeEntry(first);
+      const secondResult = await appendKnowledgeEntry(second);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(false);
+      expect(String(secondResult.reason || "")).toContain("rate limited");
+    });
   });
 
   describe("readKnowledgeEntries", () => {
@@ -709,6 +775,7 @@ Always use deterministic TF ops.
       const state = getKnowledgeState();
       expect(state).toHaveProperty("entriesWritten");
       expect(state).toHaveProperty("targetFile");
+      expect(state).toHaveProperty("lastWriteByScope");
     });
 
     it("formats a summary string", () => {

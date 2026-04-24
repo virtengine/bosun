@@ -63,6 +63,7 @@ const knowledgeState = {
   entriesWritten: 0,
   lastWriteAt: null,
   lastWriteByAgent: new Map(),
+  lastWriteByScope: new Map(),
   entryHashes: new Set(),
 };
 
@@ -75,6 +76,12 @@ function normalizeText(value) {
 function normalizeNullable(value) {
   const text = normalizeText(value);
   return text || null;
+}
+
+function getScopeThrottleKey(entry) {
+  const scopeLevel = normalizeScopeLevel(entry?.scopeLevel);
+  const scopeId = getScopeIdentifier(entry, scopeLevel);
+  return `${scopeLevel}:${scopeId || "default"}`;
 }
 
 function normalizeStringList(value, { maxItems = 12, maxLength = 240 } = {}) {
@@ -593,6 +600,7 @@ export function initSharedKnowledge(opts = {}) {
   knowledgeState.entriesWritten = 0;
   knowledgeState.lastWriteAt = null;
   knowledgeState.lastWriteByAgent = new Map();
+  knowledgeState.lastWriteByScope = new Map();
   knowledgeState.entryHashes = new Set();
 }
 
@@ -819,10 +827,14 @@ export async function appendKnowledgeEntry(entry, options = {}) {
   }
 
   const agentId = normalizeText(normalizedEntry.agentId || "unknown");
-  const lastWriteForAgent = knowledgeState.lastWriteByAgent.get(agentId) || 0;
+  const scopeThrottleKey = getScopeThrottleKey(normalizedEntry);
   const skipRateLimit = options?.skipRateLimit === true;
-  if (!skipRateLimit && lastWriteForAgent) {
-    const elapsed = Date.now() - lastWriteForAgent;
+  const now = Date.now();
+  const lastWriteForAgent = knowledgeState.lastWriteByAgent.get(agentId) || 0;
+  const lastWriteForScope = knowledgeState.lastWriteByScope.get(scopeThrottleKey) || 0;
+  const lastRelevantWrite = Math.max(lastWriteForAgent, lastWriteForScope);
+  if (!skipRateLimit && lastRelevantWrite) {
+    const elapsed = now - lastRelevantWrite;
     if (elapsed < RATE_LIMIT_MS) {
       return {
         success: false,
@@ -871,6 +883,7 @@ export async function appendKnowledgeEntry(entry, options = {}) {
     knowledgeState.entriesWritten++;
     knowledgeState.lastWriteAt = Date.now();
     knowledgeState.lastWriteByAgent.set(agentId, knowledgeState.lastWriteAt);
+    knowledgeState.lastWriteByScope.set(scopeThrottleKey, knowledgeState.lastWriteAt);
 
     return {
       success: true,
@@ -1033,6 +1046,7 @@ export function getKnowledgeState() {
     ...knowledgeState,
     entryHashes: knowledgeState.entryHashes.size,
     lastWriteByAgent: knowledgeState.lastWriteByAgent.size,
+    lastWriteByScope: knowledgeState.lastWriteByScope.size,
   };
 }
 
@@ -1045,5 +1059,16 @@ export function formatKnowledgeSummary() {
     knowledgeState.lastWriteAt
       ? `Last write: ${new Date(knowledgeState.lastWriteAt).toISOString()}`
       : "No writes this session",
+  ].join("\n");
+}
+ession",
+  ].join("\n");
+}
+astWriteAt
+      ? `Last write: ${new Date(knowledgeState.lastWriteAt).toISOString()}`
+      : "No writes this session",
+  ].join("\n");
+}
+ession",
   ].join("\n");
 }
