@@ -102,6 +102,9 @@ export function computeCacheHitPct(usage) {
 const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;  // 10 min stream idle
 const RESPONSES_API_VERSION_DEFAULT = "2025-03-01-preview";
 const OPENAI_BASE_URL = "https://api.openai.com";
+const OPENAI_TEXT_ITEM_MAX_CHARS = 10_485_760;
+const DEFAULT_HISTORY_TEXT_MAX_CHARS = 8_000_000;
+const MIN_HISTORY_TEXT_MAX_CHARS = 1024;
 
 // Shared compactor — one instance handles all sessions in the process.
 const _compactor = createContextCompactor();
@@ -178,6 +181,108 @@ function isAzureHostname(url) {
 function cloneJson(value) {
   if (value == null) return value ?? null;
   return JSON.parse(JSON.stringify(value));
+}
+
+function getHistoryTextMaxChars() {
+  const raw = Number(process.env.BOSUN_OPENAI_NATIVE_MAX_HISTORY_TEXT_CHARS);
+  if (!Number.isFinite(raw)) return DEFAULT_HISTORY_TEXT_MAX_CHARS;
+  return Math.max(
+    MIN_HISTORY_TEXT_MAX_CHARS,
+    Math.min(OPENAI_TEXT_ITEM_MAX_CHARS - 1024, Math.trunc(raw)),
+  );
+}
+
+function serializeRequestField(value, fallback = "") {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value ?? fallback);
+  } catch {
+    return String(value ?? fallback);
+  }
+}
+
+function truncateOversizedHistoryText(value, label = "history text", maxChars = getHistoryTextMaxChars()) {
+  const text = typeof value === "string" ? value : String(value ?? "");
+  if (text.length <= maxChars) return text;
+  const marker = `\n...[${label} truncated ${text.length - maxChars} chars to stay within OpenAI per-item limits]...\n`;
+  const availableChars = Math.max(0, maxChars - marker.length);
+  const headChars = Math.ceil(availableChars * 0.6);
+  const tailChars = Math.max(0, availableChars - headChars);
+  return `${text.slice(0, headChars)}${marker}${tailChars > 0 ? text.slice(-tailChars) : ""}`;
+}
+
+function sanitizeHistoryEntryForRequest(entry, maxChars = getHistoryTextMaxChars()) {
+  if (!entry || typeof entry !== "object") return entry;
+  let next = entry;
+  const updateField = (field, label, { structured = false } = {}) => {
+    const current = next?.[field];
+    if (current == null) return;
+    let truncated = current;
+    if (structured) {
+      const serialized = serializeRequestField(current, "");
+      if (serialized.length <= maxChars) return;
+      truncated = truncateOversizedHistoryText(serialized, label, maxChars);
+    } else {
+      truncated = truncateOversizedHistoryText(current, label, maxChars);
+      if (truncated === current) return;
+    }
+    if (next === entry) next = { ...entry };
+    next[field] = truncated;
+  };
+
+  switch (entry.type) {
+    case "user_message":
+      updateField("text", "user message");
+      break;
+    case "assistant_message":
+      updateField("text", "assistant message");
+      if (Array.isArray(entry.toolCalls) && entry.toolCalls.length > 0) {
+        let toolCalls = entry.toolCalls;
+        for (let idx = 0; idx < entry.toolCalls.length; idx += 1) {
+          const toolCall = entry.toolCalls[idx];
+          if (toolCall?.arguments == null) continue;
+          const serializedArgs = serializeRequestField(toolCall.arguments, "{}");
+          if (serializedArgs.length <= maxChars) continue;
+          const truncatedArgs = truncateOversizedHistoryText(serializedArgs, "tool call arguments", maxChars);
+          if (toolCalls === entry.toolCalls) toolCalls = entry.toolCalls.slice();
+          toolCalls[idx] = { ...toolCall, arguments: truncatedArgs };
+        }
+        if (toolCalls !== entry.toolCalls) {
+          if (next === entry) next = { ...entry };
+          next.toolCalls = toolCalls;
+        }
+      }
+      break;
+    case "function_call":
+      updateField("arguments", "tool call arguments", { structured: true });
+      break;
+    case "function_call_output":
+      updateField("output", "tool output", { structured: true });
+      break;
+    case "compaction_checkpoint":
+      updateField("text", "checkpoint summary");
+      break;
+    default:
+      break;
+  }
+  return next;
+}
+
+export function sanitizeHistoryEntriesForRequest(history, options = {}) {
+  if (!Array.isArray(history) || history.length === 0) return history;
+  const maxChars = Number.isFinite(Number(options.maxChars))
+    ? Math.max(
+        MIN_HISTORY_TEXT_MAX_CHARS,
+        Math.min(OPENAI_TEXT_ITEM_MAX_CHARS - 1024, Math.trunc(Number(options.maxChars))),
+      )
+    : getHistoryTextMaxChars();
+  let changed = false;
+  const sanitized = history.map((entry) => {
+    const next = sanitizeHistoryEntryForRequest(entry, maxChars);
+    if (next !== entry) changed = true;
+    return next;
+  });
+  return changed ? sanitized : history;
 }
 
 function isPlainObject(value) {
@@ -473,7 +578,7 @@ function buildResponsesRequest(history, tools, execOptions, previousResponseId =
       validCallIds.add(entry.callId);
     }
   }
-  const filteredHistory = history.filter((entry) => {
+  const filteredHistory = sanitizeHistoryEntriesForRequest(history).filter((entry) => {
     if (entry?.type === "function_call") {
       return entry.callId && typeof entry.name === "string" && entry.name.trim().length > 0;
     }
