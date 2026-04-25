@@ -3361,6 +3361,10 @@ registerNodeType("action.run_agent", {
         };
 
         const heartbeat = setInterval(() => {
+          if (!firstEventSeen) {
+            firstEventSeen = true;
+            clearFirstEventGuard();
+          }
           if (tracker && trackedTaskId) {
             tracker.touchSession(trackedTaskId);
             if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
