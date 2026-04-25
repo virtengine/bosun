@@ -7063,13 +7063,17 @@
         },
         {
           "id": "plan-work",
-          "type": "agent.run_planner",
+          "type": "action.run_agent",
           "label": "Plan Implementation",
           "config": {
             "prompt": "Analyze the task requirements and create a step-by-step implementation plan. Identify which files need to be modified, what tests need to be written, and any API contracts to maintain.",
             "outputVariable": "plan",
+            "mode": "plan",
+            "executionRole": "architect",
             "repoMapQuery": "{{taskTitle}} {{taskDescription}}",
-            "repoMapFileLimit": 8
+            "repoMapFileLimit": 8,
+            "sdk": "{{agentSdk}}",
+            "timeoutMs": "{{timeoutMs}}"
           },
           "position": {
             "x": 400,
@@ -12992,7 +12996,7 @@
           "config": {
             "workflowId": "template-task-repair-worktree",
             "mode": "dispatch",
-            "input": "(() => { const analysisRaw = String($ctx.getNodeOutput('analyze-error')?.output || '').trim(); const retryOutputRaw = String($ctx.getNodeOutput('retry-task')?.output || '').trim(); const retryErrorRaw = String($ctx.getNodeOutput('retry-task')?.error || '').trim(); const truncate = (value, limit = 2000) => value.length > limit ? `${value.slice(0, limit)}...` : value; const diagnostics = [String($data?.lastError || '').trim(), analysisRaw ? `Recovery analysis:\n${truncate(analysisRaw)}` : '', retryOutputRaw ? `Retry output:\n${truncate(retryOutputRaw)}` : '', retryErrorRaw ? `Retry error:\n${truncate(retryErrorRaw)}` : ''].filter(Boolean).join('\n\n'); return { taskId: $data?.taskId, taskTitle: $data?.taskTitle, worktreePath: $data?.worktreePath, branch: $data?.branch, baseBranch: $data?.baseBranch, error: diagnostics || String($data?.lastError || ''), recoveryAnalysis: truncate(analysisRaw), retryResult: { success: $ctx.getNodeOutput('retry-task')?.success === true, output: truncate(retryOutputRaw), error: truncate(retryErrorRaw) } }; })()"
+            "input": "(() => { const analysisRaw = String($ctx.getNodeOutput('analyze-error')?.output || '').trim(); const retryOutputRaw = String($ctx.getNodeOutput('retry-task')?.output || '').trim(); const retryErrorRaw = String($ctx.getNodeOutput('retry-task')?.error || '').trim(); const truncate = (value, limit = 2000) => value.length > limit ? `${value.slice(0, limit)}...` : value; const diagnostics = [String($data?.lastError || '').trim(), analysisRaw ? `Recovery analysis:\n${truncate(analysisRaw)}` : '', retryOutputRaw ? `Retry output:\n${truncate(retryOutputRaw)}` : '', retryErrorRaw ? `Retry error:\n${truncate(retryErrorRaw)}` : ''].filter(Boolean).join('\n\n'); return { eventType: 'task.failed', taskId: $data?.taskId, taskTitle: $data?.taskTitle, worktreePath: $data?.worktreePath, branch: $data?.branch, baseBranch: $data?.baseBranch, error: diagnostics || String($data?.lastError || ''), recoveryAnalysis: truncate(analysisRaw), retryResult: { success: $ctx.getNodeOutput('retry-task')?.success === true, output: truncate(retryOutputRaw), error: truncate(retryErrorRaw) } }; })()"
           },
           "position": {
             "x": 400,
@@ -19011,7 +19015,6 @@
             "prompt": "## Phase: Backend Planning\n\nAnalyse the task and produce a plan:\n1. Data model / schema changes\n2. API endpoint design (routes, request/response shapes)\n3. Service layer logic\n4. Database queries or migrations\n5. Test plan (unit + integration)\n\nDo NOT write code yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19039,7 +19042,6 @@
             "prompt": "## Phase: Test-Driven Implementation\n\n1. Write tests FIRST for the planned changes\n2. Verify tests fail (red)\n3. Implement the backend logic to make tests pass (green)\n4. Refactor for clarity and performance\n5. Run full test suite: {{testCommand}}\n6. Run build: {{buildCommand}}\n7. Run lint: {{lintCommand}}\n\nCommit with descriptive messages.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19067,7 +19069,6 @@
             "prompt": "## Phase: Verification\n\n1. Run the complete test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Ensure no regressions\n4. Push changes and create/update PR\n5. Include test results summary in PR description",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19401,7 +19402,6 @@
             "prompt": "## Phase: CI/CD Planning\n\nAnalyse the pipeline/infrastructure task:\n1. Current CI/CD configuration\n2. What needs to change and why\n3. Impact on existing workflows/pipelines\n4. Rollback strategy\n5. Test plan for verifying the change\n\nDo NOT make changes yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19429,7 +19429,6 @@
             "prompt": "## Phase: Pipeline Implementation\n\n1. Make the CI/CD / infrastructure changes per the plan\n2. Update configuration files (workflows, Dockerfiles, Terraform, etc.)\n3. Add or update pipeline tests where applicable\n4. Run build: {{buildCommand}}\n5. Run lint: {{lintCommand}}\n6. Validate configuration syntax\n\nCommit changes with clear descriptions.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19457,7 +19456,6 @@
             "prompt": "## Phase: Pipeline Verification\n\n1. Run full test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Verify pipeline configuration is valid\n4. Push and create/update PR\n5. Include deployment / rollback instructions in PR description",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19912,7 +19910,6 @@
             "prompt": "## Phase: Bug Reproduction & Root Cause Analysis\n\n1. Read the bug report carefully\n2. Find the relevant code area\n3. Reproduce the issue (write a failing test if possible)\n4. Trace the root cause through the codebase\n5. Document: what fails, where, why, and the minimal fix needed\n\nDo NOT fix the bug yet — only diagnose.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19940,7 +19937,6 @@
             "prompt": "## Phase: Fix Implementation with Regression Tests\n\n1. Write a regression test that demonstrates the bug (must fail before fix)\n2. Apply the minimal, surgical fix\n3. Verify the regression test now passes\n4. Run the full test suite: {{testCommand}}\n5. Run build: {{buildCommand}}\n6. Run lint: {{lintCommand}}\n7. Ensure no other tests broke\n\nCommit fix and test together with a clear commit message.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -19968,7 +19964,6 @@
             "prompt": "## Phase: Final Verification\n\n1. Run complete test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Confirm the original bug is fixed\n4. Confirm no regressions\n5. Push and create/update PR with root cause analysis in description",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20097,7 +20092,6 @@
             "prompt": "## Phase: Design Requirements Analysis\n\n1. Review the design task requirements\n2. Identify affected design tokens, components, or patterns\n3. Check existing design system for reusable pieces\n4. Plan the implementation approach\n5. List affected files and components\n\nDo NOT make changes yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20125,7 +20119,6 @@
             "prompt": "## Phase: Design Implementation\n\n1. Update design tokens (colors, spacing, typography) if needed\n2. Create / update components per the design specification\n3. Ensure consistency with existing design system\n4. Add visual tests or snapshots where applicable\n5. Run build: {{buildCommand}}\n6. Run lint: {{lintCommand}}\n\nCommit changes with descriptive messages.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20153,7 +20146,6 @@
             "prompt": "## Phase: Design Verification\n\n1. Run tests: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Verify visual consistency\n4. Check design token values are correct\n5. Push and create/update PR",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20466,7 +20458,6 @@
             "prompt": "## Phase: Design Analysis\n\nAnalyse the UI task requirements:\n1. Component hierarchy and structure\n2. Layout and responsive breakpoints\n3. State management needs\n4. Accessibility requirements (ARIA, keyboard nav)\n5. Styling approach (CSS modules, Tailwind, styled-components)\n6. Component test plan\n\nDo NOT write code yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20494,7 +20485,6 @@
             "prompt": "## Phase: UI Implementation\n\n1. Create / update components per the design plan\n2. Implement layouts, styling, and responsive design\n3. Add proper accessibility attributes\n4. Write component tests\n5. Run tests: {{testCommand}}\n6. Run build: {{buildCommand}}\n7. Run lint: {{lintCommand}}\n\nCommit with descriptive messages.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20522,7 +20512,6 @@
             "prompt": "## Phase: Visual Verification\n\n1. Run the full test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Verify components render correctly\n4. Check responsive breakpoints\n5. Verify accessibility (screen reader, keyboard)\n6. Push changes and create/update PR",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20645,7 +20634,6 @@
             "prompt": "## Phase: Architecture Planning\n\nAnalyse the task and produce a concrete plan covering:\n1. Backend changes: API routes, models, services, migrations\n2. Frontend changes: components, pages, state management\n3. Shared types / contracts between layers\n4. Test strategy for each layer\n5. Integration points and data flow\n\nDo NOT write code yet — produce only the plan.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20673,7 +20661,6 @@
             "prompt": "## Phase: Backend Implementation\n\nImplement the server-side / API changes from the architecture plan:\n- Models, schemas, database migrations\n- API routes and controllers\n- Service / business logic\n- Unit tests for backend logic\n- Run tests: {{testCommand}}\n\nCommit backend changes separately.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20701,7 +20688,6 @@
             "prompt": "## Phase: Frontend Implementation\n\nImplement the client-side / UI changes:\n- Components, pages, layouts\n- State management and API integration\n- Styling and responsive design\n- Component tests\n- Run build: {{buildCommand}}\n\nCommit frontend changes separately.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -20729,7 +20715,6 @@
             "prompt": "## Phase: Integration Testing\n\nVerify the full stack works end-to-end:\n1. Run the full test suite: {{testCommand}}\n2. Run the build: {{buildCommand}}\n3. Run lint: {{lintCommand}}\n4. Fix any integration issues between frontend and backend\n5. Ensure all tests pass before completing\n\nPush all changes and create/update the PR.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -23153,8 +23138,8 @@
         "workflow-first",
         "core"
       ],
-      "nodeCount": 82,
-      "edgeCount": 98,
+      "nodeCount": 83,
+      "edgeCount": 99,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.task_available",
@@ -23460,13 +23445,13 @@
             "prompt": "{{_taskPrompt}}\n\nExecution phase: planning. Produce a concrete implementation plan and identify required tests. Do not make code changes in this phase.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
@@ -23486,13 +23471,13 @@
             "prompt": "{{_taskPrompt}}\n\nExecution phase: tests. Write or update tests first for the target behavior, then validate failures/pass criteria before implementation changes.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
@@ -23512,13 +23497,13 @@
             "prompt": "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
@@ -23567,7 +23552,7 @@
           "type": "condition.expression",
           "label": "Implement Agent Succeeded?",
           "config": {
-            "expression": "$ctx.getNodeOutput('run-agent-implement')?.success === true"
+            "expression": "$ctx.getNodeOutput('run-agent-implement')?.success === true || $ctx.getNodeOutput('run-agent-implement')?.implementationState === 'implementation_done_commit_blocked'"
           },
           "position": {
             "x": 380,
@@ -23767,16 +23752,18 @@
           "type": "action.run_agent",
           "label": "Auto Fix Validation",
           "config": {
-            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the validation issue, then stop.",
+            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the reported validation issue below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('pre-pr-validation')?.stderr || $ctx.getNodeOutput('pre-pr-validation')?.output || $ctx.getNodeOutput('pre-pr-validation')?.error || 'Validation output unavailable.'}}",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
-            "failOnError": false
+            "failOnError": false,
+            "delegateTaskWorkflow": false,
+            "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
+            "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
           "position": {
             "x": 160,
@@ -23841,16 +23828,18 @@
           "type": "action.run_agent",
           "label": "Auto Fix Validation 2",
           "config": {
-            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining validation failures, then stop.",
+            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining reported validation failures below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr || $ctx.getNodeOutput('retry-pre-pr-validation')?.output || $ctx.getNodeOutput('retry-pre-pr-validation')?.error || 'Validation output unavailable.'}}",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
-            "failOnError": false
+            "failOnError": false,
+            "delegateTaskWorkflow": false,
+            "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
+            "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
           "position": {
             "x": 320,
@@ -23938,6 +23927,22 @@
           "position": {
             "x": 460,
             "y": 2420
+          },
+          "outputs": [
+            "default"
+          ]
+        },
+        {
+          "id": "auto-commit-pre-push",
+          "type": "action.auto_commit_dirty",
+          "label": "Auto Commit Before Push",
+          "config": {
+            "worktreePath": "{{worktreePath}}",
+            "taskId": "{{taskId}}"
+          },
+          "position": {
+            "x": 0,
+            "y": 1940
           },
           "outputs": [
             "default"
@@ -24058,7 +24063,7 @@
           "label": "Handoff PR Progressor",
           "config": {
             "workflowId": "template-bosun-pr-progressor",
-            "mode": "dispatch",
+            "mode": "sync",
             "input": {
               "taskId": "{{taskId}}",
               "taskTitle": "{{taskTitle}}",
@@ -24288,7 +24293,7 @@
           "label": "Handoff PR Progressor (Recovered)",
           "config": {
             "workflowId": "template-bosun-pr-progressor",
-            "mode": "dispatch",
+            "mode": "sync",
             "input": {
               "taskId": "{{taskId}}",
               "taskTitle": "{{taskTitle}}",
@@ -24539,8 +24544,9 @@
           "label": "Dispatch WT Repair",
           "config": {
             "workflowId": "template-task-repair-worktree",
-            "mode": "dispatch",
+            "mode": "{{ $data?._simulation === true ? 'sync' : 'dispatch' }}",
             "input": {
+              "eventType": "task.failed",
               "taskId": "{{taskId}}",
               "taskTitle": "{{taskTitle}}",
               "repoRoot": "{{repoRoot}}",
@@ -24886,9 +24892,9 @@
           "sourcePort": "default"
         },
         {
-          "id": "pre-pr-validation-ok->push-branch",
+          "id": "pre-pr-validation-ok->auto-commit-pre-push",
           "source": "pre-pr-validation-ok",
-          "target": "push-branch",
+          "target": "auto-commit-pre-push",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
         },
@@ -24918,9 +24924,9 @@
           "sourcePort": "default"
         },
         {
-          "id": "retry-validation-ok->push-branch",
+          "id": "retry-validation-ok->auto-commit-pre-push",
           "source": "retry-validation-ok",
-          "target": "push-branch",
+          "target": "auto-commit-pre-push",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
         },
@@ -24950,9 +24956,9 @@
           "sourcePort": "default"
         },
         {
-          "id": "retry2-validation-ok->push-branch",
+          "id": "retry2-validation-ok->auto-commit-pre-push",
           "source": "retry2-validation-ok",
-          "target": "push-branch",
+          "target": "auto-commit-pre-push",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
         },
@@ -24979,6 +24985,12 @@
           "id": "notify-validation-blocked->join-outcomes",
           "source": "notify-validation-blocked",
           "target": "join-outcomes",
+          "sourcePort": "default"
+        },
+        {
+          "id": "auto-commit-pre-push->push-branch",
+          "source": "auto-commit-pre-push",
+          "target": "push-branch",
           "sourcePort": "default"
         },
         {
@@ -32329,13 +32341,17 @@
         },
         {
           "id": "plan-work",
-          "type": "agent.run_planner",
+          "type": "action.run_agent",
           "label": "Plan Implementation",
           "config": {
             "prompt": "Analyze the task requirements and create a step-by-step implementation plan. Identify which files need to be modified, what tests need to be written, and any API contracts to maintain.",
             "outputVariable": "plan",
+            "mode": "plan",
+            "executionRole": "architect",
             "repoMapQuery": "{{taskTitle}} {{taskDescription}}",
-            "repoMapFileLimit": 8
+            "repoMapFileLimit": 8,
+            "sdk": "{{agentSdk}}",
+            "timeoutMs": "{{timeoutMs}}"
           },
           "position": {
             "x": 400,
@@ -38017,7 +38033,7 @@
           "config": {
             "workflowId": "template-task-repair-worktree",
             "mode": "dispatch",
-            "input": "(() => { const analysisRaw = String($ctx.getNodeOutput('analyze-error')?.output || '').trim(); const retryOutputRaw = String($ctx.getNodeOutput('retry-task')?.output || '').trim(); const retryErrorRaw = String($ctx.getNodeOutput('retry-task')?.error || '').trim(); const truncate = (value, limit = 2000) => value.length > limit ? `${value.slice(0, limit)}...` : value; const diagnostics = [String($data?.lastError || '').trim(), analysisRaw ? `Recovery analysis:\n${truncate(analysisRaw)}` : '', retryOutputRaw ? `Retry output:\n${truncate(retryOutputRaw)}` : '', retryErrorRaw ? `Retry error:\n${truncate(retryErrorRaw)}` : ''].filter(Boolean).join('\n\n'); return { taskId: $data?.taskId, taskTitle: $data?.taskTitle, worktreePath: $data?.worktreePath, branch: $data?.branch, baseBranch: $data?.baseBranch, error: diagnostics || String($data?.lastError || ''), recoveryAnalysis: truncate(analysisRaw), retryResult: { success: $ctx.getNodeOutput('retry-task')?.success === true, output: truncate(retryOutputRaw), error: truncate(retryErrorRaw) } }; })()"
+            "input": "(() => { const analysisRaw = String($ctx.getNodeOutput('analyze-error')?.output || '').trim(); const retryOutputRaw = String($ctx.getNodeOutput('retry-task')?.output || '').trim(); const retryErrorRaw = String($ctx.getNodeOutput('retry-task')?.error || '').trim(); const truncate = (value, limit = 2000) => value.length > limit ? `${value.slice(0, limit)}...` : value; const diagnostics = [String($data?.lastError || '').trim(), analysisRaw ? `Recovery analysis:\n${truncate(analysisRaw)}` : '', retryOutputRaw ? `Retry output:\n${truncate(retryOutputRaw)}` : '', retryErrorRaw ? `Retry error:\n${truncate(retryErrorRaw)}` : ''].filter(Boolean).join('\n\n'); return { eventType: 'task.failed', taskId: $data?.taskId, taskTitle: $data?.taskTitle, worktreePath: $data?.worktreePath, branch: $data?.branch, baseBranch: $data?.baseBranch, error: diagnostics || String($data?.lastError || ''), recoveryAnalysis: truncate(analysisRaw), retryResult: { success: $ctx.getNodeOutput('retry-task')?.success === true, output: truncate(retryOutputRaw), error: truncate(retryErrorRaw) } }; })()"
           },
           "position": {
             "x": 400,
@@ -43700,7 +43716,6 @@
             "prompt": "## Phase: Backend Planning\n\nAnalyse the task and produce a plan:\n1. Data model / schema changes\n2. API endpoint design (routes, request/response shapes)\n3. Service layer logic\n4. Database queries or migrations\n5. Test plan (unit + integration)\n\nDo NOT write code yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -43728,7 +43743,6 @@
             "prompt": "## Phase: Test-Driven Implementation\n\n1. Write tests FIRST for the planned changes\n2. Verify tests fail (red)\n3. Implement the backend logic to make tests pass (green)\n4. Refactor for clarity and performance\n5. Run full test suite: {{testCommand}}\n6. Run build: {{buildCommand}}\n7. Run lint: {{lintCommand}}\n\nCommit with descriptive messages.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -43756,7 +43770,6 @@
             "prompt": "## Phase: Verification\n\n1. Run the complete test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Ensure no regressions\n4. Push changes and create/update PR\n5. Include test results summary in PR description",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44068,7 +44081,6 @@
             "prompt": "## Phase: CI/CD Planning\n\nAnalyse the pipeline/infrastructure task:\n1. Current CI/CD configuration\n2. What needs to change and why\n3. Impact on existing workflows/pipelines\n4. Rollback strategy\n5. Test plan for verifying the change\n\nDo NOT make changes yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44096,7 +44108,6 @@
             "prompt": "## Phase: Pipeline Implementation\n\n1. Make the CI/CD / infrastructure changes per the plan\n2. Update configuration files (workflows, Dockerfiles, Terraform, etc.)\n3. Add or update pipeline tests where applicable\n4. Run build: {{buildCommand}}\n5. Run lint: {{lintCommand}}\n6. Validate configuration syntax\n\nCommit changes with clear descriptions.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44124,7 +44135,6 @@
             "prompt": "## Phase: Pipeline Verification\n\n1. Run full test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Verify pipeline configuration is valid\n4. Push and create/update PR\n5. Include deployment / rollback instructions in PR description",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44553,7 +44563,6 @@
             "prompt": "## Phase: Bug Reproduction & Root Cause Analysis\n\n1. Read the bug report carefully\n2. Find the relevant code area\n3. Reproduce the issue (write a failing test if possible)\n4. Trace the root cause through the codebase\n5. Document: what fails, where, why, and the minimal fix needed\n\nDo NOT fix the bug yet — only diagnose.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44581,7 +44590,6 @@
             "prompt": "## Phase: Fix Implementation with Regression Tests\n\n1. Write a regression test that demonstrates the bug (must fail before fix)\n2. Apply the minimal, surgical fix\n3. Verify the regression test now passes\n4. Run the full test suite: {{testCommand}}\n5. Run build: {{buildCommand}}\n6. Run lint: {{lintCommand}}\n7. Ensure no other tests broke\n\nCommit fix and test together with a clear commit message.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44609,7 +44617,6 @@
             "prompt": "## Phase: Final Verification\n\n1. Run complete test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Confirm the original bug is fixed\n4. Confirm no regressions\n5. Push and create/update PR with root cause analysis in description",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44725,7 +44732,6 @@
             "prompt": "## Phase: Design Requirements Analysis\n\n1. Review the design task requirements\n2. Identify affected design tokens, components, or patterns\n3. Check existing design system for reusable pieces\n4. Plan the implementation approach\n5. List affected files and components\n\nDo NOT make changes yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44753,7 +44759,6 @@
             "prompt": "## Phase: Design Implementation\n\n1. Update design tokens (colors, spacing, typography) if needed\n2. Create / update components per the design specification\n3. Ensure consistency with existing design system\n4. Add visual tests or snapshots where applicable\n5. Run build: {{buildCommand}}\n6. Run lint: {{lintCommand}}\n\nCommit changes with descriptive messages.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -44781,7 +44786,6 @@
             "prompt": "## Phase: Design Verification\n\n1. Run tests: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Verify visual consistency\n4. Check design token values are correct\n5. Push and create/update PR",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45073,7 +45077,6 @@
             "prompt": "## Phase: Design Analysis\n\nAnalyse the UI task requirements:\n1. Component hierarchy and structure\n2. Layout and responsive breakpoints\n3. State management needs\n4. Accessibility requirements (ARIA, keyboard nav)\n5. Styling approach (CSS modules, Tailwind, styled-components)\n6. Component test plan\n\nDo NOT write code yet.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45101,7 +45104,6 @@
             "prompt": "## Phase: UI Implementation\n\n1. Create / update components per the design plan\n2. Implement layouts, styling, and responsive design\n3. Add proper accessibility attributes\n4. Write component tests\n5. Run tests: {{testCommand}}\n6. Run build: {{buildCommand}}\n7. Run lint: {{lintCommand}}\n\nCommit with descriptive messages.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45129,7 +45131,6 @@
             "prompt": "## Phase: Visual Verification\n\n1. Run the full test suite: {{testCommand}}\n2. Run build: {{buildCommand}}\n3. Verify components render correctly\n4. Check responsive breakpoints\n5. Verify accessibility (screen reader, keyboard)\n6. Push changes and create/update PR",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45245,7 +45246,6 @@
             "prompt": "## Phase: Architecture Planning\n\nAnalyse the task and produce a concrete plan covering:\n1. Backend changes: API routes, models, services, migrations\n2. Frontend changes: components, pages, state management\n3. Shared types / contracts between layers\n4. Test strategy for each layer\n5. Integration points and data flow\n\nDo NOT write code yet — produce only the plan.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45273,7 +45273,6 @@
             "prompt": "## Phase: Backend Implementation\n\nImplement the server-side / API changes from the architecture plan:\n- Models, schemas, database migrations\n- API routes and controllers\n- Service / business logic\n- Unit tests for backend logic\n- Run tests: {{testCommand}}\n\nCommit backend changes separately.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45301,7 +45300,6 @@
             "prompt": "## Phase: Frontend Implementation\n\nImplement the client-side / UI changes:\n- Components, pages, layouts\n- State management and API integration\n- Styling and responsive design\n- Component tests\n- Run build: {{buildCommand}}\n\nCommit frontend changes separately.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -45329,7 +45327,6 @@
             "prompt": "## Phase: Integration Testing\n\nVerify the full stack works end-to-end:\n1. Run the full test suite: {{testCommand}}\n2. Run the build: {{buildCommand}}\n3. Run lint: {{lintCommand}}\n4. Fix any integration issues between frontend and backend\n5. Ensure all tests pass before completing\n\nPush all changes and create/update the PR.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
@@ -47661,7 +47658,7 @@
       "description": "Complete task execution pipeline: poll for tasks → claim → worktree → agent dispatch → commit detection → PR creation → status transition. Replaces the monolithic TaskExecutor.executeTask() method with a composable workflow DAG.",
       "category": "task-execution",
       "enabled": true,
-      "nodeCount": 82,
+      "nodeCount": 83,
       "trigger": "trigger.task_available",
       "variables": {
         "maxParallel": 3,
@@ -47933,13 +47930,13 @@
             "prompt": "{{_taskPrompt}}\n\nExecution phase: planning. Produce a concrete implementation plan and identify required tests. Do not make code changes in this phase.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
@@ -47959,13 +47956,13 @@
             "prompt": "{{_taskPrompt}}\n\nExecution phase: tests. Write or update tests first for the target behavior, then validate failures/pass criteria before implementation changes.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
@@ -47985,13 +47982,13 @@
             "prompt": "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
@@ -48040,7 +48037,7 @@
           "type": "condition.expression",
           "label": "Implement Agent Succeeded?",
           "config": {
-            "expression": "$ctx.getNodeOutput('run-agent-implement')?.success === true"
+            "expression": "$ctx.getNodeOutput('run-agent-implement')?.success === true || $ctx.getNodeOutput('run-agent-implement')?.implementationState === 'implementation_done_commit_blocked'"
           },
           "position": {
             "x": 380,
@@ -48240,16 +48237,18 @@
           "type": "action.run_agent",
           "label": "Auto Fix Validation",
           "config": {
-            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the validation issue, then stop.",
+            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the reported validation issue below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('pre-pr-validation')?.stderr || $ctx.getNodeOutput('pre-pr-validation')?.output || $ctx.getNodeOutput('pre-pr-validation')?.error || 'Validation output unavailable.'}}",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
-            "failOnError": false
+            "failOnError": false,
+            "delegateTaskWorkflow": false,
+            "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
+            "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
           "position": {
             "x": 160,
@@ -48314,16 +48313,18 @@
           "type": "action.run_agent",
           "label": "Auto Fix Validation 2",
           "config": {
-            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining validation failures, then stop.",
+            "prompt": "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining reported validation failures below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr || $ctx.getNodeOutput('retry-pre-pr-validation')?.output || $ctx.getNodeOutput('retry-pre-pr-validation')?.error || 'Validation output unavailable.'}}",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
-            "agentProfile": "{{agentProfile}}",
             "cwd": "{{worktreePath}}",
             "timeoutMs": "{{taskTimeoutMs}}",
             "maxRetries": "{{maxRetries}}",
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
-            "failOnError": false
+            "failOnError": false,
+            "delegateTaskWorkflow": false,
+            "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
+            "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
           },
           "position": {
             "x": 320,
@@ -48411,6 +48412,22 @@
           "position": {
             "x": 460,
             "y": 2420
+          },
+          "outputs": [
+            "default"
+          ]
+        },
+        {
+          "id": "auto-commit-pre-push",
+          "type": "action.auto_commit_dirty",
+          "label": "Auto Commit Before Push",
+          "config": {
+            "worktreePath": "{{worktreePath}}",
+            "taskId": "{{taskId}}"
+          },
+          "position": {
+            "x": 0,
+            "y": 1940
           },
           "outputs": [
             "default"
@@ -48531,7 +48548,7 @@
           "label": "Handoff PR Progressor",
           "config": {
             "workflowId": "template-bosun-pr-progressor",
-            "mode": "dispatch",
+            "mode": "sync",
             "input": {
               "taskId": "{{taskId}}",
               "taskTitle": "{{taskTitle}}",
@@ -48761,7 +48778,7 @@
           "label": "Handoff PR Progressor (Recovered)",
           "config": {
             "workflowId": "template-bosun-pr-progressor",
-            "mode": "dispatch",
+            "mode": "sync",
             "input": {
               "taskId": "{{taskId}}",
               "taskTitle": "{{taskTitle}}",
@@ -49012,8 +49029,9 @@
           "label": "Dispatch WT Repair",
           "config": {
             "workflowId": "template-task-repair-worktree",
-            "mode": "dispatch",
+            "mode": "{{ $data?._simulation === true ? 'sync' : 'dispatch' }}",
             "input": {
+              "eventType": "task.failed",
               "taskId": "{{taskId}}",
               "taskTitle": "{{taskTitle}}",
               "repoRoot": "{{repoRoot}}",
@@ -49359,9 +49377,9 @@
           "sourcePort": "default"
         },
         {
-          "id": "pre-pr-validation-ok->push-branch",
+          "id": "pre-pr-validation-ok->auto-commit-pre-push",
           "source": "pre-pr-validation-ok",
-          "target": "push-branch",
+          "target": "auto-commit-pre-push",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
         },
@@ -49391,9 +49409,9 @@
           "sourcePort": "default"
         },
         {
-          "id": "retry-validation-ok->push-branch",
+          "id": "retry-validation-ok->auto-commit-pre-push",
           "source": "retry-validation-ok",
-          "target": "push-branch",
+          "target": "auto-commit-pre-push",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
         },
@@ -49423,9 +49441,9 @@
           "sourcePort": "default"
         },
         {
-          "id": "retry2-validation-ok->push-branch",
+          "id": "retry2-validation-ok->auto-commit-pre-push",
           "source": "retry2-validation-ok",
-          "target": "push-branch",
+          "target": "auto-commit-pre-push",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
         },
@@ -49452,6 +49470,12 @@
           "id": "notify-validation-blocked->join-outcomes",
           "source": "notify-validation-blocked",
           "target": "join-outcomes",
+          "sourcePort": "default"
+        },
+        {
+          "id": "auto-commit-pre-push->push-branch",
+          "source": "auto-commit-pre-push",
+          "target": "push-branch",
           "sourcePort": "default"
         },
         {

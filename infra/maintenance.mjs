@@ -30,23 +30,15 @@ import {
 const isWindows = process.platform === "win32";
 
 // ── Workflow event bridge ─────────────────────────────────────────────────
-// Lazy-loaded to avoid circular imports (monitor → maintenance → monitor).
+// The daemon injects its workflow-event queue. Standalone callers must not
+// import monitor.mjs just to emit best-effort events.
 let _queueWorkflowEvent = null;
+export function setMaintenanceWorkflowEventQueue(queueFn) {
+  _queueWorkflowEvent = typeof queueFn === "function" ? queueFn : null;
+}
 function emitMaintenanceEvent(eventType, data = {}) {
-  if (_queueWorkflowEvent) {
-    _queueWorkflowEvent(eventType, data);
-    return;
-  }
-  import("./monitor.mjs")
-    .then((mod) => {
-      if (typeof mod.queueWorkflowEvent === "function") {
-        _queueWorkflowEvent = mod.queueWorkflowEvent;
-        _queueWorkflowEvent(eventType, data);
-      }
-    })
-    .catch(() => {
-      /* best-effort — monitor not available during tests */
-    });
+  if (!_queueWorkflowEvent) return;
+  _queueWorkflowEvent(eventType, data);
 }
 const BRANCH_SYNC_LOG_THROTTLE_MS = Math.max(
   5_000,

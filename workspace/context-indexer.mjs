@@ -75,13 +75,26 @@ const BINARY_EXTENSIONS = new Set([
 ]);
 
 const EXCLUDED_DIR_NAMES = new Set([
+  ".bosun",
+  ".bosun-monitor",
   ".git",
+  ".repo-mirror",
+  ".code-search",
   "node_modules",
   "dist",
   "build",
   ".next",
   "coverage",
   ".cache",
+  "execution-ledger",
+  "logs",
+  "node-compile-cache",
+  "output",
+  "playwright-report",
+  "test-results",
+  ".tmp",
+  "tmp",
+  "worktrees",
 ]);
 
 const TASK_TYPE_ALIASES = Object.freeze({
@@ -183,6 +196,20 @@ const TASK_TYPE_SCOPES = Object.freeze({
 });
 
 const DEFAULT_CONTEXT_INDEX_MAX_AGE_MS = 15 * 60 * 1000;
+const DEFAULT_CONTEXT_FILE_SYMBOL_LIMIT = 6;
+const DEFAULT_CONTEXT_FILE_RELATION_LIMIT = 4;
+const GENERIC_RELATED_TEST_STEMS = new Set([
+  "app",
+  "config",
+  "helper",
+  "helpers",
+  "index",
+  "main",
+  "test",
+  "types",
+  "util",
+  "utils",
+]);
 
 let sqliteModulePromise = null;
 let treeSitterAvailability = null;
@@ -758,6 +785,59 @@ function resolveImportTarget(relPath, language, spec, filePathSet) {
   return null;
 }
 
+function normalizeRelatedFileStem(pathValue) {
+  return String(pathValue || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()?.toLowerCase()
+    .replace(/(\.node)?\.test\.[^.]+$/i, "")
+    .replace(/\.spec\.[^.]+$/i, "")
+    .replace(/\.runtime\.[^.]+$/i, "")
+    .replace(/\.integration\.[^.]+$/i, "")
+    .replace(/\.unit\.[^.]+$/i, "")
+    .replace(/\.e2e\.[^.]+$/i, "")
+    .replace(/\.[^.]+$/i, "")
+    || "";
+}
+
+function addDerivedTestRelations(files = [], addRelation = () => {}) {
+  const testsByStem = new Map();
+  const sourceFiles = [];
+
+  for (const file of files) {
+    const relPath = normalizeGraphPath(file?.relPath || "");
+    if (!relPath) continue;
+    const stem = normalizeRelatedFileStem(relPath);
+    if (!stem || GENERIC_RELATED_TEST_STEMS.has(stem)) continue;
+    const entry = { relPath, stem };
+    if (shouldSkipTestPath(relPath)) {
+      if (!testsByStem.has(stem)) testsByStem.set(stem, []);
+      testsByStem.get(stem).push(entry);
+      continue;
+    }
+    sourceFiles.push(entry);
+  }
+
+  for (const source of sourceFiles) {
+    const relatedTests = testsByStem.get(source.stem) || [];
+    for (const testFile of relatedTests.slice(0, 6)) {
+      addRelation({
+        fromNodeId: makeFileNodeId(source.relPath),
+        fromNodeType: "file",
+        fromPath: source.relPath,
+        fromName: source.relPath,
+        toNodeId: makeFileNodeId(testFile.relPath),
+        toNodeType: "file",
+        toPath: testFile.relPath,
+        toName: testFile.relPath,
+        relationType: "file_related_test",
+        metadata: { derived: "stem-match", stem: source.stem },
+      });
+    }
+  }
+}
+
 function buildGraphSummary(db) {
   const edgeCount = Number(db.prepare("SELECT COUNT(*) AS c FROM relations").get()?.c || 0);
   const relationTypes = db
@@ -885,6 +965,8 @@ function rebuildContextRelations(db, rootDir, files = []) {
       });
     }
   }
+
+  addDerivedTestRelations(files, addRelation);
 
   return {
     nodeCount: Number(files.length || 0) + Number(symbolRows.length || 0) + (files.length > 0 ? 1 : 0),
@@ -1543,6 +1625,131 @@ function mapRelationRow(row) {
 
 function normalizeGraphPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function normalizeIndexedFilePath(filePath, rootDir) {
+  const [normalized] = normalizeContextIndexPathHints(filePath, rootDir);
+  return normalizeGraphPath(normalized || "");
+}
+
+function dedupeNormalizedPaths(values = [], limit = Infinity) {
+  const deduped = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = normalizeGraphPath(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(normalized);
+    if (deduped.length >= limit) break;
+  }
+  return deduped;
+}
+
+function mapSymbolDetailRow(row = {}) {
+  return {
+    name: String(row.name || "").trim(),
+    kind: String(row.kind || "symbol").trim() || "symbol",
+    line: Number.isFinite(Number(row.line)) ? Number(row.line) : 1,
+    signature: String(row.signature || "").trim(),
+    parser: String(row.parser || "heuristic").trim() || "heuristic",
+  };
+}
+
+function buildEffectiveFileSummary(fileRow = {}, symbols = []) {
+  const summary = String(fileRow.summary || "").trim();
+  if (summary) return summary;
+  const symbolNames = dedupeNormalizedPaths(
+    (Array.isArray(symbols) ? symbols : []).map((symbol) => symbol?.name || ""),
+    3,
+  );
+  if (symbolNames.length === 0) return "";
+  return `Defines ${symbolNames.join(", ")}`;
+}
+
+export async function getContextFileInsights(filePath, opts = {}) {
+  const rootDir = opts.rootDir || process.cwd();
+  const normalizedPath = normalizeIndexedFilePath(filePath, rootDir);
+  if (!normalizedPath) return null;
+
+  const symbolLimit = Math.max(1, Number(opts.symbolLimit || DEFAULT_CONTEXT_FILE_SYMBOL_LIMIT));
+  const relationLimit = Math.max(1, Number(opts.relationLimit || DEFAULT_CONTEXT_FILE_RELATION_LIMIT));
+  const { db } = await openDb(rootDir);
+
+  try {
+    const fileRow = db.prepare(`
+      SELECT path, language, summary, size, mtime_ms, hash
+      FROM files
+      WHERE path = ?
+    `).get(normalizedPath);
+    if (!fileRow) return null;
+
+    const symbols = db.prepare(`
+      SELECT name, kind, line, signature, parser
+      FROM symbols
+      WHERE path = ?
+      ORDER BY line ASC, name ASC
+      LIMIT ?
+    `).all(normalizedPath, symbolLimit).map((row) => mapSymbolDetailRow(row));
+
+    const imports = dedupeNormalizedPaths(
+      db.prepare(`
+        SELECT to_path AS path
+        FROM relations
+        WHERE relation_type = 'file_imports_file'
+          AND from_path = ?
+        ORDER BY to_path ASC
+        LIMIT ?
+      `).all(normalizedPath, relationLimit * 2).map((row) => row.path),
+      relationLimit,
+    );
+
+    const importedBy = dedupeNormalizedPaths(
+      db.prepare(`
+        SELECT from_path AS path
+        FROM relations
+        WHERE relation_type = 'file_imports_file'
+          AND to_path = ?
+        ORDER BY from_path ASC
+        LIMIT ?
+      `).all(normalizedPath, relationLimit * 2).map((row) => row.path),
+      relationLimit,
+    );
+
+    const relatedTests = dedupeNormalizedPaths(
+      db.prepare(`
+        SELECT from_path AS fromPath, to_path AS toPath
+        FROM relations
+        WHERE relation_type = 'file_related_test'
+          AND (from_path = ? OR to_path = ?)
+        ORDER BY edge_id ASC
+        LIMIT ?
+      `).all(normalizedPath, normalizedPath, relationLimit * 2).map((row) => (
+        normalizeGraphPath(row.fromPath) === normalizedPath ? row.toPath : row.fromPath
+      )),
+      relationLimit,
+    );
+
+    return {
+      path: normalizeGraphPath(fileRow.path),
+      language: String(fileRow.language || "unknown").trim() || "unknown",
+      summary: buildEffectiveFileSummary(fileRow, symbols),
+      size: Number.isFinite(Number(fileRow.size)) ? Number(fileRow.size) : null,
+      mtimeMs: Number.isFinite(Number(fileRow.mtime_ms)) ? Number(fileRow.mtime_ms) : null,
+      hash: String(fileRow.hash || "").trim() || null,
+      symbols,
+      imports,
+      importedBy,
+      relatedTests,
+      relatedFiles: dedupeNormalizedPaths([
+        ...imports,
+        ...importedBy,
+        ...relatedTests,
+      ], relationLimit * 3),
+      source: "context-index-db",
+    };
+  } finally {
+    db.close();
+  }
 }
 
 export async function getContextPathAdjacency(paths = [], opts = {}) {

@@ -121,7 +121,7 @@ async function flushStoreWrites(store) {
  *   3. Active workspace store derived from global bosun.config.json
  *   4. Repo root walked from CWD (legacy fallback)
  */
-function resolveKanbanStorePath() {
+export function resolveKanbanStorePath() {
   if (process.env.BOSUN_STORE_PATH) return process.env.BOSUN_STORE_PATH;
   if (process.env.REPO_ROOT) {
     return resolve(process.env.REPO_ROOT, ".bosun", ".cache", "kanban-state.json");

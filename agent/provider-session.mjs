@@ -561,6 +561,44 @@ export function createProviderSession(providerId = null, options = {}) {
           sessionId: normalized.sessionId || lastPayload.sessionId || activeSessionId,
           threadId: normalized.threadId || lastPayload.threadId || activeThreadId,
           providerId: provider,
+          providerSelection:
+            toTrimmedString(
+              turnOptions.providerSelection
+              || options.providerSelection
+              || turnOptions.providerConfig?.selectionId
+              || options.providerConfig?.selectionId
+              || turnOptions.provider
+              || options.provider
+              || options.providerConfig?.providerId
+              || options.providerConfig?.provider
+              || provider,
+            ) || null,
+          adapterName:
+            toTrimmedString(
+              turnOptions.adapterName
+              || options.adapterName
+              || adapter?.name
+              || runtime.provider?.adapterId
+              || "",
+            ) || null,
+          providerConfig:
+            turnOptions.providerConfig && typeof turnOptions.providerConfig === "object" && !Array.isArray(turnOptions.providerConfig)
+              ? cloneValue(turnOptions.providerConfig)
+              : (
+                options.providerConfig && typeof options.providerConfig === "object" && !Array.isArray(options.providerConfig)
+                  ? cloneValue(options.providerConfig)
+                  : null
+              ),
+          model:
+            toTrimmedString(
+              turnOptions.providerConfig?.model
+              || options.providerConfig?.model
+              || lastPayload.model
+              || turnOptions.model
+              || options.model
+              || options.providerConfig?.model
+              || "",
+            ) || null,
           sessionManager: turnOptions.sessionManager || options.sessionManager || null,
           requestedBy: turnOptions.requestedBy || options.requestedBy || null,
           taskKey: turnOptions.taskKey || options.taskKey || null,

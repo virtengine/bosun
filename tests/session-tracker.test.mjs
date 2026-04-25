@@ -243,6 +243,29 @@ describe("session-tracker", () => {
       expect(messages[0].content).toContain("Done. Changes are applied.");
     });
 
+    it("records session.turn.complete text as an agent message and trajectory step", () => {
+      tracker.startSession("task-1", "Test");
+      tracker.recordEvent("task-1", {
+        type: "session.turn.complete",
+        text: "Done. Changes are applied.",
+      });
+
+      const messages = tracker.getLastMessages("task-1");
+      expect(messages).toHaveLength(1);
+      expect(messages[0].type).toBe("agent_message");
+      expect(messages[0].content).toContain("Done. Changes are applied.");
+
+      const session = tracker.getSession("task-1");
+      expect(session?.trajectory?.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "agent_message",
+            summary: "Done. Changes are applied.",
+          }),
+        ]),
+      );
+    });
+
     it("ignores low-signal stream noise for activity tracking", () => {
       tracker.startSession("task-1", "Test");
       const session = tracker.getSession("task-1");
@@ -728,6 +751,57 @@ describe("session-tracker", () => {
         expect(session?.insights?.contextWindow?.percent).toBe(38);
         expect(listed?.insights?.contextWindow?.usedTokens).toBe(103200);
 
+        reloadedTracker.destroy();
+      } finally {
+        rmSync(persistDir, { recursive: true, force: true });
+      }
+    });
+
+    it("hydrates persisted sessions before recording events or updating status", () => {
+      const persistDir = mkdtempSync(join(tmpdir(), "bosun-session-tracker-"));
+      try {
+        const persistentTracker = createSessionTracker({ maxMessages: 10, persistDir });
+        persistentTracker.createSession({
+          id: "persisted-delegate-session",
+          type: "task-delegate",
+          metadata: {
+            title: "Persisted Delegate Session",
+            parentSessionId: "persisted-parent-session",
+          },
+        });
+        persistentTracker.recordEvent("persisted-delegate-session", {
+          role: "system",
+          content: "[Delegation] Started live session delegate-live-child",
+          timestamp: "2026-04-25T00:00:00.000Z",
+        });
+        persistentTracker.flush();
+        persistentTracker.destroy();
+
+        const reloadedTracker = createSessionTracker({ maxMessages: 10, persistDir });
+        expect(reloadedTracker.getSessionById("persisted-delegate-session")).toEqual(
+          expect.objectContaining({
+            id: "persisted-delegate-session",
+            status: "active",
+          }),
+        );
+
+        reloadedTracker.recordEvent("persisted-delegate-session", {
+          role: "system",
+          content: "[Delegation Cancelled] Session aborted because parent requested cancellation",
+          timestamp: "2026-04-25T00:01:00.000Z",
+        });
+        reloadedTracker.updateSessionStatus("persisted-delegate-session", "aborted");
+
+        const session = reloadedTracker.getSessionMessages("persisted-delegate-session");
+        expect(session?.status).toBe("aborted");
+        expect(session?.messages).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            content: "[Delegation] Started live session delegate-live-child",
+          }),
+          expect.objectContaining({
+            content: "[Delegation Cancelled] Session aborted because parent requested cancellation",
+          }),
+        ]));
         reloadedTracker.destroy();
       } finally {
         rmSync(persistDir, { recursive: true, force: true });

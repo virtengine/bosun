@@ -717,21 +717,22 @@ function normalizePrLinkageEntry(entry = {}, fallback = {}) {
   };
 }
 
+function buildPrLinkageKey(entry = {}) {
+  const branchName = String(entry?.branchName || "").trim().toLowerCase();
+  const prUrl = String(entry?.prUrl || "").trim().toLowerCase();
+  const prNumber = Number.isFinite(entry?.prNumber) ? entry.prNumber : "";
+  return [branchName, prNumber, prUrl].join("|");
+}
+
 function mergePrLinkageRecords(...sources) {
   const merged = [];
   const indexByKey = new Map();
-  const buildKey = (entry) => {
-    const branchName = String(entry?.branchName || "").trim().toLowerCase();
-    const prUrl = String(entry?.prUrl || "").trim().toLowerCase();
-    const prNumber = Number.isFinite(entry?.prNumber) ? entry.prNumber : "";
-    return [branchName, prNumber, prUrl].join("|");
-  };
   for (const source of sources) {
     const entries = Array.isArray(source) ? source : [];
     for (const rawEntry of entries) {
       const entry = normalizePrLinkageEntry(rawEntry);
       if (!entry) continue;
-      const key = buildKey(entry);
+      const key = buildPrLinkageKey(entry);
       if (!key) continue;
       if (indexByKey.has(key)) {
         const idx = indexByKey.get(key);
@@ -745,12 +746,55 @@ function mergePrLinkageRecords(...sources) {
   return merged;
 }
 
+function promotePrimaryPrLinkage(records = [], preferred = {}) {
+  const entries = Array.isArray(records)
+    ? records.map((entry) => normalizePrLinkageEntry(entry)).filter(Boolean)
+    : [];
+  if (entries.length === 0) return [];
+  const branchName = typeof preferred?.branchName === "string"
+    ? preferred.branchName.trim()
+    : "";
+  const prUrl = typeof preferred?.prUrl === "string"
+    ? preferred.prUrl.trim()
+    : "";
+  const parsedPrNumber =
+    preferred?.prNumber == null || preferred?.prNumber === ""
+      ? null
+      : Number.parseInt(String(preferred.prNumber), 10);
+  const prNumber =
+    Number.isFinite(parsedPrNumber) && parsedPrNumber > 0 ? parsedPrNumber : null;
+  if (!branchName && !prUrl && !prNumber) return entries;
+  const matchesPreferred = (entry) =>
+    (branchName && entry?.branchName === branchName)
+    || (prUrl && entry?.prUrl === prUrl)
+    || (prNumber && entry?.prNumber === prNumber);
+  const promoted = normalizePrLinkageEntry({
+    ...(branchName ? { branchName } : {}),
+    ...(prUrl ? { prUrl } : {}),
+    ...(prNumber ? { prNumber } : {}),
+    updatedAt: new Date().toISOString(),
+  }, entries.find(matchesPreferred) || entries[0] || {});
+  if (!promoted) return entries;
+  const promotedKey = buildPrLinkageKey(promoted);
+  let skippedPromoted = false;
+  const remaining = entries.filter((entry) => {
+    if (skippedPromoted) return true;
+    if (buildPrLinkageKey(entry) !== promotedKey) return true;
+    skippedPromoted = true;
+    return false;
+  });
+  return [promoted, ...remaining];
+}
+
 function buildPrLinkagePatch(options = {}, currentTask = null) {
   const branchName = typeof options?.branchName === "string" ? options.branchName.trim() : "";
   const prUrl = typeof options?.prUrl === "string" ? options.prUrl.trim() : "";
   const prNumber = options?.prNumber == null || options?.prNumber === ""
     ? null
     : Number.parseInt(String(options.prNumber), 10);
+  if (!branchName && !prUrl && !(Number.isFinite(prNumber) && prNumber > 0)) {
+    return {};
+  }
   const source = typeof options?.source === "string" && options.source.trim() ? options.source.trim() : null;
   const freshness = typeof options?.freshness === "string" && options.freshness.trim() ? options.freshness.trim() : null;
   const currentMeta = currentTask?.meta && typeof currentTask.meta === "object" ? currentTask.meta : {};
@@ -763,9 +807,12 @@ function buildPrLinkagePatch(options = {}, currentTask = null) {
     freshness,
     updatedAt: new Date().toISOString(),
     linkedAt: currentLinkage[0]?.linkedAt || new Date().toISOString(),
-  }, currentTask || {});
+  }, currentLinkage[0] || {});
   if (!nextEntry) return {};
-  const prLinkage = mergePrLinkageRecords(currentLinkage, [nextEntry]);
+  const prLinkage = promotePrimaryPrLinkage(
+    mergePrLinkageRecords(currentLinkage, [nextEntry]),
+    nextEntry,
+  );
   return {
     ...(nextEntry.branchName ? { branchName: nextEntry.branchName } : {}),
     ...(nextEntry.prUrl ? { prUrl: nextEntry.prUrl } : {}),
@@ -1187,7 +1234,20 @@ class InternalAdapter {
         delete updates.meta.base_branch;
       }
     }
-    const directLinkage = mergePrLinkageRecords(current?.prLinkage, current?.meta?.prLinkage, patch.prLinkage, patch.meta?.prLinkage, [normalizePrLinkageEntry(patch, patch)]);
+    const directLinkage = promotePrimaryPrLinkage(
+      mergePrLinkageRecords(
+        current?.prLinkage,
+        current?.meta?.prLinkage,
+        patch.prLinkage,
+        patch.meta?.prLinkage,
+        [normalizePrLinkageEntry(patch, patch)],
+      ),
+      {
+        branchName: updates.branchName,
+        prUrl: updates.prUrl,
+        prNumber: updates.prNumber,
+      },
+    );
     if (directLinkage.length > 0) {
       const primaryPrLinkage = directLinkage[0] || null;
       updates.prLinkage = directLinkage;
@@ -6515,20 +6575,15 @@ export function getKanbanBackendName() {
 // Convenience exports: direct task operations via active adapter
 // ---------------------------------------------------------------------------
 
-// ── Workflow Event Bridge (lazy-loaded from monitor.mjs) ──────────────────
+// ── Workflow Event Bridge ──────────────────────────────────────────────────
+// The daemon injects its workflow-event queue. Standalone callers (like the
+// task simulator) must not import monitor.mjs just to emit best-effort events.
 let _kanbanQueueWorkflowEvent = null;
+export function setKanbanWorkflowEventQueue(queueFn) {
+  _kanbanQueueWorkflowEvent = typeof queueFn === "function" ? queueFn : null;
+}
 function emitKanbanEvent(eventType, eventData = {}) {
-  if (!_kanbanQueueWorkflowEvent) {
-    import("../infra/monitor.mjs")
-      .then((mod) => {
-        if (typeof mod.queueWorkflowEvent === "function") {
-          _kanbanQueueWorkflowEvent = mod.queueWorkflowEvent;
-          _kanbanQueueWorkflowEvent(eventType, eventData);
-        }
-      })
-      .catch(() => {});
-    return;
-  }
+  if (!_kanbanQueueWorkflowEvent) return;
   _kanbanQueueWorkflowEvent(eventType, eventData);
 }
 

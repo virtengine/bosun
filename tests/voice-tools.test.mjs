@@ -1,6 +1,29 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 // ── Mock external boundaries ────────────────────────────────────────────────
+
+const { mockBosunSessionManager } = vi.hoisted(() => ({
+  mockBosunSessionManager: {
+    cancelSession: vi.fn(() => true),
+    getSession: vi.fn(() => null),
+  },
+}));
+
+const { mockSpawnSync } = vi.hoisted(() => ({
+  mockSpawnSync: vi.fn(),
+}));
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual("node:child_process");
+  return {
+    ...actual,
+    spawnSync: (...args) => mockSpawnSync(...args),
+  };
+});
 
 vi.mock("../config/config.mjs", () => ({
   loadConfig: vi.fn(() => ({ primaryAgent: "codex-sdk", voice: {} })),
@@ -36,8 +59,11 @@ vi.mock("../kanban/kanban-adapter.mjs", () => ({
 
 vi.mock("../infra/session-tracker.mjs", () => ({
   listSessions: vi.fn(() => []),
+  listAllSessions: vi.fn(() => []),
   getSession: vi.fn(() => null),
   getSessionById: vi.fn(() => null),
+  createSession: vi.fn(),
+  updateSessionStatus: vi.fn(),
   recordEvent: vi.fn(),
 }));
 
@@ -54,6 +80,18 @@ vi.mock("../agent/agent-pool.mjs", () => ({
     items: [],
     usage: null,
   })),
+  launchOrResumeThread: vi.fn(async () => ({
+    success: true,
+    output: "pooled agent response",
+    items: [],
+    usage: null,
+    threadId: "thread-1",
+  })),
+  resolvePoolSdkName: vi.fn(() => "codex"),
+}));
+
+vi.mock("../agent/session-manager.mjs", () => ({
+  getBosunSessionManager: vi.fn(() => mockBosunSessionManager),
 }));
 
 vi.mock("../workflow/workflow-engine.mjs", () => ({
@@ -242,9 +280,20 @@ let createBuiltinToolDefinitions;
 let execPrimaryPrompt;
 let setPrimaryAgent;
 let execPooledPrompt;
+let launchOrResumeThread;
+let resolvePoolSdkName;
 let promptDefaults;
 let sessionTracker;
 let analyzeVisionFrame;
+
+function makeTempRoot() {
+  const dir = resolve(
+    tmpdir(),
+    `voice-tools-test-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  );
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 function withApprovedToolContext(context = {}) {
   return {
@@ -263,6 +312,13 @@ function withApprovedToolContext(context = {}) {
 describe("voice-tools", () => {
   beforeEach(async () => {
     vi.resetModules();
+    mockBosunSessionManager.cancelSession.mockReset();
+    mockBosunSessionManager.cancelSession.mockReturnValue(true);
+    mockBosunSessionManager.getSession.mockReset();
+    mockBosunSessionManager.getSession.mockReturnValue(null);
+    const actualChildProcess = await vi.importActual("node:child_process");
+    mockSpawnSync.mockReset();
+    mockSpawnSync.mockImplementation((...args) => actualChildProcess.spawnSync(...args));
     ({
       getToolDefinitions,
       executeToolCall,
@@ -270,7 +326,7 @@ describe("voice-tools", () => {
     } = await import("../voice/voice-tools.mjs"));
     ({ createBuiltinToolDefinitions } = await import("../agent/tool-builtin-catalog.mjs"));
     ({ execPrimaryPrompt, setPrimaryAgent } = await import("../agent/primary-agent.mjs"));
-    ({ execPooledPrompt } = await import("../agent/agent-pool.mjs"));
+    ({ execPooledPrompt, launchOrResumeThread, resolvePoolSdkName } = await import("../agent/agent-pool.mjs"));
     promptDefaults = await import("../agent/agent-prompts.mjs");
     sessionTracker = await import("../infra/session-tracker.mjs");
     ({ analyzeVisionFrame } = await import("../voice/voice-relay.mjs"));
@@ -302,10 +358,12 @@ describe("voice-tools", () => {
       }
     });
 
-    it("includes gemini-sdk in delegate and switch executor enums", () => {
+    it("includes openai-native and gemini-sdk in delegate and switch executor enums", () => {
       const defs = getToolDefinitions();
       const delegate = defs.find((def) => def.name === "delegate_to_agent");
       const switchAgent = defs.find((def) => def.name === "switch_agent");
+      expect(delegate?.parameters?.properties?.executor?.enum || []).toContain("openai-native");
+      expect(switchAgent?.parameters?.properties?.executor?.enum || []).toContain("openai-native");
       expect(delegate?.parameters?.properties?.executor?.enum || []).toContain("gemini-sdk");
       expect(switchAgent?.parameters?.properties?.executor?.enum || []).toContain("gemini-sdk");
     });
@@ -381,6 +439,78 @@ describe("voice-tools", () => {
       expect(parsed).toHaveProperty("status");
     });
 
+    it("read_file_content appends indexed file context for agents", async () => {
+      const testRoot = makeTempRoot();
+      try {
+        const { runContextIndex } = await import("../workspace/context-indexer.mjs");
+
+        mkdirSync(resolve(testRoot, "src"), { recursive: true });
+        mkdirSync(resolve(testRoot, "tests"), { recursive: true });
+
+        writeFileSync(
+          resolve(testRoot, "src", "helper.mjs"),
+          "export function formatGreeting(name) { return `hello ${name}`; }\n",
+          "utf8",
+        );
+
+        writeFileSync(
+          resolve(testRoot, "src", "alpha.mjs"),
+          [
+            "// alpha module",
+            "import { formatGreeting } from './helper.mjs';",
+            "export function greetUser(name) { return formatGreeting(name); }",
+            "",
+          ].join("\n"),
+          "utf8",
+        );
+
+        writeFileSync(
+          resolve(testRoot, "tests", "alpha.test.mjs"),
+          [
+            "import { greetUser } from '../src/alpha.mjs';",
+            "export function alphaRuntimeTest() { return greetUser('Bosun'); }",
+            "",
+          ].join("\n"),
+          "utf8",
+        );
+
+        await runContextIndex({
+          rootDir: testRoot,
+          includeTests: true,
+          useTreeSitter: false,
+          useZoekt: false,
+        });
+
+        vi.mocked(sessionTracker.getSessionById).mockReturnValue({
+          metadata: {
+            workspaceDir: testRoot,
+          },
+        });
+
+        const result = await executeToolCall(
+          "read_file_content",
+          { filePath: "src/alpha.mjs" },
+          {
+            sessionId: "workflow-agent-file-read",
+            surface: "workflow",
+            sessionType: "workflow-agent",
+            repoRoot: testRoot,
+          },
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.result).toContain("export function greetUser");
+        expect(result.result).toContain("## Injected File Context");
+        expect(result.result).toContain("Language: javascript");
+        expect(result.result).toContain("greetUser");
+        expect(result.result).toContain("src/helper.mjs");
+      } finally {
+        if (existsSync(testRoot)) {
+          await rm(testRoot, { recursive: true, force: true });
+        }
+      }
+    });
+
     it("delegate_to_agent returns immediately with delegation confirmation", async () => {
       const result = await executeToolCall(
         "delegate_to_agent",
@@ -391,9 +521,16 @@ describe("voice-tools", () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/\{RESPONSE\}/i);
-      expect(vi.mocked(execPooledPrompt)).toHaveBeenCalled();
-      const callArgs = vi.mocked(execPooledPrompt).mock.calls[0];
+      expect(vi.mocked(launchOrResumeThread)).toHaveBeenCalled();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls[0];
       expect(callArgs[0]).toBe("test instruction");
+      expect(callArgs[3]).toMatchObject({
+        sessionId: expect.stringMatching(/^voice-live-/),
+        taskKey: expect.stringMatching(/^voice-live-/),
+        sessionType: "voice-delegate",
+        sessionScope: "voice",
+      });
+      expect(callArgs[3]?.taskKey).toBe(callArgs[3]?.sessionId);
     });
 
     it("delegate_to_agent honors call context session/executor/mode/model", async () => {
@@ -409,12 +546,253 @@ describe("voice-tools", () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/\{RESPONSE\}/i);
-      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
       expect(callArgs?.[0]).toBe("ship it");
-      expect(callArgs?.[1]).toMatchObject({
+      expect(callArgs?.[3]).toMatchObject({
         sdk: "claude-sdk",
         mode: "plan",
         model: "claude-opus-4.6",
+      });
+    });
+
+    it("delegate_to_agent falls back to the active pool executor when config still points at codex-sdk", async () => {
+      vi.mocked(resolvePoolSdkName).mockReturnValueOnce("openai-native");
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        {
+          sessionId: "workflow-openai-native-1",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          executor: "codex-sdk",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-1",
+      });
+    });
+
+    it("delegate_to_agent prefers the managed parent session runtime over stale workflow executor hints", async () => {
+      mockBosunSessionManager.getSession.mockReturnValue({
+        sessionId: "workflow-openai-native-2",
+        metadata: {
+          providerSelection: "openai-native",
+          adapterName: "openai-native",
+        },
+      });
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        {
+          sessionId: "workflow-openai-native-2",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          executor: "codex-sdk",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-2",
+      });
+    });
+
+    it("delegate_to_agent ignores stale explicit codex executor overrides when workflow runtime is already native", async () => {
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        {
+          message: "ship it",
+          executor: "codex-sdk",
+        },
+        {
+          sessionId: "workflow-openai-native-3",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          adapterName: "openai-native",
+          sdk: "openai-native",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-3",
+      });
+    });
+
+    it("delegate_to_agent forwards native provider selection and config into delegated launches", async () => {
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        {
+          sessionId: "workflow-openai-native-4",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          adapterName: "openai-native",
+          sdk: "openai-native",
+          providerSelection: "azure-openai-responses-2",
+          providerId: "azure-openai-responses",
+          providerConfig: {
+            selectionId: "azure-openai-responses-2",
+            provider: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            endpoint: "https://secondary.example/openai/v1",
+            apiVersion: "2024-10-01-preview",
+            deployment: "gpt-5.4-secondary",
+            model: "gpt-5.4",
+          },
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-4",
+        providerSelection: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        pinSdk: true,
+        model: "gpt-5.4",
+        providerConfig: expect.objectContaining({
+          selectionId: "azure-openai-responses-2",
+          provider: "azure-openai-responses",
+          providerId: "azure-openai-responses",
+          endpoint: "https://secondary.example/openai/v1",
+          apiVersion: "2024-10-01-preview",
+          deployment: "gpt-5.4-secondary",
+          model: "gpt-5.4",
+        }),
+      });
+    });
+
+    it("delegate_to_agent prefers inherited provider config model over stale parent session model", async () => {
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        {
+          sessionId: "workflow-openai-native-4b",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          adapterName: "openai-native",
+          sdk: "openai-native",
+          model: "gpt-5",
+          providerSelection: "azure-openai-responses-2",
+          providerId: "azure-openai-responses",
+          providerConfig: {
+            selectionId: "azure-openai-responses-2",
+            provider: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            endpoint: "https://secondary.example/openai/v1",
+            apiVersion: "2024-10-01-preview",
+            deployment: "gpt-5.4-secondary",
+            model: "gpt-5.4",
+          },
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-4b",
+        model: "gpt-5.4",
+        providerConfig: expect.objectContaining({
+          model: "gpt-5.4",
+        }),
+      });
+    });
+
+    it("delegate_to_agent prefers managed session provider model over stale tool context model", async () => {
+      mockBosunSessionManager.getSession.mockReturnValue({
+        sessionId: "workflow-openai-native-4c",
+        metadata: {
+          providerSelection: "azure-openai-responses-2",
+          providerId: "azure-openai-responses",
+          model: "gpt-5",
+          providerConfig: {
+            selectionId: "azure-openai-responses-2",
+            provider: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            endpoint: "https://secondary.example/openai/v1",
+            apiVersion: "2024-10-01-preview",
+            deployment: "gpt-5.4-secondary",
+            model: "gpt-5.4",
+          },
+        },
+      });
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        {
+          sessionId: "workflow-openai-native-4c",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          adapterName: "openai-native",
+          sdk: "openai-native",
+          model: "gpt-5",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-4c",
+        providerSelection: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        model: "gpt-5.4",
+        providerConfig: expect.objectContaining({
+          model: "gpt-5.4",
+        }),
+      });
+    });
+
+    it("delegate_to_agent keeps inherited native provider model when subdelegate args request a generic alias", async () => {
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        {
+          message: "ship it",
+          model: "gpt-5",
+        },
+        {
+          sessionId: "workflow-openai-native-4d",
+          surface: "workflow",
+          sessionType: "workflow-agent",
+          adapterName: "openai-native",
+          sdk: "openai-native",
+          providerSelection: "azure-openai-responses-2",
+          providerId: "azure-openai-responses",
+          providerConfig: {
+            selectionId: "azure-openai-responses-2",
+            provider: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            endpoint: "https://secondary.example/openai/v1",
+            apiVersion: "2024-10-01-preview",
+            deployment: "gpt-5.4-secondary",
+            model: "gpt-5.4",
+          },
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
+        sdk: "openai-native",
+        parentSessionId: "workflow-openai-native-4d",
+        model: "gpt-5.4",
+        providerConfig: expect.objectContaining({
+          model: "gpt-5.4",
+        }),
       });
     });
 
@@ -431,12 +809,20 @@ describe("voice-tools", () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/\{RESPONSE\}/i);
-      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
       expect(callArgs?.[0]).toBe("ship it");
+      expect(callArgs?.[3]).toMatchObject({
+        sessionId: expect.stringMatching(/^delegate-live-/),
+        taskKey: expect.stringMatching(/^delegate-live-/),
+        sessionType: "workflow-agent-delegate",
+        sessionScope: "delegate",
+        parentSessionId: "workflow-agent-1",
+        pinSdk: true,
+      });
     });
 
     it("builtin bridged delegate_to_agent defaults to non-voice tool context", async () => {
-      vi.mocked(execPooledPrompt).mockClear();
+      vi.mocked(launchOrResumeThread).mockClear();
       const defs = createBuiltinToolDefinitions();
       const delegateTool = defs.find((tool) => tool.id === "delegate_to_agent");
       const result = await delegateTool.handler(
@@ -444,8 +830,15 @@ describe("voice-tools", () => {
         { sessionId: "workflow-tool-1" },
       );
       expect(result).toMatch(/\{RESPONSE\}/i);
-      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
       expect(callArgs?.[0]).toBe("bridge this task");
+      expect(callArgs?.[3]).toMatchObject({
+        sessionId: expect.stringMatching(/^delegate-live-/),
+        taskKey: expect.stringMatching(/^delegate-live-/),
+        sessionType: "tool-bridge-delegate",
+        sessionScope: "delegate",
+        parentSessionId: "workflow-tool-1",
+      });
     });
 
     it("delegate_to_agent coerces session-bound ask mode to agent", async () => {
@@ -461,8 +854,8 @@ describe("voice-tools", () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/\{RESPONSE\}/i);
-      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
-      expect(callArgs?.[1]).toMatchObject({
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      expect(callArgs?.[3]).toMatchObject({
         sdk: "gemini-sdk",
         mode: "ask",
         model: "gemini-2.5-pro",
@@ -486,10 +879,177 @@ describe("voice-tools", () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/\{RESPONSE\}/i);
-      const callArgs = vi.mocked(execPooledPrompt).mock.calls.at(-1);
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
       expect(callArgs?.[0]).toContain("Please fix the failing test");
       expect(callArgs?.[0]).toContain("Live visual context from this call");
       expect(callArgs?.[0]).toContain("[Vision screen]");
+    });
+
+    it("delegate_to_agent marks placeholder no-text delegate completions as no_output", async () => {
+      vi.mocked(launchOrResumeThread).mockResolvedValueOnce({
+        success: true,
+        output: "(Agent completed with no text output)",
+        items: [],
+        status: "completed",
+      });
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "write the fix" },
+        withApprovedToolContext({ sessionId: "primary-no-output-1" }),
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      const liveSessionId = callArgs?.[3]?.sessionId;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(sessionTracker.updateSessionStatus).toHaveBeenCalledWith(liveSessionId, "no_output");
+      expect(sessionTracker.recordEvent).toHaveBeenCalledWith(
+        liveSessionId,
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringMatching(/no text output/i),
+        }),
+      );
+    });
+
+    it("delegate_to_agent preserves blocked delegate failures instead of marking them completed", async () => {
+      vi.mocked(launchOrResumeThread).mockResolvedValueOnce({
+        success: false,
+        status: "blocked_by_env",
+        blockedReason: "blocked_by_env",
+        error: "Missing credentials for delegated execution",
+        items: [],
+      });
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "ship it" },
+        withApprovedToolContext({ sessionId: "primary-blocked-1" }),
+      );
+
+      expect(result.error).toBeUndefined();
+      const callArgs = vi.mocked(launchOrResumeThread).mock.calls.at(-1);
+      const liveSessionId = callArgs?.[3]?.sessionId;
+      await Promise.resolve();
+      await Promise.resolve();
+      const statusCallIndex = vi.mocked(sessionTracker.updateSessionStatus).mock.calls.findIndex(
+        (call) => call[0] === liveSessionId && call[1] === "blocked_by_env",
+      );
+      const eventCallIndex = vi.mocked(sessionTracker.recordEvent).mock.calls.findIndex(
+        (call) => call[0] === liveSessionId && /Missing credentials/i.test(String(call[1]?.content || "")),
+      );
+      expect(eventCallIndex).toBeGreaterThanOrEqual(0);
+      expect(statusCallIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        vi.mocked(sessionTracker.recordEvent).mock.invocationCallOrder[eventCallIndex],
+      ).toBeLessThan(
+        vi.mocked(sessionTracker.updateSessionStatus).mock.invocationCallOrder[statusCallIndex],
+      );
+      expect(sessionTracker.updateSessionStatus).toHaveBeenCalledWith(liveSessionId, "blocked_by_env");
+      expect(sessionTracker.recordEvent).toHaveBeenCalledWith(
+        liveSessionId,
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Missing credentials for delegated execution"),
+        }),
+      );
+    });
+
+    it("delegate_to_agent blocks nested delegation from delegated tool sessions", async () => {
+      vi.mocked(launchOrResumeThread).mockClear();
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "spawn another coding session" },
+        {
+          sessionId: "delegate-live-root",
+          sessionType: "task-delegate",
+          parentSessionId: "workflow-parent",
+          surface: "bosun-builtin",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/nested delegate_to_agent calls are blocked/i);
+      expect(vi.mocked(launchOrResumeThread)).not.toHaveBeenCalled();
+    });
+
+    it("cancel_subagent recursively terminalizes tracked delegate descendants", async () => {
+      vi.mocked(sessionTracker.listAllSessions).mockReturnValue([
+        {
+          id: "delegate-live-root",
+          status: "active",
+          parentSessionId: "workflow-agent-1",
+        },
+        {
+          id: "delegate-live-child",
+          status: "active",
+          parentSessionId: "delegate-live-root",
+        },
+        {
+          id: "delegate-live-grandchild",
+          status: "active",
+          parentSessionId: "delegate-live-child",
+        },
+        {
+          id: "delegate-live-terminal",
+          status: "no_output",
+          parentSessionId: "delegate-live-root",
+        },
+      ]);
+      vi.mocked(sessionTracker.recordEvent).mockClear();
+      vi.mocked(sessionTracker.updateSessionStatus).mockClear();
+      mockBosunSessionManager.cancelSession.mockClear();
+
+      const defs = createBuiltinToolDefinitions();
+      const cancelTool = defs.find((tool) => tool.id === "cancel_subagent");
+      const result = await cancelTool.handler(
+        {
+          childSessionId: "delegate-live-root",
+          reason: "delegate_unusable",
+        },
+        { sessionId: "workflow-agent-1" },
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        cancelled: true,
+        sessionId: "delegate-live-root",
+        lineageSessionIds: [
+          "delegate-live-root",
+          "delegate-live-child",
+          "delegate-live-terminal",
+          "delegate-live-grandchild",
+        ],
+        cancelledSessionIds: [
+          "delegate-live-grandchild",
+          "delegate-live-terminal",
+          "delegate-live-child",
+          "delegate-live-root",
+        ],
+        terminalizedSessionIds: [
+          "delegate-live-grandchild",
+          "delegate-live-child",
+          "delegate-live-root",
+        ],
+      });
+      expect(mockBosunSessionManager.cancelSession).toHaveBeenNthCalledWith(1, "delegate-live-grandchild", "delegate_unusable");
+      expect(mockBosunSessionManager.cancelSession).toHaveBeenNthCalledWith(2, "delegate-live-terminal", "delegate_unusable");
+      expect(mockBosunSessionManager.cancelSession).toHaveBeenNthCalledWith(3, "delegate-live-child", "delegate_unusable");
+      expect(mockBosunSessionManager.cancelSession).toHaveBeenNthCalledWith(4, "delegate-live-root", "delegate_unusable");
+      expect(sessionTracker.recordEvent).toHaveBeenCalledWith(
+        "delegate-live-grandchild",
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("delegate_unusable"),
+        }),
+      );
+      expect(sessionTracker.updateSessionStatus).toHaveBeenCalledWith("delegate-live-grandchild", "aborted");
+      expect(sessionTracker.updateSessionStatus).toHaveBeenCalledWith("delegate-live-child", "aborted");
+      expect(sessionTracker.updateSessionStatus).toHaveBeenCalledWith("delegate-live-root", "aborted");
+      expect(sessionTracker.updateSessionStatus).not.toHaveBeenCalledWith("delegate-live-terminal", "aborted");
     });
 
     it("ask_agent_context returns quick response from pooled prompt", async () => {
@@ -577,6 +1137,44 @@ describe("voice-tools", () => {
       expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
     });
 
+    it("list_directory honors explicit context cwd before repo root", async () => {
+      const testRoot = makeTempRoot();
+      const sentinel = "cwd-sentinel.txt";
+      writeFileSync(resolve(testRoot, sentinel), "ok");
+      try {
+        const result = await executeToolCall(
+          "list_directory",
+          { path: "." },
+          {
+            cwd: testRoot,
+            repoRoot: testRoot,
+          },
+        );
+        expect(result.error).toBeUndefined();
+        const parsed = JSON.parse(result.result);
+        expect(parsed).toContain(sentinel);
+      } finally {
+        await rm(testRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("run_workspace_command allows non-safe commands for delegated non-voice sessions", async () => {
+      vi.mocked(execPooledPrompt).mockClear();
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "node -p 1+1" },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result.trim()).toBe("2");
+      expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
+    });
+
     it("run_workspace_command allows safe read-only commands without approval", async () => {
       vi.mocked(execPooledPrompt).mockClear();
       const result = await executeToolCall(
@@ -588,6 +1186,115 @@ describe("voice-tools", () => {
       expect(result.error).toBeUndefined();
       expect(result.result).toMatch(/^v\d+/i);
       expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
+    });
+
+    it("run_workspace_command resolves npm.cmd through the shell on Windows", async () => {
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "9.9.9", ""],
+        stdout: "9.9.9",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { value: "win32" });
+
+      try {
+        const result = await executeToolCall(
+          "run_workspace_command",
+          { command: "npm test" },
+          {
+            sessionId: "delegate-session-1",
+            surface: "bosun-builtin",
+            sessionType: "tool-bridge-delegate",
+          },
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.result.trim()).toBe("9.9.9");
+        expect(mockSpawnSync).toHaveBeenCalledWith(
+          "npm.cmd",
+          ["test"],
+          expect.objectContaining({
+            shell: true,
+            timeout: 300000,
+          }),
+        );
+      } finally {
+        if (originalPlatform) {
+          Object.defineProperty(process, "platform", originalPlatform);
+        }
+      }
+    });
+
+    it("run_workspace_command gives npm build scripts a long timeout", async () => {
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "built", ""],
+        stdout: "built",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "npm run build" },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result.trim()).toBe("built");
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        expect.stringMatching(/npm(?:\.cmd)?$/i),
+        ["run", "build"],
+        expect.objectContaining({
+          timeout: 300000,
+        }),
+      );
+    });
+
+    it("run_workspace_command preserves quoted conventional commit messages for delegated sessions", async () => {
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "amended", ""],
+        stdout: "amended",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      const result = await executeToolCall(
+        "run_workspace_command",
+        {
+          command: "git commit --amend -m \"fix(workspace): restore per-agent rate limiting for persistent memory writes\"",
+        },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result.trim()).toBe("amended");
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        expect.stringMatching(/git(?:\.exe)?$/i),
+        [
+          "commit",
+          "--amend",
+          "-m",
+          "fix(workspace): restore per-agent rate limiting for persistent memory writes",
+        ],
+        expect.objectContaining({
+          shell: false,
+        }),
+      );
     });
 
     it("list_prompts includes prompt sync summary and update candidates", async () => {

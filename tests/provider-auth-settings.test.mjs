@@ -109,6 +109,31 @@ describe("provider auth and model settings", () => {
     }));
   });
 
+  it("detects Codex auth.json API-key schema during auth normalization", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "bosun-codex-auth-"));
+    const authPath = join(tempDir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({
+      OPENAI_API_KEY: "sk-test-codex-auth-json",
+    }));
+
+    const codexAuth = normalizeProviderAuthState("openai-codex-subscription", {}, {
+      env: {
+        CODEX_AUTH_JSON_PATH: authPath,
+      },
+      settings: {
+        BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_ENABLED: "true",
+      },
+    });
+
+    expect(codexAuth.authenticated).toBe(true);
+    expect(codexAuth.canRun).toBe(true);
+    expect(codexAuth.preferredMode).toBe("apiKey");
+    expect(codexAuth.connection).toEqual(expect.objectContaining({
+      authSource: "auth.json",
+      authPath,
+    }));
+  });
+
   it("prefers provider-scoped model settings over built-in defaults", () => {
     const catalog = getProviderModelCatalog("azure-openai-responses", {
       settings: {
@@ -281,7 +306,7 @@ describe("provider auth and model settings", () => {
 
     expect(auth.credentialLifecycle).toEqual(expect.objectContaining({
       providerId: "openai-responses",
-      status: "authenticated",
+      status: "configured",
     }));
     expect(auth.credentialLifecycle.methods).toEqual(expect.arrayContaining([
       expect.objectContaining({

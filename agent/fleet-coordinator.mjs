@@ -38,20 +38,15 @@ import { sanitizeGitEnv } from "../git/git-safety.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Workflow Event Bridge ────────────────────────────────────────────────────
-// Lazy-import queueWorkflowEvent from monitor.mjs — cached at module scope.
+// The daemon injects its workflow-event queue. Library callers (like the task
+// simulator) intentionally run without monitor side effects, so this must stay
+// a no-op until a real owner wires it up.
 let _queueWorkflowEvent = null;
+export function setFleetWorkflowEventQueue(queueFn) {
+  _queueWorkflowEvent = typeof queueFn === "function" ? queueFn : null;
+}
 function emitFleetEvent(eventType, eventData = {}, opts = {}) {
-  if (!_queueWorkflowEvent) {
-    import("../infra/monitor.mjs")
-      .then((mod) => {
-        if (typeof mod.queueWorkflowEvent === "function") {
-          _queueWorkflowEvent = mod.queueWorkflowEvent;
-          _queueWorkflowEvent(eventType, eventData, opts);
-        }
-      })
-      .catch(() => {});
-    return;
-  }
+  if (!_queueWorkflowEvent) return;
   _queueWorkflowEvent(eventType, eventData, opts);
 }
 

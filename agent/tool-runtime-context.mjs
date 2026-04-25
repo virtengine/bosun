@@ -137,7 +137,18 @@ export function normalizeToolRuntimeContext(context = {}, defaults = {}) {
     sessionType: normalizeOptionalText(context.sessionType ?? defaults.sessionType),
     mode: normalizeOptionalText(context.mode ?? defaults.mode),
     surface: normalizeOptionalText(context.surface ?? defaults.surface),
+    sdk: normalizeOptionalText(context.sdk ?? defaults.sdk),
+    adapterName: normalizeOptionalText(context.adapterName ?? defaults.adapterName),
+    providerSelection: normalizeOptionalText(context.providerSelection ?? defaults.providerSelection),
     providerId: normalizeOptionalText(context.providerId ?? defaults.providerId),
+    providerConfig:
+      context?.providerConfig && typeof context.providerConfig === "object" && !Array.isArray(context.providerConfig)
+        ? cloneJson(context.providerConfig)
+        : (
+          defaults?.providerConfig && typeof defaults.providerConfig === "object" && !Array.isArray(defaults.providerConfig)
+            ? cloneJson(defaults.providerConfig)
+            : null
+        ),
     providerTurnId: normalizeOptionalText(context.providerTurnId ?? defaults.providerTurnId),
     executor: normalizeOptionalText(context.executor ?? defaults.executor),
     model: normalizeOptionalText(context.model ?? defaults.model),

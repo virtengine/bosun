@@ -60,11 +60,16 @@ import { createRequire } from "node:module";
 import "../infra/windows-hidden-child-processes.mjs";
 import { loadConfig } from "../config/config.mjs";
 import { resolveAgentSdkModuleEntry, resolveCodexSdkInstall } from "./agent-sdk.mjs";
-import { createProviderKernel } from "./provider-kernel.mjs";
+import { buildProviderKernelSettings, createProviderKernel } from "./provider-kernel.mjs";
+import { createProviderRegistry } from "./provider-registry.mjs";
+import { readHarnessExecutorFabric } from "./harness-executor-config.mjs";
 import { resolveRepoRoot, resolveAgentRepoRoot } from "../config/repo-root.mjs";
 import { resolveCodexProfileRuntime, readCodexConfigRuntimeDefaults } from "../shell/codex-model-profiles.mjs";
 import { buildTaskWritableRoots } from "../shell/codex-config.mjs";
-import { resolveCopilotCliLaunchConfig } from "../shell/copilot-shell.mjs";
+import {
+  importCopilotSdkModuleWithCompat,
+  resolveCopilotCliLaunchConfig,
+} from "../shell/copilot-shell.mjs";
 import openaiNativeAdapter from "../shell/openai-native-adapter.mjs";
 import { getGitHubToken } from "../github/github-auth-manager.mjs";
 import {
@@ -666,7 +671,7 @@ async function importCopilotSdkModule() {
       };
     }
   }
-  return import("@github/copilot-sdk");
+  return await importCopilotSdkModuleWithCompat();
 }
 
 async function importClaudeSdkModule() {
@@ -967,15 +972,6 @@ function getFirstEventTimeoutMs(totalTimeoutMs) {
   return resolveCodexStreamSafety(totalTimeoutMs).firstEventTimeoutMs;
 }
 
-const OPENAI_NATIVE_MEANINGFUL_EVENT_TYPES = new Set([
-  "session.stream.start",
-  "session.stream.delta",
-  "session.stream.complete",
-  "session.step.finish",
-  "session.turn.complete",
-  "session.turn.error",
-]);
-
 function isMeaningfulOpenaiNativeEvent(event) {
   if (typeof event === "string") {
     return event.trim().length > 0;
@@ -983,18 +979,11 @@ function isMeaningfulOpenaiNativeEvent(event) {
   if (!event || typeof event !== "object") {
     return false;
   }
-
-  const eventType = String(event.type || event.eventType || "").trim().toLowerCase();
-  if (OPENAI_NATIVE_MEANINGFUL_EVENT_TYPES.has(eventType)) {
-    return true;
-  }
-
   if (typeof event.delta === "string" && event.delta.trim()) return true;
   if (typeof event.text === "string" && event.text.trim()) return true;
   if (typeof event.error === "string" && event.error.trim()) return true;
   if (Array.isArray(event.toolCalls) && event.toolCalls.length > 0) return true;
   if (Array.isArray(event.toolResults) && event.toolResults.length > 0) return true;
-  if (Array.isArray(event.items) && event.items.length > 0) return true;
   return false;
 }
 
@@ -1393,6 +1382,8 @@ export function isContextOverflowError(error) {
   if (!error) return false;
   const msg = String(error).toLowerCase();
   return (
+    msg.includes("invalid string length") ||
+    msg.includes("string too long") ||
     msg.includes("context_length_exceeded") ||
     msg.includes("prompt_too_long") ||
     msg.includes("prompt is too long") ||
@@ -1462,6 +1453,37 @@ async function withTemporaryEnv(overrides, fn) {
       }
     }
   }
+}
+
+function injectProviderConfigCredentialEnv(baseEnv, providerConfig = null, providerId = "") {
+  const env = { ...(baseEnv || {}) };
+  const config =
+    providerConfig && typeof providerConfig === "object" && !Array.isArray(providerConfig)
+      ? providerConfig
+      : null;
+  const apiKey = String(config?.apiKey || "").trim();
+  if (!apiKey) return env;
+
+  const normalizedProviderId = String(
+    providerId || config?.providerId || config?.provider || config?.selectionId || "",
+  ).trim().toLowerCase();
+  const baseUrl = String(config?.baseUrl || config?.endpoint || config?.deployment || "").trim();
+  const sourceEnvKey = String(config?.credentials?.sources?.apiKey || "").trim();
+  const isAzure =
+    normalizedProviderId.includes("azure")
+    || (baseUrl && isAzureOpenAIBaseUrl(baseUrl));
+  const preferredEnvKey = sourceEnvKey || (isAzure ? "AZURE_OPENAI_API_KEY" : "OPENAI_API_KEY");
+
+  if (!env[preferredEnvKey]) {
+    env[preferredEnvKey] = apiKey;
+  }
+  if (isAzure && !env.AZURE_OPENAI_API_KEY) {
+    env.AZURE_OPENAI_API_KEY = apiKey;
+  }
+  if (!isAzure && !env.OPENAI_API_KEY) {
+    env.OPENAI_API_KEY = apiKey;
+  }
+  return env;
 }
 
 /**
@@ -1942,7 +1964,7 @@ function logResolution(name, source) {
  *
  * @returns {string} Canonical SDK name (e.g. "codex", "copilot", "claude", "opencode").
  */
-function resolvePoolSdkName() {
+export function resolvePoolSdkName() {
   if (resolvedSdkName) return resolvedSdkName;
 
   // 1. AGENT_POOL_SDK env var (explicit override)
@@ -3304,6 +3326,41 @@ function resolveHarnessNativeSelectionId(envInput = process.env) {
   // 2. Inspect harness config for a primary executor whose providerId maps to openai-native
   try {
     const cfg = loadConfig() || {};
+    const fabric = readHarnessExecutorFabric(cfg);
+    const executors = Array.isArray(fabric.executors) ? fabric.executors : [];
+    if (executors.length > 0) {
+      const registry = createProviderRegistry({
+        adapters: {
+          "openai-native": openaiNativeAdapter,
+        },
+        configExecutors: executors,
+        env: envInput,
+        includeBuiltins: false,
+        preferNativeAdapters: true,
+        settings: buildProviderKernelSettings(cfg),
+      });
+      const providerEntries = registry.listProviders();
+      const runnableById = new Map(
+        providerEntries
+          .filter((entry) => entry?.adapterId === "openai-native" && entry?.auth?.canRun === true)
+          .map((entry) => [String(entry.id || "").trim(), entry]),
+      );
+      const primaryId = String(fabric.primaryExecutorId || "").trim();
+      if (primaryId && runnableById.has(primaryId)) {
+        return primaryId;
+      }
+      const fallbackCandidate = executors
+        .filter((entry) => entry?.enabled !== false && runnableById.has(String(entry.id || "").trim()))
+        .sort((a, b) => Number(b?.weight || 0) - Number(a?.weight || 0))[0];
+      if (fallbackCandidate) {
+        return String(fallbackCandidate.id || fallbackCandidate.providerId || "").trim();
+      }
+    }
+  } catch {
+    // best effort
+  }
+  try {
+    const cfg = loadConfig() || {};
     const harness = cfg.harness || {};
     const executors = Array.isArray(harness.executors) ? harness.executors : [];
     const primaryId = String(harness.primaryExecutor || "").trim();
@@ -3360,11 +3417,21 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
     model = null,
     taskKey = null,
   } = extra;
+  const providerConfig =
+    extra?.providerConfig && typeof extra.providerConfig === "object" && !Array.isArray(extra.providerConfig)
+      ? { ...extra.providerConfig }
+      : null;
+  const normalizedProvider = String(
+    extra?.provider || providerConfig?.provider || providerConfig?.providerId || "",
+  ).trim() || null;
 
-  const runtimeSessionEnv =
+  const runtimeSessionEnv = injectProviderConfigCredentialEnv(
     envOverrides && typeof envOverrides === "object"
       ? { ...process.env, ...envOverrides }
-      : { ...process.env };
+      : { ...process.env },
+    providerConfig,
+    normalizedProvider,
+  );
   const logicalSessionId = String(
     resumeThreadId
       || extra.sessionId
@@ -3373,13 +3440,6 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
       || "",
   ).trim() || null;
   const persistent = Boolean(logicalSessionId);
-  const providerConfig =
-    extra?.providerConfig && typeof extra.providerConfig === "object" && !Array.isArray(extra.providerConfig)
-      ? { ...extra.providerConfig }
-      : null;
-  const normalizedProvider = String(
-    extra?.provider || providerConfig?.provider || providerConfig?.providerId || "",
-  ).trim() || null;
   const trimmedModel = String(model || "").trim();
   const selectionId = resolveRequestedNativeSelection({
     ...extra,
@@ -3806,10 +3866,13 @@ export async function launchEphemeralThread(
 ) {
   return await withAgentExecutionSlot(cwd, extra, async (slotLease) => {
   const resolvedGithubToken = await resolveGithubSessionToken();
-  const baseRuntimeEnv =
+  const baseRuntimeEnv = injectProviderConfigCredentialEnv(
     extra?.envOverrides && typeof extra.envOverrides === "object"
       ? { ...process.env, ...extra.envOverrides }
-      : { ...process.env };
+      : { ...process.env },
+    extra?.providerConfig,
+    extra?.provider || extra?.providerConfig?.provider || extra?.providerConfig?.providerId || "",
+  );
   const sessionEnv = injectGitHubSessionEnv(baseRuntimeEnv, resolvedGithubToken);
   const launchExtra = {
     ...extra,
@@ -5183,6 +5246,8 @@ export async function continueSession(sessionId, prompt, options = {}) {
 const RETRY_OUTPUT_PLACEHOLDERS = new Set([
   "",
   "(agent completed with no text output)",
+  "(resumed - no text output)",
+  "(resumed — no text output)",
   "continued",
   "model response continued",
 ]);
@@ -5499,6 +5564,13 @@ export async function execWithRetry(prompt, options = {}) {
 
     // Failed — should we retry?
     const retriesLeft = totalAttempts + continuesUsed - attempt;
+    const overflowFailure = isContextOverflowError(lastResult.error);
+    if (overflowFailure) {
+      forceNewThread(taskKey, `context_overflow_attempt_${attempt}`);
+      console.warn(
+        `${TAG} attempt ${attempt} hit context overflow for "${taskKey}" — invalidated persistent thread before retry`,
+      );
+    }
     if (isDeterministicSdkFailure(lastResult.error)) {
       console.warn(
         `${TAG} attempt ${attempt} hit deterministic SDK failure; retry suppressed: ${lastResult.error}`,

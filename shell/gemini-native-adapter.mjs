@@ -1,5 +1,6 @@
 import { buildProviderTurnPayload } from "../agent/provider-message-transform.mjs";
 import { retryFetch } from "./retry-fetch.mjs";
+import { resolveCredentials } from "./auth-resolver.mjs";
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
@@ -58,21 +59,6 @@ function resolvePayload(input, execOptions = {}) {
     tools: Array.isArray(execOptions.tools) ? execOptions.tools : [],
     reasoningEffort: execOptions.reasoningEffort || null,
   });
-}
-
-function resolveCredentials(execOptions = {}) {
-  const providerConfig = execOptions.providerConfig && typeof execOptions.providerConfig === "object"
-    ? execOptions.providerConfig
-    : {};
-  const env = execOptions.env && typeof execOptions.env === "object"
-    ? execOptions.env
-    : process.env;
-  const apiKey =
-    toTrimmedString(providerConfig.apiKey)
-    || toTrimmedString(env.GEMINI_API_KEY)
-    || toTrimmedString(env.GOOGLE_API_KEY)
-    || "";
-  return { apiKey };
 }
 
 function resolveBaseUrl(execOptions = {}) {

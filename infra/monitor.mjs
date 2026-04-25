@@ -74,7 +74,13 @@ function execAsync(cmd, { cwd, timeout = 30_000, encoding = "utf8" } = {}) {
 import {
   acquireMonitorLock,
   reapStaleBosunHelperProcesses,
+  setMaintenanceWorkflowEventQueue,
 } from "./maintenance.mjs";
+
+import {
+  getJanitorConfig as getStorageJanitorConfig,
+  runStorageJanitor,
+} from "./storage-janitor.mjs";
 
 import {
   attemptAutoFix,
@@ -191,6 +197,7 @@ import {
   detectMaintenanceMode,
   formatFleetSummary,
   persistFleetState,
+  setFleetWorkflowEventQueue,
 } from "../agent/fleet-coordinator.mjs";
 import {
   getComplexityMatrix,
@@ -295,6 +302,7 @@ import { addConfigReloadListener } from "./config-reload-bus.mjs";
 import {
   getKanbanBackendName,
   setKanbanBackend,
+  setKanbanWorkflowEventQueue,
   listTasks as listKanbanTasks,
   updateTaskStatus as updateKanbanTaskStatus,
   updateTask as updateKanbanTask,
@@ -1007,10 +1015,28 @@ async function ensureWorkflowAutomationEngine() {
         config?.workflowDefaults && typeof config.workflowDefaults === "object"
           ? config.workflowDefaults.templates || []
           : [];
+      const configuredWorkflowTemplateOverridesById =
+        config?.workflowDefaults
+        && typeof config.workflowDefaults === "object"
+        && config.workflowDefaults.templateOverridesById
+        && typeof config.workflowDefaults.templateOverridesById === "object"
+          ? config.workflowDefaults.templateOverridesById
+          : {};
+      const workflowDefaultAutoInstallEnabled =
+        !(
+          config?.workflowDefaults
+          && typeof config.workflowDefaults === "object"
+          && config.workflowDefaults.autoInstall === false
+        );
       const typedWorkflowTemplateConfig =
         typeof workflowTemplates?.resolveWorkflowTemplateConfig === "function"
           ? workflowTemplates.resolveWorkflowTemplateConfig(config?.workflows || [])
           : { templateIds: [], overridesById: {} };
+      const typedWorkflowTemplateIds = new Set(typedWorkflowTemplateConfig.templateIds || []);
+      const requestedTemplateOverridesById = {
+        ...configuredWorkflowTemplateOverridesById,
+        ...(typedWorkflowTemplateConfig.overridesById || {}),
+      };
 
       const requestedTemplateIds = new Set(
         typeof workflowTemplates?.resolveWorkflowTemplateIds === "function"
@@ -1021,13 +1047,17 @@ async function ensureWorkflowAutomationEngine() {
             })
           : [],
       );
-      for (const templateId of typedWorkflowTemplateConfig.templateIds || []) {
-        const overrides = typedWorkflowTemplateConfig.overridesById?.[templateId] || {};
+      for (const templateId of requestedTemplateIds) {
+        const overrides = requestedTemplateOverridesById?.[templateId] || {};
         let installed = (engine.list?.() || []).find(
           (wf) => String(wf?.metadata?.installedFrom || "").trim() === templateId,
         );
 
-        if (!installed && typeof workflowTemplates?.installTemplate === "function") {
+        if (
+          !installed
+          && (typedWorkflowTemplateIds.has(templateId) || workflowDefaultAutoInstallEnabled)
+          && typeof workflowTemplates?.installTemplate === "function"
+        ) {
           installed = workflowTemplates.installTemplate(templateId, engine, overrides);
         }
 
@@ -1047,7 +1077,9 @@ async function ensureWorkflowAutomationEngine() {
         };
         def.metadata = {
           ...(def.metadata || {}),
-          configuredFrom: "workflows.config",
+          configuredFrom: typedWorkflowTemplateIds.has(templateId)
+            ? "workflows.config"
+            : "workflowDefaults",
         };
         engine.save(def);
       }
@@ -1253,6 +1285,10 @@ async function dispatchWorkflowEvent(eventType, eventData = {}, opts = {}) {
 function queueWorkflowEvent(eventType, eventData = {}, opts = {}) {
   dispatchWorkflowEvent(eventType, eventData, opts).catch(() => {});
 }
+
+setMaintenanceWorkflowEventQueue(queueWorkflowEvent);
+setFleetWorkflowEventQueue(queueWorkflowEvent);
+setKanbanWorkflowEventQueue(queueWorkflowEvent);
 
 const REVIEW_FIX_HANDOFF_MODES = Object.freeze({
   ACTIVE_SESSION_STEERING: "active_session_steering",
@@ -14549,6 +14585,32 @@ if (!isMonitorTestRuntime) {
     process.exit(0);
   }
 
+// ── Startup state-ledger compaction: shrink the SQLite file before any other
+// module opens a handle. Uses VACUUM INTO + atomic swap; only runs when the
+// ledger is large enough (BOSUN_LEDGER_COMPACTION_BYTES, default 512 MB).
+try {
+  const { compactStateLedger, pruneStateLedgerEventRows, trimStateLedgerEventRowCaps } = await import("./storage-janitor.mjs");
+  const ledgerPath = resolve(repoRoot, ".bosun", ".cache", "state-ledger.sqlite");
+  // Prune old rows first so the subsequent VACUUM INTO has less to copy.
+  const pruneResult = await pruneStateLedgerEventRows(ledgerPath);
+  if (pruneResult?.deleted > 0) {
+    console.log(`[monitor] startup ledger prune: deleted ${pruneResult.deleted} expired event row(s)`);
+  }
+  // Then enforce per-table row caps (steady-state upper bound).
+  const trimResult = await trimStateLedgerEventRowCaps(ledgerPath);
+  if (trimResult?.deleted > 0) {
+    console.log(`[monitor] startup ledger trim: removed ${trimResult.deleted} row(s) over cap`);
+  }
+  const compactResult = await compactStateLedger(ledgerPath);
+  if (compactResult?.compacted) {
+    console.log(
+      `[monitor] startup ledger compaction: ${(compactResult.sizeBefore / 1048576).toFixed(1)} MB → ${(compactResult.sizeAfter / 1048576).toFixed(1)} MB`,
+    );
+  }
+} catch (err) {
+  console.warn(`[monitor] startup ledger compaction error: ${err?.message || err}`);
+}
+
 // ── Codex CLI config.toml: ensure global defaults + stream timeouts ─────────
 try {
   const allowRuntimeCodexMutation = isTruthyFlag(
@@ -14673,6 +14735,36 @@ pollWorkflowSchedulesOnce = async function pollWorkflowSchedulesOnce(
 safeSetInterval("workflow-schedule-check", async () => {
   await pollWorkflowSchedulesOnce();
 }, scheduleCheckIntervalMs);
+
+// ── Periodic storage janitor: bounds .bosun/ artifact growth ─────────────
+// Rotates harness events.jsonl, prunes kanban backups / session logs /
+// quarantine, truncates oversized monitor*.log files, and runs SQLite WAL
+// checkpoint + opportunistic VACUUM on the state ledger. All best-effort.
+{
+  const janitorCfg = getStorageJanitorConfig();
+  const runJanitorOnce = async (trigger) => {
+    try {
+      const summary = await runStorageJanitor({ bosunDir: resolve(repoRoot, ".bosun") });
+      const interesting = [];
+      if (summary.harnessEvents?.rotated) interesting.push(`events-rotated`);
+      if (summary.kanbanBackups?.deleted > 0) interesting.push(`kanban=${summary.kanbanBackups.deleted}`);
+      if (summary.monitorLogs?.truncated > 0) interesting.push(`monitor-logs=${summary.monitorLogs.truncated}`);
+      if (summary.sessionLogs?.deleted > 0) interesting.push(`sessions=${summary.sessionLogs.deleted}`);
+      if (summary.quarantine?.deleted > 0) interesting.push(`quarantine=${summary.quarantine.deleted}`);
+      if (summary.auditInventory?.deleted > 0) interesting.push(`audit=${summary.auditInventory.deleted}`);
+      if (summary.stateLedgerRows?.deleted > 0) interesting.push(`ledger-rows=${summary.stateLedgerRows.deleted}`);
+      if (summary.stateLedgerRowCaps?.deleted > 0) interesting.push(`ledger-cap-trim=${summary.stateLedgerRowCaps.deleted}`);
+      if (summary.stateLedger?.freedBytes > 0) interesting.push(`ledger-freed=${(summary.stateLedger.freedBytes / 1048576).toFixed(1)}MB`);
+      if (interesting.length > 0) {
+        console.log(`[storage-janitor] ${trigger} sweep: ${interesting.join(" ")} (${summary.durationMs}ms)`);
+      }
+    } catch (err) {
+      console.warn(`[storage-janitor] ${trigger} sweep error: ${err?.message || err}`);
+    }
+  };
+  safeSetTimeout("storage-janitor-startup", () => runJanitorOnce("startup"), janitorCfg.startupDelayMs);
+  safeSetInterval("storage-janitor", () => runJanitorOnce("interval"), janitorCfg.intervalMs);
+}
 
 // ── Periodic workflow run file pruning: once per day ─────────────────────
 // Deletes run detail files beyond MAX_PERSISTED_RUNS to keep the workflow-runs
@@ -15044,10 +15136,13 @@ try {
 // ── Internal Executor / Orchestrator startup ──────────────────────────────────
 /** @type {import("../task/task-executor.mjs").TaskExecutor|null} */
 let internalTaskExecutor = null;
-const workflowOwnsTaskExecutorLifecycle = isWorkflowReplacingModule("task-executor.mjs");
+// Resolve this lazily after workflow automation startup populates the replacement cache.
+function workflowOwnsTaskExecutorLifecycleEnabled() {
+  return isWorkflowReplacingModule("task-executor.mjs");
+}
 async function runWorkflowOwnedTaskRecoveryPass(source) {
   if (
-    !workflowOwnsTaskExecutorLifecycle ||
+    !workflowOwnsTaskExecutorLifecycleEnabled() ||
     !internalTaskExecutor ||
     typeof internalTaskExecutor._runInProgressRecoverySafely !== "function"
   ) {
@@ -15154,13 +15249,13 @@ if (isExecutorDisabled()) {
   console.log(
     `[monitor] :ban: task execution DISABLED (EXECUTOR_MODE=${executorMode}) — no tasks will be executed`,
   );
-} else if (executorMode === "internal" || executorMode === "hybrid") {
-  // Start internal executor
-  try {
-    if (workflowOwnsTaskExecutorLifecycle) {
-      console.log(
-        "[monitor] task-executor lifecycle delegation enabled — finalization/recovery handled by workflow replacement",
-      );
+  } else if (executorMode === "internal" || executorMode === "hybrid") {
+    // Start internal executor
+    try {
+      if (workflowOwnsTaskExecutorLifecycleEnabled()) {
+        console.log(
+          "[monitor] task-executor lifecycle delegation enabled — finalization/recovery handled by workflow replacement",
+        );
     }
     const workflowRunsDir =
       config?.configDir &&
@@ -15174,16 +15269,16 @@ if (isExecutorDisabled()) {
             "workflow-runs",
           )
         : null;
-    const execOpts = {
-      ...internalExecutorConfig,
-      repoRoot,
-      repoSlug,
-      workflowRunsDir,
-      agentPrompts,
-      workflowOwnsTaskLifecycle: workflowOwnsTaskExecutorLifecycle,
-      sendTelegram:
-        telegramToken && telegramChatId
-          ? (msg) => void sendTelegramMessage(msg)
+      const execOpts = {
+        ...internalExecutorConfig,
+        repoRoot,
+        repoSlug,
+        workflowRunsDir,
+        agentPrompts,
+        workflowOwnsTaskLifecycle: workflowOwnsTaskExecutorLifecycleEnabled(),
+        sendTelegram:
+          telegramToken && telegramChatId
+            ? (msg) => void sendTelegramMessage(msg)
           : null,
       onTaskStarted: (task, slot) => {
         const agentId =
@@ -15371,7 +15466,7 @@ if (isExecutorDisabled()) {
     };
     internalTaskExecutor = getTaskExecutor(execOpts);
     internalTaskExecutor.start();
-    if (workflowOwnsTaskExecutorLifecycle) {
+    if (workflowOwnsTaskExecutorLifecycleEnabled()) {
       scheduleStartupWorkflowRecovery(
         "startup-stale-dispatch-task-poll-unstick",
         () =>

@@ -472,6 +472,8 @@ export function createProviderKernel(options = {}) {
     return createProviderSession(runtime.providerId, {
       providerRegistry: runtime.registry,
       adapter: targetAdapter,
+      providerSelection: selectionId || runtime.selection?.selectionId || runtime.providerId || null,
+      providerConfig: explicitProviderConfig || runtime.providerConfig || null,
       sessionId: normalizedInput.sessionId,
       threadId: normalizedInput.threadId,
       model: normalizedInput.model,
@@ -509,18 +511,18 @@ export function createProviderKernel(options = {}) {
                   const mergedProviderConfig =
                     explicitProviderConfig || execOptions.providerConfig || modelApiVersion
                       ? {
-                          ...(execOptions.providerConfig || {}),
-                          ...(explicitProviderConfig || {}),
-                          model:
-                            payload.model
+                           ...(execOptions.providerConfig || {}),
+                           ...(explicitProviderConfig || {}),
+                           model:
+                            explicitProviderConfig?.model
+                            || execOptions.providerConfig?.model
+                            || payload.model
                             || runnerOptions.model
                             || normalizedInput.model
-                            || execOptions.providerConfig?.model
-                            || explicitProviderConfig?.model
                             || null,
-                          ...(modelApiVersion ? { apiVersion: modelApiVersion } : {}),
-                        }
-                      : undefined;
+                           ...(modelApiVersion ? { apiVersion: modelApiVersion } : {}),
+                         }
+                       : undefined;
                   const adapterInput = targetAdapter.acceptsTurnPayload === true
                     ? payload
                     : extractMessageFromPayload(payload);

@@ -255,11 +255,15 @@ async function initEngine(cfg = {}) {
   };
 
   // ── Create engine ─────────────────────────────────────────────────────────
-  engine = wfEngineMod.getWorkflowEngine({
+  const engineOpts = {
     workflowDir: cfg.workflowDir,
     runsDir:     cfg.runsDir,
     services,
-  });
+  };
+  if (cfg.detectInterruptedRuns === false) {
+    engineOpts.detectInterruptedRuns = false;
+  }
+  engine = wfEngineMod.getWorkflowEngine(engineOpts);
 
   // ── Forward engine events to main thread ──────────────────────────────────
   const FORWARDED_EVENTS = [
@@ -288,7 +292,8 @@ async function initEngine(cfg = {}) {
   }
 
   // ── Resume interrupted runs ────────────────────────────────────────────────
-  if (typeof engine.resumeInterruptedRuns === "function") {
+  const shouldResumeInterruptedRunsOnStart = cfg.resumeInterruptedRunsOnStart !== false;
+  if (shouldResumeInterruptedRunsOnStart && typeof engine.resumeInterruptedRuns === "function") {
     setTimeout(() => engine.resumeInterruptedRuns().catch(() => {}), 0);
   }
 }

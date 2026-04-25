@@ -296,14 +296,22 @@ export function resolveCodexSubscriptionAuth(env = process.env) {
   }
 
   const token = readNestedString(authJson, [
+    ["OPENAI_API_KEY"],
+    ["CODEX_API_KEY"],
     ["access_token"],
     ["accessToken"],
     ["tokens", "access_token"],
     ["tokens", "accessToken"],
+    ["tokens", "OPENAI_API_KEY"],
+    ["tokens", "CODEX_API_KEY"],
     ["tokens", "id_token"],
     ["tokens", "idToken"],
+    ["auth", "OPENAI_API_KEY"],
+    ["auth", "CODEX_API_KEY"],
     ["auth", "access_token"],
     ["auth", "accessToken"],
+    ["token", "OPENAI_API_KEY"],
+    ["token", "CODEX_API_KEY"],
     ["token", "access_token"],
     ["token", "accessToken"],
   ]);

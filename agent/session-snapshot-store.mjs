@@ -12,6 +12,147 @@ function cloneValue(value) {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const SNAPSHOT_STORE_HARD_LIMIT_BYTES = 5 * 1024 * 1024;
+
+function truncateSnapshotString(value, maxLength = 2048) {
+  const text = toTrimmedString(value);
+  if (!text) return text || null;
+  if (text.length <= maxLength) return text;
+  const keepHead = Math.max(256, Math.floor(maxLength * 0.75));
+  const keepTail = Math.max(64, maxLength - keepHead);
+  return `${text.slice(0, keepHead)}… [truncated ${text.length - keepHead - keepTail} chars] ${text.slice(-keepTail)}`;
+}
+
+function summarizeSnapshotValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === "string") return truncateSnapshotString(value, 2048);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value !== "object") return String(value);
+  if (depth >= 4) {
+    if (Array.isArray(value)) {
+      return { _summary: "array", length: value.length };
+    }
+    return { _summary: "object", keys: Object.keys(value).length };
+  }
+  if (Array.isArray(value)) {
+    const tailLimit = depth === 0 ? 12 : 8;
+    const kept = value.slice(-tailLimit).map((entry) => summarizeSnapshotValue(entry, depth + 1));
+    if (value.length > tailLimit) {
+      kept.unshift({
+        _truncated: {
+          droppedEntries: value.length - tailLimit,
+        },
+      });
+    }
+    return kept;
+  }
+  const entries = Object.entries(value);
+  const keyLimit = depth === 0 ? 24 : 16;
+  const compacted = {};
+  for (const [key, entry] of entries.slice(0, keyLimit)) {
+    compacted[key] = summarizeSnapshotValue(entry, depth + 1);
+  }
+  if (entries.length > keyLimit) {
+    compacted._truncated = {
+      droppedKeys: entries.length - keyLimit,
+    };
+  }
+  return compacted;
+}
+
+function withSnapshotTruncation(value, note, originalBytes = null) {
+  if (!value || typeof value !== "object") return value;
+  const existing = value._truncated && typeof value._truncated === "object" ? value._truncated : {};
+  const existingNotes = Array.isArray(existing.notes)
+    ? existing.notes.filter((entry) => typeof entry === "string" && entry.trim())
+    : [];
+  return {
+    ...value,
+    _truncated: {
+      at: new Date().toISOString(),
+      originalBytes: Number.isFinite(Number(originalBytes))
+        ? Number(originalBytes)
+        : (Number.isFinite(Number(existing.originalBytes)) ? Number(existing.originalBytes) : null),
+      notes: [...new Set([...existingNotes, note])],
+    },
+  };
+}
+
+function compactSnapshotEntry(snapshot = {}, note, originalBytes = null) {
+  return withSnapshotTruncation({
+    snapshotId: toTrimmedString(snapshot.snapshotId || "") || null,
+    sessionId: toTrimmedString(snapshot.sessionId || "") || null,
+    runId: toTrimmedString(snapshot.runId || "") || null,
+    threadId: toTrimmedString(snapshot.threadId || "") || null,
+    parentSessionId: toTrimmedString(snapshot.parentSessionId || "") || null,
+    parentThreadId: toTrimmedString(snapshot.parentThreadId || "") || null,
+    rootSessionId: toTrimmedString(snapshot.rootSessionId || snapshot.sessionId || "") || null,
+    action: toTrimmedString(snapshot.action || "snapshot") || "snapshot",
+    eventType: toTrimmedString(snapshot.eventType || "") || null,
+    status: toTrimmedString(snapshot.status || "idle") || "idle",
+    summary: truncateSnapshotString(snapshot.summary || "", 2048),
+    createdAt: toTrimmedString(snapshot.createdAt || "") || null,
+    checkpoint: summarizeSnapshotValue(snapshot.checkpoint || null, 0),
+    state: summarizeSnapshotValue(snapshot.state || {}, 0),
+    result: summarizeSnapshotValue(snapshot.result, 0),
+  }, note, originalBytes);
+}
+
+function compactEventEntry(event = {}, note, originalBytes = null) {
+  return withSnapshotTruncation({
+    eventId: toTrimmedString(event.eventId || "") || null,
+    sessionId: toTrimmedString(event.sessionId || "") || null,
+    type: toTrimmedString(event.type || "event") || "event",
+    timestamp: toTrimmedString(event.timestamp || "") || null,
+    payload: summarizeSnapshotValue(event.payload || {}, 0),
+    meta: summarizeSnapshotValue(event.meta || {}, 0),
+  }, note, originalBytes);
+}
+
+function compactCheckpointEntry(checkpoint = {}, note, originalBytes = null) {
+  return withSnapshotTruncation(
+    summarizeSnapshotValue(checkpoint || {}, 0),
+    note,
+    originalBytes,
+  );
+}
+
+function compactSnapshotStoreState(inputState, note, originalBytes = null) {
+  const snapshots = {};
+  const events = {};
+  const checkpoints = {};
+  const lastTouchedAt = { ...(inputState?.lastTouchedAt || {}) };
+  for (const [sessionId, entries] of Object.entries(inputState?.snapshots || {})) {
+    const source = Array.isArray(entries) ? entries : [];
+    snapshots[sessionId] = source.slice(-5).map((entry) => compactSnapshotEntry(entry, note, originalBytes));
+  }
+  for (const [sessionId, entries] of Object.entries(inputState?.events || {})) {
+    const source = Array.isArray(entries) ? entries : [];
+    events[sessionId] = source.slice(-20).map((entry) => compactEventEntry(entry, note, originalBytes));
+  }
+  for (const [sessionId, checkpoint] of Object.entries(inputState?.checkpoints || {})) {
+    checkpoints[sessionId] = compactCheckpointEntry(checkpoint, note, originalBytes);
+  }
+  return {
+    snapshots,
+    events,
+    checkpoints,
+    lastTouchedAt,
+  };
+}
+
+function serializeSnapshotStoreState(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    const message = String(error?.message || error || "").trim();
+    if (/invalid string length/i.test(message)) {
+      return null;
+    }
+    throw error;
+  }
+}
 
 function resolveSnapshotStorePath(filePath = "") {
   const explicit = toTrimmedString(filePath);
@@ -89,7 +230,29 @@ export function createSessionSnapshotStore(options = {}) {
     mkdirSync(dirname(filePath), { recursive: true });
     // Compact (un-indented) JSON keeps the file small enough that the
     // synchronous write does not block the event loop for whole seconds.
-    writeFileSync(filePath, JSON.stringify(state), "utf8");
+    let serialized = serializeSnapshotStoreState(state);
+    if (!serialized) {
+      state = compactSnapshotStoreState(
+        state,
+        "snapshot-store: compacted after serialization failure",
+      );
+      serialized = serializeSnapshotStoreState(state);
+    }
+    if (!serialized || serialized.length > SNAPSHOT_STORE_HARD_LIMIT_BYTES) {
+      const originalBytes = typeof serialized === "string" ? serialized.length : null;
+      state = compactSnapshotStoreState(
+        state,
+        serialized
+          ? "snapshot-store: compacted after size limit"
+          : "snapshot-store: fell back to compact summary after serialization failure",
+        originalBytes,
+      );
+      serialized = serializeSnapshotStoreState(state);
+      if (!serialized) {
+        throw new RangeError("Invalid string length");
+      }
+    }
+    writeFileSync(filePath, serialized, "utf8");
   }
 
   function readSession(sessionId) {

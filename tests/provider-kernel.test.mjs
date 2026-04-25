@@ -352,6 +352,143 @@ describe("provider kernel cutover", () => {
     expect(passedExecOptions.tools).toEqual(tools);
   });
 
+  it("passes resolved provider selection and config into tool execution context", async () => {
+    let round = 0;
+    const openaiNativeExec = vi.fn(async (_message, options = {}) => {
+      round += 1;
+      if (round === 1) {
+        return {
+          finalResponse: "Need delegated help.",
+          items: [{
+            role: "assistant",
+            content: [
+              { type: "text", text: "Need delegated help." },
+              { type: "tool_call", id: "tool-1", name: "delegate_to_agent", input: { message: "ship it" } },
+            ],
+          }],
+          toolCalls: [{
+            id: "tool-1",
+            name: "delegate_to_agent",
+            input: { message: "ship it" },
+          }],
+          providerId: options.provider || null,
+          sessionId: options.sessionId || "azure-tool-session",
+          threadId: options.threadId || "azure-tool-thread",
+          usage: {
+            inputTokens: 9,
+            outputTokens: 4,
+            totalTokens: 13,
+          },
+        };
+      }
+      return {
+        finalResponse: "done",
+        items: [{
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+        }],
+        providerId: options.provider || null,
+        sessionId: options.sessionId || "azure-tool-session",
+        threadId: options.threadId || "azure-tool-thread",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 2,
+          totalTokens: 5,
+        },
+      };
+    });
+    const executeTool = vi.fn(async (_toolName, _args, context = {}) => ({
+      ok: true,
+      providerSelection: context.providerSelection,
+      providerId: context.providerId,
+      adapterName: context.adapterName,
+      providerConfig: context.providerConfig,
+      model: context.model,
+    }));
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: openaiNativeExec,
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "azure-openai-responses",
+          azureOpenai: {
+            enabled: true,
+            defaultModel: "gpt-5.4",
+            endpoint: "https://primary.example/openai/v1",
+            deployment: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+        },
+        harness: {
+          enabled: true,
+          primaryExecutor: "azure-openai-responses",
+          executors: [
+            {
+              id: "azure-openai-responses",
+              name: "Azure Primary",
+              providerId: "azure-openai-responses",
+              enabled: true,
+              defaultModel: "gpt-5.4",
+              endpoint: "https://primary.example/openai/v1",
+              deployment: "https://primary.example/openai/v1",
+              apiVersion: "2024-12-01-preview",
+            },
+            {
+              id: "azure-openai-responses-2",
+              name: "Azure Secondary",
+              providerId: "azure-openai-responses",
+              enabled: true,
+              defaultModel: "gpt-5.4",
+              endpoint: "https://secondary.example/openai/v1",
+              deployment: "https://secondary.example/openai/v1",
+              apiVersion: "2024-10-01-preview",
+              authBindings: {
+                apiKeyEnv: "secondary-literal-key",
+              },
+            },
+          ],
+        },
+      },
+      env: {},
+    });
+
+    const session = kernel.createExecutionSession({
+      adapterName: "openai-native",
+      selectionId: "azure-openai-responses-2",
+      sessionId: "azure-tool-provider-session",
+      threadId: "azure-tool-provider-thread",
+      model: "gpt-5.4",
+      executeTool,
+    });
+
+    const result = await session.runTurn("Delegate using the selected Azure runtime.");
+
+    expect(result.finalResponse).toBe("done");
+    expect(executeTool).toHaveBeenCalledWith(
+      "delegate_to_agent",
+      { message: "ship it" },
+      expect.objectContaining({
+        providerId: "azure-openai-responses",
+        providerSelection: "azure-openai-responses-2",
+        adapterName: "openai-native",
+        model: "gpt-5.4",
+        providerConfig: expect.objectContaining({
+          selectionId: "azure-openai-responses-2",
+          provider: "azure-openai-responses",
+          endpoint: "https://secondary.example/openai/v1",
+          apiVersion: "2024-10-01-preview",
+          model: "gpt-5.4",
+        }),
+      }),
+    );
+  });
+
   it("prefers the native adapter for harness-managed Anthropic providers and passes the full turn payload", async () => {
     const anthropicExec = vi.fn(async (payload, options = {}) => ({
       finalResponse: "anthropic-native:ok",
@@ -679,6 +816,7 @@ describe("provider kernel cutover", () => {
         endpoint: options.providerConfig?.endpoint || null,
         apiVersion: options.providerConfig?.apiVersion || null,
         selectionId: options.providerConfig?.selectionId || null,
+        apiKeyPresent: Boolean(options.providerConfig?.apiKey),
         provider: options.provider || null,
       }),
       items: [],
@@ -767,17 +905,197 @@ describe("provider kernel cutover", () => {
       apiVersion: "2024-10-01-preview",
     }));
     expect(runtime.providerConfig).toEqual(expect.objectContaining({
+      apiKey: "secondary-literal-key",
       endpoint: "https://secondary.example/openai/v1",
       apiVersion: "2024-10-01-preview",
       selectionId: "azure-openai-responses-2",
     }));
 
     expect(JSON.parse(result.finalResponse)).toEqual({
+      apiKeyPresent: true,
       endpoint: "https://secondary.example/openai/v1",
       apiVersion: "2024-10-01-preview",
       selectionId: "azure-openai-responses-2",
       provider: "azure-openai-responses",
     });
+  });
+
+  it("preserves explicit provider config model when session model is a stale generic alias", async () => {
+    const openaiNativeExec = vi.fn(async (_message, options = {}) => ({
+      finalResponse: "ok",
+      items: [],
+      providerId: options.provider || null,
+      sessionId: options.sessionId || "azure-session",
+      threadId: options.threadId || "azure-thread",
+      usage: {
+        inputTokens: 8,
+        outputTokens: 4,
+        totalTokens: 12,
+      },
+    }));
+
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: openaiNativeExec,
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "azure-openai-responses",
+          azureOpenai: {
+            enabled: true,
+            defaultModel: "gpt-5.4",
+            endpoint: "https://primary.example/openai/v1",
+            deployment: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+        },
+      },
+      env: {
+        AZURE_OPENAI_API_KEY: "azure-secret",
+      },
+    });
+
+    const session = kernel.createExecutionSession({
+      adapterName: "openai-native",
+      selectionId: "azure-openai-responses",
+      sessionId: "azure-provider-session",
+      threadId: "azure-provider-thread",
+      model: "gpt-5",
+      providerConfig: {
+        selectionId: "azure-openai-responses",
+        provider: "azure-openai-responses",
+        providerId: "azure-openai-responses",
+        endpoint: "https://primary.example/openai/v1",
+        deployment: "https://primary.example/openai/v1",
+        apiVersion: "2024-12-01-preview",
+        apiKey: "azure-secret",
+        model: "gpt-5.4",
+      },
+    });
+
+    await session.runTurn("Stay on the resolved Azure model.");
+
+    expect(openaiNativeExec).toHaveBeenCalledTimes(1);
+    expect(openaiNativeExec.mock.calls[0][1]).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      providerConfig: expect.objectContaining({
+        model: "gpt-5.4",
+      }),
+    }));
+  });
+
+  it("passes provider config model into tool execution context ahead of stale turn model", async () => {
+    let round = 0;
+    const openaiNativeExec = vi.fn(async (_message, options = {}) => {
+      round += 1;
+      if (round === 1) {
+        return {
+          finalResponse: "Need delegated help.",
+          items: [{
+            role: "assistant",
+            content: [
+              { type: "text", text: "Need delegated help." },
+              { type: "tool_call", id: "tool-1", name: "delegate_to_agent", input: { message: "ship it" } },
+            ],
+          }],
+          toolCalls: [{
+            id: "tool-1",
+            name: "delegate_to_agent",
+            input: { message: "ship it" },
+          }],
+          providerId: options.provider || null,
+          sessionId: options.sessionId || "azure-tool-session",
+          threadId: options.threadId || "azure-tool-thread",
+          usage: {
+            inputTokens: 9,
+            outputTokens: 4,
+            totalTokens: 13,
+          },
+        };
+      }
+      return {
+        finalResponse: "done",
+        items: [{
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+        }],
+        providerId: options.provider || null,
+        sessionId: options.sessionId || "azure-tool-session",
+        threadId: options.threadId || "azure-tool-thread",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 2,
+          totalTokens: 5,
+        },
+      };
+    });
+    const executeTool = vi.fn(async (_toolName, _args, context = {}) => ({
+      ok: true,
+      model: context.model,
+      providerConfig: context.providerConfig,
+    }));
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: openaiNativeExec,
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        providers: {
+          defaultProvider: "azure-openai-responses",
+          azureOpenai: {
+            enabled: true,
+            defaultModel: "gpt-5.4",
+            endpoint: "https://primary.example/openai/v1",
+            deployment: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+        },
+      },
+      env: {
+        AZURE_OPENAI_API_KEY: "azure-secret",
+      },
+    });
+
+    const session = kernel.createExecutionSession({
+      adapterName: "openai-native",
+      selectionId: "azure-openai-responses",
+      sessionId: "azure-tool-session",
+      threadId: "azure-tool-thread",
+      model: "gpt-5",
+      providerConfig: {
+        selectionId: "azure-openai-responses",
+        provider: "azure-openai-responses",
+        providerId: "azure-openai-responses",
+        endpoint: "https://primary.example/openai/v1",
+        deployment: "https://primary.example/openai/v1",
+        apiVersion: "2024-12-01-preview",
+        apiKey: "azure-secret",
+        model: "gpt-5.4",
+      },
+      executeTool,
+    });
+
+    await session.runTurn("Delegate using the resolved Azure runtime.");
+
+    expect(executeTool).toHaveBeenCalledWith(
+      "delegate_to_agent",
+      { message: "ship it" },
+      expect.objectContaining({
+        model: "gpt-5.4",
+        providerConfig: expect.objectContaining({
+          model: "gpt-5.4",
+        }),
+      }),
+    );
   });
 });
 

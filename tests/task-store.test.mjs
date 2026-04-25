@@ -505,6 +505,142 @@ describe("task-store delegation topology", () => {
       latestSessionId: "TASK-CHILD:delegate:run-parent-1",
     }));
   });
+
+  it("does not let sparse same-run delegation updates clobber richer workflow run summaries", async () => {
+    const dir = makeTempDir("task-store-run-link-merge-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({ id: "TASK-MERGE", title: "Merge workflow runs", status: "inprogress" });
+    ts.linkTaskWorkflowRun("TASK-MERGE", {
+      runId: "run-merge-1",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      status: "completed",
+      startedAt: "2026-04-23T15:31:15.528Z",
+      endedAt: "2026-04-23T15:50:31.126Z",
+      summary: "Workflow completed successfully.",
+      rootRunId: "run-root-1",
+      parentRunId: "run-parent-1",
+      taskId: "TASK-MERGE",
+      rootTaskId: "TASK-MERGE",
+      parentTaskId: "TASK-MERGE",
+      sessionId: "workflow:root-session:run-root-1",
+      rootSessionId: "workflow:root-session:run-root-1",
+      parentSessionId: null,
+      delegationDepth: 0,
+      source: "workflow",
+    });
+    ts.linkTaskWorkflowRun("TASK-MERGE", {
+      runId: "run-merge-1",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      nodeId: "auto-fix",
+      status: "failed",
+      rootRunId: "run-root-1",
+      parentRunId: "run-parent-1",
+      taskId: "TASK-MERGE",
+      rootTaskId: "TASK-MERGE",
+      parentTaskId: "TASK-MERGE",
+      sessionId: "TASK-MERGE:agent:run-merge-1:auto-fix:turn",
+      rootSessionId: "TASK-MERGE",
+      parentSessionId: "workflow:root-session:run-root-1",
+      delegationDepth: 1,
+      source: "workflow",
+    });
+
+    const task = ts.getTask("TASK-MERGE");
+    expect(task?.workflowRuns).toEqual([
+      expect.objectContaining({
+        runId: "run-merge-1",
+        workflowName: "Backend Agent",
+        status: "completed",
+        startedAt: "2026-04-23T15:31:15.528Z",
+        endedAt: "2026-04-23T15:50:31.126Z",
+        summary: "Workflow completed successfully.",
+        sessionId: "workflow:root-session:run-root-1",
+        rootSessionId: "workflow:root-session:run-root-1",
+        parentSessionId: "workflow:root-session:run-root-1",
+      }),
+    ]);
+    expect(task?.topology).toEqual(expect.objectContaining({
+      latestRunId: "run-merge-1",
+      latestNodeId: "auto-fix",
+      workflowName: "Backend Agent",
+      latestSessionId: "workflow:root-session:run-root-1",
+      delegationDepth: 0,
+    }));
+  });
+
+  it("clears stale latestNodeId when a newer run is promoted without node progress", async () => {
+    const dir = makeTempDir("task-store-latest-node-reset-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({ id: "TASK-LATEST-NODE", title: "Latest node projection", status: "inprogress" });
+    ts.linkTaskWorkflowRun("TASK-LATEST-NODE", {
+      runId: "run-old-write-tests",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      nodeId: "write-tests",
+      status: "failed",
+      startedAt: "2026-04-23T19:08:06.185Z",
+      endedAt: "2026-04-23T19:28:12.940Z",
+      summary: "Failed at Write Tests First: Invalid string length",
+      rootRunId: "run-root",
+      parentRunId: "run-parent-old",
+      taskId: "TASK-LATEST-NODE",
+      rootTaskId: "TASK-LATEST-NODE",
+      parentTaskId: "TASK-LATEST-NODE",
+      sessionId: "workflow:root-session:run-root",
+      rootSessionId: "workflow:root-session:run-root",
+      parentSessionId: null,
+      source: "workflow",
+    });
+    ts.linkTaskWorkflowRun("TASK-LATEST-NODE", {
+      runId: "run-new-retry",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      status: "running",
+      startedAt: "2026-04-23T20:28:20.227Z",
+      rootRunId: "run-root",
+      parentRunId: "run-old-write-tests",
+      retryOf: "run-old-write-tests",
+      taskId: "TASK-LATEST-NODE",
+      rootTaskId: "TASK-LATEST-NODE",
+      parentTaskId: "TASK-LATEST-NODE",
+      sessionId: "workflow:root-session:run-root",
+      rootSessionId: "workflow:root-session:run-root",
+      parentSessionId: null,
+      source: "workflow",
+    });
+
+    const task = ts.getTask("TASK-LATEST-NODE");
+    expect(task?.topology).toEqual(expect.objectContaining({
+      latestRunId: "run-new-retry",
+      latestNodeId: null,
+    }));
+    expect(task?.workflowRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runId: "run-old-write-tests",
+        nodeId: "write-tests",
+      }),
+      expect.objectContaining({
+        runId: "run-new-retry",
+        nodeId: null,
+      }),
+    ]));
+  });
 });
 
 describe("task-store review persistence", () => {

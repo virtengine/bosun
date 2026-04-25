@@ -5,6 +5,11 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { TOOL_DEFS } from "../voice/voice-tool-definitions.mjs";
 import { resolveRepoRoot } from "../config/repo-root.mjs";
 import { getBosunSessionManager } from "./session-manager.mjs";
+import {
+  listAllSessions as listTrackedSessions,
+  recordEvent as recordTrackedSessionEvent,
+  updateSessionStatus as updateTrackedSessionStatus,
+} from "../infra/session-tracker.mjs";
 
 export const BUILTIN_TOOL_SOURCE = "bosun-builtin";
 
@@ -30,6 +35,104 @@ function toPlainObject(value) {
 function cloneValue(value) {
   if (value == null) return value;
   return JSON.parse(JSON.stringify(value));
+}
+
+const TRACKER_TERMINAL_STATUSES = new Set([
+  "aborted",
+  "blocked",
+  "blocked_by_env",
+  "completed",
+  "error",
+  "failed",
+  "idle",
+  "no_output",
+  "stalled",
+  "timed_out",
+]);
+
+function isTerminalTrackedSessionStatus(status) {
+  return TRACKER_TERMINAL_STATUSES.has(toTrimmedString(status).toLowerCase());
+}
+
+function collectTrackedSessionLineage(rootSessionId, sessionSummaries = []) {
+  const normalizedRoot = toTrimmedString(rootSessionId);
+  if (!normalizedRoot) return [];
+  const byParentSessionId = new Map();
+  for (const session of Array.isArray(sessionSummaries) ? sessionSummaries : []) {
+    const sessionId = toTrimmedString(session?.id || session?.taskId || "");
+    const parentSessionId = toTrimmedString(session?.parentSessionId || "");
+    if (!sessionId || !parentSessionId) continue;
+    if (!byParentSessionId.has(parentSessionId)) {
+      byParentSessionId.set(parentSessionId, []);
+    }
+    byParentSessionId.get(parentSessionId).push(sessionId);
+  }
+  const lineage = [normalizedRoot];
+  const queue = [normalizedRoot];
+  const seen = new Set(lineage);
+  while (queue.length > 0) {
+    const currentSessionId = queue.shift();
+    const children = byParentSessionId.get(currentSessionId) || [];
+    for (const childSessionId of children) {
+      if (seen.has(childSessionId)) continue;
+      seen.add(childSessionId);
+      lineage.push(childSessionId);
+      queue.push(childSessionId);
+    }
+  }
+  return lineage;
+}
+
+function cancelTrackedSessionLineage(rootSessionId, reason, sessionManager) {
+  const normalizedRoot = toTrimmedString(rootSessionId);
+  if (!normalizedRoot) {
+    return {
+      lineageSessionIds: [],
+      cancelledSessionIds: [],
+      terminalizedSessionIds: [],
+    };
+  }
+  const sessionSummaries = listTrackedSessions({
+    includePersisted: true,
+    includeRuntimeProgress: false,
+    lightweight: true,
+  });
+  const lineageSessionIds = collectTrackedSessionLineage(normalizedRoot, sessionSummaries);
+  const sessionSummaryById = new Map(
+    (Array.isArray(sessionSummaries) ? sessionSummaries : [])
+      .map((session) => [toTrimmedString(session?.id || session?.taskId || ""), session])
+      .filter(([sessionId]) => Boolean(sessionId)),
+  );
+  const cancellationOrder = [...lineageSessionIds].reverse();
+  const cancelledSessionIds = [];
+  const terminalizedSessionIds = [];
+  for (const sessionId of cancellationOrder) {
+    if (sessionManager?.cancelSession?.(sessionId, reason)) {
+      cancelledSessionIds.push(sessionId);
+    }
+    const sessionSummary = sessionSummaryById.get(sessionId);
+    if (isTerminalTrackedSessionStatus(sessionSummary?.status)) {
+      continue;
+    }
+    recordTrackedSessionEvent(sessionId, {
+      role: "system",
+      content: `[Delegation Cancelled] Session aborted because parent requested cancellation: ${reason}`,
+      timestamp: new Date().toISOString(),
+      meta: {
+        source: BUILTIN_TOOL_SOURCE,
+        eventType: "delegation_cancelled",
+        reason,
+        rootSessionId: normalizedRoot,
+      },
+    });
+    updateTrackedSessionStatus(sessionId, "aborted");
+    terminalizedSessionIds.push(sessionId);
+  }
+  return {
+    lineageSessionIds,
+    cancelledSessionIds,
+    terminalizedSessionIds,
+  };
 }
 
 function toStringArray(value) {
@@ -90,6 +193,23 @@ async function callVoiceTool(toolName, args = {}, context = {}) {
   return response?.result ?? null;
 }
 
+// Hard caps to prevent unbounded memory growth from chatty patterns or large repos.
+const RIPGREP_MAX_LINE_LENGTH = 4096;
+const RIPGREP_MAX_STDERR_BYTES = 64 * 1024;
+
+function parseRipgrepLine(line) {
+  if (!line) return null;
+  const trimmed = line.length > RIPGREP_MAX_LINE_LENGTH ? line.slice(0, RIPGREP_MAX_LINE_LENGTH) : line;
+  const firstColon = trimmed.indexOf(":");
+  const secondColon = firstColon >= 0 ? trimmed.indexOf(":", firstColon + 1) : -1;
+  if (firstColon < 0 || secondColon < 0) return null;
+  return {
+    filePath: trimmed.slice(0, firstColon).replace(/\\/g, "/"),
+    lineNumber: Number(trimmed.slice(firstColon + 1, secondColon)) || null,
+    preview: trimmed.slice(secondColon + 1),
+  };
+}
+
 async function runRipgrep(pattern, input = {}, rootDir) {
   return await new Promise((resolvePromise, rejectPromise) => {
     const args = ["-n", "--no-heading", "--color", "never"];
@@ -101,70 +221,150 @@ async function runRipgrep(pattern, input = {}, rootDir) {
     args.push(String(pattern));
     args.push(rootDir);
 
-    const child = spawn("rg", args, {
-      cwd: rootDir,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let child;
+    try {
+      child = spawn("rg", args, {
+        cwd: rootDir,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      rejectPromise(err);
+      return;
+    }
 
-    let stdout = "";
-    let stderr = "";
+    const results = [];
+    let pendingLine = "";
+    let stderrBuf = "";
+    let settled = false;
+    let killed = false;
+
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      try { child.stdout?.removeAllListeners(); } catch {}
+      try { child.stderr?.removeAllListeners(); } catch {}
+      fn(value);
+    };
+
+    const stopChild = () => {
+      if (killed) return;
+      killed = true;
+      try { child.kill("SIGTERM"); } catch {}
+    };
+
+    child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
+      if (settled) return;
+      try {
+        const text = pendingLine + chunk;
+        const lines = text.split(/\r?\n/);
+        pendingLine = lines.pop() ?? "";
+        if (pendingLine.length > RIPGREP_MAX_LINE_LENGTH) {
+          pendingLine = pendingLine.slice(0, RIPGREP_MAX_LINE_LENGTH);
+        }
+        for (const line of lines) {
+          if (results.length >= maxResults) break;
+          const parsed = parseRipgrepLine(line.trim());
+          if (parsed) results.push(parsed);
+        }
+        if (results.length >= maxResults) {
+          stopChild();
+          settle(resolvePromise, results);
+        }
+      } catch (err) {
+        stopChild();
+        settle(rejectPromise, err);
+      }
     });
+    child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
+      if (settled || stderrBuf.length >= RIPGREP_MAX_STDERR_BYTES) return;
+      const remaining = RIPGREP_MAX_STDERR_BYTES - stderrBuf.length;
+      stderrBuf += chunk.length > remaining ? chunk.slice(0, remaining) : chunk;
     });
-    child.once("error", rejectPromise);
+    child.once("error", (err) => settle(rejectPromise, err));
     child.once("close", (code) => {
-      if (code !== 0 && code !== 1) {
-        rejectPromise(new Error(stderr.trim() || `rg exited with code ${code}`));
+      if (settled) return;
+      if (pendingLine && results.length < maxResults) {
+        const parsed = parseRipgrepLine(pendingLine.trim());
+        if (parsed) results.push(parsed);
+      }
+      pendingLine = "";
+      if (code !== 0 && code !== 1 && !killed) {
+        settle(rejectPromise, new Error(stderrBuf.trim() || `rg exited with code ${code}`));
         return;
       }
-      resolvePromise(
-        stdout
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => {
-            const firstColon = line.indexOf(":");
-            const secondColon = firstColon >= 0 ? line.indexOf(":", firstColon + 1) : -1;
-            if (firstColon < 0 || secondColon < 0) return null;
-            return {
-              filePath: line.slice(0, firstColon).replace(/\\/g, "/"),
-              lineNumber: Number(line.slice(firstColon + 1, secondColon)) || null,
-              preview: line.slice(secondColon + 1),
-            };
-          })
-          .filter(Boolean),
-      );
+      settle(resolvePromise, results);
     });
   });
 }
+
+const FALLBACK_SEARCH_SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".bosun",
+  "output",
+  "logs",
+  "tmp",
+  "test-results",
+  "coverage",
+  "native",
+  "node-compile-cache",
+  "execution-ledger",
+  "dist",
+  "build",
+  ".next",
+  ".cache",
+]);
+const FALLBACK_SEARCH_MAX_FILE_BYTES = 1 * 1024 * 1024; // 1 MiB
+const FALLBACK_SEARCH_MAX_FILES = 5000;
 
 async function fallbackSearchFiles(pattern, input = {}, rootDir) {
   const maxResults = toPositiveInteger(input.maxResults, 20) || 20;
   const results = [];
   const stack = [rootDir];
-  while (stack.length > 0 && results.length < maxResults) {
+  let filesScanned = 0;
+  while (stack.length > 0 && results.length < maxResults && filesScanned < FALLBACK_SEARCH_MAX_FILES) {
     const currentDir = stack.pop();
-    const entries = await readdir(currentDir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(currentDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
     for (const entry of entries) {
-      const fullPath = resolve(currentDir, entry.name);
+      if (results.length >= maxResults || filesScanned >= FALLBACK_SEARCH_MAX_FILES) break;
+      if (entry.name.startsWith(".") && entry.name !== "." && entry.name !== "..") {
+        // skip dotfiles/dotdirs by default
+        if (entry.isDirectory()) continue;
+      }
       if (entry.isDirectory()) {
-        stack.push(fullPath);
+        if (FALLBACK_SEARCH_SKIP_DIRS.has(entry.name)) continue;
+        stack.push(resolve(currentDir, entry.name));
         continue;
       }
+      if (!entry.isFile()) continue;
+      const fullPath = resolve(currentDir, entry.name);
       const relPath = relative(rootDir, fullPath).replace(/\\/g, "/");
-      const content = await readFile(fullPath, "utf8").catch(() => null);
-      if (content == null) continue;
+      filesScanned += 1;
+      let content = null;
+      try {
+        const buf = await readFile(fullPath);
+        if (buf.length > FALLBACK_SEARCH_MAX_FILE_BYTES) continue;
+        content = buf.toString("utf8");
+      } catch {
+        continue;
+      }
+      if (!content || !content.includes(pattern)) continue;
       const lines = content.split(/\r?\n/);
       for (let index = 0; index < lines.length && results.length < maxResults; index += 1) {
         if (!lines[index].includes(pattern)) continue;
+        const preview = lines[index];
         results.push({
           filePath: relPath,
           lineNumber: index + 1,
-          preview: lines[index],
+          preview: preview.length > RIPGREP_MAX_LINE_LENGTH ? preview.slice(0, RIPGREP_MAX_LINE_LENGTH) : preview,
         });
       }
     }
@@ -259,6 +459,28 @@ function buildHarnessNativeDefinitions(options = {}) {
       name: "write_file",
       description: "Create or overwrite a workspace file within the current Bosun workspace.",
       sandbox: "workspace-write",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Workspace-relative path to create or overwrite.",
+          },
+          filePath: {
+            type: "string",
+            description: "Alias for path.",
+          },
+          content: {
+            description: "File contents to write. Strings are written directly; objects are JSON-stringified.",
+          },
+          mode: {
+            type: "string",
+            enum: ["overwrite", "append"],
+            description: "Write mode. Defaults to overwrite.",
+          },
+        },
+        required: ["path", "content"],
+      },
       handler: async (args = {}, context = {}) => {
         const target = resolveWorkspacePath(args.path || args.filePath, context, options);
         const content = typeof args.content === "string" ? args.content : JSON.stringify(args.content ?? "", null, 2);
@@ -284,6 +506,44 @@ function buildHarnessNativeDefinitions(options = {}) {
       description: "Perform a deterministic text replacement inside a workspace file.",
       sandbox: "workspace-write",
       aliases: ["replace_in_file"],
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Workspace-relative path to edit.",
+          },
+          filePath: {
+            type: "string",
+            description: "Alias for path.",
+          },
+          old_string: {
+            type: "string",
+            description: "Exact text to replace.",
+          },
+          search: {
+            type: "string",
+            description: "Alias for old_string.",
+          },
+          new_string: {
+            type: "string",
+            description: "Replacement text.",
+          },
+          replace: {
+            type: "string",
+            description: "Alias for new_string.",
+          },
+          replaceAll: {
+            type: "boolean",
+            description: "Replace all matches instead of only the first occurrence.",
+          },
+          all: {
+            type: "boolean",
+            description: "Alias for replaceAll.",
+          },
+        },
+        required: ["path", "old_string", "new_string"],
+      },
       handler: async (args = {}, context = {}) => {
         const target = resolveWorkspacePath(args.path || args.filePath, context, options);
         const oldString = String(args.old_string ?? args.search ?? "");
@@ -314,6 +574,52 @@ function buildHarnessNativeDefinitions(options = {}) {
       name: "spawn_subagent",
       description: "Spawn a Bosun internal subagent session under the canonical session manager.",
       aliases: ["spawn_agent"],
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "Instruction to send to the spawned subagent.",
+          },
+          message: {
+            type: "string",
+            description: "Alias for prompt.",
+          },
+          parentSessionId: {
+            type: "string",
+            description: "Optional parent session id override.",
+          },
+          parentThreadId: {
+            type: "string",
+            description: "Optional parent thread id override.",
+          },
+          taskKey: {
+            type: "string",
+            description: "Task key to associate with the subagent.",
+          },
+          cwd: {
+            type: "string",
+            description: "Working directory for the subagent.",
+          },
+          maxParallel: {
+            type: "number",
+            description: "Optional max parallel delegation count.",
+          },
+          autoRun: {
+            type: "boolean",
+            description: "Start the subagent immediately. Defaults to true.",
+          },
+          wait: {
+            type: "boolean",
+            description: "Wait for the subagent to finish before returning.",
+          },
+          metadata: {
+            type: "object",
+            description: "Additional metadata to record on the child session.",
+          },
+        },
+        required: ["prompt"],
+      },
       handler: async (args = {}, context = {}) => {
         const prompt = toTrimmedString(args.prompt || args.message || "");
         if (!prompt) {
@@ -369,6 +675,33 @@ function buildHarnessNativeDefinitions(options = {}) {
       name: "wait_subagent",
       description: "Wait for a spawned Bosun subagent to reach a terminal state.",
       aliases: ["wait_for_subagent"],
+      parameters: {
+        type: "object",
+        properties: {
+          childSessionId: {
+            type: "string",
+            description: "Session id of the child subagent to wait for.",
+          },
+          sessionId: {
+            type: "string",
+            description: "Alias for childSessionId.",
+          },
+          spawnId: {
+            type: "string",
+            description: "Alias for childSessionId.",
+          },
+          timeoutMs: {
+            type: "number",
+            description: "Optional timeout in milliseconds.",
+          },
+          returnOn: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional list of intermediate statuses to return on.",
+          },
+        },
+        required: ["childSessionId"],
+      },
       handler: async (args = {}, context = {}) => {
         const childSessionId = toTrimmedString(args.childSessionId || args.sessionId || args.spawnId || "");
         if (!childSessionId) {
@@ -386,17 +719,43 @@ function buildHarnessNativeDefinitions(options = {}) {
       name: "cancel_subagent",
       description: "Abort a Bosun subagent session through the canonical session manager.",
       aliases: ["abort_subagent", "close_agent"],
+      parameters: {
+        type: "object",
+        properties: {
+          childSessionId: {
+            type: "string",
+            description: "Session id of the child subagent to abort.",
+          },
+          sessionId: {
+            type: "string",
+            description: "Alias for childSessionId.",
+          },
+          reason: {
+            type: "string",
+            description: "Optional cancellation reason.",
+          },
+        },
+        required: ["childSessionId"],
+      },
       handler: async (args = {}, context = {}) => {
         const childSessionId = toTrimmedString(args.childSessionId || args.sessionId || "");
         if (!childSessionId) {
           throw new Error("cancel_subagent requires childSessionId or sessionId");
         }
         const sessionManager = context.sessionManager || options.sessionManager || getBosunSessionManager();
-        const cancelled = sessionManager.cancelSession(childSessionId, args.reason || "aborted_by_parent_tool");
+        const reason = args.reason || "aborted_by_parent_tool";
+        const {
+          lineageSessionIds,
+          cancelledSessionIds,
+          terminalizedSessionIds,
+        } = cancelTrackedSessionLineage(childSessionId, reason, sessionManager);
         return {
-          ok: Boolean(cancelled),
+          ok: cancelledSessionIds.length > 0 || terminalizedSessionIds.length > 0,
           sessionId: childSessionId,
-          cancelled: Boolean(cancelled),
+          cancelled: cancelledSessionIds.length > 0 || terminalizedSessionIds.length > 0,
+          lineageSessionIds,
+          cancelledSessionIds,
+          terminalizedSessionIds,
         };
       },
     },
@@ -404,6 +763,19 @@ function buildHarnessNativeDefinitions(options = {}) {
       id: "list_subagents",
       name: "list_subagents",
       description: "List child subagents for the current parent session.",
+      parameters: {
+        type: "object",
+        properties: {
+          parentSessionId: {
+            type: "string",
+            description: "Optional parent session id override.",
+          },
+          status: {
+            type: "string",
+            description: "Optional status filter.",
+          },
+        },
+      },
       handler: async (args = {}, context = {}) => {
         const sessionManager = context.sessionManager || options.sessionManager || getBosunSessionManager();
         return sessionManager.getSubagentControl().listChildren({

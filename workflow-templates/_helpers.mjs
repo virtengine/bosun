@@ -244,7 +244,6 @@ export function agentDefaults(extra = {}) {
   return {
     sdk: "{{resolvedSdk}}",
     model: "{{resolvedModel}}",
-    agentProfile: "{{agentProfile}}",
     cwd: "{{worktreePath}}",
     timeoutMs: "{{taskTimeoutMs}}",
     maxRetries: "{{maxRetries}}",

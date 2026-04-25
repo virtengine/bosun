@@ -772,6 +772,38 @@ describe("launchEphemeralThread", () => {
     expect(["codex", "copilot", "claude", "opencode", "openai-native"]).toContain(result.sdk);
   });
 
+  it("treats no-text placeholder completions as no_output failures", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+    mockCodexStartThread.mockImplementationOnce(() => ({
+      id: "codex-no-output-thread",
+      runStreamed: async () => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield { type: "turn.completed", usage: null };
+          },
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "codex",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("codex");
+    expect(result.blockedReason).toBe("no_output");
+    expect(String(result.error)).toContain("no text output");
+  });
+
   it("launches via opencode when requested through opencode-sdk alias", async () => {
     process.env.__MOCK_OPENCODE_AVAILABLE = "1";
     mockOpencodeExec.mockResolvedValue({
@@ -841,6 +873,72 @@ describe("launchEphemeralThread", () => {
         },
       }),
     );
+  });
+
+  it("falls through to a runnable harness native executor when the configured primary cannot run", async () => {
+    mockLoadConfig.mockReturnValue({
+      agentRuntime: "harness",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-openai-responses",
+        executors: [
+          {
+            id: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            endpoint: "https://primary.example/openai/v1",
+            deployment: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+          {
+            id: "azure-openai-responses-2",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            weight: 100,
+            endpoint: "https://secondary.example/openai/v1",
+            deployment: "https://secondary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+            authBindings: {
+              apiKeyEnv: "secondary-literal-key",
+            },
+          },
+        ],
+      },
+      providers: {
+        azureOpenai: {
+          enabled: true,
+          apiVersion: "2024-12-01-preview",
+        },
+      },
+    });
+    const createExecutionSession = vi.fn(() => ({
+      runTurn: vi.fn(async () => ({
+        finalResponse: "native-output",
+        items: [],
+      })),
+    }));
+    mockCreateProviderKernel.mockReturnValue({
+      createExecutionSession,
+    });
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+        taskKey: "workflow-openai-native-selection",
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("openai-native");
+    expect(createExecutionSession).toHaveBeenCalledWith(expect.objectContaining({
+      selectionId: "azure-openai-responses-2",
+      sessionId: "workflow-openai-native-selection",
+      threadId: "workflow-openai-native-selection",
+    }));
   });
 
   it("returns success/output/items/error fields", async () => {
@@ -1143,6 +1241,11 @@ describe("launchEphemeralThread", () => {
       createExecutionSession: () => ({
         runTurn: async (_prompt, execOptions = {}) => {
           execOptions.onEvent?.({
+            type: "session.stream.start",
+            sessionId: "test-native-session",
+            responseId: "resp-start-only",
+          });
+          execOptions.onEvent?.({
             type: "session.turn.start",
             sessionId: "test-native-session",
             model: "gpt-test",
@@ -1155,6 +1258,17 @@ describe("launchEphemeralThread", () => {
             removedCount: 1,
             checkpointAdded: false,
             newMessageCount: 1,
+          });
+          execOptions.onEvent?.({
+            type: "session.stream.complete",
+            sessionId: "test-native-session",
+            text: "",
+          });
+          execOptions.onEvent?.({
+            type: "session.step.finish",
+            sessionId: "test-native-session",
+            toolCalls: [],
+            toolResults: [],
           });
           await new Promise((_, reject) => {
             const signal = execOptions?.abortController?.signal;
@@ -1188,6 +1302,63 @@ describe("launchEphemeralThread", () => {
     expect(result.error).toMatch(/first_event_timeout/i);
     expect(result.error).toMatch(/no events received within \d+ms/i);
     expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+  });
+
+  it("injects delegated Azure providerConfig apiKey into openai-native launcher env", async () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.AZURE_OPENAI_API_KEY;
+
+    const createExecutionSession = vi.fn(() => ({
+      runTurn: vi.fn(async () => ({
+        finalResponse: "native-output",
+        items: [],
+      })),
+    }));
+    mockCreateProviderKernel.mockReturnValue({
+      createExecutionSession,
+    });
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+        taskKey: "workflow-openai-native-provider-config-env",
+        provider: "azure-openai-responses",
+        providerConfig: {
+          provider: "azure-openai-responses",
+          providerId: "azure-openai-responses",
+          endpoint: "https://example-resource.openai.azure.com/openai/v1",
+          deployment: "https://example-resource.openai.azure.com/openai/v1",
+          apiVersion: "2024-12-01-preview",
+          apiKey: "azure-secret",
+          model: "gpt-5.4",
+          credentials: {
+            sources: {
+              apiKey: "AZURE_OPENAI_API_KEY",
+            },
+          },
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("openai-native");
+    expect(mockCreateProviderKernel).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        AZURE_OPENAI_API_KEY: "azure-secret",
+      }),
+    }));
+    expect(createExecutionSession).toHaveBeenCalledWith(expect.objectContaining({
+      selectionId: "azure-openai-responses",
+      sessionId: "workflow-openai-native-provider-config-env",
+      threadId: "workflow-openai-native-provider-config-env",
+      providerConfig: expect.objectContaining({
+        apiKey: "azure-secret",
+      }),
+    }));
   });
 
   it("skips a cooled-down SDK after timeout and retries it after cooldown expiry", async () => {
@@ -2672,6 +2843,15 @@ describe("sdk cooldown heuristics", () => {
     const { __testables } = await import("../agent/agent-pool.mjs");
     expect(__testables.shouldFallbackForSdkError("Error: Failed to list models: 400")).toBe(true);
     expect(__testables.shouldApplySdkCooldown("Error: Failed to list models: 400")).toBe(false);
+  });
+
+  it("treats resumed no-output placeholders as non-meaningful results", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasMeaningfulRetryResult({
+      success: false,
+      output: "(resumed — no text output)",
+      items: [],
+    })).toBe(false);
   });
 
   it("detects repeated reconnect fingerprints as retry circuit breakers", async () => {

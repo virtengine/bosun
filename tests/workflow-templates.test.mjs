@@ -2059,9 +2059,21 @@ describe("github template CLI compatibility", () => {
 
     expect(repairDispatch?.type).toBe("action.execute_workflow");
     expect(repairDispatch?.config?.workflowId).toBe("template-task-repair-worktree");
-    expect(repairDispatch?.config?.mode).toBe("dispatch");
+    expect(repairDispatch?.config?.mode).toContain("$data?._simulation === true");
+    expect(repairDispatch?.config?.mode).toContain("'sync'");
+    expect(repairDispatch?.config?.mode).toContain("'dispatch'");
+    expect(repairDispatch?.config?.input?.eventType).toBe("task.failed");
     expect(lifecycleTemplate.edges.find((e) => e.source === "annotate-blocked-wt-failed" && e.target === "dispatch-wt-repair")).toBeDefined();
     expect(lifecycleTemplate.edges.find((e) => e.source === "dispatch-wt-repair" && e.target === "release-slot-wt-failed")).toBeDefined();
+  });
+
+  it("error recovery passes task.failed event context into the repair workflow", () => {
+    const recoveryTemplate = getTemplate("template-error-recovery");
+    const repairDispatch = recoveryTemplate.nodes.find((n) => n.id === "chain-repair");
+
+    expect(repairDispatch?.type).toBe("action.execute_workflow");
+    expect(repairDispatch?.config?.workflowId).toBe("template-task-repair-worktree");
+    expect(String(repairDispatch?.config?.input || "")).toContain("eventType: 'task.failed'");
   });
 
   it("blocked worktree recovery trims task metadata payloads before dispatch", () => {

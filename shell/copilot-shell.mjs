@@ -425,28 +425,80 @@ function buildSessionHooks() {
 
 let _attemptedJsonRpcNodeCompatPatch = false;
 
-function ensureJsonRpcNodeCompatShim() {
-  if (_attemptedJsonRpcNodeCompatPatch) return false;
-  _attemptedJsonRpcNodeCompatPatch = true;
+function ensureJsonRpcNodeCompatShim(options = {}) {
+  const state = options.shimState && typeof options.shimState === "object"
+    ? options.shimState
+    : null;
+  if (state) {
+    if (state.attempted) return false;
+    state.attempted = true;
+  } else {
+    if (_attemptedJsonRpcNodeCompatPatch) return false;
+    _attemptedJsonRpcNodeCompatPatch = true;
+  }
 
   try {
-    const packageJsonPath = require.resolve("vscode-jsonrpc/package.json");
+    const resolvePackageJsonPath =
+      typeof options.resolvePackageJsonPath === "function"
+        ? options.resolvePackageJsonPath
+        : () => require.resolve("vscode-jsonrpc/package.json");
+    const fileExists =
+      typeof options.fileExists === "function"
+        ? options.fileExists
+        : existsSync;
+    const copyFile =
+      typeof options.copyFile === "function"
+        ? options.copyFile
+        : copyFileSync;
+    const log =
+      typeof options.log === "function"
+        ? options.log
+        : console.log;
+    const warn =
+      typeof options.warn === "function"
+        ? options.warn
+        : console.warn;
+    const packageJsonPath = resolvePackageJsonPath();
     const packageDir = dirname(packageJsonPath);
     const extensionlessNodePath = resolve(packageDir, "node");
     const nodeJsPath = resolve(packageDir, "node.js");
-    if (existsSync(extensionlessNodePath) || !existsSync(nodeJsPath)) {
+    if (fileExists(extensionlessNodePath) || !fileExists(nodeJsPath)) {
       return false;
     }
-    copyFileSync(nodeJsPath, extensionlessNodePath);
-    console.log(
+    copyFile(nodeJsPath, extensionlessNodePath);
+    log(
       `[copilot-shell] applied vscode-jsonrpc compatibility shim: ${extensionlessNodePath}`,
     );
     return true;
   } catch (err) {
-    console.warn(
+    const warn =
+      typeof options.warn === "function"
+        ? options.warn
+        : console.warn;
+    warn(
       `[copilot-shell] unable to apply vscode-jsonrpc compatibility shim: ${err?.message || err}`,
     );
     return false;
+  }
+}
+
+export async function importCopilotSdkModuleWithCompat(options = {}) {
+  const importer =
+    typeof options.importer === "function"
+      ? options.importer
+      : async () => await import("@github/copilot-sdk");
+  const shimApplied = ensureJsonRpcNodeCompatShim(options);
+  try {
+    return await importer();
+  } catch (err) {
+    const message = String(err?.message || err || "");
+    if (
+      message.includes("vscode-jsonrpc/node") &&
+      (shimApplied || ensureJsonRpcNodeCompatShim(options))
+    ) {
+      return await importer();
+    }
+    throw err;
   }
 }
 
@@ -457,10 +509,8 @@ async function loadCopilotSdk() {
     return null;
   }
 
-  ensureJsonRpcNodeCompatShim();
-
   try {
-    const mod = await import("@github/copilot-sdk");
+    const mod = await importCopilotSdkModuleWithCompat();
     CopilotClientClass =
       mod.CopilotClient || mod.default?.CopilotClient || null;
     if (!CopilotClientClass) {
@@ -469,26 +519,7 @@ async function loadCopilotSdk() {
     console.log("[copilot-shell] SDK loaded successfully");
     return CopilotClientClass;
   } catch (err) {
-    const message = String(err?.message || err || "");
-    if (
-      message.includes("vscode-jsonrpc/node") &&
-      ensureJsonRpcNodeCompatShim()
-    ) {
-      try {
-        const mod = await import("@github/copilot-sdk");
-        CopilotClientClass =
-          mod.CopilotClient || mod.default?.CopilotClient || null;
-        if (!CopilotClientClass) {
-          throw new Error("CopilotClient export not found");
-        }
-        console.log("[copilot-shell] SDK loaded successfully");
-        return CopilotClientClass;
-      } catch (retryErr) {
-        console.error(`[copilot-shell] failed to load SDK: ${retryErr.message}`);
-        return null;
-      }
-    }
-    console.error(`[copilot-shell] failed to load SDK: ${message}`);
+    console.error(`[copilot-shell] failed to load SDK: ${err?.message || err}`);
     return null;
   }
 }

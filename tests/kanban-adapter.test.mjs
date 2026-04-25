@@ -1991,6 +1991,91 @@ describe("kanban-adapter internal backend", () => {
     expect(reloaded.meta?.prLinkageUpdatedAt).toBe("2026-03-22T12:00:00.000Z");
   });
 
+  it("promotes explicit branch metadata ahead of stale historical PR linkage", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Promote canonical task branch",
+      description: "Keeps the current task branch ahead of stale linkage history",
+      status: "inprogress",
+      branchName: "task/TASKDIAGLOCA-diagnostics-export",
+      baseBranch: "origin/main",
+    });
+
+    const rawTask = getTask(created.id);
+    rawTask.prLinkage = [{
+      branchName: "task/TASKDIAGLOCA-diagnostics-export",
+      prUrl: null,
+      prNumber: null,
+      source: "workflow",
+      linkedAt: "2026-04-03T12:34:31.745Z",
+      updatedAt: "2026-04-03T15:05:18.175Z",
+    }];
+    rawTask.meta = {
+      ...(rawTask.meta || {}),
+      prLinkage: [...rawTask.prLinkage],
+      prLinkageSource: "workflow",
+      prLinkageUpdatedAt: "2026-04-03T15:05:18.175Z",
+    };
+
+    const canonicalBranch = "task/f82209dfe236-m-fix-workspace-restore-per-agent-rate-limiting-f";
+    const promoted = await adapter.updateTask(created.id, {
+      branchName: canonicalBranch,
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+
+    expect(promoted.branchName).toBe(canonicalBranch);
+    const rawAfterPromote = getTask(created.id);
+    expect(rawAfterPromote.prLinkage[0]?.branchName).toBe(canonicalBranch);
+    expect(rawAfterPromote.meta?.prLinkage?.[0]?.branchName).toBe(canonicalBranch);
+
+    const afterBaseOnlyUpdate = await adapter.updateTask(created.id, {
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+    expect(afterBaseOnlyUpdate.branchName).toBe(canonicalBranch);
+
+    const rawAfterBaseOnlyUpdate = getTask(created.id);
+    expect(rawAfterBaseOnlyUpdate.branchName).toBe(canonicalBranch);
+    expect(rawAfterBaseOnlyUpdate.prLinkage[0]?.branchName).toBe(canonicalBranch);
+    expect(rawAfterBaseOnlyUpdate.meta?.prLinkage?.[0]?.branchName).toBe(canonicalBranch);
+  });
+
+  it("does not resurrect stale branch linkage on status updates without new PR linkage data", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Avoid stale branch resurrection",
+      description: "Keeps canonical branch metadata stable across blocked transitions",
+      status: "inprogress",
+      branchName: "task/f82209dfe236-clean-branch",
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+
+    await adapter.updateTask(created.id, {
+      branchName: "task/f82209dfe236-clean-branch",
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+
+    const rawTask = getTask(created.id);
+    rawTask.branchName = "task/TASKDIAGLOCA-diagnostics-export";
+
+    const transitioned = await adapter.updateTaskStatus(created.id, "blocked", {
+      source: "workflow",
+    });
+
+    expect(transitioned.branchName).toBe("task/TASKDIAGLOCA-diagnostics-export");
+    const reloaded = await adapter.updateTask(created.id, {
+      branchName: "task/f82209dfe236-clean-branch",
+    });
+    expect(reloaded.branchName).toBe("task/f82209dfe236-clean-branch");
+
+    await adapter.updateTaskStatus(created.id, "inprogress", {
+      source: "workflow",
+    });
+    const afterStatusOnlyUpdate = await adapter.getTask(created.id);
+    expect(afterStatusOnlyUpdate.branchName).toBe("task/f82209dfe236-clean-branch");
+  });
+
   it("exposes internal timeline and workflow tracking fields on task detail", async () => {
     const adapter = getKanbanAdapter();
 

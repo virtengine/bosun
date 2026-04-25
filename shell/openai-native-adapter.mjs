@@ -44,6 +44,12 @@ import {
   repairToolCalls,
   applyRepairs,
 } from "./tool-call-repair.mjs";
+import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
+import { createSessionResumer } from "./session-resume.mjs";
+import { resolveMcpTools, createMcpToolOrchestrator } from "./mcp-client.mjs";
+import { discoverMcpServers } from "./mcp-registry.mjs";
+import { resolveCredentials } from "./auth-resolver.mjs";
+import { normalizeMessages } from "./provider-transform.mjs";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -168,16 +174,6 @@ function trimTrailingSlashes(s) {
   return end === s.length ? s : s.slice(0, end);
 }
 
-function isAzureHostname(url) {
-  if (!url) return false;
-  try {
-    const host = new URL(url.includes("://") ? url : `https://${url}`).hostname.toLowerCase();
-    return host === "azure.com" || host.endsWith(".azure.com");
-  } catch {
-    return false;
-  }
-}
-
 function cloneJson(value) {
   if (value == null) return value ?? null;
   return JSON.parse(JSON.stringify(value));
@@ -204,7 +200,7 @@ function serializeRequestField(value, fallback = "") {
 function truncateOversizedHistoryText(value, label = "history text", maxChars = getHistoryTextMaxChars()) {
   const text = typeof value === "string" ? value : String(value ?? "");
   if (text.length <= maxChars) return text;
-  const marker = `\n...[${label} truncated ${text.length - maxChars} chars to stay within OpenAI per-item limits]...\n`;
+  const marker = `\n…[${label} truncated ${text.length - maxChars} chars to stay within OpenAI per-item limits]…\n`;
   const availableChars = Math.max(0, maxChars - marker.length);
   const headChars = Math.ceil(availableChars * 0.6);
   const tailChars = Math.max(0, availableChars - headChars);
@@ -241,7 +237,8 @@ function sanitizeHistoryEntryForRequest(entry, maxChars = getHistoryTextMaxChars
         for (let idx = 0; idx < entry.toolCalls.length; idx += 1) {
           const toolCall = entry.toolCalls[idx];
           if (toolCall?.arguments == null) continue;
-          const serializedArgs = serializeRequestField(toolCall.arguments, "{}");
+          const currentArgs = toolCall.arguments;
+          const serializedArgs = serializeRequestField(currentArgs, "{}");
           if (serializedArgs.length <= maxChars) continue;
           const truncatedArgs = truncateOversizedHistoryText(serializedArgs, "tool call arguments", maxChars);
           if (toolCalls === entry.toolCalls) toolCalls = entry.toolCalls.slice();
@@ -290,42 +287,7 @@ function isPlainObject(value) {
 }
 
 // ── Credential Resolution ────────────────────────────────────────────────────
-
-/**
- * Resolve the API key / OAuth token for the request.
- * Priority: providerConfig override → env from authBindings (already
- * mapped to canonical keys by applyBoundCredentialEnv) → process.env.
- */
-function resolveCredentials(execOptions) {
-  const pc = execOptions?.providerConfig ?? {};
-  const env = execOptions?.env ?? process.env;
-
-  const effectiveEndpoint =
-    toTrimmedString(pc.endpoint) ||
-    toTrimmedString(env.OPENAI_BASE_URL) ||
-    "";
-
-  const isAzure =
-    (isAzureHostname(effectiveEndpoint) ||
-      Boolean(toTrimmedString(pc.deployment))) &&
-    Boolean(effectiveEndpoint);
-
-  const apiKey =
-    toTrimmedString(pc.apiKey) ||
-    toTrimmedString(env.AZURE_OPENAI_API_KEY) ||
-    toTrimmedString(env.OPENAI_API_KEY) ||
-    "";
-
-  const oauthToken =
-    toTrimmedString(pc.oauthToken) ||
-    toTrimmedString(env.AZURE_OPENAI_AD_TOKEN) ||
-    toTrimmedString(env.AZURE_OPENAI_ACCESS_TOKEN) ||
-    "";
-
-  const authMode = toTrimmedString(pc.authMode) || (isAzure ? "apiKey" : "apiKey");
-
-  return { apiKey, oauthToken, authMode, isAzure };
-}
+// Delegated to shell/auth-resolver.mjs for unified auth state + env handling.
 
 // ── Endpoint Resolution ──────────────────────────────────────────────────────
 
@@ -342,10 +304,8 @@ function resolveEndpointUrl(execOptions, apiStyle = "responses") {
   const rawEndpoint = toTrimmedString(pc.endpoint || pc.baseUrl || env.OPENAI_BASE_URL || "");
   const apiVersion = toTrimmedString(pc.apiVersion) || RESPONSES_API_VERSION_DEFAULT;
 
-  const isAzure =
-    (isAzureHostname(rawEndpoint) ||
-      Boolean(toTrimmedString(pc.deployment))) &&
-    Boolean(rawEndpoint);
+  const credentials = resolveCredentials(execOptions);
+  const isAzure = credentials.isAzure && Boolean(rawEndpoint);
 
   // Azure AI Foundry exposes an OpenAI-compatible gateway at /openai/v1.
   // When the base URL already contains that path, use it directly with the
@@ -444,18 +404,14 @@ function historyEntryToResponsesInput(entry) {
       type: "function_call",
       call_id: entry.callId,
       name,
-      arguments: typeof entry.arguments === "string"
-        ? entry.arguments
-        : JSON.stringify(entry.arguments ?? {}),
+      arguments: serializeRequestField(entry.arguments, {}),
     };
   }
   if (entry.type === "function_call_output") {
     return {
       type: "function_call_output",
       call_id: entry.callId,
-      output: typeof entry.output === "string"
-        ? entry.output
-        : JSON.stringify(entry.output ?? ""),
+      output: serializeRequestField(entry.output, ""),
     };
   }
   return null;
@@ -565,10 +521,16 @@ function injectHistoryCacheBreakpoints(messages) {
 function buildResponsesRequest(history, tools, execOptions, previousResponseId = null, persistent = false) {
   const pc = execOptions?.providerConfig ?? {};
   const model = toTrimmedString(pc.model || execOptions?.model || "gpt-4o");
-  const systemPrompt = toTrimmedString(pc.systemPrompt || execOptions?.systemPrompt || "");
+  const maxChars = getHistoryTextMaxChars();
+  const systemPrompt = truncateOversizedHistoryText(
+    toTrimmedString(pc.systemPrompt || execOptions?.systemPrompt || ""),
+    "system prompt",
+    maxChars,
+  );
   const reasoningEffort = toTrimmedString(
     pc.reasoningEffort || execOptions?.reasoningEffort || "",
   );
+  const responseFormat = execOptions?.responseFormat || pc.responseFormat || null;
 
   // Drop any function_call entries with empty/missing names, plus their
   // associated function_call_output entries — Azure rejects empty `name`.
@@ -587,7 +549,40 @@ function buildResponsesRequest(history, tools, execOptions, previousResponseId =
     }
     return true;
   });
-  const input = filteredHistory.map(historyEntryToResponsesInput).filter(Boolean);
+  const input = filteredHistory.map(historyEntryToResponsesInput).filter(Boolean).map((item) => {
+    if (!item || typeof item !== "object") return item;
+    let next = item;
+    if (Array.isArray(item.content) && item.content.length > 0) {
+      let content = item.content;
+      for (let idx = 0; idx < item.content.length; idx += 1) {
+        const part = item.content[idx];
+        if (!part || typeof part.text !== "string") continue;
+        const truncated = truncateOversizedHistoryText(part.text, `${item.role || item.type || "input"} text`, maxChars);
+        if (truncated === part.text) continue;
+        if (content === item.content) content = item.content.slice();
+        content[idx] = { ...part, text: truncated };
+      }
+      if (content !== item.content) {
+        if (next === item) next = { ...item };
+        next.content = content;
+      }
+    }
+    if (typeof item.arguments === "string") {
+      const truncated = truncateOversizedHistoryText(item.arguments, "tool call arguments", maxChars);
+      if (truncated !== item.arguments) {
+        if (next === item) next = { ...item };
+        next.arguments = truncated;
+      }
+    }
+    if (typeof item.output === "string") {
+      const truncated = truncateOversizedHistoryText(item.output, "tool output", maxChars);
+      if (truncated !== item.output) {
+        if (next === item) next = { ...item };
+        next.output = truncated;
+      }
+    }
+    return next;
+  });
   const normalizedTools = Array.isArray(tools)
     ? tools.map(toBosunToolToResponses).filter(Boolean)
     : [];
@@ -610,6 +605,24 @@ function buildResponsesRequest(history, tools, execOptions, previousResponseId =
     // is served from the server cache at the cached-input price (typically 50% discount).
     ...(persistent ? { store: true } : {}),
   };
+
+  // Structured output (D.8)
+  if (responseFormat) {
+    if (responseFormat.type === "json_schema" && responseFormat.jsonSchema) {
+      body.text = {
+        format: {
+          type: "json_schema",
+          name: responseFormat.name || "response",
+          schema: responseFormat.jsonSchema,
+          strict: responseFormat.strict !== false,
+        },
+      };
+    } else if (responseFormat.type === "json_object") {
+      body.text = { format: { type: "json_object" } };
+    } else if (responseFormat.type === "text") {
+      body.text = { format: { type: "text" } };
+    }
+  }
 
   return body;
 }
@@ -644,12 +657,14 @@ function buildChatRequest(history, tools, execOptions) {
   const reasoningEffort = toTrimmedString(
     pc.reasoningEffort || execOptions?.reasoningEffort || "",
   );
+  const responseFormat = execOptions?.responseFormat || pc.responseFormat || null;
   // Enable Anthropic-style cache_control injection when the caller signals it
   // OR when the model name matches a known Anthropic route (auto-detect).
   // Safe to leave off for standard OpenAI — unknown fields are ignored by the API.
   const promptCaching = shouldEnablePromptCaching(pc, execOptions);
 
   let messages = history.map(historyEntryToChatMessage).filter(Boolean);
+  messages = normalizeMessages(messages, pc);
 
   // Prepend system prompt if provided and not already present in history.
   // With prompt caching: emit as an array content block so cache_control
@@ -689,6 +704,31 @@ function buildChatRequest(history, tools, execOptions) {
     ...(cachedTools.length > 0 ? { tools: cachedTools } : {}),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   };
+
+  // Anthropic thinking budget via OpenAI-compatible proxy (D.11)
+  const thinkingBudget = Number(pc.thinkingBudget || execOptions?.thinkingBudget);
+  if (Number.isFinite(thinkingBudget) && thinkingBudget > 0 && promptCaching) {
+    // Some Anthropic proxies accept `thinking` as an extension field
+    body.thinking = { type: "enabled", budget_tokens: Math.trunc(thinkingBudget) };
+  }
+
+  // Structured output (D.8)
+  if (responseFormat) {
+    if (responseFormat.type === "json_schema" && responseFormat.jsonSchema) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: responseFormat.name || "response",
+          schema: responseFormat.jsonSchema,
+          strict: responseFormat.strict !== false,
+        },
+      };
+    } else if (responseFormat.type === "json_object") {
+      body.response_format = { type: "json_object" };
+    } else if (responseFormat.type === "text") {
+      body.response_format = { type: "text" };
+    }
+  }
 
   return body;
 }
@@ -1111,15 +1151,30 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
   const _sessions = new Map();
   const _busySet = new Set();
 
+  // Session persistence (D.9)
+  const _resumer = createSessionResumer(factoryOptions.sessionStore);
+
   function getSession(sessionId) {
     if (!sessionId) return null;
     return _sessions.get(sessionId) ?? null;
   }
 
-  function ensureSession(sessionId, model = "") {
+  async function ensureSession(sessionId, model = "") {
     if (!sessionId) return { messages: [], model, lastResponseId: null };
     if (!_sessions.has(sessionId)) {
-      _sessions.set(sessionId, { messages: [], model: model || "", lastResponseId: null });
+      // Try to resume from disk before creating a fresh session (D.9)
+      const { resumed, session } = await _resumer.tryResume(sessionId, model);
+      if (resumed && session) {
+        _sessions.set(sessionId, {
+          messages: session.messages,
+          model: session.model || model || "",
+          lastResponseId: session.lastResponseId || null,
+          aggregatedUsage: session.aggregatedUsage || null,
+          compactionCount: session.compactionCount || 0,
+        });
+      } else {
+        _sessions.set(sessionId, { messages: [], model: model || "", lastResponseId: null });
+      }
     }
     const s = _sessions.get(sessionId);
     if (model && !s.model) s.model = model;
@@ -1240,10 +1295,33 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
 
     const url = resolveEndpointUrl(execOptions, apiStyle);
     const authHeaders = buildAuthHeaders(credentials);
-    const tools = Array.isArray(execOptions?.tools) ? execOptions.tools : [];
+    let tools = Array.isArray(execOptions?.tools) ? execOptions.tools : [];
 
-    // Load or init session history
-    const session = ensureSession(isPersistent ? effectiveSessionId : null, model);
+    // ── MCP tool discovery (D.7) ────────────────────────────────────────────
+    // If execOptions references MCP servers, resolve their tool schemas and
+    // merge them into the native tool list.  Also wrap the orchestrator so
+    // MCP namespaced calls (mcp__server__tool) are routed correctly.
+    const mcpServerConfigs = execOptions?.mcpServers || pc?.mcpServers || [];
+    if (mcpServerConfigs.length > 0) {
+      try {
+        tools = await resolveMcpTools(tools, mcpServerConfigs);
+      } catch (err) {
+        console.warn(`${TAG} MCP tool resolution failed: ${err?.message || err}`);
+      }
+    }
+
+    // Wrap toolOrchestrator with MCP routing if not already wrapped
+    if (!execOptions?._mcpWrapped) {
+      const originalOrchestrator = execOptions?.toolOrchestrator || null;
+      execOptions = {
+        ...execOptions,
+        toolOrchestrator: createMcpToolOrchestrator(originalOrchestrator),
+        _mcpWrapped: true,
+      };
+    }
+
+    // Load or init session history (D.9 — resume from disk when available)
+    const session = await ensureSession(isPersistent ? effectiveSessionId : null, model);
     if (model && !session.model) session.model = model;
 
     const onEvent = typeof execOptions?.onEvent === "function" ? execOptions.onEvent : null;
@@ -1419,8 +1497,58 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
       };
     }
 
+    // ── /resume slash command (D.9) ─────────────────────────────────────────
+    if (trimmedMsg.startsWith("/resume ")) {
+      _busySet.delete(effectiveSessionId);
+      const targetId = trimmedMsg.slice("/resume ".length).trim();
+      if (!targetId) {
+        return {
+          ok: false,
+          success: false,
+          finalResponse: "Usage: /resume <session_id>",
+          text: "",
+          items: [],
+          usage: null,
+          sessionId: effectiveSessionId,
+        };
+      }
+      const { resumed, session: loaded } = await _resumer.tryResume(targetId, model);
+      if (resumed && loaded) {
+        _sessions.set(targetId, {
+          messages: loaded.messages,
+          model: loaded.model || model,
+          lastResponseId: loaded.lastResponseId || null,
+          aggregatedUsage: loaded.aggregatedUsage || null,
+          compactionCount: loaded.compactionCount || 0,
+        });
+        onEvent?.({ type: "session.resumed", sessionId: targetId, messageCount: loaded.messages.length });
+        return {
+          ok: true,
+          success: true,
+          finalResponse: `Resumed session ${targetId} (${loaded.messages.length} messages).`,
+          text: "",
+          items: loaded.messages,
+          usage: null,
+          sessionId: targetId,
+          resumed: true,
+        };
+      }
+      return {
+        ok: false,
+        success: false,
+        finalResponse: `Session "${targetId}" not found on disk.`,
+        text: "",
+        items: [],
+        usage: null,
+        sessionId: effectiveSessionId,
+      };
+    }
+
     // Append user turn
-    session.messages.push({ type: "user_message", text: String(userMessage || "") });
+    session.messages.push(sanitizeHistoryEntryForRequest({
+      type: "user_message",
+      text: String(userMessage || ""),
+    }));
 
     onEvent?.({ type: "session.turn.start", sessionId: effectiveSessionId, model, apiStyle });
 
@@ -1487,13 +1615,24 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
         const activeModel = toTrimmedString(activePC.model || activeOpts?.model || model);
         const activeTools = Array.isArray(activeOpts?.tools) ? activeOpts.tools : tools;
 
-        // ── Message pruning before each LLM call ─────────────────────────────
-        // Strip reasoning tokens from old turns and truncate oversized outputs.
+        // ── Tiered disk-backed shredding + inline pruning (D.10) ─────────────
+        // First apply age-based compression with disk archival so no data is lost.
+        // Then prune reasoning tokens and cap oversized outputs inline.
+        try {
+          session.messages = await maybeCompressSessionItems(session.messages, {
+            sessionType: "primary",
+            agentType: "openai-native",
+            sessionId: effectiveSessionId,
+          });
+        } catch (err) {
+          console.warn(`[openai-native-adapter] shredding failed: ${err?.message || err}`);
+        }
         session.messages = pruneMessages(session.messages, {
           stripReasoning:    true,
           truncateOutputs:   true,
           maxToolOutputChars: 8_000,
         });
+        session.messages = sanitizeHistoryEntriesForRequest(session.messages);
 
         // Stream one API turn — with overflow retry on first context error
         let turnResult;
@@ -1607,7 +1746,7 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
             arguments: tc.arguments,
           })),
         };
-        session.messages.push(assistantEntry);
+        session.messages.push(sanitizeHistoryEntryForRequest(assistantEntry));
 
         // No tool calls → done
         if (!turnResult.toolCalls.length) break;
@@ -1660,28 +1799,28 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
         // Append function calls and outputs for Responses API format
         if (apiStyle === "responses") {
           for (const tc of turnResult.toolCalls) {
-            session.messages.push({
+            session.messages.push(sanitizeHistoryEntryForRequest({
               type: "function_call",
               callId: tc.callId,
               name: tc.name,
               arguments: tc.argumentsRaw || JSON.stringify(tc.arguments ?? {}),
-            });
+            }));
           }
           for (const tr of toolResults) {
-            session.messages.push({
+            session.messages.push(sanitizeHistoryEntryForRequest({
               type: "function_call_output",
               callId: tr.callId,
               output: tr.output,
-            });
+            }));
           }
         } else {
           // Chat format: tool results appended directly to messages via historyEntryToChatMessage
           for (const tr of toolResults) {
-            session.messages.push({
+            session.messages.push(sanitizeHistoryEntryForRequest({
               type: "function_call_output",
               callId: tr.callId,
               output: tr.output,
-            });
+            }));
           }
         }
 

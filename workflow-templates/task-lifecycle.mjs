@@ -569,8 +569,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     node("dispatch-wt-repair", "action.execute_workflow", "Dispatch WT Repair", {
       workflowId: "template-task-repair-worktree",
-      mode: "dispatch",
+      mode: "{{ $data?._simulation === true ? 'sync' : 'dispatch' }}",
       input: {
+        eventType: "task.failed",
         taskId: "{{taskId}}",
         taskTitle: "{{taskTitle}}",
         repoRoot: "{{repoRoot}}",

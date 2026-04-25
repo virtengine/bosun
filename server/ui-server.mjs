@@ -2075,38 +2075,41 @@ async function getWorkflowEngineModule() {
             const defaultPaths = getWorkflowStoragePaths(repoRoot);
             const proxy = new WorkflowEngineProxy();
             try {
+              // The monitor owns startup interrupted-run recovery for the repo store.
               await proxy._start({
                 repoRoot,
                 workflowDir: defaultPaths.workflowDir,
                 runsDir:     defaultPaths.runsDir,
+                detectInterruptedRuns: false,
+                resumeInterruptedRunsOnStart: false,
               });
               const defaultKey = getWorkflowWorkspaceKey(defaultPaths.workspaceRoot);
               _wfEngineByWorkspace.set(defaultKey, proxy);
               attachWorkflowEngineLiveBridge(proxy);
               console.log("[workflows] Workflow engine Worker thread started");
-
-              setTimeout(() => {
-                proxy.resumeInterruptedRuns().catch((err) => {
-                  console.warn("[workflows] Failed to resume interrupted runs:", err.message);
-                });
-              }, 0);
             } catch (err) {
               console.warn("[workflows] Worker thread start failed, falling back to in-process engine:", err.message);
               /* Fall back: create engine in-process */
-              const engine = _wfEngine.getWorkflowEngine({ services });
+              const engine = _wfEngine.getWorkflowEngine({
+                services,
+                workflowDir: defaultPaths.workflowDir,
+                runsDir: defaultPaths.runsDir,
+                configDir: repoRoot,
+                detectInterruptedRuns: false,
+              });
               attachWorkflowEngineLiveBridge(engine);
               attachTaskWorkflowTraceHook(engine);
               _wfTaskTraceHookRegistered = workflowTaskTraceHookCleanup.has(engine);
-              if (typeof engine.resumeInterruptedRuns === "function") {
-                setTimeout(() => {
-                  engine.resumeInterruptedRuns().catch((err) => {
-                    console.warn("[workflows] Failed to resume interrupted runs:", err.message);
-                  });
-                }, 0);
-              }
             }
           } else {
-            const engine = _wfEngine.getWorkflowEngine({ services });
+            const defaultPaths = getWorkflowStoragePaths(repoRoot);
+            const engine = _wfEngine.getWorkflowEngine({
+              services,
+              workflowDir: defaultPaths.workflowDir,
+              runsDir: defaultPaths.runsDir,
+              configDir: repoRoot,
+              detectInterruptedRuns: false,
+            });
             attachWorkflowEngineLiveBridge(engine);
             attachTaskWorkflowTraceHook(engine);
             _wfTaskTraceHookRegistered = workflowTaskTraceHookCleanup.has(engine);
@@ -3823,6 +3826,8 @@ async function getWorkflowRequestContext(reqUrl, options = {}) {
                 repoRoot,
                 workflowDir: paths.workflowDir,
                 runsDir:     paths.runsDir,
+                detectInterruptedRuns: false,
+                resumeInterruptedRunsOnStart: false,
               });
               nextEngine = proxy;
             } catch (startErr) {

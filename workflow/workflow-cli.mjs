@@ -1,11 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
 import { loadConfig } from "../config/config.mjs";
 import {
   listConfiguredWorkflows,
   loadWorkflowInputFromFile,
   runConfiguredWorkflow,
 } from "./declarative-workflows.mjs";
+import { WorkflowEngine } from "./workflow-engine.mjs";
+import { getTemplate, listTemplates } from "./workflow-templates.mjs";
 import { inspectCustomWorkflowNodePlugins } from "./workflow-nodes.mjs";
 
 function hasFlag(args, ...flags) {
@@ -78,6 +81,8 @@ function showHelp(stdout = console.log) {
   SUBCOMMANDS
     list                      List configured and built-in workflows
     run <name> [input]        Run a workflow with fresh-context agents
+    templates                 List built-in workflow-engine templates
+    template-run <id> [input] Run a workflow-engine template directly
     nodes                     Inspect custom workflow node plugin health
 
   OPTIONS
@@ -92,6 +97,90 @@ function showHelp(stdout = console.log) {
 
 export function listWorkflowSummaries(config = loadConfig(process.argv)) {
   return listConfiguredWorkflows(config);
+}
+
+function cloneJson(value) {
+  return value == null ? value ?? null : JSON.parse(JSON.stringify(value));
+}
+
+function formatConsoleCaptureArg(value) {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+async function withCapturedConsole(enabled, fn) {
+  if (!enabled) {
+    return { result: await fn(), consoleLines: [] };
+  }
+  const consoleLines = [];
+  const originals = {
+    log: console.log,
+    warn: console.warn,
+    error: console.error,
+  };
+  const capture = (level) => (...args) => {
+    consoleLines.push({
+      level,
+      message: args.map((value) => formatConsoleCaptureArg(value)).join(" ").trim(),
+    });
+  };
+  console.log = capture("log");
+  console.warn = capture("warn");
+  console.error = capture("error");
+  try {
+    return { result: await fn(), consoleLines };
+  } finally {
+    console.log = originals.log;
+    console.warn = originals.warn;
+    console.error = originals.error;
+  }
+}
+
+function buildTemplateRunReport(template, ctx, statusEvents = [], options = {}) {
+  const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+  return {
+    template: {
+      id: template?.id || null,
+      name: template?.name || null,
+      description: template?.description || "",
+      category: template?.category || null,
+    },
+    runId: ctx?.id || null,
+    dryRun: options.dryRun === true,
+    status: String(ctx?.data?._workflowTerminalStatus || (ctx?.errors?.length ? "failed" : "completed")).trim().toLowerCase() || "completed",
+    errors: Array.isArray(ctx?.errors) ? [...ctx.errors] : [],
+    logs: Array.isArray(ctx?.logs) ? [...ctx.logs] : [],
+    statusEvents: Array.isArray(statusEvents) ? statusEvents.map((entry) => ({ ...entry })) : [],
+    engineConsole: Array.isArray(options.engineConsole) ? options.engineConsole.map((entry) => ({ ...entry })) : [],
+    data: cloneJson(ctx?.data || {}),
+    nodes: nodes.map((node) => ({
+      id: node?.id || null,
+      label: node?.label || node?.id || null,
+      type: node?.type || null,
+      status: ctx?.getNodeStatus?.(node?.id) || "pending",
+      input: cloneJson(ctx?.getNodeInput?.(node?.id) ?? null),
+      output: cloneJson(ctx?.getNodeOutput?.(node?.id) ?? null),
+      timing: cloneJson(ctx?.getNodeTiming?.(node?.id) ?? null),
+    })),
+  };
+}
+
+function formatTemplateRunReport(report = {}) {
+  const lines = [
+    `template=${report?.template?.id || "unknown"} status=${report?.status || "unknown"} runId=${report?.runId || "n/a"} dryRun=${report?.dryRun === true}`,
+  ];
+  for (const node of report?.nodes || []) {
+    lines.push(`- ${node.id}\t${node.status}\t${node.type}`);
+  }
+  const logTail = Array.isArray(report?.logs) ? report.logs.slice(-12) : [];
+  for (const entry of logTail) {
+    lines.push(`  log:${entry?.nodeId || "workflow"} ${entry?.level || "info"} ${String(entry?.message || "").trim()}`);
+  }
+  return lines;
 }
 
 export async function executeWorkflowCommand(args, options = {}) {
@@ -137,6 +226,18 @@ export async function executeWorkflowCommand(args, options = {}) {
     return { ok: true, command: "list", workflows };
   }
 
+  if (subcommand === "templates") {
+    const templates = listTemplates(options.cwd || process.cwd());
+    if (asJson) {
+      stdout(JSON.stringify(templates, null, 2));
+    } else {
+      for (const template of templates) {
+        stdout(`${template.id}\t${template.category}\t${template.name}`);
+      }
+    }
+    return { ok: true, command: "templates", templates };
+  }
+
   if (subcommand === "run") {
     const name = normalizedArgs[1];
     if (!name) throw new Error("Workflow name is required. Usage: bosun workflow run <name>");
@@ -160,6 +261,56 @@ export async function executeWorkflowCommand(args, options = {}) {
       }
     }
     return { ok: true, command: "run", workflowName: name, result };
+  }
+
+  if (subcommand === "template-run") {
+    const templateId = normalizedArgs[1];
+    if (!templateId) {
+      throw new Error("Template id is required. Usage: bosun workflow template-run <id>");
+    }
+    const template = getTemplate(templateId);
+    if (!template) {
+      throw new Error(`Workflow template "${templateId}" not found`);
+    }
+    const input = parseInput(normalizedArgs, options.cwd || process.cwd());
+    const dryRun = hasFlag(normalizedArgs, "--dry-run");
+    const tempRoot = mkdtempSync(join(tmpdir(), "bosun-workflow-template-run-"));
+    const statusEvents = [];
+    try {
+      const engine = new WorkflowEngine({
+        workflowDir: join(tempRoot, "workflows"),
+        runsDir: join(tempRoot, "runs"),
+        configDir: options.cwd || process.cwd(),
+        services: options.services || {},
+        detectInterruptedRuns: false,
+      });
+      engine.on("workflow:status", (event) => {
+        statusEvents.push(cloneJson(event));
+      });
+      const captureConsole = asJson || options.forceJsonOutput === true;
+      const { result: ctx, consoleLines } = await withCapturedConsole(captureConsole, async () => (
+        engine.executeDefinition(cloneJson(template), input, {
+          dryRun,
+          force: true,
+        })
+      ));
+      const report = buildTemplateRunReport(template, ctx, statusEvents, {
+        dryRun,
+        engineConsole: consoleLines,
+      });
+      if (asJson || options.forceJsonOutput === true) {
+        stdout(JSON.stringify(report, null, 2));
+      } else {
+        for (const line of formatTemplateRunReport(report)) stdout(line);
+      }
+      return { ok: true, command: "template-run", templateId, report };
+    } finally {
+      try {
+        rmSync(tempRoot, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup only; Windows can briefly retain run files.
+      }
+    }
   }
 
   throw new Error(`Unknown workflow subcommand: ${subcommand}`);

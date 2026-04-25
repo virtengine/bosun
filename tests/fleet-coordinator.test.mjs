@@ -193,8 +193,17 @@ describe("fleet-coordinator", () => {
 
   describe("assignTasksToWorkstations", () => {
     let assignTasksToWorkstations;
+    let setFleetWorkflowEventQueue;
     beforeEach(async () => {
-      ({ assignTasksToWorkstations } = await import("../agent/fleet-coordinator.mjs"));
+      ({
+        assignTasksToWorkstations,
+        setFleetWorkflowEventQueue,
+      } = await import("../agent/fleet-coordinator.mjs"));
+      setFleetWorkflowEventQueue(null);
+    });
+
+    afterEach(() => {
+      setFleetWorkflowEventQueue?.(null);
     });
 
     it("returns empty for no peers", () => {
@@ -259,6 +268,27 @@ describe("fleet-coordinator", () => {
 
       expect(result.assignments[0].assignedTo).toBe("ws-2");
       expect(result.assignments[0].assignmentReasons).toContain("team-match");
+    });
+
+    it("emits workflow events only when a queue is injected", () => {
+      const queueWorkflowEvent = vi.fn();
+      setFleetWorkflowEventQueue(queueWorkflowEvent);
+      const waves = [["t1"]];
+      const peers = [{ instance_id: "ws-1", max_parallel: 6 }];
+
+      assignTasksToWorkstations(waves, peers);
+
+      expect(queueWorkflowEvent).toHaveBeenCalledWith(
+        "fleet.tasks_assigned",
+        expect.objectContaining({
+          totalTasks: 1,
+          totalPeers: 1,
+          waveCount: 1,
+        }),
+        expect.objectContaining({
+          dedupKey: expect.stringContaining("fleet-assign-"),
+        }),
+      );
     });
 
     it("prefers matching coordination roles ahead of round-robin defaults", () => {

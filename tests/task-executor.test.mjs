@@ -1583,6 +1583,85 @@ describe("task-executor", () => {
       expect(executeSpy).not.toHaveBeenCalled();
     });
 
+    it("does not keep workflow-owned tasks alive on stale topology-only run detail with no checkpoint progress", async () => {
+      vi.useFakeTimers();
+      const now = new Date("2026-04-24T00:00:00.000Z");
+      vi.setSystemTime(now);
+
+      const ex = new TaskExecutor({
+        projectId: "proj-1",
+        maxParallel: 2,
+        workflowOwnsTaskLifecycle: true,
+        workflowRunsDir: "/workflow-runs",
+      });
+      ex._running = true;
+      const executeSpy = vi
+        .spyOn(ex, "executeTask")
+        .mockResolvedValue(undefined);
+
+      listTasks.mockResolvedValueOnce([
+        {
+          id: "wf-stale-topology-1",
+          title: "Workflow-owned stale topology should not block reset",
+          status: "inprogress",
+          updated_at: now.toISOString(),
+          agentAttempts: 0,
+          topology: {
+            latestRunId: "run-topology-stale-1",
+          },
+        },
+      ]);
+      getActiveThreads.mockReturnValueOnce([]);
+      existsSync.mockImplementation((targetPath) =>
+        [
+          resolve("/workflow-runs", "_active-runs.json"),
+          resolve("/workflow-runs", "run-topology-stale-1.json"),
+        ].includes(targetPath),
+      );
+      readFileSync.mockImplementation((targetPath) => {
+        if (targetPath === resolve("/workflow-runs", "_active-runs.json")) {
+          return JSON.stringify([]);
+        }
+        if (targetPath === resolve("/workflow-runs", "run-topology-stale-1.json")) {
+          return JSON.stringify({
+            id: "run-topology-stale-1",
+            startedAt: new Date(now.getTime() - 21 * 60 * 1000).toISOString(),
+            endedAt: null,
+            latestCheckpoint: null,
+            updatedAt: new Date(now.getTime() - 21 * 60 * 1000 + 1).toISOString(),
+            data: {
+              taskId: "wf-stale-topology-1",
+              _dagState: {
+                status: "running",
+                createdAt: new Date(now.getTime() - 21 * 60 * 1000).toISOString(),
+                updatedAt: new Date(now.getTime() - 21 * 60 * 1000 + 1).toISOString(),
+                lastStatusAt: new Date(now.getTime() - 21 * 60 * 1000 + 1).toISOString(),
+              },
+            },
+          });
+        }
+        return "";
+      });
+
+      const summary = await ex._recoverInterruptedInProgressTasks();
+
+      expect(updateTaskStatus).toHaveBeenCalledWith(
+        "wf-stale-topology-1",
+        "todo",
+        expect.objectContaining({
+          source: "task-executor-recovery-missing-workflow-run",
+        }),
+      );
+      expect(releaseTaskClaim).toHaveBeenCalledWith({
+        taskId: "wf-stale-topology-1",
+        force: true,
+      });
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(summary.workflowEvidenceKept).toEqual([]);
+
+      vi.useRealTimers();
+    });
+
     it("marks ownerless workflow recovery resets to bypass workflow ownership", async () => {
       const ex = new TaskExecutor({
         projectId: "proj-1",
@@ -1798,6 +1877,104 @@ describe("task-executor", () => {
       );
       expect(releaseTaskClaim).toHaveBeenCalledWith({
         taskId: "wf-startup-stalled-1",
+        force: true,
+      });
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it("resets workflow-owned tasks when write-tests is stuck at agent.started with no turn progress", async () => {
+      vi.useFakeTimers();
+      const now = new Date("2026-04-23T00:00:00.000Z");
+      vi.setSystemTime(now);
+
+      const turnSessionId = "wf-startup-stalled-write-tests-1:agent:run-startup-stalled-write-tests-1:write-tests:turn";
+      const tracker = getSessionTracker();
+      tracker.createSession({
+        id: turnSessionId,
+        type: "task",
+        taskId: turnSessionId,
+        metadata: {},
+      });
+      tracker.recordEvent(turnSessionId, "agent.started");
+      vi.setSystemTime(new Date(now.getTime() + 21 * 60 * 1000));
+
+      const ex = new TaskExecutor({
+        projectId: "proj-1",
+        maxParallel: 2,
+        workflowOwnsTaskLifecycle: true,
+        workflowRunsDir: "/workflow-runs",
+      });
+      ex._running = true;
+      const executeSpy = vi
+        .spyOn(ex, "executeTask")
+        .mockResolvedValue(undefined);
+
+      listTasks.mockResolvedValueOnce([
+        {
+          id: "wf-startup-stalled-write-tests-1",
+          title: "Workflow-owned write-tests startup stall",
+          status: "inprogress",
+          updated_at: new Date(now.getTime()).toISOString(),
+          agentAttempts: 1,
+        },
+      ]);
+      getActiveThreads.mockReturnValueOnce([]);
+      existsSync.mockImplementation((targetPath) =>
+        [
+          resolve("/workflow-runs", "_active-runs.json"),
+          resolve("/workflow-runs", "run-startup-stalled-write-tests-1.json"),
+        ].includes(targetPath),
+      );
+      readFileSync.mockImplementation((targetPath) => {
+        if (targetPath === resolve("/workflow-runs", "_active-runs.json")) {
+          return JSON.stringify([
+            {
+              runId: "run-startup-stalled-write-tests-1",
+              taskId: "wf-startup-stalled-write-tests-1",
+              sessionIds: [turnSessionId],
+            },
+          ]);
+        }
+        if (targetPath === resolve("/workflow-runs", "run-startup-stalled-write-tests-1.json")) {
+          return JSON.stringify({
+            id: "run-startup-stalled-write-tests-1",
+            status: "running",
+            startedAt: new Date(now.getTime() - 25 * 60 * 1000).toISOString(),
+            endedAt: null,
+            sessionIds: [turnSessionId],
+            latestCheckpoint: {
+              eventType: "agent.started",
+              nodeId: "write-tests",
+              updatedAt: new Date(now.getTime() - 21 * 60 * 1000).toISOString(),
+              counters: {
+                toolCallCount: 0,
+                toolResultCount: 0,
+                spillCount: 0,
+              },
+            },
+            data: {
+              taskId: "wf-startup-stalled-write-tests-1",
+              _dagState: {
+                status: "running",
+                updatedAt: new Date(now.getTime() - 21 * 60 * 1000).toISOString(),
+              },
+            },
+          });
+        }
+        return "";
+      });
+
+      await ex._recoverInterruptedInProgressTasks();
+
+      expect(updateTaskStatus).toHaveBeenCalledWith(
+        "wf-startup-stalled-write-tests-1",
+        "todo",
+        expect.objectContaining({
+          source: "task-executor-recovery-missing-workflow-run",
+        }),
+      );
+      expect(releaseTaskClaim).toHaveBeenCalledWith({
+        taskId: "wf-startup-stalled-write-tests-1",
         force: true,
       });
       expect(executeSpy).not.toHaveBeenCalled();

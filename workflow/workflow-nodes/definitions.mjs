@@ -693,6 +693,34 @@ function summarizeAssistantMessageData(data = {}) {
   return "";
 }
 
+function summarizeSessionStepToolNames(event = {}, prefix = "Tool call:") {
+  const toolCalls = Array.isArray(event?.toolCalls) ? event.toolCalls : [];
+  const toolResults = Array.isArray(event?.toolResults) ? event.toolResults : [];
+  const callNameById = new Map();
+  for (const toolCall of toolCalls) {
+    const callId = String(toolCall?.callId || toolCall?.id || "").trim();
+    const name = String(toolCall?.name || toolCall?.toolName || "").trim();
+    if (callId && name) callNameById.set(callId, name);
+  }
+  const names = prefix === "Tool result:"
+    ? toolResults
+        .map((toolResult) =>
+          String(
+            callNameById.get(String(toolResult?.callId || toolResult?.id || "").trim()) ||
+              toolResult?.name ||
+              toolResult?.toolName ||
+              "",
+          ).trim()
+        )
+        .filter(Boolean)
+    : toolCalls
+        .map((toolCall) => String(toolCall?.name || toolCall?.toolName || "").trim())
+        .filter(Boolean);
+  if (!names.length) return "";
+  const unique = Array.from(new Set(names)).slice(0, 4).join(", ");
+  return `${prefix} ${unique}`;
+}
+
 function extractStreamText(value) {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -755,6 +783,25 @@ function summarizeAgentStreamEvent(event) {
   if (type === "function_call_output" || type === "tool_output") {
     const name = event?.name || event?.tool_name || event?.data?.tool_name || "unknown";
     return `Tool result: ${name}`;
+  }
+
+  if (type === "session.tool.start" || type === "session.tool.call") {
+    const name = event?.toolName || event?.tool_name || event?.name || event?.data?.toolName || event?.data?.tool_name || "unknown";
+    return `Tool call: ${name}`;
+  }
+
+  if (type === "session.tool.complete" || type === "session.tool.result") {
+    const name = event?.toolName || event?.tool_name || event?.name || event?.data?.toolName || event?.data?.tool_name || "unknown";
+    if (event?.timedOut === true) return `Tool result: ${name} (timed out)`;
+    if (event?.denied === true) return `Tool result: ${name} (denied)`;
+    return `Tool result: ${name}`;
+  }
+
+  if (type === "session.step.finish") {
+    return (
+      summarizeSessionStepToolNames(event, "Tool result:")
+      || summarizeSessionStepToolNames(event, "Agent requested tools:")
+    );
   }
 
   if (type === "error") {

@@ -456,6 +456,33 @@ describe("session manager cutover", () => {
     }));
   }, SLOW_SESSION_MANAGER_TEST_TIMEOUT_MS);
 
+  it("exposes recordEvent as a module-level alias for appendEvent callers", async () => {
+    const trackerMod = await import("../infra/session-tracker.mjs");
+    trackerMod._resetSingleton();
+    const tracker = trackerMod.getSessionTracker();
+
+    tracker.createSession({
+      id: "record-event-alias-session",
+      type: "task",
+      metadata: { title: "Record Event Alias" },
+    });
+
+    expect(typeof trackerMod.recordEvent).toBe("function");
+    trackerMod.recordEvent("record-event-alias-session", {
+      role: "assistant",
+      content: "delegated failure transcript",
+      timestamp: "2026-04-24T11:20:00.000Z",
+    });
+
+    const session = tracker.getSessionById("record-event-alias-session");
+    expect(session?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "assistant",
+        content: "delegated failure transcript",
+      }),
+    ]));
+  });
+
   it("cold-restores persisted replay history and live execution status after restart", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "bosun-session-replay-restore-"));
     const configDir = join(repoRoot, ".bosun");
@@ -623,6 +650,79 @@ describe("session manager cutover", () => {
       }));
     } finally {
       resetHarnessObservabilitySpinesForTests();
+      try {
+        rmSync(repoRoot, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  });
+
+  it("compacts oversized session snapshots after serialization failure", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "bosun-session-snapshot-compact-"));
+    const snapshotPath = join(repoRoot, ".bosun", ".cache", "session-snapshots.json");
+    const snapshotStore = createSessionSnapshotStore({
+      filePath: snapshotPath,
+    });
+    const realStringify = JSON.stringify.bind(JSON);
+    let injectedFailure = false;
+    const stringifySpy = vi.spyOn(JSON, "stringify").mockImplementation((value, replacer, space) => {
+      if (!injectedFailure && value?.snapshots?.["oversize-session"]) {
+        injectedFailure = true;
+        throw new RangeError("Invalid string length");
+      }
+      return realStringify(value, replacer, space);
+    });
+
+    try {
+      snapshotStore.capture({
+        sessionId: "oversize-session",
+        snapshotId: "snapshot-oversize-1",
+        runId: "run-oversize-1",
+        threadId: "thread-oversize-1",
+        action: "external_execution_completed",
+        status: "completed",
+        summary: "Large session snapshot",
+        state: {
+          session: {
+            sessionId: "oversize-session",
+            notes: Array.from({ length: 20 }, (_, index) => ({
+              index,
+              content: `note-${index}-${"x".repeat(2048)}`,
+            })),
+          },
+          thread: {
+            threadId: "thread-oversize-1",
+            messages: Array.from({ length: 16 }, (_, index) => ({
+              index,
+              role: "assistant",
+              content: `message-${index}-${"y".repeat(2048)}`,
+            })),
+          },
+        },
+        result: {
+          items: Array.from({ length: 24 }, (_, index) => ({
+            index,
+            summary: `summary-${index}-${"z".repeat(2048)}`,
+          })),
+        },
+        checkpoint: {
+          boundaryType: "turn_boundary",
+          messageCursor: 10,
+          turnCursor: 4,
+        },
+      });
+
+      const persisted = snapshotStore.readSession("oversize-session");
+      expect(persisted?.snapshots).toHaveLength(1);
+      expect(persisted.snapshots[0]).toEqual(expect.objectContaining({
+        snapshotId: "snapshot-oversize-1",
+        _truncated: expect.objectContaining({
+          notes: expect.arrayContaining(["snapshot-store: compacted after serialization failure"]),
+        }),
+      }));
+      expect(() => JSON.stringify(snapshotStore.snapshot())).not.toThrow();
+    } finally {
+      stringifySpy.mockRestore();
       try {
         rmSync(repoRoot, { recursive: true, force: true });
       } catch {

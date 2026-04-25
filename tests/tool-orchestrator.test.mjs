@@ -173,6 +173,8 @@ describe("tool orchestrator", () => {
     const tools = orchestrator.listTools();
     const readFile = tools.find((entry) => entry.id === "read_file_content");
     const searchFiles = tools.find((entry) => entry.id === "search_files");
+    const writeFile = tools.find((entry) => entry.id === "write_file");
+    const editFile = tools.find((entry) => entry.id === "edit_file");
     const runWorkspaceCommand = tools.find((entry) => entry.id === "run_workspace_command");
     const spawnSubagent = tools.find((entry) => entry.id === "spawn_subagent");
 
@@ -188,6 +190,31 @@ describe("tool orchestrator", () => {
         properties: expect.objectContaining({
           query: expect.any(Object),
           pattern: expect.any(Object),
+        }),
+      }),
+    }));
+    expect(writeFile).toEqual(expect.objectContaining({
+      parameters: expect.objectContaining({
+        required: ["path", "content"],
+        properties: expect.objectContaining({
+          path: expect.any(Object),
+          filePath: expect.any(Object),
+          content: expect.any(Object),
+          mode: expect.any(Object),
+        }),
+      }),
+    }));
+    expect(editFile).toEqual(expect.objectContaining({
+      aliases: expect.arrayContaining(["replace_in_file"]),
+      parameters: expect.objectContaining({
+        required: ["path", "old_string", "new_string"],
+        properties: expect.objectContaining({
+          path: expect.any(Object),
+          filePath: expect.any(Object),
+          old_string: expect.any(Object),
+          search: expect.any(Object),
+          new_string: expect.any(Object),
+          replace: expect.any(Object),
         }),
       }),
     }));

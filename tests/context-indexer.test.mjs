@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 
 import {
   ensureContextIndexFresh,
+  getContextFileInsights,
   getContextGraph,
   runContextIndex,
   searchContextIndex,
@@ -138,6 +139,49 @@ describe("context-indexer", () => {
     expect(graph.edges.some((edge) => edge.relationType === "file_imports_file" && String(edge.toPath || "").endsWith("src/helper.mjs"))).toBe(true);
   });
 
+  it("returns helpful per-file insights from the context index", async () => {
+    mkdirSync(resolve(testRoot, "src"), { recursive: true });
+    mkdirSync(resolve(testRoot, "tests"), { recursive: true });
+
+    writeFileSync(
+      resolve(testRoot, "src", "alpha.mjs"),
+      "// alpha module\nimport { formatGreeting } from './helper.mjs';\nexport function greetUser(name) { return formatGreeting(name); }\n",
+      "utf8",
+    );
+
+    writeFileSync(
+      resolve(testRoot, "src", "helper.mjs"),
+      "export function formatGreeting(name) { return `hello ${name}`; }\n",
+      "utf8",
+    );
+
+    writeFileSync(
+      resolve(testRoot, "tests", "alpha.test.mjs"),
+      "import { greetUser } from '../src/alpha.mjs';\nexport function alphaRuntimeTest() { return greetUser('Bosun'); }\n",
+      "utf8",
+    );
+
+    await runContextIndex({
+      rootDir: testRoot,
+      includeTests: true,
+      useTreeSitter: false,
+      useZoekt: false,
+    });
+
+    const insights = await getContextFileInsights("src/alpha.mjs", {
+      rootDir: testRoot,
+    });
+
+    expect(insights).toMatchObject({
+      path: "src/alpha.mjs",
+      language: "javascript",
+      summary: "alpha module",
+    });
+    expect(insights.symbols.some((entry) => entry.name === "greetUser")).toBe(true);
+    expect(insights.imports).toContain("src/helper.mjs");
+    expect(insights.relatedTests).toContain("tests/alpha.test.mjs");
+  });
+
   it("rebuilds the context index when it is missing and changed files request graph context", async () => {
     mkdirSync(resolve(testRoot, "src"), { recursive: true });
 
@@ -255,6 +299,57 @@ describe("context-indexer", () => {
 
     expect(scopedFrontend.fallbackUsed).toBe(false);
     expect(scopedFrontend.results.some((hit) => String(hit.path || "").includes("src/ui/button.tsx"))).toBe(true);
+  });
+
+  it("skips Bosun runtime mirrors and generated directories during indexing", async () => {
+    mkdirSync(resolve(testRoot, "src"), { recursive: true });
+    mkdirSync(resolve(testRoot, ".bosun", "workspaces", "mirror", "src"), { recursive: true });
+    mkdirSync(resolve(testRoot, ".bosun-monitor"), { recursive: true });
+    mkdirSync(resolve(testRoot, "output"), { recursive: true });
+    mkdirSync(resolve(testRoot, "execution-ledger"), { recursive: true });
+
+    writeFileSync(
+      resolve(testRoot, "src", "live.mjs"),
+      "export function liveSource() { return true; }\n",
+      "utf8",
+    );
+
+    writeFileSync(
+      resolve(testRoot, ".bosun", "workspaces", "mirror", "src", "live.mjs"),
+      "export function mirroredSource() { return true; }\n",
+      "utf8",
+    );
+
+    writeFileSync(
+      resolve(testRoot, ".bosun-monitor", "session.md"),
+      "# Runtime session\n",
+      "utf8",
+    );
+
+    writeFileSync(
+      resolve(testRoot, "output", "generated.json"),
+      '{"generated":true}\n',
+      "utf8",
+    );
+
+    writeFileSync(
+      resolve(testRoot, "execution-ledger", "run.md"),
+      "# Generated run log\n",
+      "utf8",
+    );
+
+    await runContextIndex({
+      rootDir: testRoot,
+      includeTests: true,
+      useTreeSitter: false,
+      useZoekt: false,
+    });
+
+    const agentIndexJsonPath = resolve(testRoot, ".bosun", "context-index", "agent-index.json");
+    const agentIndexJson = JSON.parse(readFileSync(agentIndexJsonPath, "utf8"));
+    const indexedPaths = agentIndexJson.files.map((entry) => entry.path).sort();
+
+    expect(indexedPaths).toEqual(["src/live.mjs"]);
   });
 
   it("keeps PDF files excluded from the Bosun-native context index boundary", () => {

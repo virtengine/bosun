@@ -4,7 +4,7 @@
   "github.copilot.chat.cli.customAgents.enabled": true,
   "github.copilot.chat.cli.mcp.enabled": true,
   "github.copilot.chat.agent.enabled": true,
-  "github.copilot.chat.agent.maxRequests": 500,
+  "github.copilot.chat.agent.maxRequests": 100,
   "github.copilot.chat.thinking.collapsedTools": "withThinking",
   "github.copilot.chat.thinking.generateTitles": true,
   "github.copilot.chat.confirmEditRequestRemoval": false,
@@ -14,6 +14,33 @@
   "github.copilot.chat.tools.autoApprove": true,
   "github.copilot.chat.tools.runSubagent.enabled": true,
   "github.copilot.chat.tools.searchSubagent.enabled": true,
+  "search.useIgnoreFiles": true,
+  "search.exclude": {
+    "**/.bosun/**": true,
+    "**/.cache/**": true,
+    "**/.repo-mirror/**": true,
+    "**/execution-ledger/**": true,
+    "**/logs/**": true,
+    "**/node-compile-cache/**": true,
+    "**/output/**": true,
+    "**/playwright-report/**": true,
+    "**/test-results/**": true,
+    "**/tmp/**": true,
+    "**/worktrees/**": true
+  },
+  "files.watcherExclude": {
+    "**/.bosun/**": true,
+    "**/.cache/**": true,
+    "**/.repo-mirror/**": true,
+    "**/execution-ledger/**": true,
+    "**/logs/**": true,
+    "**/node-compile-cache/**": true,
+    "**/output/**": true,
+    "**/playwright-report/**": true,
+    "**/test-results/**": true,
+    "**/tmp/**": true,
+    "**/worktrees/**": true
+  },
   "terminal.integrated.profiles.windows": {
     "PowerShell (UTF-8)": {
       "source": "PowerShell",

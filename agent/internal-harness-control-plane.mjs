@@ -28,6 +28,41 @@ function toPositiveInteger(value, fallback = 0) {
   return Number.isFinite(numeric) && numeric > 0 ? Math.trunc(numeric) : fallback;
 }
 
+const HARNESS_NO_OUTPUT_PLACEHOLDERS = new Set([
+  "",
+  "(agent completed with no text output)",
+  "(resumed - no text output)",
+  "(resumed — no text output)",
+  "continued",
+  "model response continued",
+]);
+
+function hasMeaningfulHarnessRuntimeResult(result = {}) {
+  const output = String(result?.output ?? result?.finalResponse ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!HARNESS_NO_OUTPUT_PLACEHOLDERS.has(output)) return true;
+  if (Array.isArray(result?.items) && result.items.length > 0) return true;
+  return false;
+}
+
+function normalizeHarnessProviderSessionResult(result = {}) {
+  if (!result || typeof result !== "object") return result;
+  if (result.success !== true) return result;
+  if (hasMeaningfulHarnessRuntimeResult(result)) return result;
+  const noOutputMessage =
+    toTrimmedString(result.output || result.finalResponse || "")
+    || "(Agent completed with no text output)";
+  return {
+    ...result,
+    success: false,
+    status: toTrimmedString(result.status || "") || "no_output",
+    blockedReason: toTrimmedString(result.blockedReason || "") || "no_output",
+    error: toTrimmedString(result.error || "") || noOutputMessage,
+  };
+}
+
 export function resolveHarnessControlPlanePaths(configDir) {
   const root = resolve(String(configDir || process.cwd()), ".cache", "harness");
   return {
@@ -505,12 +540,12 @@ export function createHarnessProviderSessionRuntime(options = {}) {
       if (typeof launcher !== "function") {
         throw new Error(`No launch handler is registered for SDK "${sdkName || "unknown"}"`);
       }
-      return await launcher(
+      return normalizeHarnessProviderSessionResult(await launcher(
         input.prompt,
         input.cwd,
         input.timeoutMs,
         input.extra || {},
-      );
+      ));
     },
     async resumeSession(input = {}) {
       const strategy = toTrimmedString(input.strategy);
@@ -521,14 +556,14 @@ export function createHarnessProviderSessionRuntime(options = {}) {
       if (typeof resumeHandler !== "function") {
         throw new Error(`No resume handler is registered for strategy "${strategy || "unknown"}"`);
       }
-      return await resumeHandler(
+      return normalizeHarnessProviderSessionResult(await resumeHandler(
         input.threadId,
         input.prompt,
         input.cwd,
         input.timeoutMs,
         input.extra || {},
         input.sdkName || input.sdk,
-      );
+      ));
     },
     async recoverSession(input = {}) {
       const adapterName = toTrimmedString(input.adapterName);

@@ -9,6 +9,7 @@
 
 import { loadConfig } from "../config/config.mjs";
 import { execPrimaryPrompt, getPrimaryAgentName, setPrimaryAgent, getAgentMode, setAgentMode } from "../agent/primary-agent.mjs";
+import { getBosunSessionManager } from "../agent/session-manager.mjs";
 import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -16,6 +17,7 @@ import { resolveAgentRepoRoot } from "../config/repo-root.mjs";
 import { createToolOrchestrator } from "../agent/tool-orchestrator.mjs";
 import { getVisionSessionState } from "./vision-session-state.mjs";
 import { TOOL_DEFS } from "./voice-tool-definitions.mjs";
+import { injectToolResultContext } from "../workspace/context-injector.mjs";
 
 // ── Voice response shaping (inspired by claude-phone VOICE_CONTEXT pattern) ──
 
@@ -58,6 +60,61 @@ const SAFE_WORKSPACE_COMMAND_PATTERNS = [
   /^type\s+/i,
 ];
 
+function tokenizeWorkspaceCommand(rawCmd) {
+  const tokens = [];
+  let current = "";
+  let quote = null;
+
+  for (let index = 0; index < rawCmd.length; index += 1) {
+    const char = rawCmd[index];
+
+    if (quote) {
+      if (char === "\\") {
+        const next = rawCmd[index + 1];
+        if (next === quote || next === "\\") {
+          current += next;
+          index += 1;
+          continue;
+        }
+      }
+      if (char === quote) {
+        quote = null;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote) {
+    return {
+      error: "Unterminated quoted string in workspace command.",
+      tokens: [],
+    };
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+
+  return { error: null, tokens };
+}
+
 /**
  * Extract the TTS-ready fragment from an agent response.
  *
@@ -92,6 +149,72 @@ function formatVoiceToolResult(text) {
   return words.slice(0, 100).join(" ") + "…";
 }
 
+const DELEGATE_NO_OUTPUT_PLACEHOLDERS = new Set([
+  "",
+  "(agent completed with no text output)",
+  "(resumed - no text output)",
+  "(resumed — no text output)",
+  "continued",
+  "model response continued",
+  "turn completed",
+  "session completed",
+]);
+
+function extractDelegateResultText(result) {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return "";
+  return String(
+    result.finalResponse
+      || result.output
+      || result.text
+      || result.message
+      || result.error
+      || "",
+  ).trim();
+}
+
+function hasMeaningfulDelegateResult(result) {
+  const output = extractDelegateResultText(result).replace(/\s+/g, " ").trim().toLowerCase();
+  if (!DELEGATE_NO_OUTPUT_PLACEHOLDERS.has(output)) return true;
+  if (Array.isArray(result?.items) && result.items.length > 0) return true;
+  return false;
+}
+
+function isDelegatedToolSession(context = {}) {
+  const sessionType = String(context?.sessionType || "").trim().toLowerCase();
+  return sessionType === "delegate" || sessionType.endsWith("-delegate");
+}
+
+function normalizeDelegateSessionResult(result) {
+  if (typeof result === "string") {
+    return {
+      success: !DELEGATE_NO_OUTPUT_PLACEHOLDERS.has(result.replace(/\s+/g, " ").trim().toLowerCase()),
+      output: result,
+      status: "completed",
+    };
+  }
+  if (!result || typeof result !== "object") {
+    return {
+      success: false,
+      output: "",
+      status: "no_output",
+      blockedReason: "no_output",
+      error: "(Agent completed with no text output)",
+    };
+  }
+  if (result.success !== true) return result;
+  if (hasMeaningfulDelegateResult(result)) return result;
+  const placeholder = extractDelegateResultText(result) || "(Agent completed with no text output)";
+  return {
+    ...result,
+    success: false,
+    status: String(result.status || "").trim() || "no_output",
+    blockedReason: String(result.blockedReason || "").trim() || "no_output",
+    error: String(result.error || "").trim() || placeholder,
+    output: String(result.output || "").trim() || placeholder,
+  };
+}
+
 // ── Module-scope lazy imports ───────────────────────────────────────────────
 
 let _kanbanAdapter = null;
@@ -108,6 +231,7 @@ const VALID_EXECUTORS = new Set([
   "claude-sdk",
   "gemini-sdk",
   "opencode-sdk",
+  "openai-native",
 ]);
 const VALID_AGENT_MODES = new Set(["ask", "agent", "plan", "web", "instant"]);
 const MODE_ALIASES = Object.freeze({
@@ -120,6 +244,208 @@ const MODE_ALIASES = Object.freeze({
   quick: "instant",
   browser: "web",
 });
+
+function normalizeVoiceExecutor(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (VALID_EXECUTORS.has(raw)) return raw;
+  if (raw === "codex") return "codex-sdk";
+  if (raw === "copilot") return "copilot-sdk";
+  if (raw === "claude") return "claude-sdk";
+  if (raw === "gemini") return "gemini-sdk";
+  if (raw === "opencode") return "opencode-sdk";
+  if (
+    raw === "openai-native"
+    || raw === "openai_native"
+    || raw === "azure"
+    || raw === "azure-openai"
+    || raw === "azure-openai-responses"
+    || raw === "openai-responses"
+  ) {
+    return "openai-native";
+  }
+  return raw;
+}
+
+function resolveManagedSessionExecutor(context = {}) {
+  const manager = typeof getBosunSessionManager === "function" ? getBosunSessionManager() : null;
+  if (!manager || typeof manager.getSession !== "function") return "";
+  const sessionIds = [
+    context?.sessionId,
+    context?.parentSessionId,
+    context?.rootSessionId,
+    context?.threadId,
+  ];
+  for (const sessionId of sessionIds) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) continue;
+    const session = manager.getSession(normalizedSessionId);
+    if (!session || typeof session !== "object") continue;
+    const metadata = session.metadata && typeof session.metadata === "object" ? session.metadata : {};
+    const activeWorker = session.activeWorker && typeof session.activeWorker === "object"
+      ? session.activeWorker
+      : {};
+    const candidates = [
+      activeWorker.providerSelection,
+      activeWorker.adapterName,
+      metadata.providerSelection,
+      metadata.adapterName,
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeVoiceExecutor(candidate);
+      if (VALID_EXECUTORS.has(normalized)) {
+        return normalized;
+      }
+    }
+  }
+  return "";
+}
+
+function cloneVoiceProviderConfig(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function resolveManagedSessionProviderDetails(context = {}) {
+  const manager = typeof getBosunSessionManager === "function" ? getBosunSessionManager() : null;
+  if (!manager || typeof manager.getSession !== "function") {
+    return {
+      providerSelection: "",
+      providerId: "",
+      providerConfig: null,
+      model: "",
+    };
+  }
+  const sessionIds = [
+    context?.sessionId,
+    context?.parentSessionId,
+    context?.rootSessionId,
+    context?.threadId,
+  ];
+  for (const sessionId of sessionIds) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) continue;
+    const session = manager.getSession(normalizedSessionId);
+    if (!session || typeof session !== "object") continue;
+    const metadata = session.metadata && typeof session.metadata === "object" ? session.metadata : {};
+    const activeWorker = session.activeWorker && typeof session.activeWorker === "object"
+      ? session.activeWorker
+      : {};
+    const providerConfig =
+      cloneVoiceProviderConfig(activeWorker.providerConfig)
+      || cloneVoiceProviderConfig(metadata.providerConfig)
+      || null;
+    const providerSelectionCandidates = [
+      providerConfig?.selectionId,
+      activeWorker.providerSelection,
+      metadata.providerSelection,
+      activeWorker.providerId,
+      metadata.providerId,
+      providerConfig?.provider,
+      providerConfig?.providerId,
+    ];
+    const providerIdCandidates = [
+      activeWorker.providerId,
+      metadata.providerId,
+      providerConfig?.provider,
+      providerConfig?.providerId,
+    ];
+    const providerSelection = providerSelectionCandidates
+      .map((candidate) => String(candidate || "").trim())
+      .find((candidate) => candidate && candidate !== "openai-native" && candidate !== "codex-sdk")
+      || "";
+    const providerId = providerIdCandidates
+      .map((candidate) => String(candidate || "").trim())
+      .find(Boolean)
+      || "";
+    const model = String(
+      providerConfig?.model
+      || activeWorker.model
+      || metadata.model
+      || context?.model
+      || "",
+    ).trim();
+    return {
+      providerSelection,
+      providerId,
+      providerConfig,
+      model,
+    };
+  }
+  return {
+    providerSelection: "",
+    providerId: "",
+    providerConfig: null,
+    model: "",
+  };
+}
+
+function resolveVoiceExecutor({
+  requestedExecutor,
+  context = {},
+  cfg = {},
+  pool = null,
+  preferPoolExecutor = false,
+} = {}) {
+  const poolExecutor = typeof pool?.resolvePoolSdkName === "function"
+    ? pool.resolvePoolSdkName()
+    : "";
+  const managedSessionExecutor = resolveManagedSessionExecutor(context);
+  const normalizedRequestedExecutor = normalizeVoiceExecutor(requestedExecutor);
+  const runtimeHintCandidates = [
+    context?.sdk,
+    context?.providerSelection,
+    context?.adapterName,
+    managedSessionExecutor,
+    poolExecutor,
+    context?.executor,
+    cfg?.voice?.delegateExecutor,
+    cfg?.primaryAgent,
+  ];
+  const runtimeHintExecutor = runtimeHintCandidates
+    .map((candidate) => normalizeVoiceExecutor(candidate))
+    .find((candidate) => VALID_EXECUTORS.has(candidate)) || "";
+  if (
+    preferPoolExecutor
+    && normalizedRequestedExecutor === "codex-sdk"
+    && runtimeHintExecutor
+    && runtimeHintExecutor !== "codex-sdk"
+  ) {
+    return runtimeHintExecutor;
+  }
+  const candidates = preferPoolExecutor
+    ? [
+        normalizedRequestedExecutor,
+        context?.sdk,
+        context?.providerSelection,
+        context?.adapterName,
+        managedSessionExecutor,
+        poolExecutor,
+        context?.executor,
+        cfg?.voice?.delegateExecutor,
+        cfg?.primaryAgent,
+        "codex-sdk",
+      ]
+    : [
+        normalizedRequestedExecutor,
+        context?.executor,
+        context?.sdk,
+        context?.providerSelection,
+        context?.adapterName,
+        managedSessionExecutor,
+        cfg?.voice?.delegateExecutor,
+        poolExecutor,
+        cfg?.primaryAgent,
+        "codex-sdk",
+      ];
+  for (const candidate of candidates) {
+    const normalized = normalizeVoiceExecutor(candidate);
+    if (VALID_EXECUTORS.has(normalized)) {
+      return normalized;
+    }
+  }
+  return "codex-sdk";
+}
 
 async function getKanban() {
   if (!_kanbanAdapter) {
@@ -489,7 +815,7 @@ function normalizeCandidatePath(input) {
 
 async function resolveDelegationCwd(sessionId) {
   const id = String(sessionId || "").trim();
-  if (!id) return process.cwd();
+  if (!id) return "";
   try {
     const tracker = await getSessionTracker();
     const session = tracker.getSessionById?.(id) || tracker.getSession?.(id) || null;
@@ -501,13 +827,15 @@ async function resolveDelegationCwd(sessionId) {
   } catch {
     // best effort
   }
-  return process.cwd();
+  return "";
 }
 
 async function resolveToolCwd(context = {}) {
   const sessionId = String(context?.sessionId || "").trim();
   const fromSession = await resolveDelegationCwd(sessionId);
   if (fromSession && existsSync(fromSession)) return fromSession;
+  const explicitCwd = String(context?.cwd || "").trim();
+  if (explicitCwd && existsSync(explicitCwd)) return explicitCwd;
   const repoRoot = resolveAgentRepoRoot();
   if (repoRoot && existsSync(repoRoot)) return repoRoot;
   return process.cwd();
@@ -542,6 +870,35 @@ function makeVoiceHandoffSessionId() {
 function isPrivilegedVoiceContext(context = {}) {
   const source = String(context?.authSource || "").trim().toLowerCase();
   return source === "desktop-api-key" || source === "fallback" || source === "unsafe";
+}
+
+function canRunWritableWorkspaceCommand(context = {}) {
+  if (isPrivilegedVoiceContext(context)) return true;
+  return !isVoiceLikeToolContext(context);
+}
+
+function resolveWorkspaceCommandExecutable(commandName) {
+  if (process.platform === "win32" && commandName === "npm") {
+    return "npm.cmd";
+  }
+  return commandName;
+}
+
+function shouldUseWorkspaceCommandShell(commandName) {
+  return process.platform === "win32" && commandName === "npm";
+}
+
+function resolveWorkspaceCommandTimeoutMs(commandName, args = []) {
+  const normalizedArgs = args.map((arg) => String(arg || "").toLowerCase());
+  if (commandName === "npm") {
+    const firstArg = normalizedArgs[0] || "";
+    const secondArg = normalizedArgs[1] || "";
+    if (firstArg === "test" || (firstArg === "run" && (secondArg === "test" || secondArg === "build" || secondArg === "check"))) {
+      return 300_000;
+    }
+    return 120_000;
+  }
+  return 20_000;
 }
 
 // ── Tool Definitions (OpenAI function-calling format) ────────────────────────
@@ -685,7 +1042,13 @@ export async function executeToolCall(toolName, args = {}, context = {}) {
       onEvent: context?.onEvent,
     });
     const result = await orchestrator.execute(normalizedToolName, args, runtimeContext);
-    return { result: typeof result === "string" ? result : JSON.stringify(result, null, 2) };
+    const injectedResult = await injectToolResultContext(
+      normalizedToolName,
+      args,
+      result,
+      runtimeContext,
+    );
+    return { result: typeof injectedResult === "string" ? injectedResult : JSON.stringify(injectedResult, null, 2) };
   } catch (err) {
     console.error("[voice-tools] %s error: %s", String(toolName || "unknown"), String(err?.message || err || "unknown"));
     return {
@@ -751,58 +1114,122 @@ const TOOL_HANDLERS = {
 
   async delegate_to_agent(args, context) {
     const cfg = loadConfig();
-    const requestedExecutor = String(
-      args.executor || context.executor || cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk",
-    )
-      .trim()
-      .toLowerCase();
-    const executor = VALID_EXECUTORS.has(requestedExecutor)
-      ? requestedExecutor
-      : (cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk");
+    const pool = await getAgentPool();
+    const voiceLikeContext = isVoiceLikeToolContext(context);
+    if (!voiceLikeContext && isDelegatedToolSession(context)) {
+      return "{RESPONSE}: Nested delegate_to_agent calls are blocked for delegated sessions. Continue in the current delegated session or poll the existing background session instead of spawning another live delegate.";
+    }
+    const managedProviderDetails = resolveManagedSessionProviderDetails(context);
+    const executor = resolveVoiceExecutor({
+      requestedExecutor: args.executor,
+      context,
+      cfg,
+      pool,
+      preferPoolExecutor: !voiceLikeContext,
+    });
 
     const rawMode = String(args.mode || context.mode || "agent")
       .trim()
       .toLowerCase();
     const mode = MODE_ALIASES[rawMode] || (VALID_AGENT_MODES.has(rawMode) ? rawMode : "agent");
-    const model = String(args.model || context.model || "").trim() || undefined;
+    const providerSelection = String(
+      context?.providerSelection
+      || context?.providerId
+      || context?.provider
+      || managedProviderDetails.providerSelection
+      || managedProviderDetails.providerId
+      || "",
+    ).trim() || undefined;
+    const providerId = String(
+      context?.providerId
+      || context?.provider
+      || managedProviderDetails.providerId
+      || "",
+    ).trim() || undefined;
+    const providerConfigBase =
+      cloneVoiceProviderConfig(context?.providerConfig)
+      || managedProviderDetails.providerConfig
+      || null;
+    const inheritedProviderModel = String(
+      providerConfigBase?.model
+      || managedProviderDetails.model
+      || "",
+    ).trim();
+    const requestedModel = String(
+      args.model
+      || context.model
+      || "",
+    ).trim();
+    const model = (
+      executor === "openai-native" && inheritedProviderModel
+        ? inheritedProviderModel
+        : (requestedModel || inheritedProviderModel)
+    ) || undefined;
+    const providerConfig = providerConfigBase || providerSelection || providerId || model
+      ? {
+          ...(providerConfigBase || {}),
+          ...(providerSelection && !providerConfigBase?.selectionId ? { selectionId: providerSelection } : {}),
+          ...(providerId && !providerConfigBase?.provider ? { provider: providerId } : {}),
+          ...(providerId && !providerConfigBase?.providerId ? { providerId } : {}),
+          ...(model ? { model } : {}),
+        }
+      : null;
     const parentSessionId = String(context.sessionId || "").trim() || null;
-    const sessionType = "voice-delegate";
+    const baseSessionType = String(context.sessionType || "").trim() || (voiceLikeContext ? "voice" : "delegate");
+    const sessionType = voiceLikeContext
+      ? "voice-delegate"
+      : (baseSessionType === "delegate" ? "delegate" : `${baseSessionType}-delegate`);
+    const sessionScope = voiceLikeContext ? "voice" : "delegate";
+    const sessionSource = String(context.surface || (voiceLikeContext ? "voice" : "bosun-tool")).trim() || "bosun-tool";
+    const trackerEventLabel = voiceLikeContext ? "Voice Delegation" : "Delegation";
+    const trackerEventTypePrefix = voiceLikeContext ? "voice_live_delegation" : "delegation";
     const cwd = await resolveToolCwd(context);
     const workspaceContext = await getWorkspaceContextSummary(context);
     const visionSummary = await getLatestVisionSummary(parentSessionId || "");
     const delegateMessage = appendVisionSummary(args.message, visionSummary);
-    const shortTitle = String(args.message || "").trim().slice(0, 90) || "Voice task";
+    const shortTitle = String(args.message || "").trim().slice(0, 90) || (voiceLikeContext ? "Voice task" : "Delegated task");
+    const rootSessionId = String(context.rootSessionId || parentSessionId || "").trim() || null;
 
     // ── Create a live session for direct execution (no background queue) ──
-    const liveSessionId = `voice-live-${Date.now()}-${randomUUID().slice(0, 6)}`;
+    const liveSessionId = `${voiceLikeContext ? "voice-live" : "delegate-live"}-${Date.now()}-${randomUUID().slice(0, 6)}`;
 
     try {
       const tracker = await getSessionTracker();
       if (tracker.createSession) {
-        tracker.createSession({
-          id: liveSessionId,
-          type: sessionType,
-          metadata: {
-            title: shortTitle,
-            agent: executor,
-            mode,
-            model,
-            parentSessionId,
-            workspaceDir: cwd,
-            workspaceContext,
-            source: "voice",
-          },
-        });
+        const existingSession =
+          tracker.getSessionById?.(liveSessionId)
+          || tracker.getSession?.(liveSessionId)
+          || null;
+        if (!existingSession) {
+          tracker.createSession({
+            id: liveSessionId,
+            type: sessionType,
+            metadata: {
+              title: shortTitle,
+              agent: executor,
+              mode,
+              model,
+              parentSessionId,
+              rootSessionId,
+              providerSelection,
+              providerId,
+              ...(providerConfig ? { providerConfig } : {}),
+              workspaceDir: cwd,
+              workspaceContext,
+              source: sessionSource,
+            },
+          });
+        }
       }
       // Link to parent session
       if (parentSessionId && tracker.recordEvent) {
         tracker.recordEvent(parentSessionId, {
           role: "system",
-          content: `[Voice Delegation] Started live session ${liveSessionId} → ${executor} (${mode})`,
+          content: `[${trackerEventLabel}] Started live session ${liveSessionId} → ${executor} (${mode})`,
           timestamp: new Date().toISOString(),
           meta: {
-            source: "voice",
-            eventType: "voice_live_delegation",
+            source: sessionSource,
+            eventType: trackerEventTypePrefix,
             liveSessionId,
             executor,
             mode,
@@ -812,40 +1239,71 @@ const TOOL_HANDLERS = {
     } catch { /* best effort session tracking */ }
 
     // ── Execute directly in new live session (fire-and-forget) ──
-    const pool = await getAgentPool();
-    pool.execPooledPrompt(delegateMessage, {
+    pool.launchOrResumeThread(delegateMessage, cwd, 5 * 60_000, {
+      taskKey: liveSessionId,
+      sessionId: liveSessionId,
+      sessionScope,
+      sessionType,
+      parentSessionId: parentSessionId || undefined,
+      rootSessionId: rootSessionId || undefined,
       sdk: executor,
+      ...(providerSelection ? { providerSelection } : {}),
+      ...(providerId ? { provider: providerId } : {}),
+      ...(providerConfig ? { providerConfig } : {}),
+      pinSdk: !voiceLikeContext,
       mode,
       model,
-      cwd,
-      timeoutMs: 5 * 60_000,
-      sessionType,
+      metadata: {
+        title: shortTitle,
+        agent: executor,
+        mode,
+        model,
+        parentSessionId,
+        rootSessionId,
+        providerSelection,
+        providerId,
+        ...(providerConfig ? { providerConfig } : {}),
+        workspaceDir: cwd,
+        workspaceContext,
+        source: sessionSource,
+      },
     })
-      .then(async (result) => {
-        const text = typeof result === "string"
-          ? result
-          : result?.finalResponse || result?.text || result?.message || JSON.stringify(result);
-        const trimmed = String(text || "").trim();
+      .then(async (rawResult) => {
+        const result = normalizeDelegateSessionResult(rawResult);
+        const trimmed = extractDelegateResultText(result)
+          || (result?.success === false ? JSON.stringify(result) : "");
+        const completionStatus = String(
+          result?.blockedReason
+          || result?.status
+          || (result?.success === true ? "completed" : "failed"),
+        ).trim() || (result?.success === true ? "completed" : "failed");
+        const completionEventType = result?.success === true
+          ? `${trackerEventTypePrefix}_complete`
+          : `${trackerEventTypePrefix}_blocked`;
         try {
           const tracker = await getSessionTracker();
-          if (tracker.updateSessionStatus) {
-            tracker.updateSessionStatus(liveSessionId, "completed");
-          }
           if (tracker.recordEvent) {
-            tracker.recordEvent(liveSessionId, {
-              role: "assistant",
-              content: trimmed.slice(0, 4000),
-              timestamp: new Date().toISOString(),
-              meta: { source: "voice", eventType: "voice_delegation_complete", executor, mode },
-            });
-            if (parentSessionId) {
-              tracker.recordEvent(parentSessionId, {
-                role: "system",
-                content: `[Voice Delegation Complete] Session ${liveSessionId} finished.`,
+            if (trimmed) {
+              tracker.recordEvent(liveSessionId, {
+                role: result?.success === true ? "assistant" : "system",
+                content: trimmed.slice(0, 4000),
                 timestamp: new Date().toISOString(),
-                meta: { source: "voice", eventType: "voice_live_delegation_complete", liveSessionId },
+                meta: { source: sessionSource, eventType: completionEventType, executor, mode, status: completionStatus },
               });
             }
+            if (parentSessionId) {
+              tracker.recordEvent(parentSessionId, {
+                role: result?.success === true ? "system" : "assistant",
+                content: result?.success === true
+                  ? `[${trackerEventLabel} Complete] Session ${liveSessionId} finished.`
+                  : `[${trackerEventLabel} Blocked] Session ${liveSessionId} ended with status ${completionStatus}.`,
+                timestamp: new Date().toISOString(),
+                meta: { source: sessionSource, eventType: completionEventType, liveSessionId, status: completionStatus },
+              });
+            }
+          }
+          if (tracker.updateSessionStatus) {
+            tracker.updateSessionStatus(liveSessionId, completionStatus);
           }
         } catch {
           // best effort
@@ -854,15 +1312,16 @@ const TOOL_HANDLERS = {
       .catch(async (err) => {
         try {
           const tracker = await getSessionTracker();
-          if (tracker.updateSessionStatus) {
-            tracker.updateSessionStatus(liveSessionId, "error");
-          }
           if (tracker.recordEvent) {
             tracker.recordEvent(liveSessionId, {
               role: "system",
-              content: `[Voice Delegation Error] ${err?.message || "Unknown error"}`,
+              content: `[${trackerEventLabel} Error] ${err?.message || "Unknown error"}`,
               timestamp: new Date().toISOString(),
+              meta: { source: sessionSource, eventType: `${trackerEventTypePrefix}_error`, liveSessionId },
             });
+          }
+          if (tracker.updateSessionStatus) {
+            tracker.updateSessionStatus(liveSessionId, "error");
           }
         } catch {
           // best effort
@@ -874,14 +1333,8 @@ const TOOL_HANDLERS = {
 
   async ask_agent_context(args, context) {
     const cfg = loadConfig();
-    const requestedExecutor = String(
-      context?.executor || cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk",
-    )
-      .trim()
-      .toLowerCase();
-    const executor = VALID_EXECUTORS.has(requestedExecutor)
-      ? requestedExecutor
-      : (cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk");
+    const pool = await getAgentPool();
+    const executor = resolveVoiceExecutor({ context, cfg, pool });
 
     const mode = "instant";
     const model = String(args.model || context?.model || "").trim() || undefined;
@@ -900,7 +1353,6 @@ const TOOL_HANDLERS = {
     const message = VOICE_CONTEXT_PREAMBLE + appendVisionSummary(`${userAsk}${contextBlock}`, visionSummary);
 
     try {
-      const pool = await getAgentPool();
       const result = await pool.execPooledPrompt(message, {
         sdk: executor,
         mode,
@@ -1664,19 +2116,19 @@ const TOOL_HANDLERS = {
     const prompt = String(args.prompt || "").trim();
     if (!prompt) return { ok: false, error: "prompt is required." };
     const cfg = loadConfig();
-    const requestedExecutor = String(
-      args.executor || context?.executor || cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk",
-    ).trim().toLowerCase();
-    const executor = VALID_EXECUTORS.has(requestedExecutor)
-      ? requestedExecutor
-      : (VALID_EXECUTORS.has(cfg.primaryAgent) ? cfg.primaryAgent : "codex-sdk");
+    const pool = await getAgentPool();
+    const executor = resolveVoiceExecutor({
+      requestedExecutor: args.executor,
+      context,
+      cfg,
+      pool,
+    });
 
     const generationPrompt =
       "Generate a Bosun workflow JSON definition only. " +
       "Return strict JSON with keys: name, description, enabled, variables, nodes, edges, triggers, metadata. " +
       "Do not include markdown fences.\n\n" +
       `User request:\n${prompt}`;
-    const pool = await getAgentPool();
     const result = await pool.execPooledPrompt(generationPrompt, {
       sdk: executor,
       mode: "agent",
@@ -2122,17 +2574,12 @@ const TOOL_HANDLERS = {
       `VOICE_RESPONSE: [exactly 1 sentence confirming what happened or the key result]`;
 
     const cfg = loadConfig();
-    const requestedExecutor = String(
-      context?.executor || cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk",
-    ).trim().toLowerCase();
-    const executor = VALID_EXECUTORS.has(requestedExecutor)
-      ? requestedExecutor
-      : (cfg.voice?.delegateExecutor || cfg.primaryAgent || "codex-sdk");
+    const pool = await getAgentPool();
+    const executor = resolveVoiceExecutor({ context, cfg, pool });
     const model = String(context?.model || "").trim() || undefined;
     const cwd = await resolveToolCwd(context);
 
     try {
-      const pool = await getAgentPool();
       const result = await pool.execPooledPrompt(taskPrompt, {
         sdk: executor,
         mode: "instant",
@@ -2316,21 +2763,21 @@ const TOOL_HANDLERS = {
     const SAFE_PATTERNS = SAFE_WORKSPACE_COMMAND_PATTERNS;
 
     const isSafe = SAFE_PATTERNS.some((p) => p.test(rawCmd));
-    if (!isSafe) {
+    if (!isSafe && !canRunWritableWorkspaceCommand(context)) {
       return "{RESPONSE}: Blocked non-read-only workspace command for this session. Ask an owner/admin to run it, or switch to a delegated agent workflow.";
     }
 
     try {
       const { spawnSync } = await import("node:child_process");
       const cwd = await resolveToolCwd(context);
-      const hasShellMeta = /[|&;<>\x60$(){}]/.test(rawCmd);
+      const hasShellMeta = /[|&;<>\x60$]/.test(rawCmd);
       if (hasShellMeta) {
         return "{RESPONSE}: Shell metacharacters are not allowed in direct workspace commands.";
       }
-      const tokens = String(rawCmd)
-        .split(/\s+/)
-        .map((token) => token.trim())
-        .filter(Boolean);
+      const { error: tokenError, tokens } = tokenizeWorkspaceCommand(rawCmd);
+      if (tokenError) {
+        return `{RESPONSE}: ${tokenError}`;
+      }
       if (tokens.length === 0) {
         return "{RESPONSE}: command is required.";
       }
@@ -2356,11 +2803,14 @@ const TOOL_HANDLERS = {
         return "{RESPONSE}: Command is not allowlisted for direct execution.";
       }
       const cmdArgs = tokens.slice(1);
-      const res = spawnSync(safeCmd, cmdArgs, {
+      const executable = resolveWorkspaceCommandExecutable(safeCmd);
+      const useShell = shouldUseWorkspaceCommandShell(safeCmd);
+      const timeoutMs = resolveWorkspaceCommandTimeoutMs(safeCmd, cmdArgs);
+      const res = spawnSync(executable, cmdArgs, {
         encoding: "utf8",
-        timeout: 20_000,
+        timeout: timeoutMs,
         cwd,
-        shell: false,
+        shell: useShell,
         stdio: ["ignore", "pipe", "pipe"],
       });
       if (res.error) throw res.error;

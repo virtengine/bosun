@@ -3372,10 +3372,8 @@ registerNodeType("action.run_agent", {
         };
 
         const heartbeat = setInterval(() => {
-          if (!firstEventSeen) {
-            firstEventSeen = true;
-            clearFirstEventGuard();
-          }
+          // Heartbeats prove the workflow node is still alive, not that the
+          // delegated agent emitted a meaningful first event.
           if (tracker && trackedTaskId) {
             tracker.touchSession(trackedTaskId);
             if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {

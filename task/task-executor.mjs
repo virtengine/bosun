@@ -806,6 +806,7 @@ const INPROGRESS_RECOVERY_INTERVAL_MS = 5 * 60 * 1000;
 const INPROGRESS_RECOVERY_HISTORY_LIMIT = 12;
 const WORKFLOW_RUN_RECOVERY_GRACE_MS = 60 * 60 * 1000; // 60 minutes — agent phases (plan/tests/implement) can run >15 min between dag updates
 const WORKFLOW_RUN_STARTUP_STALL_RECOVERY_MS = INPROGRESS_RECOVERY_UNSTARTED_RESET_MS;
+const WORKFLOW_RUN_PROGRESS_TIMESTAMP_EPSILON_MS = 1000;
 const UNRESOLVED_TEMPLATE_TOKEN_RE = /\{\{[^{}]+\}\}/;
 
 function normalizeSelector(value) {
@@ -4724,8 +4725,7 @@ class TaskExecutor {
   _isStartupOnlyWorkflowEvidenceStalled(candidate) {
     const checkpoint = candidate?.detail?.latestCheckpoint || null;
     const eventType = String(checkpoint?.eventType || "").trim().toLowerCase();
-    const nodeId = String(checkpoint?.nodeId || "").trim();
-    if (eventType !== "agent.started" || !nodeId.startsWith("run-agent-")) {
+    if (eventType !== "agent.started") {
       return false;
     }
 
@@ -4771,6 +4771,64 @@ class TaskExecutor {
 
     const elapsedMs = Number(progress?.elapsedMs || 0);
     return totalEvents <= 1 && elapsedMs >= WORKFLOW_RUN_STARTUP_STALL_RECOVERY_MS;
+  }
+
+  _isCheckpointlessWorkflowEvidenceStale(candidate) {
+    const source = String(candidate?.source || "").trim().toLowerCase();
+    if (source === "active-runs") {
+      return false;
+    }
+
+    const detail = candidate?.detail && typeof candidate.detail === "object"
+      ? candidate.detail
+      : null;
+    if (!detail) {
+      return false;
+    }
+
+    if (detail?.latestCheckpoint && typeof detail.latestCheckpoint === "object") {
+      return false;
+    }
+
+    const status = String(candidate?.status || "").trim().toLowerCase();
+    if (TERMINAL_WORKFLOW_RUN_STATUSES.has(status)) {
+      return false;
+    }
+
+    const lastActivityMs = Number(candidate?.lastActivityMs || 0);
+    if (!Number.isFinite(lastActivityMs) || lastActivityMs <= 0) {
+      return false;
+    }
+    if (Date.now() - lastActivityMs < WORKFLOW_RUN_STARTUP_STALL_RECOVERY_MS) {
+      return false;
+    }
+
+    const dagState = detail?.data?._dagState || detail?._dagState || null;
+    const startedAtMs = Math.max(
+      parseTimestampMs(detail?.startedAt),
+      parseTimestampMs(dagState?.createdAt),
+    );
+    if (startedAtMs <= 0) {
+      return false;
+    }
+
+    const concreteProgressMs = Math.max(
+      parseTimestampMs(detail?.lastProgressAt),
+      parseTimestampMs(dagState?.lastStatusAt),
+    );
+    const genericUpdateMs = Math.max(
+      parseTimestampMs(detail?.updatedAt),
+      parseTimestampMs(dagState?.updatedAt),
+    );
+    const meaningfulProgressFloorMs = startedAtMs + WORKFLOW_RUN_PROGRESS_TIMESTAMP_EPSILON_MS;
+    if (
+      concreteProgressMs > meaningfulProgressFloorMs ||
+      genericUpdateMs > meaningfulProgressFloorMs
+    ) {
+      return false;
+    }
+
+    return true;
   }
 
   _rankWorkflowEvidenceCandidate(candidate, expectedTaskId = "") {
@@ -4875,6 +4933,10 @@ class TaskExecutor {
     if (ranked.hasRecentEvidence && this._isStartupOnlyWorkflowEvidenceStalled(ranked)) {
       ranked.hasRecentEvidence = false;
       ranked.startupStalled = true;
+    }
+    if (ranked.hasRecentEvidence && this._isCheckpointlessWorkflowEvidenceStale(ranked)) {
+      ranked.hasRecentEvidence = false;
+      ranked.checkpointlessStale = true;
     }
 
     return ranked;

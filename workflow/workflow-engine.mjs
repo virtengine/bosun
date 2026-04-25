@@ -47,6 +47,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlink
 import { resolve, basename, extname, join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import os from "node:os";
 import {
   ensureTestRuntimeSandbox,
   resolvePathForTestRuntime,
@@ -138,6 +139,16 @@ function getRuntimeProcess() {
 
 function getRuntimeEnv() {
   return getRuntimeProcess()?.env || {};
+}
+
+function getWorkflowResumeTraceTaskIds() {
+  const raw = String(getRuntimeEnv().WORKFLOW_RESUME_TRACE_TASK_IDS || "").trim();
+  if (!raw) return null;
+  const taskIds = raw
+    .split(/[,\s]+/)
+    .map((value) => normalizeWorkflowIdentityText(value))
+    .filter(Boolean);
+  return taskIds.length > 0 ? new Set(taskIds) : null;
 }
 
 function shouldQuietWorkflowTraceLogs() {
@@ -1543,6 +1554,7 @@ function cleanObject(value = {}) {
 }
 
 const MAX_PERSISTED_RUN_STRING_LENGTH = 4_000;
+const MAX_PERSISTED_RUN_COMMAND_OUTPUT_LENGTH = 128_000;
 const MAX_PERSISTED_RUN_ARRAY_ITEMS = 25;
 const MAX_PERSISTED_RUN_OBJECT_KEYS = 40;
 const MAX_PERSISTED_RUN_DEPTH = 6;
@@ -1554,6 +1566,12 @@ function truncatePersistedRunString(value, limit = MAX_PERSISTED_RUN_STRING_LENG
   if (!text) return text;
   if (!Number.isFinite(limit) || limit <= 0 || text.length <= limit) return text;
   return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function resolvePersistedRunStringLimit(key = "") {
+  return key === "output"
+    ? MAX_PERSISTED_RUN_COMMAND_OUTPUT_LENGTH
+    : MAX_PERSISTED_RUN_STRING_LENGTH;
 }
 
 function buildPersistedValueSummary(value) {
@@ -1635,6 +1653,10 @@ function isTaskLikePersistedValue(value, { key = "" } = {}) {
   const hasTaskIdentity = Boolean(
     value.taskId ||
     value.taskTitle ||
+    ((value.id || value.title) && (value.status !== undefined || value.branch || value.branchName)) ||
+    value.meta?.worktreeFailure,
+  );
+  const hasTaskLocation = Boolean(
     value.branch ||
     value.branchName ||
     value.repoRoot ||
@@ -1643,16 +1665,9 @@ function isTaskLikePersistedValue(value, { key = "" } = {}) {
     value.defaultTargetBranch ||
     value.meta?.worktreeFailure,
   );
-  if (!hasTaskIdentity) return false;
-  return keySignalsTask || Boolean(
-    value.branch ||
-    value.branchName ||
-    value.repoRoot ||
-    value.worktreePath ||
-    value.baseBranch ||
-    value.defaultTargetBranch ||
-    value.meta?.worktreeFailure,
-  );
+  const hasTaskState = value.status !== undefined || Boolean(value.meta?.worktreeFailure);
+  if (!hasTaskIdentity && !keySignalsTask) return false;
+  return keySignalsTask || hasTaskLocation || hasTaskState;
 }
 
 function summarizePersistedTaskValue(value, { key = "" } = {}) {
@@ -1762,14 +1777,16 @@ function summarizePersistedObject(value, { depth = 0, key = "" } = {}) {
 function summarizePersistedWorkflowValue(value, { depth = 0, key = "" } = {}) {
   if (value == null) return value;
   const valueType = typeof value;
-  if (valueType === "string") return truncatePersistedRunString(value);
+  if (valueType === "string") {
+    return truncatePersistedRunString(value, resolvePersistedRunStringLimit(key));
+  }
   if (valueType === "number" || valueType === "boolean") return value;
   if (valueType === "bigint") return String(value);
   if (valueType === "function" || valueType === "symbol") return undefined;
   if (depth >= MAX_PERSISTED_RUN_DEPTH) return buildPersistedValueSummary(value);
   if (Array.isArray(value)) return summarizePersistedArray(value, { depth, key });
   if (valueType === "object") return summarizePersistedObject(value, { depth, key });
-  return truncatePersistedRunString(value);
+  return truncatePersistedRunString(value, resolvePersistedRunStringLimit(key));
 }
 
 function preservePersistedRunIdentityData(sourceData, summarizedData) {
@@ -2763,21 +2780,33 @@ function buildRunDelegationTopology({ runId = null, detail = {}, runGraph = null
 
 function buildActiveRunIndexEntry(runId, workflowId, workflowName, ctx) {
   const detail = ctx?.toJSON?.(Date.now()) || {};
-  const taskIds = collectRunTaskIds(detail, {
-    currentRunId: runId,
-    includeTopologyIds: false,
+  const topology = buildRunDelegationTopology({
+    runId,
+    detail,
   });
-  const sessionIds = collectRunSessionIds(detail);
   return cleanObject({
     runId,
     workflowId,
     workflowName,
     startedAt: ctx?.startedAt || Date.now(),
-    taskId: taskIds[0] || undefined,
-    taskIds: taskIds.length > 0 ? taskIds : undefined,
+    rootRunId: topology.rootRunId || undefined,
+    parentRunId: topology.parentRunId || undefined,
+    taskId: topology.taskId || undefined,
+    rootTaskId: topology.rootTaskId || undefined,
+    parentTaskId: topology.parentTaskId || undefined,
+    taskIds: Array.isArray(topology.taskIds) && topology.taskIds.length > 0
+      ? topology.taskIds
+      : undefined,
     taskTitle: resolveRunTaskTitle(detail, { currentRunId: runId }) || undefined,
-    sessionId: sessionIds[0] || undefined,
-    sessionIds: sessionIds.length > 0 ? sessionIds : undefined,
+    sessionId: topology.sessionId || undefined,
+    rootSessionId: topology.rootSessionId || undefined,
+    parentSessionId: topology.parentSessionId || undefined,
+    sessionIds: Array.isArray(topology.sessionIds) && topology.sessionIds.length > 0
+      ? topology.sessionIds
+      : undefined,
+    delegationDepth: Number.isFinite(Number(topology.delegationDepth))
+      ? Number(topology.delegationDepth)
+      : undefined,
   });
 }
 
@@ -3618,6 +3647,50 @@ export class WorkflowEngine extends EventEmitter {
       }
     }
     return next;
+  }
+
+  _stripRetryResumeEphemeralData(def, data = {}) {
+    if (!data || typeof data !== "object") return data;
+    const next = { ...data };
+    for (const key of [
+      "_workflowSessionId",
+      "_workflowRootSessionId",
+      "_workflowParentSessionId",
+      "_workflowSessionScope",
+      "_workflowTaskId",
+      "_workflowRunThreadId",
+      "_delegatedSessionIds",
+    ]) {
+      delete next[key];
+    }
+    const templateId = String(def?.metadata?.installedFrom || "").trim();
+    if (templateId === "template-task-lifecycle") {
+      for (const key of [
+        "claimToken",
+        "_claimToken",
+        "worktreePath",
+        "_worktreeCreated",
+        "_worktreeManaged",
+        "_pushSkipped",
+        "_changedFileCount",
+      ]) {
+        delete next[key];
+      }
+    }
+    return next;
+  }
+
+  _resolveRetryResumeResetStartNodeId(def, data = {}) {
+    const templateId = String(def?.metadata?.installedFrom || "").trim();
+    if (templateId !== "template-task-lifecycle") return null;
+    const hadClaimOrWorktreeState = Boolean(
+      String(data?.claimToken || data?._claimToken || "").trim()
+      || String(data?.worktreePath || "").trim(),
+    );
+    if (!hadClaimOrWorktreeState) return null;
+    return Array.isArray(def?.nodes) && def.nodes.some((node) => String(node?.id || "").trim() === "claim-task")
+      ? "claim-task"
+      : null;
   }
 
   _resolveTaskTraceContext(ctx, node = null, result = null) {
@@ -4628,7 +4701,10 @@ export class WorkflowEngine extends EventEmitter {
     const originalData = { ...(originalRun.detail?.data || {}) };
     delete originalData._workflowId;
     delete originalData._workflowName;
-    const retryData = this._applyResumeInputMigrations(def, originalData);
+    const retryData = this._stripRetryResumeEphemeralData(
+      def,
+      this._applyResumeInputMigrations(def, originalData),
+    );
 
     this.emit("run:retry", {
       originalRunId: runId,
@@ -4661,6 +4737,11 @@ export class WorkflowEngine extends EventEmitter {
     const detail = originalRun.detail || {};
     const nodeStatuses = detail.nodeStatuses || {};
     const nodeOutputs = detail.nodeOutputs || {};
+    const adjacency = this._buildAdjacency(def);
+    const resumeResetStartNodeId = this._resolveRetryResumeResetStartNodeId(def, originalData);
+    const resumeResetNodeIds = resumeResetStartNodeId
+      ? this._collectSubgraph(resumeResetStartNodeId, adjacency)
+      : new Set();
 
     // Build a fresh context but pre-seed completed node outputs.
     const ctx = new WorkflowContext({
@@ -4685,6 +4766,10 @@ export class WorkflowEngine extends EventEmitter {
     const preservedCompletedNodeIds = [];
     const focusNodeIds = [];
     for (const [nodeId, status] of Object.entries(nodeStatuses)) {
+      if (resumeResetNodeIds.has(nodeId)) {
+        focusNodeIds.push(nodeId);
+        continue;
+      }
       if (status === NodeStatus.COMPLETED) {
         preservedCompletedNodeIds.push(nodeId);
         ctx.setNodeStatus(nodeId, NodeStatus.COMPLETED);
@@ -4705,6 +4790,8 @@ export class WorkflowEngine extends EventEmitter {
       reason: "retry_resume",
       sourceRunId: runId,
       preservedCompletedNodeIds,
+      resetStartNodeId: resumeResetStartNodeId || undefined,
+      resetNodeIds: resumeResetNodeIds.size > 0 ? [...resumeResetNodeIds] : undefined,
     });
 
     this._recordDagRevision(ctx, {
@@ -4715,6 +4802,8 @@ export class WorkflowEngine extends EventEmitter {
       sourceRunId: runId,
       preservedCompletedNodeIds,
       focusNodeIds,
+      resetStartNodeId: resumeResetStartNodeId || undefined,
+      resetNodeIds: resumeResetNodeIds.size > 0 ? [...resumeResetNodeIds] : undefined,
     });
 
     const retryRunId = ctx.id;
@@ -4759,7 +4848,6 @@ export class WorkflowEngine extends EventEmitter {
     });
 
     try {
-      const adjacency = this._buildAdjacency(def);
       const entryNodes = this._findEntryNodes(def);
       if (entryNodes.length === 0) {
         throw new Error("Workflow has no entry nodes (no triggers or unconnected nodes)");
@@ -7685,10 +7773,6 @@ export class WorkflowEngine extends EventEmitter {
     ) {
       return ["kanban"];
     }
-    // Telegram notification
-    if (nodeType === "notify.telegram") {
-      return ["telegram"];
-    }
     // condition.task_has_tag reads from kanban
     if (nodeType === "condition.task_has_tag") {
       return ["kanban"];
@@ -8261,6 +8345,46 @@ export class WorkflowEngine extends EventEmitter {
     }
   }
 
+  _resolveTaskClaimsRepoRoot() {
+    const candidates = [
+      resolve(this.runsDir, ".."),
+      resolve(this.runsDir, "..", ".."),
+      this._configDir,
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    for (const candidate of candidates) {
+      const claimsPath = resolve(candidate, ".cache", "bosun", "task-claims.json");
+      if (existsSync(claimsPath)) return candidate;
+    }
+    return resolve(this.runsDir, "..");
+  }
+
+  _getLiveLocalTaskClaim(taskId) {
+    const normalizedTaskId = normalizeWorkflowIdentityText(taskId || "");
+    if (!normalizedTaskId) return null;
+    try {
+      const claimsPath = resolve(
+        this._resolveTaskClaimsRepoRoot(),
+        ".cache",
+        "bosun",
+        "task-claims.json",
+      );
+      if (!existsSync(claimsPath)) return null;
+      const registry = JSON.parse(readFileSync(claimsPath, "utf8"));
+      const claim = registry?.claims?.[normalizedTaskId] || null;
+      if (!claim || typeof claim !== "object") return null;
+      const claimHost = String(claim?.metadata?.host || "").trim().toLowerCase();
+      if (claimHost && claimHost !== os.hostname().toLowerCase()) return null;
+      const claimPid = Number(claim?.metadata?.pid);
+      if (!Number.isFinite(claimPid) || claimPid <= 0) return null;
+      process.kill(Math.trunc(claimPid), 0);
+      return claim;
+    } catch {
+      return null;
+    }
+  }
+
   /** Write the active-runs index atomically. */
   _writeActiveRunsIndex(entries) {
     try {
@@ -8272,36 +8396,99 @@ export class WorkflowEngine extends EventEmitter {
     }
   }
 
+  _readPersistedRunDetail(runId) {
+    const normalizedRunId = String(runId || "").trim();
+    if (!normalizedRunId) return null;
+    try {
+      const detailPath = resolve(this.runsDir, `${normalizedRunId}.json`);
+      if (!existsSync(detailPath)) return null;
+      return JSON.parse(readFileSync(detailPath, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  _getPersistedForeignActiveRunIndexEntries(options = {}) {
+    const omitRunId = String(options?.omitRunId || "").trim();
+    const includeRunId = String(options?.includeRunId || "").trim();
+    const managedRunIds = new Set(
+      [...this._activeRuns.keys()]
+        .map((runId) => String(runId || "").trim())
+        .filter(Boolean),
+    );
+    if (includeRunId && !(omitRunId && includeRunId === omitRunId)) {
+      managedRunIds.add(includeRunId);
+    }
+    const preservedEntries = [];
+    for (const candidate of this._readActiveRunsIndex()) {
+      const runId = String(candidate?.runId || "").trim();
+      if (!runId || runId === omitRunId || managedRunIds.has(runId)) continue;
+      const detail = this._readPersistedRunDetail(runId);
+      const taskIdentity = this._resolveRunTaskIdentity(candidate, detail);
+      const taskId = normalizeWorkflowIdentityText(
+        taskIdentity?.taskId || candidate?.taskId || "",
+      );
+      if (!taskId || !this._getLiveLocalTaskClaim(taskId)) continue;
+      preservedEntries.push(cleanObject({
+        ...candidate,
+        runId,
+        workflowId:
+          normalizeWorkflowIdentityText(candidate?.workflowId || detail?.data?._workflowId || "")
+          || undefined,
+        workflowName:
+          normalizeWorkflowRunText(candidate?.workflowName || detail?.data?._workflowName || "")
+          || undefined,
+        startedAt: Number.isFinite(Number(candidate?.startedAt))
+          ? Number(candidate.startedAt)
+          : (Number.isFinite(Number(detail?.startedAt)) ? Number(detail.startedAt) : Date.now()),
+        taskId,
+        taskTitle:
+          normalizeWorkflowRunText(taskIdentity?.taskTitle || candidate?.taskTitle || "")
+          || undefined,
+      }));
+    }
+    return preservedEntries;
+  }
+
   _snapshotActiveRunIndexEntries(options = {}) {
     const omitRunId = String(options?.omitRunId || "").trim();
     const includeRunId = String(options?.includeRunId || "").trim();
     const includeWorkflowId = String(options?.includeWorkflowId || "").trim();
     const includeWorkflowName = String(options?.includeWorkflowName || "").trim();
     const includeCtx = options?.includeCtx || null;
-    const entries = [];
+    const entriesByRunId = new Map();
+    for (const entry of this._getPersistedForeignActiveRunIndexEntries(options)) {
+      entriesByRunId.set(String(entry?.runId || "").trim(), entry);
+    }
     for (const [runId, info] of this._activeRuns.entries()) {
       if (omitRunId && runId === omitRunId) continue;
       const workflowId = String(info?.workflowId || "").trim();
       const workflowName = String(info?.workflowName || "").trim();
       const ctx = info?.ctx || null;
       if (!workflowId || !ctx) continue;
-      entries.push(buildActiveRunIndexEntry(runId, workflowId, workflowName, ctx));
+      entriesByRunId.set(
+        runId,
+        buildActiveRunIndexEntry(runId, workflowId, workflowName, ctx),
+      );
     }
     if (
       includeRunId &&
       includeWorkflowId &&
       includeCtx &&
       !(omitRunId && includeRunId === omitRunId) &&
-      !entries.some((entry) => String(entry?.runId || "").trim() === includeRunId)
+      !entriesByRunId.has(includeRunId)
     ) {
-      entries.push(buildActiveRunIndexEntry(
+      entriesByRunId.set(
         includeRunId,
-        includeWorkflowId,
-        includeWorkflowName,
-        includeCtx,
-      ));
+        buildActiveRunIndexEntry(
+          includeRunId,
+          includeWorkflowId,
+          includeWorkflowName,
+          includeCtx,
+        ),
+      );
     }
-    return entries.sort(
+    return [...entriesByRunId.values()].sort(
       (left, right) =>
         Number(left?.startedAt || 0) - Number(right?.startedAt || 0) ||
         String(left?.runId || "").localeCompare(String(right?.runId || "")),
@@ -8355,12 +8542,65 @@ export class WorkflowEngine extends EventEmitter {
     }
   }
 
+  _syncTaskProjectionFromRunSummary(summary, detail = null) {
+    if (!this.services?.kanban || !summary || typeof summary !== "object") return;
+    try {
+      const runId = normalizeWorkflowIdentityText(summary.runId || "");
+      if (!runId) return;
+      const taskIdentity = this._resolveRunTaskIdentity(summary, detail);
+      const taskId = normalizeWorkflowIdentityText(taskIdentity?.taskId || summary.taskId || "");
+      if (!taskId) return;
+      const topology =
+        summary.delegationTopology && typeof summary.delegationTopology === "object"
+          ? summary.delegationTopology
+          : {};
+      const startedAtMs = Number(summary.startedAt);
+      const endedAtMs = Number(summary.endedAt);
+      const status = normalizeWorkflowIdentityText(summary.status || "") || null;
+      const summaryText =
+        normalizeWorkflowRunText(summary.issueAdvisorSummary || "") ||
+        `Workflow run ${runId} ${status || "updated"}`;
+      linkTaskWorkflowRun(taskId, {
+        runId,
+        workflowId: normalizeWorkflowIdentityText(summary.workflowId || "") || null,
+        workflowName: normalizeWorkflowRunText(summary.workflowName || "") || null,
+        status,
+        startedAt: Number.isFinite(startedAtMs) ? new Date(startedAtMs).toISOString() : null,
+        endedAt: Number.isFinite(endedAtMs) ? new Date(endedAtMs).toISOString() : null,
+        summary: summaryText,
+        taskId,
+        rootRunId: normalizeWorkflowIdentityText(
+          summary.rootRunId || topology.rootRunId || runId,
+        ) || runId,
+        parentRunId: normalizeWorkflowIdentityText(
+          summary.parentRunId || topology.parentRunId || "",
+        ) || null,
+        retryOf: normalizeWorkflowIdentityText(summary.retryOf || "") || null,
+        retryMode: normalizeWorkflowIdentityText(summary.retryMode || "") || null,
+        sessionId: normalizeWorkflowIdentityText(summary.sessionId || topology.sessionId || "") || null,
+        rootSessionId: normalizeWorkflowIdentityText(
+          topology.rootSessionId || summary.sessionId || topology.sessionId || "",
+        ) || null,
+        parentSessionId: normalizeWorkflowIdentityText(topology.parentSessionId || "") || null,
+        rootTaskId: normalizeWorkflowIdentityText(topology.rootTaskId || taskId) || taskId,
+        parentTaskId: normalizeWorkflowIdentityText(topology.parentTaskId || "") || null,
+        delegationDepth: Number.isFinite(Number(topology.delegationDepth))
+          ? Math.max(0, Math.trunc(Number(topology.delegationDepth)))
+          : 0,
+        outcome: normalizeWorkflowIdentityText(summary.resumeResult || status || "") || null,
+        source: "workflow",
+      });
+    } catch (err) {
+      console.warn(`${TAG} Failed to sync task projection for summary ${String(summary?.runId || "").trim() || "<unknown>"}: ${String(err?.message || err)}`);
+    }
+  }
+
   _persistActiveRunState(runId, workflowId, workflowName, ctx) {
     try {
       this._ensureDirs();
 
-      // Active-runs is derived from the authoritative in-memory map so
-      // concurrent run start/finish events cannot erase sibling entries.
+      // Active-runs is derived from the in-memory map plus any foreign
+      // task-claimed entries still backed by a live local coordinator.
       this._writeActiveRunsIndex(this._snapshotActiveRunIndexEntries({
         includeRunId: runId,
         includeWorkflowId: workflowId,
@@ -8473,6 +8713,9 @@ export class WorkflowEngine extends EventEmitter {
       const activeEntries = this._readActiveRunsIndex();
       const interrupted = [];
       const interruptedRunIds = new Set();
+      const interruptedTaskIds = new Set();
+      const reconcileTaskIds = new Set();
+      const preservedActiveRunIds = new Set();
       const now = Date.now();
       const runs = this._readRunIndex();
       const runsById = new Map(
@@ -8519,6 +8762,13 @@ export class WorkflowEngine extends EventEmitter {
         const missingConcreteTaskIdentity =
           isConcreteTaskIdentityRequired(summary, detail) &&
           !this._resolveRunTaskIdentity(summary, detail)?.taskId;
+        const interruptedTaskId = normalizeWorkflowIdentityText(
+          this._resolveRunTaskIdentity(summary, detail)?.taskId || summary?.taskId || "",
+        );
+        if (interruptedTaskId && this._getLiveLocalTaskClaim(interruptedTaskId)) {
+          preservedActiveRunIds.add(normalizedRunId);
+          return;
+        }
         const wantsResumable = options?.resumable !== false && !missingConcreteTaskIdentity;
         const forceResumable = options?.forceResumable === true && !missingConcreteTaskIdentity;
         const canResume = wantsResumable && (forceResumable || resumableStaleRunsAssigned < maxResumableStaleRuns);
@@ -8535,6 +8785,11 @@ export class WorkflowEngine extends EventEmitter {
               ? "invalid_task_identity"
               : "recovery_cap_exceeded";
           }
+          if (interruptedTaskId) {
+            interruptedTaskIds.add(interruptedTaskId);
+            reconcileTaskIds.add(interruptedTaskId);
+          }
+          this._syncTaskProjectionFromRunSummary(summary, detail);
         }
         if (canResume && !forceResumable) resumableStaleRunsAssigned += 1;
         interrupted.push({
@@ -8594,13 +8849,53 @@ export class WorkflowEngine extends EventEmitter {
         }
       }
 
+      if (this.services?.kanban) {
+        const resumableRepairResults = new Set([
+          "duplicate_task_run",
+          "covered_by_root_interrupted_run",
+          "resumed",
+        ]);
+        for (const run of runs) {
+          const taskId = normalizeWorkflowIdentityText(run?.taskId || "");
+          if (!taskId) continue;
+          const status = normalizeWorkflowIdentityText(run?.status || "");
+          const resumeResult = normalizeWorkflowRunText(run?.resumeResult).trim().toLowerCase();
+          if (
+            interruptedTaskIds.has(taskId) ||
+            status === WorkflowStatus.RUNNING ||
+            (
+              status === WorkflowStatus.PAUSED &&
+              (run?.resumable === true || resumableRepairResults.has(resumeResult))
+            )
+          ) {
+            reconcileTaskIds.add(taskId);
+          }
+        }
+      }
+
       if (interrupted.length > 0) {
         if (runs.length > MAX_PERSISTED_RUNS) runs.splice(0, runs.length - MAX_PERSISTED_RUNS);
         this._writeRunIndex(runs);
       }
 
-      // Clear the active-runs index — we've handled recoverable entries.
-      this._writeActiveRunsIndex([]);
+      if (this.services?.kanban && reconcileTaskIds.size > 0) {
+        const taskScopedRuns = runs
+          .filter((run) => reconcileTaskIds.has(normalizeWorkflowIdentityText(run?.taskId || "")))
+          .sort(
+            (left, right) =>
+              Number(left?.startedAt || 0) - Number(right?.startedAt || 0) ||
+              String(left?.runId || "").localeCompare(String(right?.runId || "")),
+          );
+        for (const run of taskScopedRuns) {
+          this._syncTaskProjectionFromRunSummary(run);
+        }
+      }
+
+      const preservedActiveEntries = activeEntries.filter((entry) => {
+        const runId = String(entry?.runId || "").trim();
+        return runId && preservedActiveRunIds.has(runId);
+      });
+      this._writeActiveRunsIndex(preservedActiveEntries);
 
       if (interrupted.length > 0) {
         const sample = interrupted.slice(0, 20).map((entry) => entry.runId).join(", ");
@@ -8618,7 +8913,10 @@ export class WorkflowEngine extends EventEmitter {
   }
 
   /**
-   * Resume all interrupted (PAUSED + resumable) runs.
+   * Resume all interrupted (PAUSED + resumable) runs, plus failed task-scoped
+   * descendants that became stranded after a previously resumed ancestor run
+   * failed and no paused resumable representative remains.
+   *
    * Should be called AFTER services are wired up (e.g. after workflow
    * engine is fully initialized with node executors).
    */
@@ -8679,14 +8977,6 @@ export class WorkflowEngine extends EventEmitter {
               return true;
             });
 
-      if (!runs.length) {
-        if (startupInterruptedRunIds) this._startupInterruptedRunIds = null;
-        this._resumingRuns = false;
-        return;
-      }
-
-      console.log(`${TAG} Resuming ${runs.length} interrupted run(s)...`);
-
       // ── Deduplicate by taskId: keep only the most recent run per task ────
       // After N crash/restart cycles, N run entries accumulate for the same
       // taskId. Resuming all of them causes competing workflow runs that race
@@ -8701,27 +8991,165 @@ export class WorkflowEngine extends EventEmitter {
       // reader for the dedup scan and only parse full details for the
       // small set of runs we actually resume.
       const identityCache = new Map(); // runId → small identity object
-      const latestByTaskId = new Map(); // taskId → run entry (highest startedAt)
+      const allRunsById = new Map(
+        allRuns
+          .map((run) => {
+            const runId = String(run?.runId || "").trim();
+            return runId ? [runId, run] : null;
+          })
+          .filter(Boolean),
+      );
+      const latestByTaskId = new Map(); // taskId → representative interrupted/root task run
+      const resolveRunStartedAtMs = (candidate) => {
+        const rawStartedAt = candidate?.startedAt;
+        const numericStartedAt = Number(rawStartedAt);
+        if (Number.isFinite(numericStartedAt) && numericStartedAt > 0) {
+          return numericStartedAt;
+        }
+        const parsedStartedAt = Date.parse(String(rawStartedAt || ""));
+        return Number.isFinite(parsedStartedAt) && parsedStartedAt > 0 ? parsedStartedAt : 0;
+      };
       const getIdentity = (runId) => {
         if (identityCache.has(runId)) return identityCache.get(runId);
         const ident = this._readRunDetailIdentity(runId);
         identityCache.set(runId, ident || null);
         return ident || null;
       };
+      const resolveTaskIdentity = (run, ident = null) => {
+        if (!run) return "";
+        const indexedTaskId = resolveIndexedRunTaskIdentity(run);
+        if (indexedTaskId) return indexedTaskId;
+        const resolvedIdentity = ident ?? getIdentity(run.runId);
+        return this._resolveRunTaskIdentity(run, resolvedIdentity)?.taskId || "";
+      };
+      const promotableResumeResults = new Set([
+        "covered_by_root_interrupted_run",
+        "duplicate_task_run",
+      ]);
+      const resumedAncestorResumeResults = new Set([
+        "resumed",
+      ]);
+      const resumeTraceTaskIds = getWorkflowResumeTraceTaskIds();
+      const hasRepresentativeActivitySignal = (candidate) =>
+        Number(candidate?.activeNodeCount || 0) > 0;
+      const canPromoteRepresentativeRun = (candidate) =>
+        String(candidate?.status || "").trim() === WorkflowStatus.PAUSED &&
+        promotableResumeResults.has(String(candidate?.resumeResult || "").trim()) &&
+        hasRepresentativeActivitySignal(candidate);
+      const hasResumedPausedAncestor = (candidate, taskId) => {
+        const candidateRunId = String(candidate?.runId || "").trim();
+        if (!candidateRunId || !taskId) return false;
+        let currentRunId = normalizeWorkflowIdentityText(
+          candidate?.parentRunId ||
+          candidate?.retryOf ||
+          "",
+        );
+        const visited = new Set([candidateRunId]);
+        while (currentRunId && !visited.has(currentRunId)) {
+          visited.add(currentRunId);
+          const ancestor = allRunsById.get(currentRunId);
+          if (!ancestor) break;
+          const ancestorIdentity = getIdentity(currentRunId);
+          const ancestorTaskId = resolveTaskIdentity(ancestor, ancestorIdentity);
+          if (!ancestorTaskId || ancestorTaskId !== taskId) break;
+          if (
+            String(ancestor?.status || "").trim() === WorkflowStatus.PAUSED &&
+            resumedAncestorResumeResults.has(String(ancestor?.resumeResult || "").trim())
+          ) {
+            return true;
+          }
+          currentRunId = normalizeWorkflowIdentityText(
+            ancestor?.parentRunId ||
+            ancestorIdentity?.data?._workflowParentRunId ||
+            ancestorIdentity?.dagState?.parentRunId ||
+            ancestor?.retryOf ||
+            "",
+          );
+        }
+        return false;
+      };
+      const canQueueStrandedFailedRepresentative = (candidate, taskId) =>
+        String(candidate?.status || "").trim() === WorkflowStatus.FAILED &&
+        hasResumedPausedAncestor(candidate, taskId);
+      const canParticipateInResumeSelection = (candidate) => {
+        const status = String(candidate?.status || "").trim();
+        if (status === WorkflowStatus.RUNNING) return true;
+        if (status !== WorkflowStatus.PAUSED) return false;
+        return Boolean(candidate?.resumable) || canPromoteRepresentativeRun(candidate);
+      };
+      const resolveRepresentativeTaskRun = (run, taskId, ident = null) => {
+        let representative = run;
+        let representativeIdentity = ident ?? getIdentity(run?.runId);
+        let selectedRepresentative = canParticipateInResumeSelection(representative)
+          ? representative
+          : null;
+        const traceChain = [];
+        const visited = new Set();
+        while (representative) {
+          const representativeRunId = String(representative?.runId || "").trim();
+          if (!representativeRunId || visited.has(representativeRunId)) break;
+          visited.add(representativeRunId);
+          if (resumeTraceTaskIds?.has(taskId)) {
+            traceChain.push(cleanObject({
+              runId: representativeRunId,
+              workflowName: representative?.workflowName || undefined,
+              status: representative?.status || undefined,
+              resumable: representative?.resumable,
+              resumeResult: representative?.resumeResult || undefined,
+              taskId,
+              startedAt: representative?.startedAt || undefined,
+              parentRunId:
+                representative?.parentRunId ||
+                representativeIdentity?.data?._workflowParentRunId ||
+                representativeIdentity?.dagState?.parentRunId ||
+                undefined,
+            }));
+          }
+          const parentRunId = normalizeWorkflowIdentityText(
+            representative?.parentRunId ||
+            representativeIdentity?.data?._workflowParentRunId ||
+            representativeIdentity?.dagState?.parentRunId ||
+            "",
+          );
+          if (!parentRunId) break;
+          const parentRun = allRunsById.get(parentRunId);
+          if (!parentRun) break;
+          const parentTaskId = resolveTaskIdentity(parentRun);
+          if (!parentTaskId || parentTaskId !== taskId) break;
+          const parentStatus = String(parentRun?.status || "").trim();
+          const sameWorkflowFamily =
+            normalizeWorkflowIdentityText(parentRun?.workflowId || "") ===
+            normalizeWorkflowIdentityText(representative?.workflowId || "");
+          representative = parentRun;
+          representativeIdentity = getIdentity(parentRunId);
+          if (parentStatus !== WorkflowStatus.RUNNING && parentStatus !== WorkflowStatus.PAUSED) break;
+          if (
+            canParticipateInResumeSelection(parentRun) &&
+            (parentStatus === WorkflowStatus.RUNNING || hasRepresentativeActivitySignal(parentRun)) &&
+            (!sameWorkflowFamily || !selectedRepresentative)
+          ) {
+            selectedRepresentative = parentRun;
+          }
+        }
+        if (resumeTraceTaskIds?.has(taskId)) {
+          console.log(
+            `${TAG} Resume trace task ${taskId}: source=${String(run?.runId || "").trim() || "<unknown>"} ` +
+            `selected=${String(selectedRepresentative?.runId || run?.runId || "").trim() || "<unknown>"} ` +
+            `chain=${JSON.stringify(traceChain)}`,
+          );
+        }
+        return selectedRepresentative || run;
+      };
 
       let resumeLoopCount = 0;
       for (const run of allRuns) {
-        let tid = resolveIndexedRunTaskIdentity(run);
-        if (!tid && run?.status === WorkflowStatus.RUNNING) {
-          const ident = getIdentity(run.runId);
-          if (ident) {
-            tid = this._resolveRunTaskIdentity(run, ident)?.taskId || "";
-          }
-        }
+        const ident = run?.status === WorkflowStatus.RUNNING ? getIdentity(run.runId) : null;
+        const tid = resolveTaskIdentity(run, ident);
         if (!tid) continue;
+        const representative = resolveRepresentativeTaskRun(run, tid, ident);
         const prev = latestByTaskId.get(tid);
-        if (!prev || (run.startedAt || 0) >= (prev.startedAt || 0)) {
-          latestByTaskId.set(tid, run);
+        if (!prev || resolveRunStartedAtMs(representative) >= resolveRunStartedAtMs(prev)) {
+          latestByTaskId.set(tid, representative);
         }
         resumeLoopCount += 1;
         await maybeYieldInterruptedResumeWork(resumeLoopCount);
@@ -8729,17 +9157,104 @@ export class WorkflowEngine extends EventEmitter {
 
       for (const run of runs) {
         const ident = getIdentity(run.runId);
-        if (ident) {
-          const tid = this._resolveRunTaskIdentity(run, ident)?.taskId || "";
-          if (tid) {
-            const prev = latestByTaskId.get(tid);
-            if (!prev || (run.startedAt || 0) >= (prev.startedAt || 0)) {
-              latestByTaskId.set(tid, run);
-            }
+        const tid = resolveTaskIdentity(run, ident);
+        if (tid) {
+          const representative = resolveRepresentativeTaskRun(run, tid, ident);
+          const prev = latestByTaskId.get(tid);
+          if (!prev || resolveRunStartedAtMs(representative) >= resolveRunStartedAtMs(prev)) {
+            latestByTaskId.set(tid, representative);
           }
         }
         resumeLoopCount += 1;
         await maybeYieldInterruptedResumeWork(resumeLoopCount);
+      }
+
+      let promotedAncestorCount = 0;
+      let promotedAncestorIndexDirty = false;
+      const promotedRunIds = new Set();
+      const promoteRepresentativeRun = (representative, sourceRun = null) => {
+        const representativeRunId = String(representative?.runId || "").trim();
+        if (!representativeRunId || promotedRunIds.has(representativeRunId)) return;
+        if (!canPromoteRepresentativeRun(representative) || representative?.resumable) return;
+        representative.resumable = true;
+        delete representative.resumeResult;
+        if (!Number.isFinite(Number(representative?.interruptedAt))) {
+          const fallbackInterruptedAt = Number(sourceRun?.interruptedAt || Date.now());
+          representative.interruptedAt = Number.isFinite(fallbackInterruptedAt)
+            ? fallbackInterruptedAt
+            : Date.now();
+        }
+        if (!pausedResumableRunsById.has(representativeRunId)) {
+          pausedResumableRunsById.set(representativeRunId, representative);
+          pausedResumableRuns.push(representative);
+        }
+        if (!runs.some((entry) => String(entry?.runId || "").trim() === representativeRunId)) {
+          runs.unshift(representative);
+        }
+        if (this._startupInterruptedRunIds instanceof Set) {
+          this._startupInterruptedRunIds.add(representativeRunId);
+        }
+        promotedRunIds.add(representativeRunId);
+        promotedAncestorCount += 1;
+        promotedAncestorIndexDirty = true;
+      };
+
+      for (const run of [...runs]) {
+        const tid = resolveTaskIdentity(run);
+        if (!tid) continue;
+        const representative = latestByTaskId.get(tid);
+        if (!representative) continue;
+        promoteRepresentativeRun(representative, run);
+      }
+
+      const queuedFailedRepresentativeRunIds = new Set();
+      for (const [taskId, representative] of latestByTaskId.entries()) {
+        if (!canQueueStrandedFailedRepresentative(representative, taskId)) continue;
+        const representativeRunId = String(representative?.runId || "").trim();
+        if (!representativeRunId) continue;
+        if (runs.some((entry) => String(entry?.runId || "").trim() === representativeRunId)) continue;
+        runs.unshift(representative);
+        if (this._startupInterruptedRunIds instanceof Set) {
+          this._startupInterruptedRunIds.add(representativeRunId);
+        }
+        queuedFailedRepresentativeRunIds.add(representativeRunId);
+      }
+
+      if (promotedAncestorIndexDirty) {
+        this._writeRunIndex(allRuns);
+        console.log(
+          `${TAG} Re-activated ${promotedAncestorCount} interrupted ancestor run(s) from duplicate descendants`,
+        );
+      }
+      if (queuedFailedRepresentativeRunIds.size > 0) {
+        console.log(
+          `${TAG} Queued ${queuedFailedRepresentativeRunIds.size} stranded failed task run(s) ` +
+          `after resumed ancestors failed`,
+        );
+      }
+      if (!runs.length) {
+        if (startupInterruptedRunIds) this._startupInterruptedRunIds = null;
+        this._resumingRuns = false;
+        return;
+      }
+      console.log(`${TAG} Resuming ${runs.length} interrupted run(s)...`);
+      if (resumeTraceTaskIds?.size > 0) {
+        for (const [taskId, representative] of latestByTaskId.entries()) {
+          if (!resumeTraceTaskIds.has(taskId)) continue;
+          console.log(
+            `${TAG} Resume trace winner task ${taskId}: ` +
+            `${JSON.stringify(cleanObject({
+              runId: representative?.runId || undefined,
+              workflowName: representative?.workflowName || undefined,
+              status: representative?.status || undefined,
+              resumable: representative?.resumable,
+              resumeResult: representative?.resumeResult || undefined,
+              startedAt: representative?.startedAt || undefined,
+              parentRunId: representative?.parentRunId || undefined,
+              rootRunId: representative?.rootRunId || undefined,
+            }))}`,
+          );
+        }
       }
 
       // Mark older duplicate runs as not-resumable before entering the loop.
@@ -8968,6 +9483,7 @@ export class WorkflowEngine extends EventEmitter {
         runs[idx].resumable = false;
         runs[idx].resumeResult = reason;
         this._writeRunIndex(runs);
+        this._syncTaskProjectionFromRunSummary(runs[idx]);
       }
       if (this._startupInterruptedRunIds instanceof Set) {
         this._startupInterruptedRunIds.delete(String(runId || "").trim());
@@ -9035,6 +9551,7 @@ export class WorkflowEngine extends EventEmitter {
       if (runs.length > MAX_PERSISTED_RUNS) runs = runs.slice(-MAX_PERSISTED_RUNS);
       this._writeRunIndex(runs);
       clearRunHistoryCache();
+      this._syncTaskProjectionFromRunSummary(summary, detail);
 
       // Save full run detail
       this._writeRunDetail(runId, detail);
@@ -9072,17 +9589,84 @@ export class WorkflowEngine extends EventEmitter {
     const HARD_LIMIT_BYTES = 10 * 1024 * 1024; // 10 MB serialized
     if (!detail || typeof detail !== "object") return detail;
 
-    let serialized;
-    try {
-      serialized = JSON.stringify(detail);
-    } catch {
-      return detail;
+    const serializeDetail = (value) => {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return null;
+      }
+    };
+    const withTruncationNotes = (value, notes, originalBytes = null) => {
+      if (!value || typeof value !== "object" || !Array.isArray(notes) || notes.length === 0) return value;
+      const existingTruncation =
+        value._truncated && typeof value._truncated === "object" ? value._truncated : {};
+      const existingNotes = Array.isArray(existingTruncation.notes)
+        ? existingTruncation.notes.filter((note) => typeof note === "string" && note.trim())
+        : [];
+      return {
+        ...value,
+        _truncated: {
+          at: new Date().toISOString(),
+          originalBytes: Number.isFinite(Number(originalBytes))
+            ? Number(originalBytes)
+            : (
+                Number.isFinite(Number(existingTruncation.originalBytes))
+                  ? Number(existingTruncation.originalBytes)
+                  : null
+              ),
+          notes: [...new Set([...existingNotes, ...notes])],
+        },
+      };
+    };
+
+    let serialized = serializeDetail(detail);
+    if (!serialized) {
+      const compacted = repairWorkflowRunDetail(compactPersistedRunDetail(detail));
+      const compactedSerialized = serializeDetail(compacted);
+      if (compactedSerialized) {
+        if (compactedSerialized.length <= HARD_LIMIT_BYTES) {
+          return withTruncationNotes(compacted, ["detail: compacted after serialization failure"]);
+        }
+        serialized = compactedSerialized;
+      } else {
+        return withTruncationNotes(
+          repairWorkflowRunDetail({
+            id: detail.id ?? null,
+            startedAt: detail.startedAt ?? null,
+            endedAt: detail.endedAt ?? null,
+            duration: detail.duration ?? null,
+            status: detail.status ?? null,
+            nodeStatuses: summarizePersistedWorkflowValue(detail.nodeStatuses, {
+              key: "nodeStatuses",
+            }),
+            data: preservePersistedRunIdentityData(detail.data, {}),
+            errors: summarizePersistedWorkflowValue(detail.errors, { key: "errors" }),
+            issueAdvisor: summarizePersistedWorkflowValue(detail.issueAdvisor, {
+              key: "issueAdvisor",
+            }),
+          }),
+          ["detail: fell back to minimal summary after serialization failure"],
+        );
+      }
     }
     if (!serialized || serialized.length <= HARD_LIMIT_BYTES) return detail;
 
+    let trimmed = repairWorkflowRunDetail(compactPersistedRunDetail(detail));
+    let trimmingNotes = [];
+    let recheck = serializeDetail(trimmed);
+    if (recheck && recheck.length <= HARD_LIMIT_BYTES) {
+      return withTruncationNotes(
+        trimmed,
+        ["detail: compacted before persisting oversized run detail"],
+        serialized.length,
+      );
+    }
+
     // Shallow-clone so we do not mutate the live in-memory detail object.
-    const trimmed = { ...detail };
-    const truncationNotes = [];
+    trimmed = {
+      ...(trimmed && typeof trimmed === "object" ? trimmed : detail),
+    };
+    const truncationNotes = [...trimmingNotes];
 
     const trimArray = (obj, key, keep, label) => {
       if (!obj || !Array.isArray(obj[key])) return;
@@ -9130,8 +9714,7 @@ export class WorkflowEngine extends EventEmitter {
     trimArray(trimmed, "nodeStatusEvents", 500, "nodeStatusEvents");
 
     // If we are still over the limit, drop the heaviest non-essential fields.
-    let recheck;
-    try { recheck = JSON.stringify(trimmed); } catch { recheck = ""; }
+    recheck = serializeDetail(trimmed) || "";
     if (recheck && recheck.length > HARD_LIMIT_BYTES) {
       if (trimmed.data && typeof trimmed.data === "object") {
         const dataKeysToDrop = ["_replayTrajectory", "_dagState"];
@@ -9142,7 +9725,7 @@ export class WorkflowEngine extends EventEmitter {
           }
         }
       }
-      try { recheck = JSON.stringify(trimmed); } catch { recheck = ""; }
+      recheck = serializeDetail(trimmed) || "";
       if (recheck && recheck.length > HARD_LIMIT_BYTES) {
         trimmed.nodeOutputs = {};
         truncationNotes.push("nodeOutputs: dropped (still oversized)");

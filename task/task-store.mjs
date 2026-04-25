@@ -765,6 +765,180 @@ function normalizeWorkflowRunLinks(rawRuns) {
   return normalized.slice(-MAX_WORKFLOW_RUN_LINKS);
 }
 
+const TERMINAL_WORKFLOW_RUN_LINK_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "skipped",
+  "paused",
+  "stale",
+]);
+
+function parseWorkflowRunLinkTime(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return 0;
+  const direct = Number(text);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasWorkflowRunLinkValue(value) {
+  if (typeof value === "string") return value.length > 0;
+  return value != null;
+}
+
+function scoreWorkflowRunLink(entry) {
+  if (!entry || typeof entry !== "object") return 0;
+  const status = String(entry.status || "").trim().toLowerCase();
+  let score = 0;
+  if (hasWorkflowRunLinkValue(entry.workflowId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.workflowName)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.nodeId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.status)) score += 2;
+  if (hasWorkflowRunLinkValue(entry.outcome)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.startedAt)) score += 3;
+  if (hasWorkflowRunLinkValue(entry.endedAt)) score += 4;
+  if (hasWorkflowRunLinkValue(entry.summary)) score += 2;
+  if (hasWorkflowRunLinkValue(entry.url)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.rootRunId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.parentRunId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.retryOf)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.retryMode)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.taskId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.rootTaskId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.parentTaskId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.sessionId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.rootSessionId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.parentSessionId)) score += 1;
+  if (Number.isFinite(Number(entry.delegationDepth)) && Number(entry.delegationDepth) > 0) score += 1;
+  if (TERMINAL_WORKFLOW_RUN_LINK_STATUSES.has(status)) score += 2;
+  return score;
+}
+
+function shouldPreferIncomingWorkflowRunLink(existing, incoming) {
+  const existingEndedAt = parseWorkflowRunLinkTime(existing?.endedAt);
+  const incomingEndedAt = parseWorkflowRunLinkTime(incoming?.endedAt);
+  if (incomingEndedAt !== existingEndedAt) return incomingEndedAt > existingEndedAt;
+
+  const existingLatestAt = Math.max(
+    parseWorkflowRunLinkTime(existing?.startedAt),
+    existingEndedAt,
+  );
+  const incomingLatestAt = Math.max(
+    parseWorkflowRunLinkTime(incoming?.startedAt),
+    incomingEndedAt,
+  );
+  if (incomingLatestAt !== existingLatestAt) return incomingLatestAt > existingLatestAt;
+
+  const existingScore = scoreWorkflowRunLink(existing);
+  const incomingScore = scoreWorkflowRunLink(incoming);
+  if (incomingScore !== existingScore) return incomingScore > existingScore;
+
+  return String(incoming?.runId || "").trim().localeCompare(String(existing?.runId || "").trim()) >= 0;
+}
+
+function mergeWorkflowRunLink(existingEntry, incomingEntry) {
+  const existing = normalizeWorkflowRunLinks([existingEntry])[0] || null;
+  const incoming = normalizeWorkflowRunLinks([incomingEntry])[0] || null;
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  const preferIncoming = shouldPreferIncomingWorkflowRunLink(existing, incoming);
+  const pick = (field) => {
+    const existingValue = existing[field];
+    const incomingValue = incoming[field];
+    if (!hasWorkflowRunLinkValue(existingValue)) return incomingValue;
+    if (!hasWorkflowRunLinkValue(incomingValue)) return existingValue;
+    return preferIncoming ? incomingValue : existingValue;
+  };
+
+  const merged = {
+    runId: pick("runId"),
+    workflowId: pick("workflowId"),
+    workflowName: pick("workflowName"),
+    nodeId: pick("nodeId"),
+    status: pick("status"),
+    outcome: pick("outcome"),
+    startedAt: pick("startedAt"),
+    endedAt: pick("endedAt"),
+    summary: pick("summary"),
+    url: pick("url"),
+    rootRunId: pick("rootRunId"),
+    parentRunId: pick("parentRunId"),
+    retryOf: pick("retryOf"),
+    retryMode: pick("retryMode"),
+    taskId: pick("taskId"),
+    rootTaskId: pick("rootTaskId"),
+    parentTaskId: pick("parentTaskId"),
+    sessionId: pick("sessionId"),
+    rootSessionId: pick("rootSessionId"),
+    parentSessionId: pick("parentSessionId"),
+    delegationDepth: preferIncoming
+      ? incoming.delegationDepth
+      : existing.delegationDepth,
+    source: pick("source"),
+    meta: preferIncoming
+      ? { ...(existing.meta || {}), ...(incoming.meta || {}) }
+      : { ...(incoming.meta || {}), ...(existing.meta || {}) },
+  };
+  return normalizeWorkflowRunLinks([merged])[0] || incoming || existing;
+}
+
+function shouldPromoteLatestWorkflowRun(task, run, workflowRuns = []) {
+  const incomingRunId = String(run?.runId || "").trim();
+  if (!incomingRunId) return false;
+  const currentLatestRunId = String(
+    task?.topology?.latestRunId ??
+      task?.latestRunId ??
+      "",
+  ).trim();
+  if (!currentLatestRunId || currentLatestRunId === incomingRunId) return true;
+  const currentLatest = workflowRuns.find((entry) => String(entry?.runId || "").trim() === currentLatestRunId) || null;
+  if (!currentLatest) return true;
+  const incomingStartedAt = Math.max(
+    parseWorkflowRunLinkTime(run?.startedAt),
+    parseWorkflowRunLinkTime(run?.endedAt),
+  );
+  const currentStartedAt = Math.max(
+    parseWorkflowRunLinkTime(currentLatest?.startedAt),
+    parseWorkflowRunLinkTime(currentLatest?.endedAt),
+  );
+  if (incomingStartedAt !== currentStartedAt) return incomingStartedAt > currentStartedAt;
+  return incomingRunId.localeCompare(currentLatestRunId) >= 0;
+}
+
+function resolveLatestWorkflowNodeId(task, run, shouldPromoteLatest) {
+  const currentTopology =
+    task?.topology && typeof task.topology === "object" && !Array.isArray(task.topology)
+      ? task.topology
+      : {};
+  const currentLatestRunId = String(
+    currentTopology.latestRunId ??
+      task?.latestRunId ??
+      "",
+  ).trim();
+  const incomingRunId = String(run?.runId || "").trim();
+  const currentLatestNodeId = String(currentTopology.latestNodeId || "").trim() || null;
+  const incomingNodeId = String(run?.nodeId || "").trim() || null;
+  const updatesCurrentLatest = Boolean(
+    incomingRunId &&
+    currentLatestRunId &&
+    incomingRunId === currentLatestRunId,
+  );
+
+  if (shouldPromoteLatest) {
+    if (incomingNodeId) return incomingNodeId;
+    return updatesCurrentLatest ? currentLatestNodeId : null;
+  }
+
+  if (updatesCurrentLatest) {
+    return incomingNodeId || currentLatestNodeId;
+  }
+
+  return currentLatestNodeId;
+}
+
 function normalizeTaskTopology(rawTopology = {}, rawTask = {}) {
   const topology =
     rawTopology && typeof rawTopology === "object" && !Array.isArray(rawTopology)
@@ -2653,24 +2827,29 @@ export function linkTaskWorkflowRun(taskId, workflowRun = {}) {
   if (!task) return null;
   const normalized = normalizeWorkflowRunLinks([workflowRun]);
   if (normalized.length === 0) return null;
-  const run = normalized[0];
+  const incomingRun = normalized[0];
   const existing = Array.isArray(task.workflowRuns) ? task.workflowRuns : [];
+  const current = existing.find((entry) => String(entry?.runId || "") === incomingRun.runId) || null;
+  const run = current ? mergeWorkflowRunLink(current, incomingRun) : incomingRun;
   const dedup = existing.filter((entry) => String(entry?.runId || "") !== run.runId);
-  task.workflowRuns = normalizeWorkflowRunLinks([...dedup, run]);
+  const nextWorkflowRuns = normalizeWorkflowRunLinks([...dedup, run]);
+  task.workflowRuns = nextWorkflowRuns;
+  const shouldPromoteLatest = shouldPromoteLatestWorkflowRun(task, run, nextWorkflowRuns);
+  const nextLatestNodeId = resolveLatestWorkflowNodeId(task, run, shouldPromoteLatest);
   task.topology = normalizeTaskTopology({
     ...(task.topology && typeof task.topology === "object" ? task.topology : {}),
-    workflowId: run.workflowId || task.topology?.workflowId || null,
-    workflowName: run.workflowName || task.topology?.workflowName || null,
-    latestNodeId: run.nodeId || task.topology?.latestNodeId || null,
-    latestRunId: run.runId,
-    rootRunId: run.rootRunId || task.topology?.rootRunId || null,
-    parentRunId: run.parentRunId || task.topology?.parentRunId || null,
-    latestSessionId: run.sessionId || task.topology?.latestSessionId || null,
-    sessionId: run.sessionId || task.topology?.sessionId || null,
-    rootSessionId: run.rootSessionId || task.topology?.rootSessionId || null,
-    parentSessionId: run.parentSessionId || task.topology?.parentSessionId || null,
-    rootTaskId: run.rootTaskId || task.topology?.rootTaskId || task.id || null,
-    parentTaskId: run.parentTaskId || task.topology?.parentTaskId || task.parentTaskId || null,
+    workflowId: shouldPromoteLatest ? (run.workflowId || task.topology?.workflowId || null) : (task.topology?.workflowId || run.workflowId || null),
+    workflowName: shouldPromoteLatest ? (run.workflowName || task.topology?.workflowName || null) : (task.topology?.workflowName || run.workflowName || null),
+    latestNodeId: nextLatestNodeId,
+    latestRunId: shouldPromoteLatest ? run.runId : (task.topology?.latestRunId || task.latestRunId || run.runId),
+    rootRunId: shouldPromoteLatest ? (run.rootRunId || task.topology?.rootRunId || null) : (task.topology?.rootRunId || run.rootRunId || null),
+    parentRunId: shouldPromoteLatest ? (run.parentRunId || task.topology?.parentRunId || null) : (task.topology?.parentRunId || run.parentRunId || null),
+    latestSessionId: shouldPromoteLatest ? (run.sessionId || task.topology?.latestSessionId || null) : (task.topology?.latestSessionId || run.sessionId || null),
+    sessionId: shouldPromoteLatest ? (run.sessionId || task.topology?.sessionId || null) : (task.topology?.sessionId || run.sessionId || null),
+    rootSessionId: shouldPromoteLatest ? (run.rootSessionId || task.topology?.rootSessionId || null) : (task.topology?.rootSessionId || run.rootSessionId || null),
+    parentSessionId: shouldPromoteLatest ? (run.parentSessionId || task.topology?.parentSessionId || null) : (task.topology?.parentSessionId || run.parentSessionId || null),
+    rootTaskId: shouldPromoteLatest ? (run.rootTaskId || task.topology?.rootTaskId || task.id || null) : (task.topology?.rootTaskId || run.rootTaskId || task.id || null),
+    parentTaskId: shouldPromoteLatest ? (run.parentTaskId || task.topology?.parentTaskId || task.parentTaskId || null) : (task.topology?.parentTaskId || run.parentTaskId || task.parentTaskId || null),
     delegationDepth: Number.isFinite(Number(run.delegationDepth))
       ? Math.max(0, Math.trunc(Number(run.delegationDepth)))
       : (task.topology?.delegationDepth || 0),

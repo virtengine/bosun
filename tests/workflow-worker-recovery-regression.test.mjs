@@ -74,10 +74,15 @@ describe("workflow worker recovery regressions", () => {
   const harnessBridgeSource = readFileSync(resolve(process.cwd(), "server/routes/harness-agent-bridge.mjs"), "utf8");
   const workerSource = readFileSync(resolve(process.cwd(), "server/workflow-engine-worker.mjs"), "utf8");
 
-  it("lets worker-backed engines detect and resume interrupted runs", () => {
-    expect(workerSource).toContain("engine = wfEngineMod.getWorkflowEngine({");
-    expect(workerSource).not.toContain("detectInterruptedRuns: false");
+  it("keeps UI-owned worker-backed engines from owning interrupted-run recovery", () => {
+    expect(uiServerSource).toContain("detectInterruptedRuns: false");
+    expect(uiServerSource).toContain("resumeInterruptedRunsOnStart: false");
+    expect(workerSource).toContain("if (cfg.detectInterruptedRuns === false)");
+    expect(workerSource).toContain("const shouldResumeInterruptedRunsOnStart = cfg.resumeInterruptedRunsOnStart !== false;");
+    expect(workerSource).toContain("if (shouldResumeInterruptedRunsOnStart && typeof engine.resumeInterruptedRuns === \"function\")");
     expect(workerSource).toContain("setTimeout(() => engine.resumeInterruptedRuns().catch(() => {}), 0);");
+    expect(uiServerSource).not.toContain('proxy.resumeInterruptedRuns().catch((err) => {');
+    expect(uiServerSource).not.toContain('engine.resumeInterruptedRuns().catch((err) => {');
   });
 
   it("gives workflow workers a longer default startup window before falling back in-process", () => {

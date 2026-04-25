@@ -98,6 +98,18 @@ describe("monitor workflow startup guards", () => {
     expect(monitorSource).toContain("auto-disabled stale workflow");
   });
 
+  it("re-enables requested workflowDefaults templates during startup sync", () => {
+    expect(monitorSource).toContain("config.workflowDefaults.templateOverridesById");
+    expect(monitorSource).toContain("const workflowDefaultAutoInstallEnabled =");
+    expect(monitorSource).toContain("const typedWorkflowTemplateIds = new Set(typedWorkflowTemplateConfig.templateIds || [])");
+    expect(monitorSource).toContain("for (const templateId of requestedTemplateIds)");
+    expect(monitorSource).toContain(
+      "(typedWorkflowTemplateIds.has(templateId) || workflowDefaultAutoInstallEnabled)",
+    );
+    expect(monitorSource).toContain('configuredFrom: typedWorkflowTemplateIds.has(templateId)');
+    expect(monitorSource).toContain('"workflowDefaults"');
+  });
+
   it("forces agent session monitor template reconciliation on startup", () => {
     expect(monitorSource).toContain('forceUpdateTemplateIds: [');
     expect(monitorSource).toContain('"template-task-lifecycle"');
@@ -177,13 +189,47 @@ describe("monitor workflow startup guards", () => {
     expect(monitorSource).toContain('await runWorkflowOwnedTaskRecoveryPass(');
     expect(monitorSource).toContain('"startup-workflow-history-unstick"');
     expect(monitorSource).toContain('"startup-stale-dispatch-task-poll-unstick"');
-    expect(monitorSource).toContain(`await engine.resumeInterruptedRuns();
-            await runWorkflowOwnedTaskRecoveryPass(
-              "startup-workflow-history-unstick",`);
-    expect(monitorSource).toContain(`throwOnError: true,
-              });
-              await runWorkflowOwnedTaskRecoveryPass(
-                "startup-stale-dispatch-task-poll-unstick",`);
+    const historyRecoveryPos = monitorSource.indexOf('await engine.resumeInterruptedRuns();');
+    const historyTaskRecoveryPos = monitorSource.indexOf(
+      "await runWorkflowOwnedTaskRecoveryPass(",
+      historyRecoveryPos,
+    );
+    const taskPollAnchorPos = monitorSource.indexOf('"startup-stale-dispatch-task-poll-unstick"');
+    const taskPollRecoveryPos = monitorSource.indexOf(
+      "await runWorkflowOwnedTaskRecoveryPass(",
+      taskPollAnchorPos,
+    );
+    expect(historyRecoveryPos).toBeGreaterThan(-1);
+    expect(historyTaskRecoveryPos).toBeGreaterThan(historyRecoveryPos);
+    expect(taskPollRecoveryPos).toBeGreaterThan(-1);
+    expect(
+      monitorSource.indexOf('throwOnError: true,\n              });'),
+    ).toBeLessThan(taskPollRecoveryPos);
+  });
+
+  it("resolves task executor lifecycle delegation after workflow startup init", () => {
+    const helperPos = monitorSource.indexOf(
+      'function workflowOwnsTaskExecutorLifecycleEnabled() {',
+    );
+    expect(monitorSource).toContain(
+      'function workflowOwnsTaskExecutorLifecycleEnabled() {',
+    );
+    expect(monitorSource).toContain(
+      'return isWorkflowReplacingModule("task-executor.mjs");',
+    );
+    expect(monitorSource).not.toContain(
+      'const workflowOwnsTaskExecutorLifecycle = isWorkflowReplacingModule("task-executor.mjs");',
+    );
+    expect(helperPos).toBeGreaterThan(-1);
+    expect(helperPos).toBeLessThan(
+      monitorSource.indexOf("!workflowOwnsTaskExecutorLifecycleEnabled() ||"),
+    );
+    expect(helperPos).toBeLessThan(
+      monitorSource.indexOf("workflowOwnsTaskLifecycle: workflowOwnsTaskExecutorLifecycleEnabled(),"),
+    );
+    expect(helperPos).toBeLessThan(
+      monitorSource.indexOf("if (workflowOwnsTaskExecutorLifecycleEnabled()) {"),
+    );
   });
 
   it("kicks non-task schedule polling during workflow automation startup", () => {

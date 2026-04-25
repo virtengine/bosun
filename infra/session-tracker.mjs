@@ -1304,6 +1304,10 @@ export class SessionTracker {
 
     // Auto-create session if it doesn't exist yet
     if (!session) {
+      this.getSessionMessages(taskId);
+      session = this.#sessions.get(taskId);
+    }
+    if (!session) {
       if (this.#isSessionRetired(taskId)) return;
       if (event && (event.role || event.type)) {
         this.#autoCreateSession(taskId, event);
@@ -1773,7 +1777,11 @@ export class SessionTracker {
    * @param {string} status
    */
   updateSessionStatus(sessionId, status) {
-    const session = this.#sessions.get(sessionId);
+    let session = this.#sessions.get(sessionId);
+    if (!session) {
+      this.getSessionMessages(sessionId);
+      session = this.#sessions.get(sessionId);
+    }
     if (!session) return;
     session.status = isTerminalSessionStatus(status)
       ? deriveTerminalSessionStatus(session, status)
@@ -2290,6 +2298,15 @@ export class SessionTracker {
     if (event?.type === "assistant.message") {
       const content = event?.data?.content || event?.content || "";
       return { id, kind: "agent_message", summary: content.slice(0, 200), timestamp: eventTimestamp };
+    }
+
+    if (event?.type === "session.turn.complete" && event?.text) {
+      return {
+        id,
+        kind: "agent_message",
+        summary: String(event.text).slice(0, 200),
+        timestamp: eventTimestamp,
+      };
     }
 
     return null;
@@ -2845,6 +2862,15 @@ ${items.join("\n")}` : "todo updated";
       };
     }
 
+    if (event.type === "session.turn.complete" && event.text) {
+      return {
+        type: "agent_message",
+        content: toText(event.text).slice(0, MAX_MESSAGE_CHARS),
+        timestamp: eventTimestamp,
+        meta: { lifecycle: "session_turn_complete" },
+      };
+    }
+
     if (event.type === "session.idle" || event.type === "session.completed") {
       return {
         type: "system",
@@ -3044,6 +3070,16 @@ export async function createSession(opts) {
  */
 export function appendEvent(sessionId, event) {
   return getSessionTracker().appendEvent(sessionId, event);
+}
+
+/**
+ * Backward-compatible alias used by module-level callers that historically
+ * expected a recordEvent export on the session-tracker module.
+ * @param {string} sessionId
+ * @param {Object|string} event
+ */
+export function recordEvent(sessionId, event) {
+  return getSessionTracker().recordEvent(sessionId, event);
 }
 
 /**

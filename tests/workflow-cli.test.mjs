@@ -73,6 +73,51 @@ describe("workflow CLI helpers", () => {
     expect(JSON.parse(stdout[0]).success).toBe(true);
   });
 
+  it("lists workflow-engine templates", async () => {
+    const stdout = [];
+    const response = await executeWorkflowCommand(["workflow", "templates", "--json"], {
+      stdout: (line) => stdout.push(line),
+    });
+
+    expect(response.ok).toBe(true);
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.some((entry) => entry.id === "template-task-lifecycle")).toBe(true);
+    expect(payload.some((entry) => entry.id === "template-backend-agent")).toBe(true);
+  });
+
+  it("dry-runs workflow-engine templates with traced node output", async () => {
+    const stdout = [];
+    const response = await executeWorkflowCommand(
+      [
+        "workflow",
+        "template-run",
+        "template-backend-agent",
+        "--dry-run",
+        "--json",
+        "--input-json",
+        JSON.stringify({
+          taskTitle: "Fix prompt routing",
+          taskDescription: "Inspect backend agent planning flow",
+          branch: "task/fix-prompt-routing",
+          testCommand: "npm test",
+          buildCommand: "npm run build",
+          lintCommand: "npm run lint",
+        }),
+      ],
+      {
+        stdout: (line) => stdout.push(line),
+      },
+    );
+
+    expect(response.ok).toBe(true);
+    expect(response.report.status).toBe("completed");
+    expect(response.report.dryRun).toBe(true);
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.template.id).toBe("template-backend-agent");
+    expect(payload.nodes.some((node) => node.id === "plan-work" && node.type === "action.run_agent")).toBe(true);
+    expect(payload.nodes.some((node) => node.id === "write-tests" && node.status === "completed")).toBe(true);
+  });
+
   it("reports custom node health summaries in JSON", async () => {
     const dir = mkdtempSync(resolve(tmpdir(), "bosun-workflow-cli-nodes-"));
     mkdirSync(join(dir, "custom-nodes"), { recursive: true });
