@@ -95,6 +95,33 @@ describe("vitest-runner", () => {
     ).toEqual(expected);
   });
 
+  it("expands path-like glob arguments before forwarding them to Vitest", () => {
+    const root = createFixture();
+    mkdirSync(resolve(root, "tests"), { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0" }),
+    );
+    writeFileSync(resolve(root, "tests", "workspace-alpha.test.mjs"), "export {};\n");
+    writeFileSync(resolve(root, "tests", "memory-write.test.mjs"), "export {};\n");
+    writeFileSync(resolve(root, "tests", "other.test.mjs"), "export {};\n");
+
+    const expected = [
+      "run",
+      "tests/workspace-alpha.test.mjs",
+      "tests/memory-write.test.mjs",
+    ];
+    if (process.platform === "win32") {
+      expected.push("--configLoader", "runner");
+    }
+
+    expect(
+      resolveVitestArgs(["run", "tests/workspace-*.test.mjs", "tests/*memory*.test.mjs"], {
+        startDir: root,
+      }),
+    ).toEqual(expected);
+  });
+
   it("routes package test scripts through the worktree-safe runner", () => {
     const packageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
 

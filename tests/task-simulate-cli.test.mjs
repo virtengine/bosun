@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -378,6 +379,74 @@ describe("task simulate CLI", () => {
     expect(payload.status).toBe("failed");
     expect(payload.taskId).toBe(task.id);
     expect(payload.errors.some((entry) => entry?.name === "TaskSimulationProcessExitError")).toBe(true);
+  });
+
+  it("blocks overlapping task simulation runs when a live lock file exists", async () => {
+    const repoRoot = makeTempDir();
+    const runtime = createFakeRuntime({ repoRoot });
+    const lockPath = resolve(repoRoot, ".bosun", ".cache", "task-simulator.pid");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        lockToken: "existing-lock",
+        startedAt: new Date().toISOString(),
+      }, null, 2),
+      "utf8",
+    );
+
+    await expect(
+      executeTaskSimulationCommand(["simulate", "task", "--json"], { runtime }),
+    ).rejects.toThrow(/Another task simulator instance is already running/);
+
+    expect(runtime.engine.execute).not.toHaveBeenCalled();
+    expect(runtime.engine.retryRun).not.toHaveBeenCalled();
+  });
+
+  it("cleans up stale simulator locks and releases its own lock on success", async () => {
+    const repoRoot = makeTempDir();
+    const task = {
+      id: "task-lock-cleanup",
+      title: "Recover stale simulator lock",
+      baseBranch: "origin/main",
+    };
+    const ctx = buildContext({
+      runId: "run-lock-cleanup",
+      taskId: task.id,
+      taskTitle: task.title,
+      triggerOutput: {
+        triggered: true,
+        reason: "direct_task",
+        taskId: task.id,
+        task,
+      },
+    });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      ctx,
+    });
+    const lockPath = resolve(repoRoot, ".bosun", ".cache", "task-simulator.pid");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: 999999,
+        lockToken: "stale-lock",
+        startedAt: new Date().toISOString(),
+      }, null, 2),
+      "utf8",
+    );
+
+    const result = await executeTaskSimulationCommand(
+      ["simulate", "task", task.id, "--json"],
+      { runtime, forceJsonOutput: true, stdout: () => {} },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runtime.engine.execute).toHaveBeenCalledOnce();
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   // ── resume ───────────────────────────────────────────────────────────────

@@ -805,6 +805,8 @@ const WORKFLOW_AGENT_REPO_BLOCK_PATTERNS = [
   /pre-push hook/i,
   /hook declined/i,
   /cannot rebase/i,
+  /git worktree metadata corrupt/i,
+  /not a git repository:\s*.+\.git[\\/](?:worktrees|modules)[\\/]/i,
 ];
 
 const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
@@ -2621,6 +2623,92 @@ registerNodeType("action.run_agent", {
         };
       }
       finalPrompt = appendWorkflowTaskPromptContext(finalPrompt, promptCompleteness);
+    }
+
+    const agentRepoRootCandidate = String(
+      ctx.data?.repoRoot ||
+      ctx.data?.task?.repoRoot ||
+      ctx.data?.taskDetail?.repoRoot ||
+      cwd,
+    ).trim() || cwd;
+    const agentRepoRoot = findContainingGitRepoRoot(agentRepoRootCandidate) || agentRepoRootCandidate;
+    if (isManagedBosunWorktree(cwd, agentRepoRoot)) {
+      const worktreeState = inspectManagedWorktreeState(cwd);
+      if (worktreeState.invalid) {
+        const detectedIssues = Array.from(
+          new Set(
+            Array.isArray(worktreeState.issues)
+              ? worktreeState.issues.map((issue) => String(issue || "").trim()).filter(Boolean)
+              : [],
+          ),
+        );
+        const detail = [
+          detectedIssues.join(", "),
+          Array.isArray(worktreeState.conflictFiles) && worktreeState.conflictFiles.length > 0
+            ? `conflicts=${worktreeState.conflictFiles.join(",")}`
+            : "",
+        ].filter(Boolean).join(" ");
+        const branchName = String(
+          ctx.data?.branch ||
+          ctx.data?.task?.branchName ||
+          ctx.data?.taskDetail?.branchName ||
+          "",
+        ).trim() || null;
+        const baseBranch = String(
+          ctx.data?.baseBranch ||
+          ctx.data?.task?.baseBranch ||
+          ctx.data?.taskDetail?.baseBranch ||
+          "",
+        ).trim() || null;
+        const defaultTargetBranch = String(
+          ctx.data?.defaultTargetBranch ||
+          ctx.data?.task?.defaultTargetBranch ||
+          ctx.data?.taskDetail?.defaultTargetBranch ||
+          baseBranch ||
+          "",
+        ).trim() || null;
+        const worktreeFailure = {
+          branch: branchName,
+          repoRoot: agentRepoRoot,
+          worktreePath: cwd,
+          baseBranch,
+          defaultTargetBranch,
+          detectedIssues,
+          phase: "run_agent_preflight",
+        };
+        resetManagedWorktree(agentRepoRoot, cwd, worktreeState.gitDir);
+        await recordWorktreeRecoveryEvent(agentRepoRoot, {
+          reason: "poisoned_worktree",
+          branch: branchName,
+          taskId: trackedTaskId || null,
+          worktreePath: cwd,
+          detectedIssues,
+          phase: "run_agent_preflight",
+          error: detail || "git worktree metadata corrupt",
+          outcome: "recreated",
+          timestamp: new Date().toISOString(),
+        });
+        ctx.log(
+          node.id,
+          `Managed worktree invalid before agent start: ${cwd}${detail ? ` (${detail})` : ""}`,
+          "warn",
+        );
+        return {
+          success: false,
+          error: `blocked: git worktree metadata corrupt${detail ? ` (${detail})` : ""}`,
+          output: "",
+          sdk,
+          items: [],
+          threadId: null,
+          sessionId: null,
+          blockedReason: "worktree_failure",
+          worktreeFailure,
+          detectedIssues,
+          needsReacquire: true,
+          removed: true,
+          retryable: false,
+        };
+      }
     }
 
     ctx.log(node.id, `Running agent (${sdk}) in ${cwd}`);

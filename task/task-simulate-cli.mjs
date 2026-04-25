@@ -2,9 +2,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { loadConfig } from "../config/config.mjs";
 import {
@@ -232,6 +234,11 @@ function resolveSimulationStatePath(repoRoot, options = {}) {
   return resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
 }
 
+function resolveSimulationLockPath(repoRoot, options = {}) {
+  if (options.lockPath) return resolve(options.lockPath);
+  return resolve(repoRoot, ".bosun", ".cache", "task-simulator.pid");
+}
+
 function readSimulationState(statePath) {
   if (!existsSync(statePath)) return null;
   try {
@@ -264,6 +271,94 @@ function resolveResumeRunId(savedState, runtime = {}) {
 function writeSimulationState(statePath, payload) {
   mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(statePath, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function parseSimulationLock(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return { pid: null, raw: text, data: null };
+  if (text.startsWith("{")) {
+    try {
+      const data = JSON.parse(text);
+      return {
+        pid: Number(
+          data?.pid ??
+          data?.processId ??
+          data?.ownerPid ??
+          data?.process?.pid,
+        ),
+        raw: text,
+        data,
+      };
+    } catch {
+      return { pid: Number(text), raw: text, data: null };
+    }
+  }
+  return { pid: Number(text), raw: text, data: null };
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM" || error?.code === "EACCES";
+  }
+}
+
+function readSimulationLock(lockPath) {
+  if (!existsSync(lockPath)) return null;
+  try {
+    return parseSimulationLock(readFileSync(lockPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function acquireSimulationLock(lockPath) {
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const lockToken = randomUUID();
+  const lockPayload = {
+    pid: process.pid,
+    lockToken,
+    startedAt: new Date().toISOString(),
+    argv: [...process.argv],
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(lockPath, JSON.stringify(lockPayload, null, 2), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return {
+        release() {
+          const current = readSimulationLock(lockPath);
+          if (current?.data?.lockToken !== lockToken) return;
+          try {
+            unlinkSync(lockPath);
+          } catch {
+            /* best effort */
+          }
+        },
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const existing = readSimulationLock(lockPath);
+      if (isProcessAlive(existing?.pid)) {
+        throw new Error(
+          `Another task simulator instance is already running (PID ${existing.pid || "unknown"})`,
+        );
+      }
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        /* retry once after stale-lock cleanup */
+      }
+    }
+  }
+
+  throw new Error("Failed to acquire task simulator lock");
 }
 
 function buildAgentPoolService(overrides = {}) {
@@ -652,6 +747,7 @@ export async function executeTaskSimulationCommand(args, options = {}) {
   const statePath = resolveSimulationStatePath(runtime.repoRoot, {
     statePath: options.statePath || runtime.statePath,
   });
+  const lockPath = resolveSimulationLockPath(runtime.repoRoot, options);
   const positional = taskArgs.filter((arg) => !arg.startsWith("--"));
   let explicitTaskId = String(positional[0] || "").trim();
   let restarted = false;
@@ -714,6 +810,7 @@ export async function executeTaskSimulationCommand(args, options = {}) {
     statusEvents.push(cloneJson(event));
   };
   runtime.engine.on?.("workflow:status", onStatus);
+  const simulationLock = acquireSimulationLock(lockPath);
   try {
     const captureConsole = asJson || options.forceJsonOutput === true;
     let ctx = null;
@@ -781,6 +878,7 @@ export async function executeTaskSimulationCommand(args, options = {}) {
     }
     return { ok: true, command: "task", report };
   } finally {
+    simulationLock.release();
     runtime.engine.off?.("workflow:status", onStatus);
     await runtime.close?.();
   }

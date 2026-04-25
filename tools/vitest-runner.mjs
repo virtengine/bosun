@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const requireModule = createRequire(import.meta.url);
@@ -62,6 +62,86 @@ function resolveCliPathArg(value, { startDir, packageRoot }) {
     return packagePath;
   }
   return value;
+}
+
+function toPosixPath(value) {
+  return String(value || "").replaceAll("\\", "/");
+}
+
+function hasGlobMagic(value) {
+  return /[*?[\]{}]/.test(String(value || ""));
+}
+
+function looksLikePathArg(value) {
+  const candidate = String(value || "");
+  return (
+    hasGlobMagic(candidate)
+    || candidate.includes("/")
+    || candidate.includes("\\")
+    || candidate.startsWith(".")
+    || /\.(?:[cm]?js|[cm]?ts|jsx|tsx)$/i.test(candidate)
+  );
+}
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function globPatternToRegex(pattern) {
+  const normalized = toPosixPath(pattern);
+  let regex = "";
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const next = normalized[index + 1];
+    if (char === "*") {
+      if (next === "*") {
+        regex += ".*";
+        index += 1;
+      } else {
+        regex += "[^/]*";
+      }
+      continue;
+    }
+    if (char === "?") {
+      regex += "[^/]";
+      continue;
+    }
+    regex += escapeRegex(char);
+  }
+
+  return new RegExp(`^${regex}$`);
+}
+
+function walkFiles(rootDir, out = []) {
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    const entryPath = resolve(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      walkFiles(entryPath, out);
+      continue;
+    }
+    if (entry.isFile()) out.push(entryPath);
+  }
+  return out;
+}
+
+function expandVitestPathArg(value, { startDir = process.cwd(), packageRoot } = {}) {
+  if (!looksLikePathArg(value) || !hasGlobMagic(value)) {
+    return [value];
+  }
+
+  const rootDir = packageRoot || startDir;
+  if (!rootDir || !existsSync(rootDir)) {
+    return [value];
+  }
+
+  const matcher = globPatternToRegex(value);
+  const matches = walkFiles(rootDir)
+    .map((entryPath) => toPosixPath(relative(startDir, entryPath)))
+    .filter((entryPath) => matcher.test(entryPath))
+    .sort((left, right) => left.localeCompare(right));
+
+  return matches.length > 0 ? matches : [value];
 }
 
 export function detectChildSpawnBlocked() {
@@ -171,6 +251,10 @@ export function resolveVitestArgs(
     if (arg.startsWith("--configLoader=") || arg.startsWith("--config-loader=")) {
       hasConfigLoaderArg = true;
       filteredArgs.push(arg);
+      continue;
+    }
+    if (looksLikePathArg(arg)) {
+      filteredArgs.push(...expandVitestPathArg(arg, { startDir, packageRoot }));
       continue;
     }
     filteredArgs.push(arg);

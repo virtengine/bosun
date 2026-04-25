@@ -8464,6 +8464,90 @@ describe("Session chaining - action.run_agent", () => {
     expect(ctx.data.plan).toBe("Concrete implementation plan");
   });
 
+  it("fails fast and marks managed worktrees for reacquire when git metadata is missing before launch", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-engine-broken-worktree-"));
+    const worktreePath = join(repoDir, ".bosun", "worktrees", "task-broken-worktree");
+    const missingGitDir = join(repoDir, ".git", "worktrees", "task-broken-worktree");
+    mkdirSync(worktreePath, { recursive: true });
+    execSync("git init", {
+      cwd: repoDir,
+      encoding: "utf8",
+      stdio: "ignore",
+      env: makeIsolatedGitEnv(),
+    });
+    writeFileSync(
+      join(worktreePath, ".git"),
+      `gitdir: ${missingGitDir.replace(/\\/g, "/")}\n`,
+      "utf8",
+    );
+
+    try {
+      const launchEphemeralThread = vi.fn().mockResolvedValue({
+        success: true,
+        output: "should not launch",
+        items: [],
+        sdk: "openai-native",
+        threadId: "thread-should-not-run",
+      });
+      const mockEngine = {
+        services: {
+          agentPool: {
+            launchEphemeralThread,
+          },
+        },
+      };
+      const ctx = new WorkflowContext({
+        repoRoot: repoDir,
+        worktreePath,
+        branch: "task/broken-worktree",
+        baseBranch: "origin/main",
+        defaultTargetBranch: "origin/main",
+        taskId: "TASK-BROKEN-WORKTREE",
+        task: {
+          id: "TASK-BROKEN-WORKTREE",
+          title: "Recover broken managed worktree",
+          branchName: "task/broken-worktree",
+          baseBranch: "origin/main",
+        },
+      });
+
+      const result = await handler.execute({
+        id: "run-agent-tests",
+        type: "action.run_agent",
+        config: {
+          prompt: "Run tests",
+          autoRecover: false,
+          failOnError: false,
+        },
+      }, ctx, mockEngine);
+
+      expect(launchEphemeralThread).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        success: false,
+        blockedReason: "worktree_failure",
+        needsReacquire: true,
+        removed: true,
+        retryable: false,
+      });
+      expect(String(result.error || "")).toMatch(/git worktree metadata corrupt/i);
+      expect(result.worktreeFailure).toMatchObject({
+        repoRoot: repoDir,
+        worktreePath,
+        branch: "task/broken-worktree",
+        baseBranch: "origin/main",
+        defaultTargetBranch: "origin/main",
+        phase: "run_agent_preflight",
+      });
+      expect(Array.isArray(result.worktreeFailure?.detectedIssues)).toBe(true);
+      expect(existsSync(worktreePath)).toBe(false);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("marks action.run_agent as waiting until a shared agent slot is acquired", async () => {
     const handler = getNodeType("action.run_agent");
     expect(handler).toBeDefined();
@@ -9258,6 +9342,46 @@ Status:
     expect(result.success).toBe(false);
     expect(result.blockedReason).toBe("blocked_by_env");
     expect(String(result.error || "")).toMatch(/write-capable tool path|tool capability issue|truthfully claim implementation/i);
+  });
+
+  it("treats git worktree metadata corruption summaries as blocked_by_repo", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const blockedOutput = [
+      "blocked: git worktree metadata corrupt",
+      "fatal: not a git repository: C:/repo/.git/worktrees/task-broken",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: blockedOutput,
+      summary: blockedOutput,
+      narrative: blockedOutput,
+      sdk: "openai-native",
+      threadId: "thread-broken-worktree-summary",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "a-broken-worktree-summary",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("blocked_by_repo");
+    expect(String(result.error || "")).toMatch(/git worktree metadata corrupt|not a git repository/i);
   });
 
   it("treats active delegated-agent summaries as blocked_by_env", async () => {
