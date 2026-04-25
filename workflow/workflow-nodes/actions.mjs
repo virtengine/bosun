@@ -10000,6 +10000,37 @@ registerNodeType("action.acquire_worktree", {
         return candidatePath;
       };
 
+      const createWorktreeAtPath = () => {
+        execGitArgsSync(
+          branchExistsLocally
+            ? ["worktree", "add", worktreePath, branch]
+            : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
+          { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
+        );
+        createdFromExistingBranch = branchExistsLocally;
+      };
+
+      const ensureCreatedManagedWorktree = (phaseLabel) => {
+        let gitDir = resolveWorktreeGitDir(worktreePath);
+        if (gitDir) return gitDir;
+        if (!isManagedBosunWorktree(worktreePath, repoRoot)) {
+          throw new Error(`Worktree creation failed: ${worktreePath} is not an attached managed worktree`);
+        }
+        recoveryState.recreated = true;
+        recoveryState.phase = phaseLabel;
+        recoveryState.worktreePath = worktreePath;
+        recoveryState.detectedIssues.add("missing_git_metadata");
+        resetManagedWorktree(repoRoot, worktreePath, gitDir);
+        fixGitConfigCorruption(repoRoot);
+        if (existsSync(worktreePath)) {
+          allocateRecoveryWorktreePath(phaseLabel);
+        }
+        createWorktreeAtPath();
+        gitDir = resolveWorktreeGitDir(worktreePath);
+        if (gitDir) return gitDir;
+        throw new Error(`Worktree creation failed: ${worktreePath} is not an attached managed worktree`);
+      };
+
       // Ensure long paths are enabled for this repo before checkout.
       try {
         execGitArgsSync(["config", "--local", "core.longpaths", "true"], {
@@ -10161,13 +10192,7 @@ registerNodeType("action.acquire_worktree", {
         }
       }
       try {
-        execGitArgsSync(
-          branchExistsLocally
-            ? ["worktree", "add", worktreePath, branch]
-            : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
-          { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
-        );
-        createdFromExistingBranch = branchExistsLocally;
+        createWorktreeAtPath();
       } catch (createErr) {
         const createErrDetail = String(createErr?.stderr || createErr?.message || "");
 
@@ -10182,9 +10207,7 @@ registerNodeType("action.acquire_worktree", {
             });
           } catch { /* best-effort cleanup */ }
           // Retry fresh creation — let any failure propagate as a normal error
-          execGitArgsSync(["worktree", "add", worktreePath, "-b", branch, baseBranch], {
-            cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout,
-          });
+          createWorktreeAtPath();
           createdFromExistingBranch = false;
         } else if (!isExistingBranchWorktreeError(createErr)) {
           throw new Error(`Worktree creation failed: ${formatExecSyncError(createErr)}`);
@@ -10201,15 +10224,9 @@ registerNodeType("action.acquire_worktree", {
               if (existsSync(worktreePath)) {
                 allocateRecoveryWorktreePath("attached-branch");
               }
-               execGitArgsSync(
-                 branchExistsLocally
-                   ? ["worktree", "add", worktreePath, branch]
-                   : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
-                 { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
-               );
-               createdFromExistingBranch = branchExistsLocally;
-               recreatedAttachedWorktree = true;
-             } else {
+              createWorktreeAtPath();
+              recreatedAttachedWorktree = true;
+            } else {
               fixGitConfigCorruption(repoRoot);
               ctx.data.worktreePath = attachedPath;
               ctx.data.baseBranch = baseBranch;
@@ -10245,15 +10262,9 @@ registerNodeType("action.acquire_worktree", {
           if (!recreatedAttachedWorktree && existsSync(worktreePath)) {
             allocateRecoveryWorktreePath("path-exists-race");
             try {
-               execGitArgsSync(
-                 branchExistsLocally
-                   ? ["worktree", "add", worktreePath, branch]
-                   : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
-                 { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
-               );
-               createdFromExistingBranch = branchExistsLocally;
-               createdRecoveryWorktree = true;
-             } catch (recoveryErr) {
+              createWorktreeAtPath();
+              createdRecoveryWorktree = true;
+            } catch (recoveryErr) {
               throw new Error(
                 `Worktree creation failed: ${formatExecSyncError(createErr)}; ` +
                 `recovery-path failed: ${formatExecSyncError(recoveryErr)}`,
@@ -10263,11 +10274,7 @@ registerNodeType("action.acquire_worktree", {
           if (!recreatedAttachedWorktree && !createdRecoveryWorktree) {
             // Branch already exists — attach worktree to existing branch.
             try {
-              execGitArgsSync(
-                ["worktree", "add", worktreePath, branch],
-                { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
-              );
-              createdFromExistingBranch = true;
+              createWorktreeAtPath();
             } catch (reuseErr) {
               throw new Error(
                 `Worktree creation failed: ${formatExecSyncError(createErr)}; ` +
@@ -10278,9 +10285,13 @@ registerNodeType("action.acquire_worktree", {
         }
       }
       if (createdFromExistingBranch) {
-        syncReusableWorktreeToBaseBranch(worktreePath);
+        const recreatedFreshWorktree = syncReusableWorktreeToBaseBranch(worktreePath);
+        if (recreatedFreshWorktree) {
+          createdFromExistingBranch = false;
+        }
       }
-      clearWorktreeGitState(resolveWorktreeGitDir(worktreePath), repoRoot);
+      const worktreeGitDir = ensureCreatedManagedWorktree("post-create");
+      clearWorktreeGitState(worktreeGitDir, repoRoot);
       fixGitConfigCorruption(repoRoot);
 
       ctx.data.worktreePath = worktreePath;

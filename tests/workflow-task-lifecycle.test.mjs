@@ -41,6 +41,7 @@ let completedWithPR;
 let noCommitCounts;
 let skipUntil;
 let buildCommandTerminationDiagnostic;
+let deriveManagedWorktreeDirName;
 
 if (SPAWN_BLOCKED) {
   describe("workflow-task-lifecycle", () => {
@@ -59,6 +60,7 @@ if (SPAWN_BLOCKED) {
     _skipUntil: skipUntil,
   } = await import("../workflow/workflow-nodes/transforms.mjs"));
   ({ buildCommandTerminationDiagnostic } = await import("../workflow/workflow-nodes/actions.mjs"));
+  ({ deriveManagedWorktreeDirName } = await import("../workflow/workflow-nodes/definitions.mjs"));
 
 // -- Helpers -----------------------------------------------------------------
 
@@ -3483,6 +3485,81 @@ describe("action.acquire_worktree", () => {
       branch,
       taskId: "legacy-conflict-1",
     });
+    expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("refresh_conflict");
+  }, 20000);
+
+  it("recreates a usable managed worktree when post-create sync removes a stale detached branch", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/post-create-refresh-conflict";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    const taskId = "post-create-conflict-1";
+    const placeholderPath = join(
+      repoDir,
+      ".bosun",
+      "worktrees",
+      deriveManagedWorktreeDirName(taskId, branch),
+    );
+    mkdirSync(join(placeholderPath, ".bosun"), { recursive: true });
+
+    writeFileSync(join(repoDir, "README.md"), "main branch baseline\n");
+    gitExec("git add README.md && git commit -m main-readme-baseline", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "README.md"), "local base change\n");
+    gitExec("git add README.md && git commit -m local-base-readme-change", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${branch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "README.md"), "task branch change\n");
+    gitExec("git add README.md && git commit -m task-readme-change", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const ctx = makeCtx({});
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+
+    const result = await nt.execute(node, ctx);
+    expect(result.success).toBe(true);
+    expect(result.created).toBe(true);
+    expect(String(result.worktreePath).replace(/\\/g, "/")).toBe(String(placeholderPath).replace(/\\/g, "/"));
+    expect(existsSync(join(result.worktreePath, ".git"))).toBe(true);
+
+    const topLevel = gitExec("git rev-parse --show-toplevel", {
+      cwd: result.worktreePath,
+      encoding: "utf8",
+    }).trim().replace(/\\/g, "/");
+    expect(topLevel).toBe(String(result.worktreePath).replace(/\\/g, "/"));
+
+    const recovery = readWorktreeRecoveryStatus(repoDir);
+    expect(recovery?.health).toBe("recovered");
+    expect(recovery?.failureStreak).toBe(0);
+    expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("missing_git_metadata");
     expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("refresh_conflict");
   }, 20000);
 
