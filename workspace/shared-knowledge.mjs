@@ -878,8 +878,9 @@ export async function appendKnowledgeEntry(entry, options = {}) {
 
     knowledgeState.entryHashes.add(normalizedEntry.hash);
     knowledgeState.entriesWritten++;
-    knowledgeState.lastWriteAt = Date.now();
-    knowledgeState.lastWriteByThrottleKey.set(throttleKey, knowledgeState.lastWriteAt);
+    const completedAt = Date.now();
+    knowledgeState.lastWriteAt = completedAt;
+    knowledgeState.lastWriteByThrottleKey.set(throttleKey, completedAt);
 
     return {
       success: true,
