@@ -67,6 +67,12 @@ const knowledgeState = {
   writeQueue: Promise.resolve(),
 };
 
+function resetKnowledgeThrottleState() {
+  knowledgeState.lastWriteAt = null;
+  knowledgeState.lastWriteByThrottleKey = new Map();
+}
+
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function normalizeText(value) {
@@ -598,8 +604,7 @@ export function initSharedKnowledge(opts = {}) {
   knowledgeState.registryFile = opts.registryFile || DEFAULT_REGISTRY_FILE;
   knowledgeState.sectionHeader = opts.sectionHeader || DEFAULT_SECTION_HEADER;
   knowledgeState.entriesWritten = 0;
-  knowledgeState.lastWriteAt = null;
-  knowledgeState.lastWriteByThrottleKey = new Map();
+  resetKnowledgeThrottleState();
   knowledgeState.entryHashes = new Set();
   knowledgeState.writeQueue = Promise.resolve();
 }
