@@ -3467,6 +3467,48 @@ describe("action.acquire_worktree", () => {
     expect(result.error).toContain("managed worktree was removed after stale refresh state");
     expect(existsSync(legacyPath)).toBe(false);
   }, 20000);
+
+  it("fails non-retryably when the task branch is already attached to an unmanaged worktree", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/unmanaged-attached-branch";
+    const externalPath = mkdtempSync(join(tmpdir(), "wf-unmanaged-attached-"));
+
+    try {
+      gitExec(`git worktree add "${externalPath}" -b "${branch}" main`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+
+      const ctx = makeCtx({});
+      const node = makeNode("action.acquire_worktree", {
+        repoRoot: repoDir,
+        taskId: "unmanaged-attached-1",
+        branch,
+        baseBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      });
+
+      const result = await nt.execute(node, ctx);
+
+      expect(result.success).toBe(false);
+      expect(result.retryable).toBe(false);
+      expect(result.failureKind).toBe("unmanaged_attached_worktree");
+      expect(result.worktreePath.replace(/\\/g, "/")).toBe(externalPath.replace(/\\/g, "/"));
+      expect(result.error).toContain("already attached to unmanaged worktree");
+      expect(result.blockedReason).toContain("non-Bosun worktree");
+      expect(existsSync(externalPath)).toBe(true);
+    } finally {
+      try {
+        gitExec(`git worktree remove "${externalPath}" --force`, {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {
+        rmSync(externalPath, { recursive: true, force: true });
+      }
+    }
+  }, 20000);
   it("uses a short managed worktree directory derived from task id", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const ctx = makeCtx({});

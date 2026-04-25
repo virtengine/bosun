@@ -9772,6 +9772,36 @@ registerNodeType("action.acquire_worktree", {
         return true;
       };
 
+      const blockUnmanagedAttachedWorktree = async (attachedPath) => {
+        const errorMessage = `Task branch ${branch} is already attached to unmanaged worktree: ${attachedPath}`;
+        recoveryState.phase = "attached-branch";
+        recoveryState.worktreePath = attachedPath;
+        recoveryState.detectedIssues.add("unmanaged_attached_worktree");
+        await persistRecoveryEvent({
+          outcome: "blocked_unmanaged_attached_worktree",
+          phase: "attached-branch",
+          worktreePath: attachedPath,
+          detectedIssues: ["unmanaged_attached_worktree"],
+          error: errorMessage,
+        });
+        ctx.log(node.id, errorMessage);
+        return {
+          success: false,
+          error: errorMessage,
+          taskId,
+          repoRoot,
+          worktreePath: attachedPath,
+          branch,
+          baseBranch,
+          retryable: false,
+          failureKind: "unmanaged_attached_worktree",
+          blockedReason:
+            "Task branch is already attached to a non-Bosun worktree; detach or remove that external worktree before retrying.",
+          detectedIssues: ["unmanaged_attached_worktree"],
+          phase: "attached-branch",
+        };
+      };
+
       const tryReuseExistingBranchWorktree = async (candidatePath, phaseLabel, logLabel = "Reusing existing branch worktree") => {
         if (!candidatePath || !existsSync(candidatePath)) return null;
         if (invalidateBrokenReusableWorktree(candidatePath, phaseLabel)) {
@@ -10059,6 +10089,9 @@ registerNodeType("action.acquire_worktree", {
         );
       }
       if (attachedPath && existsSync(attachedPath)) {
+        if (!isManagedBosunWorktree(attachedPath, repoRoot)) {
+          return blockUnmanagedAttachedWorktree(attachedPath);
+        }
         if (invalidateBrokenReusableWorktree(attachedPath, "attached-branch")) {
           fixGitConfigCorruption(repoRoot);
         } else {
@@ -10143,6 +10176,9 @@ registerNodeType("action.acquire_worktree", {
           let recreatedAttachedWorktree = false;
           let createdRecoveryWorktree = false;
           if (attachedPath && existsSync(attachedPath)) {
+            if (!isManagedBosunWorktree(attachedPath, repoRoot)) {
+              return blockUnmanagedAttachedWorktree(attachedPath);
+            }
             if (invalidateBrokenReusableWorktree(attachedPath, "attached-branch")) {
               fixGitConfigCorruption(repoRoot);
               if (existsSync(worktreePath)) {
