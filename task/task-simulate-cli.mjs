@@ -40,7 +40,12 @@ import {
   loadStore,
   waitForStoreWrites,
 } from "./task-store.mjs";
-import { resolveKanbanStorePath } from "./task-cli.mjs";
+/** Resolve the kanban state JSON path using common env/config heuristics. */
+function resolveKanbanStorePath() {
+  if (process.env.BOSUN_STORE_PATH) return process.env.BOSUN_STORE_PATH;
+  const base = process.env.REPO_ROOT || process.cwd();
+  return resolve(base, ".bosun", ".cache", "kanban-state.json");
+}
 
 const TASK_SIMULATION_TEMPLATE_ID = "template-task-lifecycle";
 const TASK_SIMULATION_TEMPLATE_FORCE_UPDATE_IDS = [
