@@ -691,6 +691,39 @@ describe("shared-knowledge", () => {
       expect(entries.map((entry) => entry.agentId)).toContain("agent-beta");
     });
 
+    it("allows concurrent writes in the same scope when agents differ", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Session memory: delta can persist recovery learnings in the shared session scope.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-shared",
+        agentId: "agent-delta",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Session memory: epsilon can also persist shared-session learnings without delta blocking it.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-shared",
+        agentId: "agent-epsilon",
+      });
+
+      const [firstResult, secondResult] = await Promise.all([
+        appendKnowledgeEntry(first),
+        appendKnowledgeEntry(second),
+      ]);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+    });
+
     it("rate limits burst writes from the same agent or scope", async () => {
       initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
 

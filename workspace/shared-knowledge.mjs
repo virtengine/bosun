@@ -61,14 +61,12 @@ const knowledgeState = {
   registryFile: DEFAULT_REGISTRY_FILE,
   sectionHeader: DEFAULT_SECTION_HEADER,
   entriesWritten: 0,
-  lastWriteAt: null,
   lastWriteByThrottleKey: new Map(),
   entryHashes: new Set(),
   writeQueue: Promise.resolve(),
 };
 
 function resetKnowledgeThrottleState() {
-  knowledgeState.lastWriteAt = null;
   knowledgeState.lastWriteByThrottleKey = new Map();
 }
 
@@ -886,9 +884,7 @@ export async function appendKnowledgeEntry(entry, options = {}) {
 
       knowledgeState.entryHashes.add(normalizedEntry.hash);
       knowledgeState.entriesWritten++;
-      const completedAt = Date.now();
-      knowledgeState.lastWriteAt = completedAt;
-      knowledgeState.lastWriteByThrottleKey.set(throttleKey, completedAt);
+      knowledgeState.lastWriteByThrottleKey.set(throttleKey, Date.now());
 
       return {
         success: true,
@@ -1066,8 +1062,8 @@ export function formatKnowledgeSummary() {
     `Registry: ${knowledgeState.registryFile}`,
     `Dedup cache: ${knowledgeState.entryHashes.size} hashes`,
     `Throttle keys: ${knowledgeState.lastWriteByThrottleKey.size}`,
-    knowledgeState.lastWriteAt
-      ? `Last write: ${new Date(knowledgeState.lastWriteAt).toISOString()}`
+    knowledgeState.lastWriteByThrottleKey.size > 0
+      ? "Per-agent/per-scope throttles active"
       : "No writes this session",
   ].join("\n");
 }
