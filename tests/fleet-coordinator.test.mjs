@@ -559,10 +559,10 @@ describe("shared-knowledge", () => {
   });
 
   describe("appendKnowledgeEntry", () => {
-    let appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge;
+    let appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge, readKnowledgeEntries;
 
     beforeEach(async () => {
-      ({ appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge } =
+      ({ appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge, readKnowledgeEntries } =
         await import("../workspace/shared-knowledge.mjs"));
     });
 
@@ -677,10 +677,18 @@ describe("shared-knowledge", () => {
       expect(firstResult.success).toBe(true);
       expect(secondResult.success).toBe(true);
 
-      const entries = await readKnowledgeEntries();
-      expect(entries.map((entry) => entry.agentId)).toEqual(
+      const { listKnowledgeEntriesFromStateLedger } = await import("../lib/state-ledger-sqlite.mjs");
+      const stateEntries = listKnowledgeEntriesFromStateLedger({
+        repoRoot: tempRoot,
+        scopeLevel: "workspace",
+        teamId: "team-a",
+      });
+      expect(stateEntries.map((entry) => entry.agentId)).toEqual(
         expect.arrayContaining(["agent-alpha", "agent-beta"]),
       );
+
+      const entries = await readKnowledgeEntries();
+      expect(entries.map((entry) => entry.agentId)).toContain("agent-beta");
     });
 
     it("rate limits burst writes from the same agent or scope", async () => {

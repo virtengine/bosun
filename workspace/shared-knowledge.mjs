@@ -64,6 +64,7 @@ const knowledgeState = {
   lastWriteAt: null,
   lastWriteByThrottleKey: new Map(),
   entryHashes: new Set(),
+  writeQueue: Promise.resolve(),
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -600,6 +601,7 @@ export function initSharedKnowledge(opts = {}) {
   knowledgeState.lastWriteAt = null;
   knowledgeState.lastWriteByThrottleKey = new Map();
   knowledgeState.entryHashes = new Set();
+  knowledgeState.writeQueue = Promise.resolve();
 }
 
 // ── Entry Format ─────────────────────────────────────────────────────────────
@@ -818,83 +820,89 @@ async function writeKnowledgeMarkdownMirror(filePath, markdown) {
 }
 
 export async function appendKnowledgeEntry(entry, options = {}) {
-  const normalizedEntry = serializeEntry(entry);
-  const validation = validateEntry(normalizedEntry);
-  if (!validation.valid) {
-    return { success: false, reason: validation.reason };
-  }
-
-  const agentId = normalizeText(normalizedEntry.agentId || "unknown");
-  const scopeThrottleKey = getScopeThrottleKey(normalizedEntry);
-  const throttleKey = `${agentId}::${scopeThrottleKey}`;
-  const skipRateLimit = options?.skipRateLimit === true;
-  const now = Date.now();
-  const lastRelevantWrite = knowledgeState.lastWriteByThrottleKey.get(throttleKey) || 0;
-  if (!skipRateLimit && lastRelevantWrite) {
-    const elapsed = now - lastRelevantWrite;
-    if (elapsed < RATE_LIMIT_MS) {
-      return {
-        success: false,
-        reason: `rate limited — wait ${Math.ceil((RATE_LIMIT_MS - elapsed) / 1000)}s`,
-      };
-    }
-  }
-
-  await ensureEntryHashesLoaded();
-  if (isDuplicate(normalizedEntry)) {
-    return { success: false, reason: "duplicate entry — already recorded" };
-  }
-
-  const markdown = formatEntryAsMarkdown(normalizedEntry);
-  const effectiveRepoRoot = knowledgeState.repoRoot || process.cwd();
-  const filePath = resolve(knowledgeState.repoRoot || process.cwd(), knowledgeState.targetFile);
-
-  try {
-    const ledgerResult = appendKnowledgeEntryToStateLedger(normalizedEntry, {
-      repoRoot: effectiveRepoRoot,
-    });
-    const syncedRegistry = await syncRegistryProjectionFromLedger(effectiveRepoRoot);
-    const syncedContainsEntry = Array.isArray(syncedRegistry?.entries)
-      && syncedRegistry.entries.some((entry) => entry?.hash === normalizedEntry.hash);
-    if (!syncedContainsEntry) {
-      const legacyRegistry = await loadLegacyRegistryEntries(effectiveRepoRoot);
-      await saveRegistryEntries(effectiveRepoRoot, {
-        ...legacyRegistry,
-        entries: [
-          normalizedEntry,
-          ...legacyRegistry.entries.filter((entry) => entry?.hash !== normalizedEntry.hash),
-        ],
-      });
+  const writeOperation = async () => {
+    const normalizedEntry = serializeEntry(entry);
+    const validation = validateEntry(normalizedEntry);
+    if (!validation.valid) {
+      return { success: false, reason: validation.reason };
     }
 
-    let mirrored = true;
-    let mirrorReason = null;
+    const agentId = normalizeText(normalizedEntry.agentId || "unknown");
+    const scopeThrottleKey = getScopeThrottleKey(normalizedEntry);
+    const throttleKey = `${agentId}::${scopeThrottleKey}`;
+    const skipRateLimit = options?.skipRateLimit === true;
+    const now = Date.now();
+    const lastRelevantWrite = knowledgeState.lastWriteByThrottleKey.get(throttleKey) || 0;
+    if (!skipRateLimit && lastRelevantWrite) {
+      const elapsed = now - lastRelevantWrite;
+      if (elapsed < RATE_LIMIT_MS) {
+        return {
+          success: false,
+          reason: `rate limited — wait ${Math.ceil((RATE_LIMIT_MS - elapsed) / 1000)}s`,
+        };
+      }
+    }
+
+    await ensureEntryHashesLoaded();
+    if (isDuplicate(normalizedEntry)) {
+      return { success: false, reason: "duplicate entry — already recorded" };
+    }
+
+    const markdown = formatEntryAsMarkdown(normalizedEntry);
+    const effectiveRepoRoot = knowledgeState.repoRoot || process.cwd();
+    const filePath = resolve(knowledgeState.repoRoot || process.cwd(), knowledgeState.targetFile);
+
     try {
-      await writeKnowledgeMarkdownMirror(filePath, markdown);
-    } catch (mirrorError) {
-      mirrored = false;
-      mirrorReason = `markdown mirror failed: ${mirrorError.message}`;
-    }
-
-    knowledgeState.entryHashes.add(normalizedEntry.hash);
-    knowledgeState.entriesWritten++;
-    const completedAt = Date.now();
-    knowledgeState.lastWriteAt = completedAt;
-    knowledgeState.lastWriteByThrottleKey.set(throttleKey, completedAt);
-
-    return {
-      success: true,
-      hash: normalizedEntry.hash,
-      registryPath: getRegistryPath(effectiveRepoRoot),
-      ledgerPath: ledgerResult?.path || resolveStateLedgerPath({
+      const ledgerResult = appendKnowledgeEntryToStateLedger(normalizedEntry, {
         repoRoot: effectiveRepoRoot,
-      }),
-      mirrored,
-      mirrorReason,
-    };
-  } catch (err) {
-    return { success: false, reason: `write error: ${err.message}` };
-  }
+      });
+      const syncedRegistry = await syncRegistryProjectionFromLedger(effectiveRepoRoot);
+      const syncedContainsEntry = Array.isArray(syncedRegistry?.entries)
+        && syncedRegistry.entries.some((entry) => entry?.hash === normalizedEntry.hash);
+      if (!syncedContainsEntry) {
+        const legacyRegistry = await loadLegacyRegistryEntries(effectiveRepoRoot);
+        await saveRegistryEntries(effectiveRepoRoot, {
+          ...legacyRegistry,
+          entries: [
+            normalizedEntry,
+            ...legacyRegistry.entries.filter((entry) => entry?.hash !== normalizedEntry.hash),
+          ],
+        });
+      }
+
+      let mirrored = true;
+      let mirrorReason = null;
+      try {
+        await writeKnowledgeMarkdownMirror(filePath, markdown);
+      } catch (mirrorError) {
+        mirrored = false;
+        mirrorReason = `markdown mirror failed: ${mirrorError.message}`;
+      }
+
+      knowledgeState.entryHashes.add(normalizedEntry.hash);
+      knowledgeState.entriesWritten++;
+      const completedAt = Date.now();
+      knowledgeState.lastWriteAt = completedAt;
+      knowledgeState.lastWriteByThrottleKey.set(throttleKey, completedAt);
+
+      return {
+        success: true,
+        hash: normalizedEntry.hash,
+        registryPath: getRegistryPath(effectiveRepoRoot),
+        ledgerPath: ledgerResult?.path || resolveStateLedgerPath({
+          repoRoot: effectiveRepoRoot,
+        }),
+        mirrored,
+        mirrorReason,
+      };
+    } catch (err) {
+      return { success: false, reason: `write error: ${err.message}` };
+    }
+  };
+
+  const queuedWrite = knowledgeState.writeQueue.then(writeOperation, writeOperation);
+  knowledgeState.writeQueue = queuedWrite.catch(() => undefined);
+  return queuedWrite;
 }
 
 // ── Read / Retrieve ──────────────────────────────────────────────────────────
