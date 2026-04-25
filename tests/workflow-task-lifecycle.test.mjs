@@ -4901,6 +4901,8 @@ describe("action.push_branch", () => {
     expect(nt.schema.properties.rebaseBeforePush).toBeDefined();
     expect(nt.schema.properties.skipHooks).toBeDefined();
     expect(nt.schema.properties.skipHooks.default).toBe(false);
+    expect(nt.schema.properties.pushTimeout).toBeDefined();
+    expect(nt.schema.properties.pushTimeout.default).toBe(300000);
     expect(nt.schema.properties.emptyDiffGuard).toBeDefined();
     expect(nt.schema.properties.syncMainForModuleBranch).toBeDefined();
     expect(nt.schema.properties.requireApproval).toBeDefined();

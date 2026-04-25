@@ -12691,7 +12691,7 @@ registerNodeType("action.push_branch", {
       conflictResolverPrompt: { type: "string", description: "Optional custom prompt for merge conflict resolution agent runs" },
       emptyDiffGuard: { type: "boolean", default: true, description: "Abort if no files changed vs base" },
       syncMainForModuleBranch: { type: "boolean", default: false, description: "Also sync base with main" },
-      pushTimeout: { type: "number", default: 120000, description: "Push timeout (ms)" },
+      pushTimeout: { type: "number", default: 300000, description: "Push timeout (ms)" },
       protectedBranches: {
         type: "array", items: { type: "string" },
         default: ["main", "master", "develop", "production"],
@@ -12733,7 +12733,7 @@ registerNodeType("action.push_branch", {
     const conflictResolverPrompt = String(node.config?.conflictResolverPrompt || "");
     const emptyDiffGuard = node.config?.emptyDiffGuard !== false;
     const syncMain = node.config?.syncMainForModuleBranch === true;
-    const pushTimeout = node.config?.pushTimeout || 120000;
+    const pushTimeout = node.config?.pushTimeout || 300000;
     const protectedBranches = node.config?.protectedBranches
       || ["main", "master", "develop", "production"];
 
