@@ -729,6 +729,8 @@ describe("shared-knowledge", () => {
         scope: "testing",
         category: "pattern",
         scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
         sessionId: "session-shared",
         agentId: "agent-delta",
       });
@@ -737,6 +739,8 @@ describe("shared-knowledge", () => {
         scope: "testing",
         category: "pattern",
         scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
         sessionId: "session-shared",
         agentId: "agent-epsilon",
       });
