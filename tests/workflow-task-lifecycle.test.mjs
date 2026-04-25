@@ -2910,6 +2910,50 @@ describe("action.resolve_executor", () => {
     }
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
+  it("classifies already-implemented workflow agent blocks as commit-blocked implement state", async () => {
+    const handler = getNodeType("action.run_agent");
+    const ctx = makeCtx({
+      worktreePath: "/tmp/implemented-worktree",
+      repoRoot: "/tmp/implemented-repo",
+      taskId: "TASK-IMPLEMENT-ALREADY-DONE",
+      task: {
+        id: "TASK-IMPLEMENT-ALREADY-DONE",
+        title: "Already implemented task",
+      },
+    });
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: false,
+      sdk: "copilot",
+      output: [
+        "Code inspection suggests the task is already implemented in this worktree.",
+        "The worktree already contains the intended fix and the implemented already-present fix appears aligned with task requirements.",
+        "Blocked by environment constraints: this delegated session cannot safely inspect enough context to finish verification here.",
+      ].join("\n"),
+      items: [],
+      threadId: "agent-thread-implemented",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const node = makeNode("action.run_agent", {
+      prompt: "Confirm implementation state",
+      autoRecover: false,
+      failOnError: false,
+    }, "run-agent-implement");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
   it("forwards OpenCode restart config through action.restart_agent execution", async () => {
     const handler = getNodeType("action.restart_agent");
     const ctx = makeCtx({

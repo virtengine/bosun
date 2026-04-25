@@ -1783,6 +1783,20 @@ function classifyWorkflowAgentBlockedStatus(result = {}) {
   return null;
 }
 
+const WORKFLOW_AGENT_IMPLEMENTATION_PRESENT_PATTERNS = [
+  /implemented already-present fix appears aligned/i,
+  /already implemented in the current worktree/i,
+  /task appears already implemented/i,
+  /worktree already contains the intended fix/i,
+  /code inspection suggests the task is already implemented/i,
+];
+
+function isWorkflowAgentImplementationAlreadyPresent(text = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return WORKFLOW_AGENT_IMPLEMENTATION_PRESENT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function deriveWorkflowAgentSessionStatus(result = {}, { streamEventCount = 0 } = {}) {
   const blockedStatus = classifyWorkflowAgentBlockedStatus(result);
   if (blockedStatus) return blockedStatus;
@@ -1819,6 +1833,16 @@ function normalizeWorkflowAgentBlockedResult(result = {}) {
     }
     if (!String(normalized.blockedReason || "").trim()) {
       normalized.blockedReason = classifyPushBlockedReason(text, false);
+    }
+  } else if (
+    blockedStatus === "blocked_by_env"
+    && isWorkflowAgentImplementationAlreadyPresent(text)
+  ) {
+    if (!String(normalized.implementationState || "").trim()) {
+      normalized.implementationState = "implementation_done_commit_blocked";
+    }
+    if (!String(normalized.blockedReason || "").trim()) {
+      normalized.blockedReason = "implementation_done_commit_blocked";
     }
   } else if (!String(normalized.blockedReason || "").trim()) {
     normalized.blockedReason = blockedStatus;
@@ -3462,6 +3486,9 @@ registerNodeType("action.run_agent", {
         const heartbeat = setInterval(() => {
           // Heartbeats prove the workflow node is still alive, not that the
           // delegated agent emitted a meaningful first event.
+          if (!firstEventSeen && !waitingForSlot) {
+            armFirstEventGuard();
+          }
           if (tracker && trackedTaskId) {
             tracker.touchSession(trackedTaskId);
             if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {

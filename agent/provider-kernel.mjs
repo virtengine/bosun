@@ -514,12 +514,12 @@ export function createProviderKernel(options = {}) {
                            ...(execOptions.providerConfig || {}),
                            ...(explicitProviderConfig || {}),
                            model:
-                            explicitProviderConfig?.model
-                            || execOptions.providerConfig?.model
-                            || payload.model
-                            || runnerOptions.model
-                            || normalizedInput.model
-                            || null,
+                             explicitProviderConfig?.model
+                             || payload.model
+                             || runnerOptions.model
+                             || normalizedInput.model
+                             || execOptions.providerConfig?.model
+                             || null,
                            ...(modelApiVersion ? { apiVersion: modelApiVersion } : {}),
                          }
                        : undefined;

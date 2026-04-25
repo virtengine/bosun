@@ -42,5 +42,7 @@ describe("voice tool capability injection regressions", () => {
     expect(orchestrator).toContain("Enabled tools JSON:");
     expect(workflow).toContain("buildWorkflowAgentToolContract");
     expect(workflow).toContain("## Tool Capability Contract");
+    expect(workflow).toContain("prefer targeted read/view calls with explicit line ranges");
+    expect(workflow).toContain("retry as separate single-purpose commands");
   });
 });

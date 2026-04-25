@@ -228,6 +228,25 @@ function toAnthropicBlocks(message = {}) {
   return blocks;
 }
 
+function hasToolExecutionPath(toolCalls = [], execOptions = {}) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return false;
+  if (execOptions?.allowMcp === true) return true;
+  const toolOrchestrator = execOptions?.toolOrchestrator;
+  if (toolOrchestrator && (
+    typeof toolOrchestrator.executeTool === "function"
+    || typeof toolOrchestrator.execute === "function"
+  )) {
+    return true;
+  }
+  const toolRunner = execOptions?.toolRunner;
+  if (toolRunner && typeof toolRunner.runTool === "function") return true;
+  const configuredTools = Array.isArray(execOptions?.tools) ? execOptions.tools : [];
+  return toolCalls.some((call) => configuredTools.some((tool) =>
+    toTrimmedString(tool?.name || tool?.function?.name) === toTrimmedString(call?.name)
+    && typeof tool?.execute === "function"
+  ));
+}
+
 function mergeAnthropicMessages(messages = []) {
   const merged = [];
   for (const entry of messages) {
@@ -421,6 +440,25 @@ function buildAssistantItems(content = [], text = "") {
   return output;
 }
 
+function buildAssistantResultMessage(text = "", toolCalls = []) {
+  return {
+    role: "assistant",
+    content: [
+      ...(text ? [{ type: "text", text }] : []),
+      ...(Array.isArray(toolCalls) ? toolCalls : []).map((toolCall, index) => ({
+        id: toTrimmedString(toolCall?.id || toolCall?.callId) || `tool-call-${index + 1}`,
+        type: "tool_call",
+        name: toTrimmedString(toolCall?.name) || "tool",
+        input: isPlainObject(toolCall?.input) || Array.isArray(toolCall?.input)
+          ? cloneJson(toolCall.input)
+          : (isPlainObject(toolCall?.arguments) || Array.isArray(toolCall?.arguments)
+              ? cloneJson(toolCall.arguments)
+              : {}),
+      })),
+    ],
+  };
+}
+
 // ── SSE stream parsing (Anthropic event model) ───────────────────────────────
 
 async function* parseSseStream(response, signal) {
@@ -502,6 +540,10 @@ async function streamAnthropicTurn(url, apiKey, body, execOptions = {}) {
     const message = await parseErrorResponse(response);
     throw new Error(`Anthropic API error ${response.status}: ${message}`);
   }
+  if (!response.body || typeof response.body.getReader !== "function") {
+    clearTimeout(idleTimer);
+    return await parseAnthropicNonStreamingResponse(response);
+  }
 
   try {
     for await (const { event, data } of parseSseStream(response, fetchSignal)) {
@@ -580,6 +622,17 @@ async function streamAnthropicTurn(url, apiKey, body, execOptions = {}) {
 
 // ── Non-streaming fallback for structured output ─────────────────────────────
 
+async function parseAnthropicNonStreamingResponse(response) {
+  const payload = await response.json();
+  const content = Array.isArray(payload?.content) ? payload.content : [];
+  const text = extractAnthropicText(content) || "";
+  const toolCalls = extractAnthropicToolCalls(content);
+  const stopReason = payload.stop_reason || payload.stopReason || null;
+  const usage = normalizeAnthropicUsage(payload?.usage || {});
+
+  return { text, toolCalls, stopReason, usage };
+}
+
 async function callAnthropicNonStreaming(url, apiKey, body, execOptions = {}) {
   const signal = execOptions?.abortController?.signal ?? null;
   const controller = new AbortController();
@@ -609,15 +662,7 @@ async function callAnthropicNonStreaming(url, apiKey, body, execOptions = {}) {
     const message = await parseErrorResponse(response);
     throw new Error(`Anthropic API error ${response.status}: ${message}`);
   }
-
-  const payload = await response.json();
-  const content = Array.isArray(payload?.content) ? payload.content : [];
-  const text = extractAnthropicText(content) || "";
-  const toolCalls = extractAnthropicToolCalls(content);
-  const stopReason = payload.stop_reason || payload.stopReason || null;
-  const usage = normalizeAnthropicUsage(payload?.usage || {});
-
-  return { text, toolCalls, stopReason, usage };
+  return await parseAnthropicNonStreamingResponse(response);
 }
 
 // ── Tool execution ───────────────────────────────────────────────────────────
@@ -766,13 +811,34 @@ export const anthropicNativeAdapter = {
       toTrimmedString(payload.model)
       || toTrimmedString(execOptions.model)
       || toTrimmedString(execOptions.providerConfig?.model);
+    const providerId =
+      toTrimmedString(payload.providerId)
+      || toTrimmedString(execOptions.provider)
+      || toTrimmedString(execOptions.providerConfig?.provider)
+      || "anthropic-messages";
+    const threadId =
+      toTrimmedString(payload.threadId)
+      || toTrimmedString(execOptions.threadId || execOptions.sessionId)
+      || effectiveSessionId;
     const { apiKey } = resolveCredentials(execOptions);
 
-    let tools = Array.isArray(execOptions?.tools) ? execOptions.tools : [];
+    let tools = Array.isArray(execOptions?.tools)
+      ? execOptions.tools
+      : (Array.isArray(payload.tools) ? payload.tools : []);
+    const directToolExecutionOptions = {
+      toolOrchestrator: execOptions?.toolOrchestrator || null,
+      toolRunner: execOptions?.toolRunner || null,
+      tools: [
+        ...(Array.isArray(execOptions?.tools) ? execOptions.tools : []),
+        ...(Array.isArray(payload.tools) ? payload.tools : []),
+      ],
+      allowMcp: false,
+    };
 
     // ── MCP tool discovery (D.7) ────────────────────────────────────────────
     const mcpServerConfigs = execOptions?.mcpServers || execOptions?.providerConfig?.mcpServers || [];
     if (mcpServerConfigs.length > 0) {
+      directToolExecutionOptions.allowMcp = true;
       try {
         tools = await resolveMcpTools(tools, mcpServerConfigs);
       } catch (err) {
@@ -792,8 +858,22 @@ export const anthropicNativeAdapter = {
     const session = await ensureSession(isPersistent ? effectiveSessionId : null, model);
     if (model && !session.model) session.model = model;
     const onEvent = typeof execOptions?.onEvent === "function" ? execOptions.onEvent : null;
-
-    const trimmedMsg = String(input || "").trim().toLowerCase();
+    const payloadMessages = Array.isArray(payload.messages) ? cloneJson(payload.messages) : [];
+    const hasExplicitPayloadHistory = Boolean(
+      input
+      && typeof input === "object"
+      && !Array.isArray(input)
+      && (
+        Array.isArray(input.messages)
+        || Array.isArray(input.history)
+        || Array.isArray(input.items)
+      ),
+    );
+    const promptText =
+      typeof input === "string"
+        ? String(input)
+        : toTrimmedString(payload.prompt);
+    const trimmedMsg = promptText.trim().toLowerCase();
 
     // Slash commands
     if (trimmedMsg === "/undo") {
@@ -909,12 +989,20 @@ export const anthropicNativeAdapter = {
       };
     }
 
-    // Append user turn
-    session.messages.push({ type: "user_message", text: String(input || "") });
+    // Seed structured payload history on the first turn so system prompts, tool
+    // definitions, and rich user content survive into the Anthropic request.
+    if (hasExplicitPayloadHistory && payloadMessages.length > 0) {
+      session.messages = payloadMessages;
+    } else if (session.messages.length === 0 && payloadMessages.length > 0) {
+      session.messages = payloadMessages;
+    } else {
+      session.messages.push({ type: "user_message", text: promptText });
+    }
     onEvent?.({ type: "session.turn.start", sessionId: effectiveSessionId, model });
 
     let aggregatedUsage = null;
     let finalText = "";
+    let finalToolCalls = [];
     let roundCount = 0;
     const maxCostUsd = Number(execOptions?.maxCostUsd ?? execOptions?.providerConfig?.maxCostUsd ?? 0) || 0;
 
@@ -985,6 +1073,10 @@ export const anthropicNativeAdapter = {
         }
 
         finalText = turnResult.text;
+        finalToolCalls = Array.isArray(turnResult.toolCalls) ? turnResult.toolCalls.map((toolCall) => ({
+          ...toolCall,
+          id: toolCall?.id || toolCall?.callId || null,
+        })) : [];
 
         if (turnResult.usage) {
           if (!turnResult.usage.costUsd || turnResult.usage.costUsd === 0) {
@@ -1025,6 +1117,7 @@ export const anthropicNativeAdapter = {
         session.messages.push(assistantEntry);
 
         if (!turnResult.toolCalls.length) break;
+        if (!hasToolExecutionPath(turnResult.toolCalls, directToolExecutionOptions)) break;
 
         // Pre-tool compaction
         const preTool = _compactor.shouldCompact(session, { model, beforeToolRound: true });
@@ -1090,9 +1183,11 @@ export const anthropicNativeAdapter = {
       return {
         success: true,
         finalResponse: finalText,
-        items: session.messages.slice(-Math.min(session.messages.length, 100)),
+        items: [buildAssistantResultMessage(finalText, finalToolCalls)],
         usage: aggregatedUsage,
+        providerId,
         sessionId: effectiveSessionId,
+        threadId,
         model,
         roundCount,
       };
@@ -1110,7 +1205,9 @@ export const anthropicNativeAdapter = {
         finalResponse: `Error: ${err?.message || err}`,
         items: [],
         usage: aggregatedUsage,
+        providerId,
         sessionId: effectiveSessionId,
+        threadId,
       };
     } finally {
       _busySet.delete(effectiveSessionId);
