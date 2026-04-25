@@ -1041,8 +1041,7 @@ export function getKnowledgeState() {
   return {
     ...knowledgeState,
     entryHashes: knowledgeState.entryHashes.size,
-    lastWriteByAgent: knowledgeState.lastWriteByAgent.size,
-    lastWriteByScope: knowledgeState.lastWriteByScope.size,
+    throttleKeys: knowledgeState.lastWriteByThrottleKey.size,
   };
 }
 
@@ -1052,22 +1051,9 @@ export function formatKnowledgeSummary() {
     `Target: ${knowledgeState.targetFile}`,
     `Registry: ${knowledgeState.registryFile}`,
     `Dedup cache: ${knowledgeState.entryHashes.size} hashes`,
+    `Throttle keys: ${knowledgeState.lastWriteByThrottleKey.size}`,
     knowledgeState.lastWriteAt
       ? `Last write: ${new Date(knowledgeState.lastWriteAt).toISOString()}`
       : "No writes this session",
-  ].join("\n");
-}
-ession",
-  ].join("\n");
-}
-astWriteAt
-      ? `Last write: ${new Date(knowledgeState.lastWriteAt).toISOString()}`
-      : "No writes this session",
-  ].join("\n");
-}
-ession",
-  ].join("\n");
-}
-,
   ].join("\n");
 }

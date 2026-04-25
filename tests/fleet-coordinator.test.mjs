@@ -741,6 +741,44 @@ describe("shared-knowledge", () => {
       expect(firstResult.success).toBe(true);
       expect(secondResult.success).toBe(true);
     });
+
+    it("rate limits the same agent within the same scope but not across scopes", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Run memory: first zeta write in workspace scope should persist successfully.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        workspaceId: "workspace-zeta",
+        agentId: "agent-zeta",
+      });
+      const throttled = buildKnowledgeEntry({
+        content: "Run memory: second zeta write in the same workspace scope should be throttled immediately.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        workspaceId: "workspace-zeta",
+        agentId: "agent-zeta",
+      });
+      const differentScope = buildKnowledgeEntry({
+        content: "Run memory: zeta should still persist to a different session scope without workspace throttling blocking it.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        sessionId: "session-zeta",
+        agentId: "agent-zeta",
+      });
+
+      const firstResult = await appendKnowledgeEntry(first);
+      const throttledResult = await appendKnowledgeEntry(throttled);
+      const differentScopeResult = await appendKnowledgeEntry(differentScope);
+
+      expect(firstResult.success).toBe(true);
+      expect(throttledResult.success).toBe(false);
+      expect(String(throttledResult.reason || "")).toContain("rate limited");
+      expect(differentScopeResult.success).toBe(true);
+    });
   });
 
   describe("readKnowledgeEntries", () => {
@@ -804,7 +842,7 @@ Always use deterministic TF ops.
       const state = getKnowledgeState();
       expect(state).toHaveProperty("entriesWritten");
       expect(state).toHaveProperty("targetFile");
-      expect(state).toHaveProperty("lastWriteByScope");
+      expect(state).toHaveProperty("throttleKeys");
     });
 
     it("formats a summary string", () => {
