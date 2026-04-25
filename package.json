@@ -409,6 +409,7 @@
     "task/task-claims.mjs",
     "task/task-cli-bin.mjs",
     "task/task-cli.mjs",
+    "task/task-simulate-cli.mjs",
     "task/task-complexity.mjs",
     "task/task-context.mjs",
     "task/task-debt-ledger.mjs",
