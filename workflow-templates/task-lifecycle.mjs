@@ -335,6 +335,10 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     node("notify-validation-blocked", "notify.telegram", "Notify Validation Blocked", {
       message: "⚠️ Task \"{{taskTitle}}\" ({{taskId}}) blocked after repeated pre-PR validation failures.",
     }, { x: 460, y: 2420 }),
+    node("auto-commit-pre-push", "action.auto_commit_dirty", "Auto Commit Before Push", {
+      worktreePath: "{{worktreePath}}",
+      taskId: "{{taskId}}",
+    }, { x: 0, y: 1940 }),
     // ── SUCCESS PATH: Push branch (with merge-base refresh + empty-diff guard) ───────
     node("push-branch", "action.push_branch", "Push Branch", {
       worktreePath: "{{worktreePath}}",
@@ -662,21 +666,22 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     // Success path (has commits)
     edge("has-commits", "pre-pr-validation", { condition: "$output?.result === true", port: "yes" }),
     edge("pre-pr-validation", "pre-pr-validation-ok"),
-    edge("pre-pr-validation-ok", "push-branch", { condition: "$output?.result === true", port: "yes" }),
+    edge("pre-pr-validation-ok", "auto-commit-pre-push", { condition: "$output?.result === true", port: "yes" }),
     edge("pre-pr-validation-ok", "set-fix-summary", { condition: "$output?.result !== true", port: "no" }),
     edge("set-fix-summary", "auto-fix-validation"),
     edge("auto-fix-validation", "retry-pre-pr-validation"),
     edge("retry-pre-pr-validation", "retry-validation-ok"),
-    edge("retry-validation-ok", "push-branch", { condition: "$output?.result === true", port: "yes" }),
+    edge("retry-validation-ok", "auto-commit-pre-push", { condition: "$output?.result === true", port: "yes" }),
     edge("retry-validation-ok", "set-fix2-summary", { condition: "$output?.result !== true", port: "no" }),
     edge("set-fix2-summary", "auto-fix-validation-2"),
     edge("auto-fix-validation-2", "retry2-pre-pr-validation"),
     edge("retry2-pre-pr-validation", "retry2-validation-ok"),
-    edge("retry2-validation-ok", "push-branch", { condition: "$output?.result === true", port: "yes" }),
+    edge("retry2-validation-ok", "auto-commit-pre-push", { condition: "$output?.result === true", port: "yes" }),
     edge("retry2-validation-ok", "log-validation-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("log-validation-failed", "set-blocked-validation-failed"),
     edge("set-blocked-validation-failed", "notify-validation-blocked"),
     edge("notify-validation-blocked", "join-outcomes"),
+    edge("auto-commit-pre-push", "push-branch"),
     edge("push-branch", "push-ok"),
     edge("push-ok", "build-pr-body", { condition: "$output?.result === true", port: "yes" }),
     edge("build-pr-body", "create-pr"),

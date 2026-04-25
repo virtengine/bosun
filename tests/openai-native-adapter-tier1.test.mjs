@@ -18,7 +18,9 @@ import {
   shouldEnablePromptCaching,
   computeCacheHitPct,
   BudgetExceededError,
+  sanitizeHistoryEntriesForRequest,
 } from "../shell/openai-native-adapter.mjs";
+import { createToolExecutor } from "../shell/tool-executor.mjs";
 import {
   createSessionStore,
   replayEvents,
@@ -88,6 +90,57 @@ describe("BudgetExceededError", () => {
     expect(err.costUsd).toBe(1.23);
     expect(err.limitUsd).toBe(1);
     expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe("sanitizeHistoryEntriesForRequest", () => {
+  it("truncates oversized request entries before they exceed OpenAI per-item limits", () => {
+    const history = [
+      { type: "user_message", text: "u".repeat(1800) },
+      {
+        type: "assistant_message",
+        text: "a".repeat(1700),
+        toolCalls: [{ callId: "call-1", name: "demo", arguments: "x".repeat(1600) }],
+      },
+      { type: "function_call_output", callId: "call-1", output: "o".repeat(1500) },
+    ];
+
+    const sanitized = sanitizeHistoryEntriesForRequest(history, { maxChars: 1024 });
+
+    expect(sanitized[0].text.length).toBeLessThanOrEqual(1024);
+    expect(sanitized[0].text).toContain("truncated");
+    expect(sanitized[1].text.length).toBeLessThanOrEqual(1024);
+    expect(sanitized[1].toolCalls[0].arguments.length).toBeLessThanOrEqual(1024);
+    expect(sanitized[2].output.length).toBeLessThanOrEqual(1024);
+  });
+
+  it("returns the original history when no entry exceeds the cap", () => {
+    const history = [
+      { type: "user_message", text: "short" },
+      { type: "assistant_message", text: "still short" },
+    ];
+
+    expect(sanitizeHistoryEntriesForRequest(history, { maxChars: 1024 })).toBe(history);
+  });
+
+  it("truncates oversized structured tool payloads before request serialization", () => {
+    const history = [
+      {
+        type: "assistant_message",
+        text: "tool turn",
+        toolCalls: [{ callId: "call-1", name: "demo", arguments: { blob: "x".repeat(1800) } }],
+      },
+      { type: "function_call_output", callId: "call-1", output: { blob: "o".repeat(1900) } },
+    ];
+
+    const sanitized = sanitizeHistoryEntriesForRequest(history, { maxChars: 1024 });
+
+    expect(typeof sanitized[0].toolCalls[0].arguments).toBe("string");
+    expect(sanitized[0].toolCalls[0].arguments.length).toBeLessThanOrEqual(1024);
+    expect(sanitized[0].toolCalls[0].arguments).toContain("truncated");
+    expect(typeof sanitized[1].output).toBe("string");
+    expect(sanitized[1].output.length).toBeLessThanOrEqual(1024);
+    expect(sanitized[1].output).toContain("truncated");
   });
 });
 
@@ -260,5 +313,141 @@ describe("shell/session-store", () => {
       { kind: "session.compaction", payload: {}, ts: 3 },
     ]);
     expect(session.compactionCount).toBe(2);
+  });
+});
+
+describe("createToolExecutor", () => {
+  it("dispatches through toolOrchestrator.execute with full session context", async () => {
+    const calls = [];
+    const executor = createToolExecutor();
+      const toolOrchestrator = {
+        async execute(toolName, args, context) {
+          calls.push({ toolName, args, context });
+          return {
+            ok: true,
+            cwd: context.cwd,
+            repoRoot: context.repoRoot,
+            taskKey: context.taskKey,
+            requestedBy: context.requestedBy,
+            adapterName: context.adapterName,
+            executor: context.executor,
+            sdk: context.sdk,
+            providerSelection: context.providerSelection,
+            providerConfig: context.providerConfig,
+            toolCallId: context.toolCallId,
+          };
+        },
+      };
+
+    const { results } = await executor.execute([
+      {
+        callId: "call-1",
+        name: "edit_file",
+        arguments: {
+          path: "workspace/shared-knowledge.mjs",
+          old_string: "before",
+          new_string: "after",
+        },
+      },
+    ], {
+      sessionId: "session-1",
+      cwd: "C:\\repo\\worktree",
+      repoRoot: "C:\\repo",
+        taskKey: "task-1",
+        requestedBy: "workflow:test",
+        agentProfileId: "default",
+        adapter: { name: "openai-native" },
+        provider: "azure-openai-responses",
+        providerConfig: {
+          selectionId: "azure-openai-responses-2",
+          provider: "azure-openai-responses",
+          endpoint: "https://secondary.example/openai/v1",
+          apiVersion: "2024-10-01-preview",
+        },
+        sessionType: "workflow-agent",
+        surface: "workflow",
+        model: "gpt-5.4",
+        toolOrchestrator,
+      });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      toolName: "edit_file",
+      args: {
+        path: "workspace/shared-knowledge.mjs",
+        old_string: "before",
+        new_string: "after",
+      },
+      context: {
+        sessionId: "session-1",
+        cwd: "C:\\repo\\worktree",
+        repoRoot: "C:\\repo",
+        taskKey: "task-1",
+        requestedBy: "workflow:test",
+        agentProfileId: "default",
+        adapterName: "openai-native",
+        executor: "openai-native",
+        sdk: "openai-native",
+        providerSelection: "azure-openai-responses",
+        providerConfig: {
+          selectionId: "azure-openai-responses-2",
+          provider: "azure-openai-responses",
+          endpoint: "https://secondary.example/openai/v1",
+          apiVersion: "2024-10-01-preview",
+        },
+        sessionType: "workflow-agent",
+        surface: "workflow",
+        model: "gpt-5.4",
+        toolCallId: "call-1",
+      },
+    });
+    expect(JSON.parse(results[0].output)).toMatchObject({
+      ok: true,
+      cwd: "C:\\repo\\worktree",
+      repoRoot: "C:\\repo",
+      taskKey: "task-1",
+      requestedBy: "workflow:test",
+      adapterName: "openai-native",
+      executor: "openai-native",
+      sdk: "openai-native",
+      providerSelection: "azure-openai-responses",
+      providerConfig: {
+        selectionId: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        endpoint: "https://secondary.example/openai/v1",
+        apiVersion: "2024-10-01-preview",
+      },
+      toolCallId: "call-1",
+    });
+  });
+
+  it("times out tools even when the executor ignores abortSignal", async () => {
+    const executor = createToolExecutor();
+    const started = [];
+
+    const { results, anyTimedOut } = await executor.execute([
+      {
+        callId: "call-timeout-1",
+        name: "run_validation",
+        arguments: { command: "npm test" },
+      },
+    ], {
+      sessionId: "session-timeout-1",
+      toolTimeoutMs: 25,
+      toolOrchestrator: {
+        async execute(toolName, args, context) {
+          started.push({ toolName, args, context });
+          return await new Promise(() => {});
+        },
+      },
+    });
+
+    expect(started).toHaveLength(1);
+    expect(anyTimedOut).toBe(true);
+    expect(results).toHaveLength(1);
+    expect(results[0].timedOut).toBe(true);
+    expect(JSON.parse(results[0].output)).toEqual({
+      error: 'Tool "run_validation" timed out after 25ms.',
+    });
   });
 });

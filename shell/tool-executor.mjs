@@ -78,6 +78,52 @@ function toStr(v) {
   return String(v ?? "").trim();
 }
 
+function toPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? { ...value }
+    : {};
+}
+
+function toStringArray(value) {
+  return Array.isArray(value)
+    ? value.map((entry) => toStr(entry)).filter(Boolean)
+    : [];
+}
+
+function createAbortSignalError(signal) {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const message = toStr(reason || "aborted");
+  const lower = message.toLowerCase();
+  const error = new Error(message);
+  error.name = lower.includes("timeout") ? "TimeoutError" : "AbortError";
+  return error;
+}
+
+async function raceWithSignal(promise, signal = null) {
+  if (!signal) return promise;
+  if (signal.aborted) throw createAbortSignalError(signal);
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", handleAbort);
+    const handleResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const handleReject = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const handleAbort = () => handleReject(createAbortSignalError(signal));
+    signal.addEventListener("abort", handleAbort, { once: true });
+    Promise.resolve(promise).then(handleResolve, handleReject);
+  });
+}
+
 /**
  * Compute a stable fingerprint for a tool call.
  * Used for doom-loop detection. We don't need crypto — just a compact key.
@@ -237,32 +283,107 @@ async function dispatchSingleTool({
   try {
     const toolOrchestrator = execOptions?.toolOrchestrator;
     const toolRunner       = execOptions?.toolRunner;
+    const nestedContext    = toPlainObject(execOptions?.context);
+    const executionContext = {
+      ...nestedContext,
+      context: nestedContext,
+      onEvent,
+      sessionId,
+      toolCallId: callId,
+      abortSignal: toolSignal,
+      cwd: toStr(execOptions?.cwd || nestedContext.cwd),
+      repoRoot: toStr(execOptions?.repoRoot || nestedContext.repoRoot),
+      taskKey: toStr(execOptions?.taskKey || nestedContext.taskKey),
+      runId: toStr(execOptions?.runId || nestedContext.runId),
+      turnId: toStr(execOptions?.turnId || nestedContext.turnId),
+      requestedBy: toStr(execOptions?.requestedBy || nestedContext.requestedBy),
+      agentProfileId: toStr(execOptions?.agentProfileId || nestedContext.agentProfileId),
+      sdk: toStr(
+        execOptions?.sdk
+        || execOptions?.executor
+        || execOptions?.adapterName
+        || execOptions?.adapter?.name
+        || nestedContext.sdk
+        || nestedContext.executor
+        || nestedContext.adapterName,
+      ),
+      executor: toStr(
+        execOptions?.executor
+        || execOptions?.sdk
+        || execOptions?.adapterName
+        || execOptions?.adapter?.name
+        || nestedContext.executor
+        || nestedContext.sdk
+        || nestedContext.adapterName,
+      ),
+      adapterName: toStr(
+        execOptions?.adapterName
+        || execOptions?.adapter?.name
+        || execOptions?.executor
+        || execOptions?.sdk
+        || nestedContext.adapterName
+        || nestedContext.executor
+        || nestedContext.sdk,
+      ),
+      providerSelection: toStr(
+        execOptions?.providerSelection
+        || execOptions?.providerId
+        || execOptions?.provider
+        || nestedContext.providerSelection
+        || nestedContext.providerId,
+      ),
+      providerId: toStr(
+        execOptions?.providerId
+        || execOptions?.provider
+        || nestedContext.providerId
+        || nestedContext.providerSelection,
+      ),
+      providerConfig:
+        execOptions?.providerConfig && typeof execOptions.providerConfig === "object" && !Array.isArray(execOptions.providerConfig)
+          ? toPlainObject(execOptions.providerConfig)
+          : (
+            nestedContext.providerConfig && typeof nestedContext.providerConfig === "object" && !Array.isArray(nestedContext.providerConfig)
+              ? toPlainObject(nestedContext.providerConfig)
+              : null
+          ),
+      sessionType: toStr(execOptions?.sessionType || nestedContext.sessionType),
+      surface: toStr(execOptions?.surface || nestedContext.surface),
+      model: toStr(execOptions?.model || nestedContext.model),
+      sessionManager: execOptions?.sessionManager || nestedContext.sessionManager || null,
+      approval: execOptions?.approval || nestedContext.approval || null,
+      toolPolicy: execOptions?.toolPolicy || nestedContext.toolPolicy || null,
+      allowedTools: toStringArray(execOptions?.allowedTools).length > 0
+        ? toStringArray(execOptions?.allowedTools)
+        : toStringArray(nestedContext.allowedTools),
+      deniedTools: toStringArray(execOptions?.deniedTools).length > 0
+        ? toStringArray(execOptions?.deniedTools)
+        : toStringArray(nestedContext.deniedTools),
+      subagentMaxParallel: execOptions?.subagentMaxParallel ?? nestedContext.subagentMaxParallel,
+    };
 
-    if (toolOrchestrator && typeof toolOrchestrator.executeTool === "function") {
-      output = await toolOrchestrator.executeTool(toolName, args, {
-        onEvent,
-        sessionId,
-        toolCallId: callId,
-        abortSignal: toolSignal,
-        context: execOptions?.context,
-      });
-    } else if (toolRunner && typeof toolRunner.runTool === "function") {
-      output = await toolRunner.runTool(toolName, args, {
-        onEvent,
-        sessionId,
-        abortSignal: toolSignal,
-      });
-    } else if (toolDef && typeof toolDef.execute === "function") {
-      output = await toolDef.execute(args, {
-        toolCallId: callId,
-        sessionId,
-        abortSignal: toolSignal,
-        messages: execOptions?.messages ?? [],
-        context: execOptions?.context,
-      });
-    } else {
-      output = { error: `No executor configured for tool "${toolName}".` };
-    }
+    // Enforce the timeout at the executor boundary so hung tools cannot keep
+    // the provider turn open forever when they ignore abortSignal internally.
+    output = await raceWithSignal((async () => {
+      if (toolOrchestrator && (
+        typeof toolOrchestrator.executeTool === "function"
+        || typeof toolOrchestrator.execute === "function"
+      )) {
+        const executeTool = typeof toolOrchestrator.executeTool === "function"
+          ? toolOrchestrator.executeTool.bind(toolOrchestrator)
+          : toolOrchestrator.execute.bind(toolOrchestrator);
+        return await executeTool(toolName, args, executionContext);
+      }
+      if (toolRunner && typeof toolRunner.runTool === "function") {
+        return await toolRunner.runTool(toolName, args, executionContext);
+      }
+      if (toolDef && typeof toolDef.execute === "function") {
+        return await toolDef.execute(args, {
+          ...executionContext,
+          messages: execOptions?.messages ?? [],
+        });
+      }
+      return { error: `No executor configured for tool "${toolName}".` };
+    })(), toolSignal);
   } catch (err) {
     timedOut = err?.name === "TimeoutError" ||
                String(err?.message ?? "").toLowerCase().includes("timeout");

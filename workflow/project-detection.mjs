@@ -395,14 +395,13 @@ function findMakeTarget(rootDir, targetNames = []) {
 function detectQualityGateCommand(rootDir, commands = {}, options = {}) {
   const packageManager = String(options.packageManager || "").trim().toLowerCase();
   const scripts = readPackageJsonScripts(rootDir);
+  if (existsSync(resolve(rootDir, ".githooks", "pre-push"))) {
+    return "bash .githooks/pre-push";
+  }
   for (const scriptName of ["prepush:check", "prepush-check", "prepush", "pre-push", "verify", "validate", "check"]) {
     if (typeof scripts[scriptName] === "string" && scripts[scriptName].trim()) {
       return buildPackageScriptCommand(packageManager, scriptName);
     }
-  }
-
-  if (existsSync(resolve(rootDir, ".githooks", "pre-push"))) {
-    return "bash .githooks/pre-push";
   }
 
   const makeTarget = findMakeTarget(rootDir, ["prepush", "pre-push", "verify", "validate", "check"]);
