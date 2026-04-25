@@ -3413,7 +3413,7 @@ describe("action.acquire_worktree", () => {
     expect(ctx.data._worktreeManaged).toBe(true);
   }, 20000);
 
-  it("fails non-retryably when an already-attached managed branch cannot rebase onto the latest local base", async () => {
+  it("recreates an already-attached managed branch when it falls behind the latest local base", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const branch = "task/legacy-reuse-conflict";
     const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
@@ -3461,11 +3461,29 @@ describe("action.acquire_worktree", () => {
     });
 
     const result = await nt.execute(node, ctx);
-    expect(result.success).toBe(false);
-    expect(result.retryable).toBe(false);
-    expect(result.failureKind).toBe("branch_refresh_conflict");
-    expect(result.error).toContain("managed worktree was removed after stale refresh state");
+    expect(result.success).toBe(true);
+    expect(result.reused).toBe(true);
+    expect(result.reusedExistingBranch).toBe(true);
+    expect(String(result.worktreePath || "")).toContain(".bosun");
+    expect(String(result.worktreePath || "")).not.toBe(String(legacyPath));
     expect(existsSync(legacyPath)).toBe(false);
+    expect(existsSync(result.worktreePath)).toBe(true);
+    const isGit = gitExec("git rev-parse --is-inside-work-tree", {
+      cwd: result.worktreePath,
+      encoding: "utf8",
+    }).trim();
+    expect(isGit).toBe("true");
+
+    const recovery = readWorktreeRecoveryStatus(repoDir);
+    expect(recovery?.health).toBe("recovered");
+    expect(recovery?.failureStreak).toBe(0);
+    expect(recovery?.recentEvents?.[0]).toMatchObject({
+      outcome: "recreated",
+      reason: "poisoned_worktree",
+      branch,
+      taskId: "legacy-conflict-1",
+    });
+    expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("refresh_conflict");
   }, 20000);
 
   it("fails non-retryably when the task branch is already attached to an unmanaged worktree", async () => {
@@ -3831,7 +3849,7 @@ describe("action.acquire_worktree", () => {
     }
   }, 30000);
 
-  it.skipIf(skipLocallyForSpeed)("returns a non-retryable failure when an existing task branch conflicts with the latest base", async () => {
+  it.skipIf(skipLocallyForSpeed)("recreates a stale managed task branch worktree when it falls behind the latest remote base", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const branch = "task/recreate-conflict-behind";
     const remoteDir = mkdtempSync(join(tmpdir(), "wf-acquire-origin-"));
@@ -3890,26 +3908,32 @@ describe("action.acquire_worktree", () => {
 
       const secondCtx = makeCtx({});
       const second = await nt.execute(node, secondCtx);
-      expect(second.success).toBe(false);
-      expect(second.retryable).toBe(false);
-      expect(second.failureKind).toBe("branch_refresh_conflict");
-      expect(second.error).toContain("managed worktree was removed after stale refresh state");
+      expect(second.success).toBe(true);
+      expect(second.created).toBe(true);
+      const counts = gitExec("git rev-list --left-right --count HEAD...origin/main", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      const match = counts.match(/^(\d+)\s+(\d+)$/);
+      expect(match).not.toBeNull();
+      expect(Number(match[1])).toBeGreaterThan(0);
+      expect(Number(match[2])).toBe(0);
 
       const thirdCtx = makeCtx({});
       const third = await nt.execute(node, thirdCtx);
-      expect(third.success).toBe(false);
-      expect(third.retryable).toBe(false);
-      expect(third.failureKind).toBe("branch_refresh_conflict");
+      expect(third.success).toBe(true);
+      expect(third.reused).toBe(true);
 
       const recovery = readWorktreeRecoveryStatus(repoDir);
-      expect(recovery?.health).toBe("degraded");
-      expect(recovery?.failureStreak).toBe(2);
+      expect(recovery?.health).toBe("recovered");
+      expect(recovery?.failureStreak).toBe(0);
       expect(recovery?.recentEvents?.[0]).toMatchObject({
-        outcome: "recreation_failed",
+        outcome: "recreated",
         reason: "poisoned_worktree",
         branch,
         taskId: "recreate-conflict-1",
       });
+      expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("refresh_conflict");
     } finally {
       if (previousAllowRefresh === undefined) {
         delete process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;

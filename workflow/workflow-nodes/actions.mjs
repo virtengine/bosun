@@ -9867,7 +9867,7 @@ registerNodeType("action.acquire_worktree", {
 
       const ensureWorktreeContainsBaseBranch = (targetWorktreePath, phaseLabel = "post-pull") => {
         if (!baseBranch || baseBranch === branch) {
-          return;
+          return false;
         }
         try {
           execGitArgsSync(["rev-parse", "--verify", baseBranch], {
@@ -9877,7 +9877,7 @@ registerNodeType("action.acquire_worktree", {
             stdio: ["ignore", "pipe", "pipe"],
           });
         } catch {
-          return;
+          return false;
         }
         try {
           execGitArgsSync(["merge-base", "--is-ancestor", baseBranch, "HEAD"], {
@@ -9896,10 +9896,13 @@ registerNodeType("action.acquire_worktree", {
           recoveryState.worktreePath = targetWorktreePath;
           recoveryState.detectedIssues.add("refresh_conflict");
           resetManagedWorktree(repoRoot, targetWorktreePath, resolveWorktreeGitDir(targetWorktreePath));
-          throw new Error(
-            `managed worktree was removed after stale refresh state: ${targetWorktreePath}`,
+          ctx.log(
+            node.id,
+            `Discarding stale managed worktree (${phaseLabel}): ${targetWorktreePath} refresh_conflict`,
           );
+          return true;
         }
+        return false;
       };
 
       const syncReusableWorktreeToBaseBranch = (targetWorktreePath) => {
@@ -9914,11 +9917,10 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             /* rebase failures are non-fatal only if the worktree remains reusable */
           }
-          ensureWorktreeContainsBaseBranch(targetWorktreePath);
-          return;
+          return ensureWorktreeContainsBaseBranch(targetWorktreePath);
         }
         if (!baseBranch || baseBranch === branch) {
-          return;
+          return false;
         }
         try {
           execGitArgsSync(["rev-parse", "--verify", baseBranch], {
@@ -9928,7 +9930,7 @@ registerNodeType("action.acquire_worktree", {
             stdio: ["ignore", "pipe", "pipe"],
           });
         } catch {
-          return;
+          return false;
         }
         try {
           execGitArgsSync(["rebase", baseBranch], {
@@ -9949,7 +9951,7 @@ registerNodeType("action.acquire_worktree", {
             // Best-effort cleanup for a failed local-base rebase.
           }
         }
-        ensureWorktreeContainsBaseBranch(targetWorktreePath);
+        return ensureWorktreeContainsBaseBranch(targetWorktreePath);
       };
 
       // Ensure remote-tracking base refs are fresh when the repo actually has that remote.
@@ -10040,8 +10042,9 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             /* best-effort — dirty state handled by post-pull invalidity check below */
           }
-          syncReusableWorktreeToBaseBranch(worktreePath);
-          recreatedManagedWorktree = invalidateBrokenReusableWorktree(worktreePath, "post-pull");
+          recreatedManagedWorktree =
+            syncReusableWorktreeToBaseBranch(worktreePath)
+            || invalidateBrokenReusableWorktree(worktreePath, "post-pull");
         }
         if (!recreatedManagedWorktree && existsSync(worktreePath)) {
           fixGitConfigCorruption(repoRoot);
@@ -10063,6 +10066,7 @@ registerNodeType("action.acquire_worktree", {
       }
 
       // Create fresh worktree
+      let createdFromExistingBranch = false;
       let branchExistsLocally = localBranchExists();
       const attachedPath =
         branchExistsLocally && !existsSync(worktreePath)
@@ -10119,30 +10123,45 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             /* best-effort — dirty state handled by later invalidity checks */
           }
-          syncReusableWorktreeToBaseBranch(attachedPath);
-          fixGitConfigCorruption(repoRoot);
-          ctx.data.worktreePath = attachedPath;
-          ctx.data.baseBranch = baseBranch;
-          ctx.data._worktreeCreated = false;
-          ctx.data._worktreeManaged = true;
-          await persistTaskBranchMetadata(attachedPath);
-          await persistRecoveryEvent({
-            outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
-            worktreePath: attachedPath,
-          });
-          ctx.log(node.id, `Reusing existing branch worktree: ${attachedPath}`);
-          return {
-            success: true,
-            worktreePath: attachedPath,
-            created: false,
-            reused: true,
-            reusedExistingBranch: true,
-            branch,
-            baseBranch,
-          };
+          const recreatedAttachedDuringSync =
+            syncReusableWorktreeToBaseBranch(attachedPath)
+            || invalidateBrokenReusableWorktree(attachedPath, "attached-branch-post-pull");
+          if (recreatedAttachedDuringSync) {
+            fixGitConfigCorruption(repoRoot);
+            if (existsSync(worktreePath)) {
+              allocateRecoveryWorktreePath("attached-branch");
+            }
+            execGitArgsSync(
+              branchExistsLocally
+                ? ["worktree", "add", worktreePath, branch]
+                : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
+              { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
+            );
+            createdFromExistingBranch = branchExistsLocally;
+          } else {
+            fixGitConfigCorruption(repoRoot);
+            ctx.data.worktreePath = attachedPath;
+            ctx.data.baseBranch = baseBranch;
+            ctx.data._worktreeCreated = false;
+            ctx.data._worktreeManaged = true;
+            await persistTaskBranchMetadata(attachedPath);
+            await persistRecoveryEvent({
+              outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
+              worktreePath: attachedPath,
+            });
+            ctx.log(node.id, `Reusing existing branch worktree: ${attachedPath}`);
+            return {
+              success: true,
+              worktreePath: attachedPath,
+              created: false,
+              reused: true,
+              reusedExistingBranch: true,
+              branch,
+              baseBranch,
+            };
+          }
         }
       }
-      let createdFromExistingBranch = false;
       try {
         execGitArgsSync(
           branchExistsLocally
