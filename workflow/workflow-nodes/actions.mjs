@@ -461,6 +461,8 @@ import { getAgentToolConfig, getEffectiveTools } from "../../agent/agent-tool-co
 import { getToolsPromptBlock } from "../../agent/agent-custom-tools.mjs";
 import { buildRelevantSkillsPromptBlock, findRelevantSkills } from "../../agent/bosun-skills.mjs";
 import { readHarnessExecutorFabric } from "../../agent/harness-executor-config.mjs";
+import { buildProviderKernelSettings } from "../../agent/provider-kernel.mjs";
+import { createProviderRegistry } from "../../agent/provider-registry.mjs";
 import { loadConfig, readConfigDocument } from "../../config/config.mjs";
 import { resolveRepoRoot as resolveConfiguredRepoRoot } from "../../config/repo-root.mjs";
 import { shouldRequireManagedPrePush } from "../../infra/guardrails.mjs";
@@ -485,6 +487,7 @@ import {
   retrieveKnowledgeEntries,
 } from "../../workspace/shared-knowledge.mjs";
 import { compactCommandOutputPayload } from "../../workspace/context-cache.mjs";
+import openaiNativeAdapter from "../../shell/openai-native-adapter.mjs";
 import {
   findReusableSkillbookStrategies,
   getSkillbookStrategy,
@@ -2145,6 +2148,14 @@ function attachCompactedCommandOutput(baseResult, {
     outputSuggestedRerun: compacted.commandDiagnostics?.suggestedRerun || null,
     outputHint: compacted.commandDiagnostics?.summary || compacted.commandDiagnostics?.hint || null,
   }));
+}
+
+export function buildCommandTerminationDiagnostic(err = null) {
+  const parts = [];
+  const signal = typeof err?.signal === "string" ? err.signal.trim() : "";
+  if (signal) parts.push(`signal: ${signal}`);
+  if (err?.killed === true) parts.push("killed: true");
+  return parts.length > 0 ? `[bosun-command-diagnostic] ${parts.join(", ")}` : "";
 }
 
 const HTML_TEXT_BREAK_TAGS = new Set([
@@ -9036,9 +9047,29 @@ registerNodeType("action.resolve_executor", {
         if (runtime !== "harness" || config?.harness?.enabled === false) return null;
 
         const fabric = readHarnessExecutorFabric(config);
+        const executors = Array.isArray(fabric.executors) ? fabric.executors : [];
+        if (executors.length === 0) return null;
+        const registry = createProviderRegistry({
+          adapters: {
+            "openai-native": openaiNativeAdapter,
+          },
+          configExecutors: executors,
+          env: process.env,
+          includeBuiltins: false,
+          preferNativeAdapters: true,
+          settings: buildProviderKernelSettings(config),
+        });
+        const runnableById = new Set(
+          registry.listProviders()
+            .filter((entry) => entry?.adapterId === "openai-native" && entry?.auth?.canRun === true)
+            .map((entry) => String(entry.id || "").trim())
+            .filter(Boolean),
+        );
         const selectedExecutor =
-          fabric.executors.find((entry) => entry.id === fabric.primaryExecutorId && entry.enabled !== false)
-          || fabric.executors.find((entry) => entry.enabled !== false)
+          executors.find((entry) => String(entry?.id || "").trim() === fabric.primaryExecutorId && runnableById.has(String(entry?.id || "").trim()))
+          || executors
+            .filter((entry) => entry?.enabled !== false && runnableById.has(String(entry?.id || "").trim()))
+            .sort((left, right) => Number(right?.weight || 0) - Number(left?.weight || 0))[0]
           || null;
         const providerId = String(selectedExecutor?.providerId || "").trim();
         if (!["azure-openai-responses", "openai-responses", "openai-compatible"].includes(providerId)) {
@@ -9697,6 +9728,7 @@ registerNodeType("action.acquire_worktree", {
               currentBranch = branchRef.replace(/^refs\/heads\//, "");
             }
           }
+          if (currentPath && currentBranch === branch) return currentPath;
         } catch {
           // best-effort only
         }
@@ -9803,6 +9835,43 @@ registerNodeType("action.acquire_worktree", {
 
       const shouldSyncFromOrigin = () => /^origin\//.test(baseBranch) && hasOriginRemote();
 
+      const ensureWorktreeContainsBaseBranch = (targetWorktreePath, phaseLabel = "post-pull") => {
+        if (!baseBranch || baseBranch === branch) {
+          return;
+        }
+        try {
+          execGitArgsSync(["rev-parse", "--verify", baseBranch], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch {
+          return;
+        }
+        try {
+          execGitArgsSync(["merge-base", "--is-ancestor", baseBranch, "HEAD"], {
+            cwd: targetWorktreePath,
+            timeout: 5000,
+            stdio: ["ignore", "ignore", "ignore"],
+          });
+        } catch {
+          if (!isManagedBosunWorktree(targetWorktreePath, repoRoot)) {
+            throw new Error(
+              `Attached worktree for ${branch} does not include latest base ${baseBranch}`,
+            );
+          }
+          recoveryState.recreated = true;
+          recoveryState.phase = phaseLabel;
+          recoveryState.worktreePath = targetWorktreePath;
+          recoveryState.detectedIssues.add("refresh_conflict");
+          resetManagedWorktree(repoRoot, targetWorktreePath, resolveWorktreeGitDir(targetWorktreePath));
+          throw new Error(
+            `managed worktree was removed after stale refresh state: ${targetWorktreePath}`,
+          );
+        }
+      };
+
       const syncReusableWorktreeToBaseBranch = (targetWorktreePath) => {
         if (shouldSyncFromOrigin()) {
           try {
@@ -9815,6 +9884,7 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             /* rebase failures are non-fatal only if the worktree remains reusable */
           }
+          ensureWorktreeContainsBaseBranch(targetWorktreePath);
           return;
         }
         if (!baseBranch || baseBranch === branch) {
@@ -9849,6 +9919,7 @@ registerNodeType("action.acquire_worktree", {
             // Best-effort cleanup for a failed local-base rebase.
           }
         }
+        ensureWorktreeContainsBaseBranch(targetWorktreePath);
       };
 
       // Ensure remote-tracking base refs are fresh when the repo actually has that remote.
@@ -13026,18 +13097,33 @@ registerNodeType("action.push_branch", {
         output: output?.trim()?.slice(0, 500) || "",
       };
     } catch (err) {
-      ctx.log(node.id, `Push failed: ${err.message?.slice(0, 300)}`);
-      const blockedReason = classifyPushBlockedReason(err.message || "", false);
-      return {
+      const stdout = String(err?.stdout?.toString?.() || err?.stdout || "");
+      const stderr = String(err?.stderr?.toString?.() || err?.stderr || "");
+      const terminationDiagnostic = buildCommandTerminationDiagnostic(err);
+      const stderrWithDiagnostic = [stderr.trim(), terminationDiagnostic]
+        .filter(Boolean)
+        .join("\n");
+      const detail = [String(err?.message || "").trim(), terminationDiagnostic, stderr.trim(), stdout.trim()]
+        .filter(Boolean)
+        .join("\n");
+      ctx.log(node.id, `Push failed: ${trimLogText(detail, 300) || "unknown push failure"}`);
+      const blockedReason = classifyPushBlockedReason(detail || err?.message || "", false);
+      const result = {
         success: false,
         pushed: false,
         branch: cleanBranch,
         remote,
-        error: err.message?.slice(0, 500),
+        error: trimLogText(detail, 500) || String(err?.message || "push failed"),
         implementationDone: true,
         blockedReason,
         implementationState: "implementation_done_commit_blocked",
       };
+      return await attachCompactedCommandOutput(result, {
+        command: `git ${pushArgs.join(" ")}`,
+        stdout,
+        stderr: stderrWithDiagnostic,
+        exitCode: err?.status ?? err?.exitCode ?? null,
+      });
     }
   },
 });

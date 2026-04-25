@@ -40,6 +40,7 @@ let MAX_NO_COMMIT_ATTEMPTS;
 let completedWithPR;
 let noCommitCounts;
 let skipUntil;
+let buildCommandTerminationDiagnostic;
 
 if (SPAWN_BLOCKED) {
   describe("workflow-task-lifecycle", () => {
@@ -57,6 +58,7 @@ if (SPAWN_BLOCKED) {
     _noCommitCounts: noCommitCounts,
     _skipUntil: skipUntil,
   } = await import("../workflow/workflow-nodes/transforms.mjs"));
+  ({ buildCommandTerminationDiagnostic } = await import("../workflow/workflow-nodes/actions.mjs"));
 
 // -- Helpers -----------------------------------------------------------------
 
@@ -151,6 +153,25 @@ describe("project detection quality gates", () => {
     const detected = detectProjectStack(repoRoot);
 
     expect(detected.primary?.id).toBe("go");
+    expect(detected.commands.qualityGate).toBe("bash .githooks/pre-push");
+    expect(resolveAutoCommand("auto", "qualityGate", repoRoot)).toBe("bash .githooks/pre-push");
+    expect(detected.commands.qualityGate).not.toBe("npm run prepush:check");
+  });
+  it("prefers repo hooks for node quality gates even when prepush:check exists", () => {
+    repoRoot = mkdtempSync(join(tmpdir(), "wf-quality-gate-node-"));
+    mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+    writeFileSync(join(repoRoot, ".githooks", "pre-push"), "#!/usr/bin/env bash\necho ok\n");
+    writeFileSync(join(repoRoot, "package.json"), JSON.stringify({
+      name: "quality-gate-node",
+      version: "1.0.0",
+      scripts: {
+        "prepush:check": "npm run test:all",
+      },
+    }, null, 2));
+
+    const detected = detectProjectStack(repoRoot);
+
+    expect(detected.primary?.id).toBe("node");
     expect(detected.commands.qualityGate).toBe("bash .githooks/pre-push");
     expect(resolveAutoCommand("auto", "qualityGate", repoRoot)).toBe("bash .githooks/pre-push");
     expect(detected.commands.qualityGate).not.toBe("npm run prepush:check");
@@ -2178,6 +2199,8 @@ describe("action.resolve_executor", () => {
       internalExecutor: { sdk: "codex" },
       primaryAgent: "codex",
     });
+    const savedEnv = { ...process.env };
+    process.env.AZURE_OPENAI_API_KEY = "primary-secret";
 
     try {
       const nt = getNodeType("action.resolve_executor");
@@ -2211,6 +2234,97 @@ describe("action.resolve_executor", () => {
       }));
     } finally {
       loadConfigSpy.mockRestore();
+      for (const key of Object.keys(process.env)) {
+        if (!(key in savedEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, savedEnv);
+    }
+  });
+
+  it("skips an auth-dead harness primary executor in favor of a runnable secondary", async () => {
+    const configMod = await import("../config/config.mjs");
+    const loadConfigSpy = vi.spyOn(configMod, "loadConfig").mockReturnValue({
+      agentRuntime: "harness",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-openai-responses",
+        executors: [
+          {
+            id: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            defaultModel: "gpt-4.1-mini",
+            endpoint: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+          {
+            id: "azure-openai-responses-2",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            weight: 100,
+            defaultModel: "gpt-4.1",
+            endpoint: "https://secondary.example/openai/v1",
+            apiVersion: "2024-10-01-preview",
+            authBindings: {
+              apiKeyEnv: "AZURE_OPENAI_API_KEY_SECONDARY",
+            },
+          },
+        ],
+      },
+      executorConfig: {
+        executors: [
+          {
+            name: "codex-default",
+            executor: "CODEX",
+            variant: "DEFAULT",
+            role: "primary",
+            weight: 100,
+            enabled: true,
+            models: [],
+          },
+        ],
+      },
+      internalExecutor: { sdk: "codex" },
+      primaryAgent: "codex",
+    });
+    const savedEnv = { ...process.env };
+    delete process.env.AZURE_OPENAI_API_KEY;
+    process.env.AZURE_OPENAI_API_KEY_SECONDARY = "secondary-secret";
+
+    try {
+      const nt = getNodeType("action.resolve_executor");
+      const ctx = makeCtx({});
+      const node = makeNode("action.resolve_executor", {
+        defaultSdk: "auto",
+      });
+      const result = await nt.execute(node, ctx);
+      expect(result.success).toBe(true);
+      expect(result.sdk).toBe("openai-native");
+      expect(result.model).toBe("gpt-4.1");
+      expect(result.provider).toBe("azure-openai-responses-2");
+      expect(result.providerConfig).toEqual(expect.objectContaining({
+        selectionId: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        providerId: "azure-openai-responses",
+        endpoint: "https://secondary.example/openai/v1",
+        apiVersion: "2024-10-01-preview",
+        model: "gpt-4.1",
+      }));
+      expect(ctx.data.resolvedProvider).toBe("azure-openai-responses-2");
+      expect(ctx.data.resolvedProviderConfig).toEqual(expect.objectContaining({
+        selectionId: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        providerId: "azure-openai-responses",
+        endpoint: "https://secondary.example/openai/v1",
+        apiVersion: "2024-10-01-preview",
+        model: "gpt-4.1",
+      }));
+    } finally {
+      loadConfigSpy.mockRestore();
+      for (const key of Object.keys(process.env)) {
+        if (!(key in savedEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, savedEnv);
     }
   });
 
@@ -3297,6 +3411,61 @@ describe("action.acquire_worktree", () => {
     expect(result.created).toBe(false);
     expect(String(result.worktreePath).replace(/\\/g, "/")).toBe(String(legacyPath).replace(/\\/g, "/"));
     expect(ctx.data._worktreeManaged).toBe(true);
+  }, 20000);
+
+  it("fails non-retryably when an already-attached managed branch cannot rebase onto the latest local base", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/legacy-reuse-conflict";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    const legacyPath = join(repoDir, ".bosun", "worktrees", "task-legacy-reuse-conflict");
+    mkdirSync(join(repoDir, ".bosun", "worktrees"), { recursive: true });
+
+    writeFileSync(join(repoDir, "README.md"), "main branch baseline\n");
+    gitExec("git add README.md && git commit -m main-readme-baseline", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "README.md"), "local base change\n");
+    gitExec("git add README.md && git commit -m local-base-readme-change", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    gitExec(`git worktree add "${legacyPath}" -b "${branch}" main`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(legacyPath, "README.md"), "task branch change\n");
+    gitExec("git add README.md && git commit -m task-readme-change", {
+      cwd: legacyPath,
+      stdio: "ignore",
+    });
+
+    const ctx = makeCtx({});
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "legacy-conflict-1",
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+
+    const result = await nt.execute(node, ctx);
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.failureKind).toBe("branch_refresh_conflict");
+    expect(result.error).toContain("managed worktree was removed after stale refresh state");
+    expect(existsSync(legacyPath)).toBe(false);
   }, 20000);
   it("uses a short managed worktree directory derived from task id", async () => {
     const nt = getNodeType("action.acquire_worktree");
@@ -4847,6 +5016,12 @@ describe("action.detect_new_commits", () => {
 // ---------------------------------------------------------------------------
 
 describe("action.push_branch", () => {
+  it("formats signal-based termination details for push diagnostics", () => {
+    expect(buildCommandTerminationDiagnostic({ signal: "SIGTERM", killed: true }))
+      .toBe("[bosun-command-diagnostic] signal: SIGTERM, killed: true");
+    expect(buildCommandTerminationDiagnostic({ signal: "", killed: false })).toBe("");
+  });
+
   it("refuses to push to protected branches", async () => {
     const nt = getNodeType("action.push_branch");
     const ctx = makeCtx({});
@@ -4935,6 +5110,57 @@ describe("action.push_branch", () => {
     expect(result.error).toContain("must run local pre-push validation");
     rmSync(repoRoot, { recursive: true, force: true });
   });
+
+  it("preserves compacted hook stderr when push fails", async () => {
+    const nt = getNodeType("action.push_branch");
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-push-stderr-"));
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-push-stderr-remote-"));
+    try {
+      execGit("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.email test@test.com", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.name Test", { cwd: repoDir, stdio: "ignore" });
+      execGit(`git remote add origin "${remoteDir}"`, { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "README.md"), "init\n");
+      execGit("git add README.md && git commit -m init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git branch -M main", { cwd: repoDir, stdio: "ignore" });
+      execGit("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+      mkdirSync(join(repoDir, ".githooks"), { recursive: true });
+      writeFileSync(
+        join(repoDir, ".githooks", "pre-push"),
+        [
+          "#!/usr/bin/env node",
+          "for (let i = 0; i < 260; i += 1) process.stderr.write(`noise-${i} ${'x'.repeat(18)}\\n`);",
+          "process.stderr.write('PUSH_HOOK_TERMINAL: provider auth mismatch\\n');",
+          "process.exit(1);",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      execGit("git config core.hooksPath .githooks", { cwd: repoDir, stdio: "ignore" });
+      execGit("git checkout -b feature/push-stderr", { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "feature.txt"), "feature\n");
+      execGit("git add feature.txt && git commit -m feature-work", { cwd: repoDir, stdio: "ignore" });
+
+      const result = await nt.execute(makeNode("action.push_branch", {
+        worktreePath: repoDir,
+        branch: "feature/push-stderr",
+        baseBranch: "main",
+      }), makeCtx({ repoRoot: repoDir }));
+
+      expect(result.success).toBe(false);
+      expect(result.pushed).toBe(false);
+      expect(result.output).toContain("[Live-compacted git]");
+      expect(result.output).toContain("failed to push some refs");
+      expect(result.output).toContain("bosun --tool-log");
+      expect(result.outputCompacted).toBe(true);
+      expect(result.rawOutputChars).toBeGreaterThan(result.compactedOutputChars);
+      expect(result.outputBudgetPolicy).toBeTruthy();
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(remoteDir, { recursive: true, force: true });
+    }
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------
@@ -5415,6 +5641,7 @@ describe("template-task-lifecycle", () => {
       "set-blocked-agent-plan-failed", "set-blocked-agent-tests-failed", "set-blocked-agent-implement-failed",
       "claim-stolen", "detect-commits", "has-commits", "no-commit-retries-exhausted",
       "pre-pr-validation", "pre-pr-validation-ok", "set-fix-summary", "auto-fix-validation", "retry-pre-pr-validation", "retry-validation-ok", "log-validation-failed", "set-blocked-validation-failed", "notify-validation-blocked",
+      "auto-commit-pre-push",
       "push-branch", "push-ok", "build-pr-body", "create-pr", "set-inreview", "handoff-pr-progressor", "log-success",
       "log-no-commits", "log-no-commits-exhausted", "set-todo-cooldown", "set-blocked-no-commits", "build-pr-body-stolen", "create-pr-retry", "pr-created-stolen", "set-inreview-stolen", "handoff-pr-progressor-stolen", "log-claim-stolen-recovered",
       "release-worktree", "release-claim", "release-slot",
@@ -5513,24 +5740,29 @@ describe("template-task-lifecycle", () => {
     const t = getTemplate("template-task-lifecycle");
     const autoFixValidation = t.nodes.find((n) => n.id === "auto-fix-validation");
     const autoFixValidation2 = t.nodes.find((n) => n.id === "auto-fix-validation-2");
+    const autoCommitBeforePush = t.nodes.find((n) => n.id === "auto-commit-pre-push");
     expect(t.edges.find((e) => e.source === "has-commits" && e.target === "pre-pr-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation" && e.target === "pre-pr-validation-ok")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "push-branch")).toBeDefined();
+    expect(autoCommitBeforePush?.type).toBe("action.auto_commit_dirty");
+    expect(autoCommitBeforePush?.config?.worktreePath).toBe("{{worktreePath}}");
+    expect(autoCommitBeforePush?.config?.taskId).toBe("{{taskId}}");
+    expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "auto-commit-pre-push")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "set-fix-summary")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-fix-summary" && e.target === "auto-fix-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "auto-fix-validation" && e.target === "retry-pre-pr-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry-pre-pr-validation" && e.target === "retry-validation-ok")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "retry-validation-ok" && e.target === "push-branch")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "retry-validation-ok" && e.target === "auto-commit-pre-push")).toBeDefined();
     // Pass 1 failed → escalated pass 2
     expect(t.edges.find((e) => e.source === "retry-validation-ok" && e.target === "set-fix2-summary")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-fix2-summary" && e.target === "auto-fix-validation-2")).toBeDefined();
     expect(t.edges.find((e) => e.source === "auto-fix-validation-2" && e.target === "retry2-pre-pr-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry2-pre-pr-validation" && e.target === "retry2-validation-ok")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "retry2-validation-ok" && e.target === "push-branch")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "retry2-validation-ok" && e.target === "auto-commit-pre-push")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry2-validation-ok" && e.target === "log-validation-failed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "log-validation-failed" && e.target === "set-blocked-validation-failed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-blocked-validation-failed" && e.target === "notify-validation-blocked")).toBeDefined();
     expect(t.edges.find((e) => e.source === "notify-validation-blocked" && e.target === "join-outcomes")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "auto-commit-pre-push" && e.target === "push-branch")).toBeDefined();
     expect(t.edges.find((e) => e.source === "push-branch" && e.target === "push-ok")).toBeDefined();
     expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.stderr");
     expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.output");
