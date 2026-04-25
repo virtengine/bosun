@@ -205,7 +205,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     }, { x: 380, y: 1545, outputs: ["yes", "no"] }),
 
     node("implement-agent-ok", "condition.expression", "Implement Agent Succeeded?", {
-      expression: "$ctx.getNodeOutput('run-agent-implement')?.success === true",
+      expression:
+        "$ctx.getNodeOutput('run-agent-implement')?.success === true"
+        + " || $ctx.getNodeOutput('run-agent-implement')?.implementationState === 'implementation_done_commit_blocked'",
     }, { x: 380, y: 1610, outputs: ["yes", "no"] }),
 
     node("set-blocked-agent-plan-failed", "action.update_task_status", "Set Blocked (Plan Fail)", {

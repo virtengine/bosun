@@ -643,6 +643,16 @@ describe("workflow-templates", () => {
     }
   });
 
+  it("task lifecycle treats commit-blocked implement sessions as recoverable", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+    const implementGate = template.nodes.find((n) => n.id === "implement-agent-ok");
+    expect(implementGate?.type).toBe("condition.expression");
+    expect(implementGate?.config?.expression).toContain("run-agent-implement");
+    expect(implementGate?.config?.expression).toContain("success === true");
+    expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
+  });
+
   it("continuation loop template exposes configurable turn/stuck controls", () => {
     const template = getTemplate("template-continuation-loop");
     expect(template).toBeDefined();

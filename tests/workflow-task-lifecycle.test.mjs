@@ -5459,6 +5459,7 @@ describe("template-task-lifecycle", () => {
 
   it("gates each agent phase before entering the next stage or cleanup", () => {
     const t = getTemplate("template-task-lifecycle");
+    const implementGate = t.nodes.find((n) => n.id === "implement-agent-ok");
     expect(t.edges.find((e) => e.source === "build-prompt" && e.target === "run-agent-plan")).toBeDefined();
     expect(t.edges.find((e) => e.source === "run-agent-plan" && e.target === "plan-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "plan-agent-ok" && e.target === "run-agent-tests")).toBeDefined();
@@ -5469,6 +5470,7 @@ describe("template-task-lifecycle", () => {
     expect(t.edges.find((e) => e.source === "run-agent-implement" && e.target === "implement-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "claim-stolen")).toBeDefined();
     expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "set-blocked-agent-implement-failed")).toBeDefined();
+    expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
   });
 
   it("push-branch uses merge-based push config", () => {
