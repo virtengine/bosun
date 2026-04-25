@@ -406,6 +406,28 @@ function branchMatchesTaskOwnership(branchName, taskId, canonicalBranchName) {
   return normalizedBranch.includes(taskToken);
 }
 
+function taskHasPrReference(task) {
+  if (!task || typeof task !== "object") return false;
+  const prNumber = Number.parseInt(String(task.prNumber || task.pr_number || ""), 10);
+  if (Number.isFinite(prNumber) && prNumber > 0) return true;
+  if (String(task.prUrl || task.pr_url || "").trim()) return true;
+  if (Array.isArray(task.links?.prs) && task.links.prs.some((value) => String(value || "").trim())) {
+    return true;
+  }
+  return false;
+}
+
+function buildTaskBranchRecoveryName(branchName) {
+  const normalizedBranch = String(branchName || "task/recovery")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96) || "task/recovery";
+  return `${normalizedBranch}-recovery-${randomUUID().slice(0, 8)}`.slice(0, 120);
+}
+
 function resolveWorkflowCwdValue(rawValue, fallback = process.cwd()) {
   const fallbackText = String(fallback || process.cwd()).trim() || process.cwd();
   const text = String(rawValue || "").trim();
@@ -769,7 +791,7 @@ const WORKFLOW_AGENT_PLACEHOLDER_OUTPUTS = new Set([
   "continued",
   "model response continued",
 ]);
-
+const DEFAULT_WORKFLOW_AGENT_FIRST_EVENT_TIMEOUT_MS = 120_000;
 const WORKFLOW_AGENT_REPO_BLOCK_PATTERNS = [
   /merge conflict/i,
   /unmerged files/i,
@@ -791,6 +813,61 @@ const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
   /poisoned tool session/i,
   /doom-loop protection/i,
   /startup-only/i,
+  /still blocked on execution/i,
+  /blocked on execution in this session/i,
+  /stalled delegated agent/i,
+  /write-capable delegated agent failed/i,
+  /failed immediately without producing output/i,
+  /failed immediately with no transcript/i,
+  /blocked from applying changes in this environment/i,
+  /blocked from making the requested code changes in this session/i,
+  /can(?:not|['’]?t) truthfully claim this task is implemented/i,
+  /can(?:not|['’]?t) truthfully claim implementation/i,
+  /insufficient write\/execute capability in current session/i,
+  /blocked from editing or verifying in this session/i,
+  /blocked in this session because .*write-capable tooling/i,
+  /delegated session is failing before any work starts/i,
+  /delegated session still appears stuck/i,
+  /delegated child session still has no output yet/i,
+  /blocked from completing this task in the current session/i,
+  /blocked: tool capability issue in current session/i,
+  /still blocked:\s*no usable write-capable tool path in this session/i,
+  /background agent is still running/i,
+  /delegated agent is still running/i,
+  /delegated agent is started but has not produced work output yet/i,
+  /still active,\s*but no agent output/i,
+  /status:\s*active\s*-\s*latest output:\s*(?:no output yet|none yet)/i,
+  /session does not expose a working file-edit path/i,
+  /session remains read-only for writes/i,
+  /cannot advance beyond analysis because the session remains read-only/i,
+  /workspace only permits read-only shell access/i,
+  /file-edit tools available here require exact replacement payloads/i,
+  /every write-capable path has failed or is blocked/i,
+  /tooling\/session write path unavailable/i,
+  /i could not implement because/i,
+  /writable edit commands?(?: in this session)? remain blocked/i,
+  /delegate session.*\bno_output\b/i,
+  /delegated?(?: coding)? session.*(?:no[_ ]output|produced no output|hasn['’]t emitted output yet|stalled)/i,
+  /stuck in [`'"]?no_output[`'"]?/i,
+  /current state:\s*[`'"]?no_output[`'"]?/i,
+  /status:\s*[`'"]?no_output[`'"]?/i,
+  /no write capability/i,
+  /direct write commands?(?: in this session)? (?:are|remain) blocked/i,
+  /insufficient direct write-capable inspection/i,
+  /\brun_workspace_command\b.*blocked/i,
+  /\bedit_file\b.*(?:cannot|blocked)/i,
+  /read-only inspection only/i,
+  /blocked by environment constraints/i,
+  /writable delegation attempt failed immediately/i,
+  /lack of writable access in this session/i,
+  /failing delegated executor path/i,
+  /blocked:\s*read-only workspace session/i,
+  /direct write\/test\/commit operations are denied in this session/i,
+  /delegation did not progress normally/i,
+  /repeatedly spawning nested sessions instead of producing code\/output/i,
+  /blocked on tool-side file modification/i,
+  /cannot truthfully report completion/i,
+  /best next step is to cancel and re-delegate or switch executor/i,
   /connection refused/i,
   /connection reset/i,
   /network/i,
@@ -810,10 +887,66 @@ const WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS = [
   /git commit/i,
 ];
 
+function parseWorkflowAgentTimeoutMs(value, fallback = null) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(Math.trunc(parsed), 60 * 60 * 1000));
+}
+
+function resolveWorkflowAgentFirstEventTimeoutMs(timeoutMs, override = undefined) {
+  let configuredTimeoutMs = parseWorkflowAgentTimeoutMs(override, null);
+  if (configuredTimeoutMs == null) {
+    const envTimeoutMs = parseWorkflowAgentTimeoutMs(
+      process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS,
+      null,
+    );
+    if (envTimeoutMs != null) {
+      configuredTimeoutMs = envTimeoutMs;
+    } else {
+      try {
+        configuredTimeoutMs = parseWorkflowAgentTimeoutMs(
+          loadConfig()?.internalExecutor?.stream?.firstEventTimeoutMs,
+          DEFAULT_WORKFLOW_AGENT_FIRST_EVENT_TIMEOUT_MS,
+        );
+      } catch {
+        configuredTimeoutMs = DEFAULT_WORKFLOW_AGENT_FIRST_EVENT_TIMEOUT_MS;
+      }
+    }
+  }
+  const totalBudgetMs = Number(timeoutMs);
+  if (!Number.isFinite(totalBudgetMs) || totalBudgetMs <= 2_000) {
+    return configuredTimeoutMs;
+  }
+  return Math.max(1, Math.min(configuredTimeoutMs, Math.trunc(totalBudgetMs - 1_000)));
+}
+
+function isMeaningfulWorkflowAgentEvent(event) {
+  if (typeof event === "string") {
+    return event.trim().length > 0;
+  }
+  if (!event || typeof event !== "object") {
+    return false;
+  }
+  const summaryLine = summarizeAgentStreamEvent(event);
+  if (typeof summaryLine === "string" && summaryLine.trim()) {
+    return true;
+  }
+  if (typeof event.delta === "string" && event.delta.trim()) return true;
+  if (typeof event.text === "string" && event.text.trim()) return true;
+  if (typeof event.error === "string" && event.error.trim()) return true;
+  if (Array.isArray(event.toolCalls) && event.toolCalls.length > 0) return true;
+  if (Array.isArray(event.toolResults) && event.toolResults.length > 0) return true;
+  return false;
+}
+
 function collectWorkflowAgentResultFragments(result = {}) {
   const fragments = [];
   if (result?.error) fragments.push(String(result.error));
   if (result?.output) fragments.push(String(result.output));
+  if (result?.message) fragments.push(String(result.message));
+  if (result?.summary) fragments.push(String(result.summary));
+  if (result?.narrative) fragments.push(String(result.narrative));
   if (Array.isArray(result?.stream)) fragments.push(...result.stream.map((entry) => String(entry || "")));
   if (Array.isArray(result?.items)) {
     fragments.push(
@@ -821,6 +954,18 @@ function collectWorkflowAgentResultFragments(result = {}) {
     );
   }
   return fragments.filter((fragment) => String(fragment || "").trim());
+}
+
+function isWorkflowAgentDelegationInspectionStall(text = "") {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  const lostDelegateVisibility = /can(?:not|['’]?t) retrieve the delegated run/i.test(normalized);
+  const noWorkspaceProgress =
+    /no implementation landed in the workspace/i.test(normalized)
+    || /still no implementation present/i.test(normalized)
+    || /working tree:\s*clean/i.test(normalized)
+    || /git status[^.\n]*clean/i.test(normalized);
+  return lostDelegateVisibility && noWorkspaceProgress;
 }
 
 function pickWorkflowPromptString(...values) {
@@ -1624,6 +1769,9 @@ function classifyWorkflowAgentBlockedStatus(result = {}) {
   if (WORKFLOW_AGENT_REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) {
     return "blocked_by_repo";
   }
+  if (isWorkflowAgentDelegationInspectionStall(text)) {
+    return "blocked_by_env";
+  }
   if (WORKFLOW_AGENT_ENV_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) {
     return "blocked_by_env";
   }
@@ -2230,6 +2378,7 @@ registerNodeType("action.run_agent", {
       mode: { type: "string", enum: ["ask", "agent", "plan", "web", "instant"], default: "agent", description: "Optional framing mode for the agent run" },
       executionRole: { type: "string", enum: ["architect", "editor"], description: "Optional architect/editor execution role override" },
       architectPlan: { type: "string", description: "Approved architect plan passed into editor/verify phases" },
+      outputVariable: { type: "string", description: "Optional context key to store the final agent output" },
       repoMapQuery: { type: "string", description: "Optional query used to select a compact repo map" },
       repoMapFileLimit: { type: "number", default: 12, description: "Maximum repo-map files to include" },
       timeoutMs: { type: "number", default: 3600000, description: "Agent timeout in ms" },
@@ -2263,6 +2412,11 @@ registerNodeType("action.run_agent", {
       },
       delegationWatchdogTimeoutMs: { type: "number", default: 300000, description: "Stall threshold for delegated non-task workflows in ms" },
       delegationWatchdogMaxRecoveries: { type: "number", default: 1, description: "Maximum watchdog recovery retries for delegated workflows" },
+      delegateTaskWorkflow: {
+        type: "boolean",
+        default: true,
+        description: "Whether task-backed runs may auto-delegate into a matching primary-agent workflow",
+      },
     },
     required: ["prompt"],
   },
@@ -2322,6 +2476,7 @@ registerNodeType("action.run_agent", {
     const agentProfileId = String(
       ctx.resolve(node.config?.agentProfile || ctx.data?.agentProfile || ""),
     ).trim();
+    const outputVariable = String(ctx.resolve(node.config?.outputVariable || "") || "").trim();
     const resolvedTimeout = Number(ctx.resolve(node.config?.timeoutMs ?? 3600000));
     const timeoutMs = Number.isFinite(resolvedTimeout) && resolvedTimeout > 0
       ? resolvedTimeout
@@ -2459,7 +2614,13 @@ registerNodeType("action.run_agent", {
 
     ctx.log(node.id, `Running agent (${sdk}) in ${cwd}`);
 
+    const shouldDelegateTaskWorkflow = parseBooleanSetting(
+      node.config?.delegateTaskWorkflow,
+      true,
+    );
+
     if (
+      shouldDelegateTaskWorkflow &&
       !ctx.data?._agentWorkflowActive &&
       typeof engine?.list === "function" &&
       typeof engine?.execute === "function"
@@ -2850,6 +3011,15 @@ registerNodeType("action.run_agent", {
         let lastStreamLog = "";
         const streamLines = [];
         const startedAt = Date.now();
+        const firstEventTimeoutMs = resolveWorkflowAgentFirstEventTimeoutMs(
+          timeoutMs,
+          node.config?.firstEventTimeoutMs,
+        );
+        const launchAbortController = new AbortController();
+        let firstEventGuardTimer = null;
+        let firstEventGuardReject = null;
+        let firstEventSeen = false;
+        let waitingForSlot = false;
         const storedSessionOwnerNodeId = String(ctx.data?._agentSessionNodeId || "").trim();
         const currentNodeId = String(node.id || "").trim();
         const allowStoredSessionReuse = !storedSessionOwnerNodeId || storedSessionOwnerNodeId === currentNodeId;
@@ -3072,10 +3242,63 @@ registerNodeType("action.run_agent", {
           metadata: launchExtra.metadata,
         });
         let slotWaitAnnounced = false;
+        const clearFirstEventGuard = () => {
+          if (firstEventGuardTimer) {
+            clearTimeout(firstEventGuardTimer);
+            firstEventGuardTimer = null;
+          }
+        };
+        const triggerFirstEventGuard = () => {
+          if (firstEventSeen || waitingForSlot || !firstEventGuardReject) return;
+          const error = new Error(
+            `first_event_timeout: no agent events received within ${firstEventTimeoutMs}ms`,
+          );
+          error.code = "WORKFLOW_AGENT_FIRST_EVENT_TIMEOUT";
+          const reject = firstEventGuardReject;
+          firstEventGuardReject = null;
+          if (!launchAbortController.signal.aborted) {
+            launchAbortController.abort("first_event_timeout");
+          }
+          ctx.log(
+            node.id,
+            `${passLabel || "Agent"} emitted no events within ${firstEventTimeoutMs}ms; aborting run`,
+            "warn",
+          );
+          reject(error);
+        };
+        const armFirstEventGuard = () => {
+          clearFirstEventGuard();
+          if (!firstEventGuardReject || firstEventSeen || waitingForSlot || !firstEventTimeoutMs) return;
+          firstEventGuardTimer = setTimeout(triggerFirstEventGuard, firstEventTimeoutMs);
+          if (typeof firstEventGuardTimer.unref === "function") {
+            firstEventGuardTimer.unref();
+          }
+        };
+        const withFirstEventGuard = async (launchAttempt) => {
+          if (!firstEventTimeoutMs || firstEventSeen) {
+            return await launchAttempt();
+          }
+          firstEventGuardReject = null;
+          const timeoutPromise = new Promise((_, reject) => {
+            firstEventGuardReject = reject;
+          });
+          armFirstEventGuard();
+          try {
+            return await Promise.race([
+              Promise.resolve().then(launchAttempt),
+              timeoutPromise,
+            ]);
+          } finally {
+            clearFirstEventGuard();
+            firstEventGuardReject = null;
+          }
+        };
         launchExtra.slotOwnerKey = slotOwnerKey;
         launchExtra.slotMeta = slotMeta;
         launchExtra.onSlotQueued = (slotState) => {
           slotWaitAnnounced = true;
+          waitingForSlot = true;
+          clearFirstEventGuard();
           if (typeof ctx.setNodeStatus === "function") {
             ctx.setNodeStatus(node.id, "waiting");
           }
@@ -3091,6 +3314,8 @@ registerNodeType("action.run_agent", {
           );
         };
         launchExtra.onSlotAcquired = (slotState) => {
+          waitingForSlot = false;
+          armFirstEventGuard();
           if (typeof ctx.setNodeStatus === "function") {
             ctx.setNodeStatus(node.id, "running");
           }
@@ -3104,6 +3329,12 @@ registerNodeType("action.run_agent", {
         };
         launchExtra.onEvent = (event) => {
           try {
+            const line = summarizeAgentStreamEvent(event);
+            const meaningful = isMeaningfulWorkflowAgentEvent(event);
+            if (!firstEventSeen && meaningful) {
+              firstEventSeen = true;
+              clearFirstEventGuard();
+            }
             if (tracker && trackedTaskId) {
               tracker.recordEvent(trackedTaskId, {
                 ...(event && typeof event === "object" ? event : { content: String(event || "") }),
@@ -3116,7 +3347,6 @@ registerNodeType("action.run_agent", {
                 });
               }
             }
-            const line = summarizeAgentStreamEvent(event);
             if (!line || line === lastStreamLog) return;
             lastStreamLog = line;
             streamEventCount += 1;
@@ -3164,19 +3394,20 @@ registerNodeType("action.run_agent", {
                 nodeLabel: String(node.label || node.id || "").trim() || null,
                 meta: { strategy: "continue_session", sessionId },
               });
-              result = await harnessAgentService.continueSession(sessionId, continuePrompt, {
+              result = await withFirstEventGuard(() => harnessAgentService.continueSession(sessionId, continuePrompt, {
                 timeout: timeoutMs,
                 cwd,
                 ...(sdkOverride ? { sdk: sdkOverride } : {}),
                 ...(modelOverride ? { model: modelOverride } : {}),
                 ...(providerOverride ? { provider: providerOverride } : {}),
                 ...(providerConfigOverride ? { providerConfig: providerConfigOverride } : {}),
+                abortController: launchAbortController,
                 slotOwnerKey,
                 slotMeta,
-              onSlotQueued: launchExtra.onSlotQueued,
-              onSlotAcquired: launchExtra.onSlotAcquired,
-              env: agentGitEnv,
-            });
+                onSlotQueued: launchExtra.onSlotQueued,
+                onSlotAcquired: launchExtra.onSlotAcquired,
+                env: agentGitEnv,
+              }));
               if (result?.success) {
                 ctx.log(node.id, `${passLabel} Recovery: continue-session succeeded`.trim());
               } else {
@@ -3243,6 +3474,7 @@ registerNodeType("action.run_agent", {
               ...(modelOverride ? { model: modelOverride } : {}),
               ...(providerOverride ? { provider: providerOverride } : {}),
               ...(providerConfigOverride ? { providerConfig: providerConfigOverride } : {}),
+              abortController: launchAbortController,
               onEvent: launchExtra.onEvent,
               systemPrompt: effectiveSystemPrompt,
               slotOwnerKey,
@@ -3268,9 +3500,11 @@ registerNodeType("action.run_agent", {
                 nodeLabel: String(node.label || node.id || "").trim() || null,
                 meta: { taskId: explicitTaskBackedRun ? trackedTaskId : null, sessionType: trackedSessionType },
               });
-              result = preferEphemeralLaunch
-                ? await harnessAgentService.launchEphemeralThread(passPrompt, cwd, timeoutMs, baseRunTaskOptions)
-                : await harnessAgentService.runTask(passPrompt, baseRunTaskOptions);
+              result = await withFirstEventGuard(() => (
+                preferEphemeralLaunch
+                  ? harnessAgentService.launchEphemeralThread(passPrompt, cwd, timeoutMs, baseRunTaskOptions)
+                  : harnessAgentService.runTask(passPrompt, baseRunTaskOptions)
+              ));
             } catch (err) {
               if (!isNullSessionIdCrash(err)) throw err;
               const freshSessionId = `${managedSessionId || recoveryTaskKey}:fresh-${Date.now()}`;
@@ -3290,14 +3524,17 @@ registerNodeType("action.run_agent", {
                 sessionId: freshSessionId,
                 env: agentGitEnv,
               };
-              result = preferEphemeralLaunch
-                ? await harnessAgentService.launchEphemeralThread(passPrompt, cwd, timeoutMs, freshOptions)
-                : await harnessAgentService.runTask(passPrompt, freshOptions);
+              result = await withFirstEventGuard(() => (
+                preferEphemeralLaunch
+                  ? harnessAgentService.launchEphemeralThread(passPrompt, cwd, timeoutMs, freshOptions)
+                  : harnessAgentService.runTask(passPrompt, freshOptions)
+              ));
             }
           }
             return result;
           } finally {
             clearInterval(heartbeat);
+            clearFirstEventGuard();
           }
         };
         const tracedTaskMetadata = explicitTaskBackedRun
@@ -3360,7 +3597,22 @@ registerNodeType("action.run_agent", {
             resumed: err?.resumed === true,
           };
         }
-        result = normalizeWorkflowAgentBlockedResult(result);
+        const digest = buildAgentExecutionDigest(result, streamLines, maxRetainedEvents);
+        const normalizedStream = [
+          ...(Array.isArray(result?.stream) ? result.stream : []),
+          ...(Array.isArray(digest.stream) ? digest.stream : []),
+        ];
+        const normalizedItems = [
+          ...(Array.isArray(result?.items) ? result.items : []),
+          ...(Array.isArray(digest.items) ? digest.items : []),
+        ];
+        result = normalizeWorkflowAgentBlockedResult({
+          ...result,
+          summary: String(result?.summary || "").trim() || digest.summary,
+          narrative: String(result?.narrative || "").trim() || digest.narrative,
+          stream: normalizedStream,
+          items: normalizedItems,
+        });
         success = result?.success === true;
         ctx.log(node.id, `${passLabel || "Agent"} completed: success=${success} streamEvents=${streamEventCount}`);
 
@@ -3520,7 +3772,6 @@ registerNodeType("action.run_agent", {
             attempts: Number(result?.attempts || 0) || undefined,
           },
         });
-        const digest = buildAgentExecutionDigest(result, streamLines, maxRetainedEvents);
         const finalizedSession = finalizeWorkflowLinkedSessionExecution(workflowSessionLink, {
           ...result,
           success,
@@ -3541,6 +3792,9 @@ registerNodeType("action.run_agent", {
             stream: digest.stream,
           },
         });
+        if (outputVariable) {
+          ctx.data[outputVariable] = result?.output ?? "";
+        }
 
         if (!success) {
           return {
@@ -8900,15 +9154,28 @@ registerNodeType("action.resolve_executor", {
         tags: taskTags,
       });
       const plan = planResult?.plan || null;
-      const profile = planResult?.best?.profile || null;
+      const bestMatch = planResult?.best || null;
+      const profile = bestMatch?.profile || null;
+      const importedProfile = Boolean(
+        bestMatch
+        && (
+          (Array.isArray(bestMatch.tags) && bestMatch.tags.includes("imported"))
+          || profile?.importMeta
+        ),
+      );
       const shouldApplyProfile = Boolean(
         plan
         && plan.agentProfileId
         && (
-          plan.autoApply !== false
-          || (Array.isArray(plan.skillIds) && plan.skillIds.length > 0)
-          || Boolean(profile?.sdk)
-          || Number(plan.confidence || 0) >= 0.2
+          plan.autoApply === true
+          || (
+            !importedProfile
+            && (
+              (Array.isArray(plan.skillIds) && plan.skillIds.length > 0)
+              || Boolean(profile?.sdk)
+              || Number(plan.confidence || 0) >= 0.2
+            )
+          )
         ),
       );
       if (shouldApplyProfile) {
@@ -9224,7 +9491,8 @@ registerNodeType("action.acquire_worktree", {
     },
     required: ["branch", "taskId"],
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
+    const STALE_TASK_BRANCH_RECREATE_DIFF_THRESHOLD = 200;
     const taskId = cfgOrCtx(node, ctx, "taskId");
     const branch = cfgOrCtx(node, ctx, "branch");
     const resolvedRepoRoot = resolveWorkflowRepoRoot(node, ctx);
@@ -9263,6 +9531,79 @@ registerNodeType("action.acquire_worktree", {
       ].filter(Boolean).join(" ");
       ctx.log(node.id, `[worktree-recovery] ${details}`);
       await recordWorktreeRecoveryEvent(repoRoot, payload);
+    };
+    const persistTaskBranchMetadata = async (persistedWorktreePath) => {
+      const normalizedTaskId = String(taskId || "").trim();
+      if (!normalizedTaskId) return;
+      const normalizedWorktreePath = String(persistedWorktreePath || "").trim() || null;
+      const patch = {
+        branchName: String(branch || "").trim() || null,
+        baseBranch: String(baseBranch || "").trim() || null,
+        worktreePath: normalizedWorktreePath,
+      };
+      if (ctx.data?.task && typeof ctx.data.task === "object") {
+        Object.assign(ctx.data.task, patch);
+      }
+      if (ctx.data?.taskDetail && typeof ctx.data.taskDetail === "object") {
+        Object.assign(ctx.data.taskDetail, patch);
+      }
+      if (ctx.data?.taskInfo && typeof ctx.data.taskInfo === "object") {
+        Object.assign(ctx.data.taskInfo, patch);
+      }
+      const kanban = engine?.services?.kanban;
+      if (typeof kanban?.updateTask === "function") {
+        await kanban.updateTask(normalizedTaskId, patch);
+      }
+    };
+    const taskSnapshotCandidates = [
+      ctx.data?.task,
+      ctx.data?.taskDetail,
+      ctx.data?.taskInfo,
+    ].filter((entry) => entry && typeof entry === "object");
+    let currentTaskSnapshot = taskSnapshotCandidates.find((entry) => {
+      const candidateId = String(entry?.id || entry?.taskId || "").trim();
+      return candidateId && candidateId === String(taskId || "").trim();
+    }) || null;
+    const kanban = engine?.services?.kanban;
+    if (!currentTaskSnapshot && typeof kanban?.getTask === "function") {
+      currentTaskSnapshot = await kanban.getTask(taskId).catch(() => null);
+    }
+    const shouldRecreateDetachedTaskBranch = () => {
+      if (!currentTaskSnapshot || typeof currentTaskSnapshot !== "object") return false;
+      if (taskHasPrReference(currentTaskSnapshot)) return false;
+      if (!baseBranch || baseBranch === branch) return false;
+      const canonicalBranchName = deriveTaskBranch({
+        id: taskId,
+        title: pickTaskString(
+          currentTaskSnapshot?.title,
+          ctx.data?.task?.title,
+          ctx.data?.taskDetail?.title,
+          ctx.data?.taskInfo?.title,
+          "",
+        ),
+      });
+      if (!branchMatchesTaskOwnership(branch, taskId, canonicalBranchName)) return false;
+      try {
+        const gitOpts = {
+          cwd: repoRoot,
+          encoding: "utf8",
+          timeout: 5000,
+          stdio: ["ignore", "pipe", "pipe"],
+        };
+        const baseHead = execGitArgsSync(["rev-parse", "--verify", baseBranch], gitOpts).trim();
+        const mergeBase = execGitArgsSync(["merge-base", baseBranch, branch], gitOpts).trim();
+        if (!baseHead || !mergeBase || baseHead === mergeBase) return false;
+        const changedFiles = execGitArgsSync(["diff", "--name-only", `${baseBranch}..${branch}`], {
+          ...gitOpts,
+          timeout: 10000,
+        })
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        return changedFiles.length >= STALE_TASK_BRANCH_RECREATE_DIFF_THRESHOLD;
+      } catch {
+        return false;
+      }
     };
 
     const candidateWorktreePath = resolve(
@@ -9425,6 +9766,7 @@ registerNodeType("action.acquire_worktree", {
         ctx.data.baseBranch = baseBranch;
         ctx.data._worktreeCreated = false;
         ctx.data._worktreeManaged = true;
+        await persistTaskBranchMetadata(candidatePath);
         await persistRecoveryEvent({
           outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
           worktreePath: candidatePath,
@@ -9456,6 +9798,54 @@ registerNodeType("action.acquire_worktree", {
       };
 
       const shouldSyncFromOrigin = () => /^origin\//.test(baseBranch) && hasOriginRemote();
+
+      const syncReusableWorktreeToBaseBranch = (targetWorktreePath) => {
+        if (shouldSyncFromOrigin()) {
+          try {
+            execGitArgsSync(["pull", "--rebase", "origin", baseBranchShort], {
+              cwd: targetWorktreePath,
+              encoding: "utf8",
+              timeout: fetchTimeout,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+          } catch {
+            /* rebase failures are non-fatal only if the worktree remains reusable */
+          }
+          return;
+        }
+        if (!baseBranch || baseBranch === branch) {
+          return;
+        }
+        try {
+          execGitArgsSync(["rev-parse", "--verify", baseBranch], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch {
+          return;
+        }
+        try {
+          execGitArgsSync(["rebase", baseBranch], {
+            cwd: targetWorktreePath,
+            encoding: "utf8",
+            timeout: fetchTimeout,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch {
+          try {
+            execGitArgsSync(["rebase", "--abort"], {
+              cwd: targetWorktreePath,
+              encoding: "utf8",
+              timeout: 5000,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+          } catch {
+            // Best-effort cleanup for a failed local-base rebase.
+          }
+        }
+      };
 
       // Ensure remote-tracking base refs are fresh when the repo actually has that remote.
       const baseBranchShort = baseBranch.replace(/^origin\//, "");
@@ -9545,17 +9935,7 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             /* best-effort — dirty state handled by post-pull invalidity check below */
           }
-          if (shouldSyncFromOrigin()) {
-            try {
-              execGitArgsSync(["pull", "--rebase", "origin", baseBranchShort], {
-                cwd: worktreePath, encoding: "utf8",
-                timeout: fetchTimeout,
-                stdio: ["ignore", "pipe", "pipe"],
-              });
-            } catch {
-              /* rebase failures are non-fatal only if the worktree remains reusable */
-            }
-          }
+          syncReusableWorktreeToBaseBranch(worktreePath);
           recreatedManagedWorktree = invalidateBrokenReusableWorktree(worktreePath, "post-pull");
         }
         if (!recreatedManagedWorktree && existsSync(worktreePath)) {
@@ -9564,6 +9944,7 @@ registerNodeType("action.acquire_worktree", {
           ctx.data.baseBranch = baseBranch;
           ctx.data._worktreeCreated = false;
           ctx.data._worktreeManaged = true;
+          await persistTaskBranchMetadata(worktreePath);
           await persistRecoveryEvent({
             outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
             worktreePath,
@@ -9577,20 +9958,66 @@ registerNodeType("action.acquire_worktree", {
       }
 
       // Create fresh worktree
-      const branchExistsLocally = localBranchExists();
+      let branchExistsLocally = localBranchExists();
       const attachedPath =
         branchExistsLocally && !existsSync(worktreePath)
           ? await findAttachedWorktreeForBranch()
           : "";
+      if (branchExistsLocally && !attachedPath && !existsSync(worktreePath) && shouldRecreateDetachedTaskBranch()) {
+        const recoveryBranch = buildTaskBranchRecoveryName(branch);
+        execGitArgsSync(["branch", recoveryBranch, branch], {
+          cwd: repoRoot,
+          encoding: "utf8",
+          timeout: 10000,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        execGitArgsSync(["branch", "-D", branch], {
+          cwd: repoRoot,
+          encoding: "utf8",
+          timeout: 10000,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        branchExistsLocally = false;
+        ctx.log(
+          node.id,
+          `Recreating stale detached task branch from ${baseBranch}: ${branch} (backup: ${recoveryBranch})`,
+        );
+      }
       if (attachedPath && existsSync(attachedPath)) {
         if (invalidateBrokenReusableWorktree(attachedPath, "attached-branch")) {
           fixGitConfigCorruption(repoRoot);
         } else {
+          try {
+            const dirty = execGitArgsSync(["status", "--porcelain"], {
+              cwd: attachedPath,
+              encoding: "utf8",
+              timeout: 5000,
+              stdio: ["ignore", "pipe", "pipe"],
+            }).trim();
+            if (dirty) {
+              execGitArgsSync(["reset", "--hard", "HEAD"], {
+                cwd: attachedPath,
+                encoding: "utf8",
+                timeout: 10000,
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+              execGitArgsSync(["clean", "-fd"], {
+                cwd: attachedPath,
+                encoding: "utf8",
+                timeout: 10000,
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+            }
+          } catch {
+            /* best-effort — dirty state handled by later invalidity checks */
+          }
+          syncReusableWorktreeToBaseBranch(attachedPath);
           fixGitConfigCorruption(repoRoot);
           ctx.data.worktreePath = attachedPath;
           ctx.data.baseBranch = baseBranch;
           ctx.data._worktreeCreated = false;
           ctx.data._worktreeManaged = true;
+          await persistTaskBranchMetadata(attachedPath);
           await persistRecoveryEvent({
             outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
             worktreePath: attachedPath,
@@ -9607,6 +10034,7 @@ registerNodeType("action.acquire_worktree", {
           };
         }
       }
+      let createdFromExistingBranch = false;
       try {
         execGitArgsSync(
           branchExistsLocally
@@ -9614,6 +10042,7 @@ registerNodeType("action.acquire_worktree", {
             : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
           { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
         );
+        createdFromExistingBranch = branchExistsLocally;
       } catch (createErr) {
         const createErrDetail = String(createErr?.stderr || createErr?.message || "");
 
@@ -9631,6 +10060,7 @@ registerNodeType("action.acquire_worktree", {
           execGitArgsSync(["worktree", "add", worktreePath, "-b", branch, baseBranch], {
             cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout,
           });
+          createdFromExistingBranch = false;
         } else if (!isExistingBranchWorktreeError(createErr)) {
           throw new Error(`Worktree creation failed: ${formatExecSyncError(createErr)}`);
         } else {
@@ -9643,19 +10073,21 @@ registerNodeType("action.acquire_worktree", {
               if (existsSync(worktreePath)) {
                 allocateRecoveryWorktreePath("attached-branch");
               }
-              execGitArgsSync(
-                branchExistsLocally
-                  ? ["worktree", "add", worktreePath, branch]
-                  : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
-                { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
-              );
-              recreatedAttachedWorktree = true;
-            } else {
+               execGitArgsSync(
+                 branchExistsLocally
+                   ? ["worktree", "add", worktreePath, branch]
+                   : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
+                 { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
+               );
+               createdFromExistingBranch = branchExistsLocally;
+               recreatedAttachedWorktree = true;
+             } else {
               fixGitConfigCorruption(repoRoot);
               ctx.data.worktreePath = attachedPath;
               ctx.data.baseBranch = baseBranch;
               ctx.data._worktreeCreated = false;
               ctx.data._worktreeManaged = true;
+              await persistTaskBranchMetadata(attachedPath);
               await persistRecoveryEvent({
                 outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
                 worktreePath: attachedPath,
@@ -9685,14 +10117,15 @@ registerNodeType("action.acquire_worktree", {
           if (!recreatedAttachedWorktree && existsSync(worktreePath)) {
             allocateRecoveryWorktreePath("path-exists-race");
             try {
-              execGitArgsSync(
-                branchExistsLocally
-                  ? ["worktree", "add", worktreePath, branch]
-                  : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
-                { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
-              );
-              createdRecoveryWorktree = true;
-            } catch (recoveryErr) {
+               execGitArgsSync(
+                 branchExistsLocally
+                   ? ["worktree", "add", worktreePath, branch]
+                   : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
+                 { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
+               );
+               createdFromExistingBranch = branchExistsLocally;
+               createdRecoveryWorktree = true;
+             } catch (recoveryErr) {
               throw new Error(
                 `Worktree creation failed: ${formatExecSyncError(createErr)}; ` +
                 `recovery-path failed: ${formatExecSyncError(recoveryErr)}`,
@@ -9706,6 +10139,7 @@ registerNodeType("action.acquire_worktree", {
                 ["worktree", "add", worktreePath, branch],
                 { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
               );
+              createdFromExistingBranch = true;
             } catch (reuseErr) {
               throw new Error(
                 `Worktree creation failed: ${formatExecSyncError(createErr)}; ` +
@@ -9715,6 +10149,9 @@ registerNodeType("action.acquire_worktree", {
           }
         }
       }
+      if (createdFromExistingBranch) {
+        syncReusableWorktreeToBaseBranch(worktreePath);
+      }
       clearWorktreeGitState(resolveWorktreeGitDir(worktreePath), repoRoot);
       fixGitConfigCorruption(repoRoot);
 
@@ -9722,6 +10159,7 @@ registerNodeType("action.acquire_worktree", {
       ctx.data.baseBranch = baseBranch;
       ctx.data._worktreeCreated = true;
       ctx.data._worktreeManaged = true;
+      await persistTaskBranchMetadata(worktreePath);
       await persistRecoveryEvent({
         outcome: recoveryState.recreated ? "recreated" : "healthy_noop",
         worktreePath,

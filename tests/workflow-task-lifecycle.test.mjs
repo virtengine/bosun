@@ -2432,6 +2432,90 @@ describe("action.resolve_executor", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("does not auto-apply low-confidence profiles just because they carry skills", async () => {
+    const nt = getNodeType("action.resolve_executor");
+    const root = mkdtempSync(join(tmpdir(), "wf-resolve-executor-low-confidence-skills-"));
+    const bosunDir = join(root, ".bosun");
+    const profilesDir = join(bosunDir, "profiles");
+    const skillsDir = join(bosunDir, "skills");
+    mkdirSync(profilesDir, { recursive: true });
+    mkdirSync(skillsDir, { recursive: true });
+
+    const now = new Date().toISOString();
+    writeFileSync(join(bosunDir, "library.json"), JSON.stringify({
+      generated: now,
+      entries: [
+        {
+          id: "generic-agent",
+          type: "agent",
+          name: "Imported Generic Agent",
+          description: "Broad imported-style profile with weak pattern",
+          filename: "generic-agent.json",
+          tags: ["generic", "agent", "imported"],
+          scope: "global",
+          workspace: null,
+          meta: {},
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "generic-guidance",
+          type: "skill",
+          name: "Generic Guidance",
+          description: "Generic skill that should not force profile auto-apply",
+          filename: "generic-guidance.md",
+          tags: ["generic", "agent", "imported"],
+          scope: "global",
+          workspace: null,
+          meta: {},
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    }, null, 2));
+    writeFileSync(
+      join(profilesDir, "generic-agent.json"),
+      JSON.stringify({
+        id: "generic-agent",
+        name: "Imported Generic Agent",
+        description: "Broad profile with weak pattern and auxiliary skill",
+        titlePatterns: ["\\bagent\\b"],
+        scopes: ["generic"],
+        tags: ["generic", "agent", "imported"],
+        skills: ["generic-guidance"],
+        importMeta: {
+          sourceId: "external-library",
+          repoUrl: "https://example.com/external-library.git",
+          branch: "main",
+          relPath: ".github/agents/imported-generic-agent.md",
+        },
+      }, null, 2),
+    );
+    writeFileSync(join(skillsDir, "generic-guidance.md"), "# Skill\nGeneric guidance.");
+
+    const ctx = makeCtx({
+      repoRoot: root,
+      task: {
+        tags: ["workflow", "automation"],
+      },
+    });
+    const node = makeNode("action.resolve_executor", {
+      taskTitle: "feat(workflow): issue-state continuation loop workflow template",
+      taskDescription: "Design continuation-loop workflow template with maxTurns and stuckDetection for the agent runtime.",
+      repoRoot: root,
+      defaultSdk: "codex",
+    });
+
+    const result = await nt.execute(node, ctx);
+    expect(result.success).toBe(true);
+    expect(result.tier).not.toBe("profile");
+    expect(ctx.data.agentProfile).toBeUndefined();
+    expect(ctx.data.resolvedAgentProfile).toBeUndefined();
+    expect(ctx.data.resolvedSkillIds).toBeUndefined();
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("honors profile sdk/model preference when defined", async () => {
     const nt = getNodeType("action.resolve_executor");
     const root = mkdtempSync(join(tmpdir(), "wf-resolve-executor-profile-sdk-"));
@@ -2816,6 +2900,290 @@ describe("action.acquire_worktree", () => {
     expect(ctx.data.baseBranch).toBe("main");
     expect(result.created).toBe(true);
     expect(existsSync(result.worktreePath)).toBe(true);
+  });
+
+  it("rebases a reused task worktree onto a local base branch override", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/local-base-reuse";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reuse-local-base-1",
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({}));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+    writeFileSync(join(first.worktreePath, "feature.txt"), "task work\n");
+    gitExec("git add feature.txt && git commit -m task-work", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    const overrideNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reuse-local-base-1",
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(overrideNode, makeCtx({}));
+    expect(second.success).toBe(true);
+    expect(second.reused).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    const headContainsLocalBase = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} HEAD`,
+      { cwd: second.worktreePath, encoding: "utf8" },
+    );
+    expect(headContainsLocalBase).toBe("");
+  });
+
+  it("rebases a newly attached task branch worktree onto a local base branch override", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/local-base-reattach";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reattach-local-base-1",
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({}));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+    writeFileSync(join(first.worktreePath, "feature.txt"), "task work\n");
+    gitExec("git add feature.txt && git commit -m task-work", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+    gitExec(`git worktree remove "${first.worktreePath}" --force`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const overrideNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reattach-local-base-1",
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(overrideNode, makeCtx({}));
+    expect(second.success).toBe(true);
+    expect(second.created).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    const headContainsLocalBase = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} HEAD`,
+      { cwd: second.worktreePath, encoding: "utf8" },
+    );
+    expect(headContainsLocalBase).toBe("");
+  });
+
+  it("recreates large stale detached task branches from the latest base when no PR exists", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "blocked-stale-1";
+    const branch = "task/blockedstale1-stale-ref";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale ref",
+        status: "blocked",
+      },
+    }));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+
+    for (let index = 0; index < 205; index += 1) {
+      const name = `stale-${String(index).padStart(3, "0")}.txt`;
+      writeFileSync(join(first.worktreePath, name), `stale ${index}\n`);
+    }
+    gitExec("git add . && git commit -m stale-task-history", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    gitExec(`git show ${branch}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    gitExec(`git worktree remove "${first.worktreePath}" --force`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const secondNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(secondNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale ref",
+        status: "inprogress",
+        prNumber: null,
+        prUrl: null,
+      },
+    }));
+    expect(second.success).toBe(true);
+    expect(second.created).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    expect(existsSync(join(second.worktreePath, "stale-000.txt"))).toBe(false);
+
+    const recreatedBranchFile = gitExec(`git show ${branch}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(recreatedBranchFile).toContain("export async function loadCodex() {}");
+    const baseAncestor = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} ${branch}`,
+      { cwd: repoDir, encoding: "utf8" },
+    );
+    expect(baseAncestor).toBe("");
+
+    const backupBranches = gitExec("git branch --format=\"%(refname:short)\"", {
+      cwd: repoDir,
+      encoding: "utf8",
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => line.startsWith(`${branch}-recovery-`));
+    expect(backupBranches.length).toBe(1);
+    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(backupBranchFile).toContain("export { Codex }");
+  });
+
+  it("persists acquired worktree branch metadata back to the task store projection", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const ctx = makeCtx({
+      task: {
+        id: "task-persist-branch-1",
+        branchName: "task/old-stale-branch",
+        baseBranch: "origin/main",
+      },
+    });
+    const updateTask = vi.fn(async () => true);
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "task-persist-branch-1",
+      branch: "task/task-persist-branch-1-clean-branch",
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: { updateTask },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(updateTask).toHaveBeenCalledWith(
+      "task-persist-branch-1",
+      expect.objectContaining({
+        branchName: "task/task-persist-branch-1-clean-branch",
+        baseBranch: "main",
+        worktreePath: result.worktreePath,
+      }),
+    );
+    expect(ctx.data.task.branchName).toBe("task/task-persist-branch-1-clean-branch");
+    expect(ctx.data.task.baseBranch).toBe("main");
+    expect(ctx.data.task.worktreePath).toBe(result.worktreePath);
   });
 
   it("returns explicit non-retryable metadata for config validation failures", async () => {
@@ -5137,6 +5505,8 @@ describe("template-task-lifecycle", () => {
 
   it("runs pre-PR validation before pushing", () => {
     const t = getTemplate("template-task-lifecycle");
+    const autoFixValidation = t.nodes.find((n) => n.id === "auto-fix-validation");
+    const autoFixValidation2 = t.nodes.find((n) => n.id === "auto-fix-validation-2");
     expect(t.edges.find((e) => e.source === "has-commits" && e.target === "pre-pr-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation" && e.target === "pre-pr-validation-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "push-branch")).toBeDefined();
@@ -5156,6 +5526,10 @@ describe("template-task-lifecycle", () => {
     expect(t.edges.find((e) => e.source === "set-blocked-validation-failed" && e.target === "notify-validation-blocked")).toBeDefined();
     expect(t.edges.find((e) => e.source === "notify-validation-blocked" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "push-branch" && e.target === "push-ok")).toBeDefined();
+    expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.stderr");
+    expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.output");
+    expect(autoFixValidation2?.config?.prompt).toContain("$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr");
+    expect(autoFixValidation2?.config?.prompt).toContain("$ctx.getNodeOutput('retry-pre-pr-validation')?.output");
   });
 
   it("passes repository scope metadata into build-prompt node", () => {
