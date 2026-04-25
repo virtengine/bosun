@@ -787,6 +787,52 @@ describe("shared-knowledge", () => {
       expect(secondResult.success).toBe(true);
     });
 
+    it("keeps same-agent burst writes throttled even when other agents write concurrently", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const agentThetaFirst = buildKnowledgeEntry({
+        content: "Session memory: theta first write should persist before duplicate burst suppression activates.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-theta",
+        agentId: "agent-theta",
+      });
+      const agentThetaSecond = buildKnowledgeEntry({
+        content: "Session memory: theta second write should be throttled because it reuses the same agent and scope immediately.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-theta",
+        agentId: "agent-theta",
+      });
+      const agentIota = buildKnowledgeEntry({
+        content: "Session memory: iota concurrent write should still persist because only theta's throttle bucket is hot.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-theta",
+        agentId: "agent-iota",
+      });
+
+      const firstThetaResult = await appendKnowledgeEntry(agentThetaFirst);
+      const [secondThetaResult, iotaResult] = await Promise.all([
+        appendKnowledgeEntry(agentThetaSecond),
+        appendKnowledgeEntry(agentIota),
+      ]);
+
+      expect(firstThetaResult.success).toBe(true);
+      expect(secondThetaResult.success).toBe(false);
+      expect(String(secondThetaResult.reason || "")).toContain("rate limited");
+      expect(iotaResult.success).toBe(true);
+    });
+
     it("rate limits the same agent within the same scope but not across scopes", async () => {
       initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
 
