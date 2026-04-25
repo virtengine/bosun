@@ -91,6 +91,9 @@ function showHelp() {
   COMMANDS
     workflow list              List declarative pipeline workflows
     workflow run <name>        Run a declarative pipeline workflow
+    workflow templates         List workflow-engine templates
+    workflow template-run <id> Run a workflow-engine template directly
+    simulate task [id|restart] Run the real task-lifecycle workflow
     workflow nodes             Inspect custom workflow node plugin health
     tui                        Launch the terminal UI
     audit <command>            Run codebase annotation audit tools (scan|generate|warn|manifest|index|trim|conformity|migrate)
@@ -179,6 +182,9 @@ function showHelp() {
   WORKFLOWS
     workflow list               List built-in and configured workflows
     workflow run <name>         Run a declarative fresh-context workflow
+    workflow templates          List built-in workflow-engine templates
+    workflow template-run <id>  Run a workflow-engine template directly
+    simulate task [id|restart]  Run the real task lifecycle workflow
 
     Run 'bosun workflow --help' for workflow CLI examples.
     Run 'bosun tui' to launch the terminal UI.
@@ -1626,6 +1632,22 @@ async function main() {
     const commandStartIndex = workflowCommandIndex >= 0 ? workflowCommandIndex : workflowFlagIndex;
     const workflowArgs = args.slice(commandStartIndex + 1);
     await runWorkflowCli(workflowArgs);
+    process.exit(0);
+  }
+
+  const simulateFlagIndex = args.indexOf("--simulate");
+  const simulateCommandIndex =
+    args[0] === "simulate"
+      ? 0
+      : args[0]?.startsWith("--")
+        ? args.indexOf("simulate")
+        : -1;
+  if (simulateCommandIndex >= 0 || simulateFlagIndex >= 0) {
+    const { runTaskSimulationCli } = await import("./task/task-simulate-cli.mjs");
+    const commandStartIndex =
+      simulateCommandIndex >= 0 ? simulateCommandIndex : simulateFlagIndex;
+    const simulateArgs = args.slice(commandStartIndex + 1);
+    await runTaskSimulationCli(simulateArgs);
     process.exit(0);
   }
 
