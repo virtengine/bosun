@@ -19,6 +19,8 @@ vi.mock("node:fs", async (importOriginal) => {
       existsSync: vi.fn(() => false),
       mkdirSync: vi.fn(),
       readdirSync: vi.fn(() => []),
+      realpathSync: vi.fn((path) => String(path)),
+      rmSync: vi.fn(),
       statSync: vi.fn(() => ({ mtimeMs: Date.now(), isDirectory: () => true })),
       symlinkSync: vi.fn(),
       writeFileSync: vi.fn(),
@@ -51,7 +53,7 @@ vi.mock("../workspace/worktree-setup.mjs", () => ({
 }));
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 
 import {
   WorktreeManager,
@@ -118,6 +120,8 @@ describe("worktree-manager", () => {
     resetWorktreeManager();
     existsSync.mockReturnValue(false);
     readdirSync.mockReturnValue([]);
+    realpathSync.mockImplementation((path) => String(path));
+    rmSync.mockReset();
     statSync.mockReturnValue({ mtimeMs: Date.now(), isDirectory: () => true });
     inspectWorktreeRuntimeSetupMock.mockReturnValue({
       ok: true,
@@ -591,6 +595,76 @@ describe("worktree-manager", () => {
         /\/fake\/repo\/\.cache\/worktrees\/ve-abc-feat\/node_modules$/,
       );
       expect(typeof linkType).toBe("string");
+    });
+
+    it("repairs reused worktree node_modules when an existing copy no longer points at repo root", async () => {
+      const wtPath = `${REPO_ROOT}/.cache/worktrees/ve-abc-feat`;
+      spawnSync.mockImplementation((_cmd, args) => {
+        if (args && args.includes("--porcelain")) {
+          return {
+            status: 0,
+            stdout: porcelainOutput([
+              { path: REPO_ROOT, branch: "refs/heads/main" },
+              { path: wtPath, branch: "refs/heads/ve/abc-feat" },
+            ]),
+            stderr: "",
+          };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      });
+      existsSync.mockImplementation((path) => {
+        const normalized = String(path).replace(/\\/g, "/");
+        return normalized.endsWith(`${REPO_ROOT}/node_modules`)
+          || normalized.endsWith(`${wtPath}/node_modules`);
+      });
+      realpathSync.mockImplementation((path) => String(path).replace(/\\/g, "/"));
+
+      await mgr.acquireWorktree("ve/abc-feat", "task-2", {
+        owner: "monitor",
+      });
+
+      expect(rmSync).toHaveBeenCalledWith(
+        expect.stringMatching(/node_modules$/),
+        expect.objectContaining({ recursive: true, force: true }),
+      );
+      expect(symlinkSync).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps shared node_modules when the existing worktree path already resolves to repo root", async () => {
+      const wtPath = `${REPO_ROOT}/.cache/worktrees/ve-abc-feat`;
+      spawnSync.mockImplementation((_cmd, args) => {
+        if (args && args.includes("--porcelain")) {
+          return {
+            status: 0,
+            stdout: porcelainOutput([
+              { path: REPO_ROOT, branch: "refs/heads/main" },
+              { path: wtPath, branch: "refs/heads/ve/abc-feat" },
+            ]),
+            stderr: "",
+          };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      });
+      existsSync.mockImplementation((path) => {
+        const normalized = String(path).replace(/\\/g, "/");
+        return normalized.endsWith(`${REPO_ROOT}/node_modules`)
+          || normalized.endsWith(`${wtPath}/node_modules`);
+      });
+      realpathSync.mockImplementation((path) => {
+        const normalized = String(path).replace(/\\/g, "/");
+        if (normalized.endsWith(`${REPO_ROOT}/node_modules`)
+          || normalized.endsWith(`${wtPath}/node_modules`)) {
+          return `${REPO_ROOT}/node_modules`;
+        }
+        return normalized;
+      });
+
+      await mgr.acquireWorktree("ve/abc-feat", "task-2", {
+        owner: "monitor",
+      });
+
+      expect(rmSync).not.toHaveBeenCalled();
+      expect(symlinkSync).not.toHaveBeenCalled();
     });
 
     it("registers worktree with taskKey", async () => {

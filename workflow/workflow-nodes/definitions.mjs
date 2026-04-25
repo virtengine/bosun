@@ -1304,6 +1304,7 @@ function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
     "For large files, prefer targeted read/view calls with explicit line ranges and batch multiple focused reads instead of whole-file reads.",
     "If shell filtering blocks a compound command, retry as separate single-purpose commands rather than treating the session as blocked.",
     "Before declaring verification blocked, inspect focused git status/diff output for the target paths and run the narrowest relevant test command you can prove.",
+    "For Node/Vitest repos that include tools/vitest-runner.mjs, prefer `node tools/vitest-runner.mjs run <target-paths>` over `npm test -- <target-paths>` for focused worktree verification.",
     "Enabled tools JSON:",
     "```json",
     JSON.stringify(manifest, null, 2),

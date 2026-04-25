@@ -44,5 +44,6 @@ describe("voice tool capability injection regressions", () => {
     expect(workflow).toContain("## Tool Capability Contract");
     expect(workflow).toContain("prefer targeted read/view calls with explicit line ranges");
     expect(workflow).toContain("retry as separate single-purpose commands");
+    expect(workflow).toContain("node tools/vitest-runner.mjs run <target-paths>");
   });
 });

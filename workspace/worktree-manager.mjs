@@ -21,6 +21,7 @@ import {
   rmSync,
   statSync,
   readdirSync,
+  realpathSync,
   symlinkSync,
 } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -309,7 +310,7 @@ function buildBootstrapPlan(worktreePath, policy, detection, repoRoot) {
     const hasReadySharedPathsInWorktree =
       stackSharedPaths.length > 0 &&
       stackSharedPaths.every((relativePath) =>
-        existsSync(resolve(worktreePath, relativePath)),
+        isSharedPathReady(repoRoot, worktreePath, relativePath),
       );
     let willLinkSharedPathsFromRepoRoot = false;
     if (!hasReadySharedPathsInWorktree && policy?.linkSharedPaths && repoRoot) {
@@ -317,8 +318,7 @@ function buildBootstrapPlan(worktreePath, policy, detection, repoRoot) {
         stackSharedPaths.length > 0 &&
         stackSharedPaths.every((relativePath) => {
           const sourcePath = resolve(repoRoot, relativePath);
-          const targetPath = resolve(worktreePath, relativePath);
-          return existsSync(sourcePath) && !existsSync(targetPath);
+          return existsSync(sourcePath) && !isSharedPathReady(repoRoot, worktreePath, relativePath);
         });
     }
     const hasReadySharedPaths =
@@ -335,14 +335,39 @@ function buildBootstrapPlan(worktreePath, policy, detection, repoRoot) {
   };
 }
 
+function isSharedPathReady(repoRoot, worktreePath, relativePath) {
+  const targetPath = resolve(worktreePath, relativePath);
+  if (!existsSync(targetPath)) {
+    return false;
+  }
+  if (!repoRoot) {
+    return true;
+  }
+  const sourcePath = resolve(repoRoot, relativePath);
+  if (!existsSync(sourcePath)) {
+    return true;
+  }
+  try {
+    return realpathSync(sourcePath) === realpathSync(targetPath);
+  } catch {
+    return false;
+  }
+}
+
 function ensureWorktreeSharedPath(repoRoot, worktreePath, relativePath) {
   const sourcePath = resolve(repoRoot, relativePath);
   const targetPath = resolve(worktreePath, relativePath);
-  if (!existsSync(sourcePath) || existsSync(targetPath)) {
+  if (!existsSync(sourcePath)) {
+    return false;
+  }
+  if (isSharedPathReady(repoRoot, worktreePath, relativePath)) {
     return false;
   }
 
   try {
+    if (existsSync(targetPath)) {
+      rmSync(targetPath, { recursive: true, force: true });
+    }
     mkdirSync(dirname(targetPath), { recursive: true });
     let linkType = process.platform === "win32" ? "junction" : "dir";
     try {

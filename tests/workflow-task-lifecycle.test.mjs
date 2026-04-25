@@ -178,6 +178,27 @@ describe("project detection quality gates", () => {
     expect(resolveAutoCommand("auto", "qualityGate", repoRoot)).toBe("bash .githooks/pre-push");
     expect(detected.commands.qualityGate).not.toBe("npm run prepush:check");
   });
+  it("prefers the focused vitest runner for node test commands when available", () => {
+    repoRoot = mkdtempSync(join(tmpdir(), "wf-quality-gate-vitest-"));
+    mkdirSync(join(repoRoot, "tools"), { recursive: true });
+    writeFileSync(join(repoRoot, "tools", "vitest-runner.mjs"), "export {};\n");
+    writeFileSync(join(repoRoot, "package.json"), JSON.stringify({
+      name: "quality-gate-node-vitest",
+      version: "1.0.0",
+      scripts: {
+        test: "vitest run",
+      },
+      devDependencies: {
+        vitest: "^4.0.0",
+      },
+    }, null, 2));
+
+    const detected = detectProjectStack(repoRoot);
+
+    expect(detected.primary?.id).toBe("node");
+    expect(detected.commands.test).toBe("node tools/vitest-runner.mjs run");
+    expect(resolveAutoCommand("auto", "test", repoRoot)).toBe("node tools/vitest-runner.mjs run");
+  });
   it("records a single owner-mismatch audit event across duplicate renewal retries", async () => {
     vi.useFakeTimers();
     const nt = getNodeType("action.claim_task");

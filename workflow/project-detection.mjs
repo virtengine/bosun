@@ -31,8 +31,13 @@ const STACK_DEFINITIONS = [
       const pm = this.detectPackageManager(rootDir);
       const run = pm === "npm" ? "npm run" : pm === "yarn" ? "yarn" : pm === "pnpm" ? "pnpm" : "bun run";
       const scripts = readPackageJsonScripts(rootDir);
+      const deps = readPackageJsonDeps(rootDir);
+      const prefersFocusedVitestRunner =
+        deps.has("vitest") && existsSync(resolve(rootDir, "tools", "vitest-runner.mjs"));
       const cmds = {
-        test: scripts.test ? `${pm} test` : "",
+        test: prefersFocusedVitestRunner
+          ? "node tools/vitest-runner.mjs run"
+          : scripts.test ? `${pm} test` : "",
         build: scripts.build ? `${run} build` : "",
         lint: scripts.lint ? `${run} lint` : "",
         syntaxCheck: "node --check",
@@ -43,7 +48,6 @@ const STACK_DEFINITIONS = [
         cmds.syntaxCheck = `${pm === "npm" ? "npx" : pm} tsc --noEmit`;
       }
       // Detect test framework
-      const deps = readPackageJsonDeps(rootDir);
       if (deps.has("vitest")) cmds.testFramework = "vitest";
       else if (deps.has("jest")) cmds.testFramework = "jest";
       else if (deps.has("mocha")) cmds.testFramework = "mocha";
