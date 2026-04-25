@@ -185,6 +185,15 @@ function isDelegatedToolSession(context = {}) {
   return sessionType === "delegate" || sessionType.endsWith("-delegate");
 }
 
+function isDelegatedLiveSessionContext(context = {}) {
+  const sessionIds = [
+    context?.sessionId,
+    context?.parentSessionId,
+    context?.rootSessionId,
+  ].map((value) => String(value || "").trim().toLowerCase());
+  return sessionIds.some((value) => value.startsWith("delegate-live-"));
+}
+
 function normalizeDelegateSessionResult(result) {
   if (typeof result === "string") {
     return {
@@ -1116,7 +1125,7 @@ const TOOL_HANDLERS = {
     const cfg = loadConfig();
     const pool = await getAgentPool();
     const voiceLikeContext = isVoiceLikeToolContext(context);
-    if (!voiceLikeContext && isDelegatedToolSession(context)) {
+    if ((!voiceLikeContext && isDelegatedToolSession(context)) || isDelegatedLiveSessionContext(context)) {
       return "{RESPONSE}: Nested delegate_to_agent calls are blocked for delegated sessions. Continue in the current delegated session or poll the existing background session instead of spawning another live delegate.";
     }
     const managedProviderDetails = resolveManagedSessionProviderDetails(context);

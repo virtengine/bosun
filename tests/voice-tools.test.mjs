@@ -976,6 +976,23 @@ describe("voice-tools", () => {
       expect(vi.mocked(launchOrResumeThread)).not.toHaveBeenCalled();
     });
 
+    it("delegate_to_agent blocks nested delegation when a delegate-live session loses sessionType metadata", async () => {
+      vi.mocked(launchOrResumeThread).mockClear();
+
+      const result = await executeToolCall(
+        "delegate_to_agent",
+        { message: "spawn another coding session" },
+        withApprovedToolContext({
+          sessionId: "delegate-live-root",
+          parentSessionId: "workflow-parent",
+        }),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/nested delegate_to_agent calls are blocked/i);
+      expect(vi.mocked(launchOrResumeThread)).not.toHaveBeenCalled();
+    });
+
     it("cancel_subagent recursively terminalizes tracked delegate descendants", async () => {
       vi.mocked(sessionTracker.listAllSessions).mockReturnValue([
         {
