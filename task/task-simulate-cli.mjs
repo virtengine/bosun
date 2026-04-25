@@ -241,6 +241,26 @@ function readSimulationState(statePath) {
   }
 }
 
+function resolveResumeRunId(savedState, runtime = {}) {
+  const fallbackRunId = String(savedState?.runId || "").trim();
+  const taskId = String(savedState?.taskId || "").trim();
+  if (!fallbackRunId || !taskId || typeof runtime.engine?.getRunHistory !== "function") {
+    return fallbackRunId;
+  }
+  try {
+    const history = runtime.engine.getRunHistory(savedState?.workflowId || runtime.workflowId) || [];
+    const candidate = history.find((run) => {
+      const runId = String(run?.runId || "").trim();
+      const runTaskId = String(run?.taskId || run?.rootTaskId || "").trim();
+      const status = String(run?.status || "").trim().toLowerCase();
+      return runId && runId !== fallbackRunId && runTaskId === taskId && status !== "completed";
+    });
+    return String(candidate?.runId || "").trim() || fallbackRunId;
+  } catch {
+    return fallbackRunId;
+  }
+}
+
 function writeSimulationState(statePath, payload) {
   mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(statePath, JSON.stringify(payload, null, 2), "utf8");
@@ -652,7 +672,7 @@ export async function executeTaskSimulationCommand(args, options = {}) {
       resumeMode = String(taskArgs[modeIdx + 1] || "from_failed").trim() || "from_failed";
     }
     const savedState = readSimulationState(statePath);
-    resumeRunId = String(savedState?.runId || "").trim();
+    resumeRunId = resolveResumeRunId(savedState, runtime);
     if (!resumeRunId) {
       throw new Error(
         "No prior simulation run recorded for resume — run `bosun simulate task` first",

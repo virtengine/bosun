@@ -40,6 +40,7 @@ function createFakeRuntime({
   ctx,
   retryCtx = null,
   workflowId = "workflow-task-lifecycle",
+  runHistory = [],
 } = {}) {
   const workflowDefinition = {
     id: workflowId,
@@ -64,6 +65,7 @@ function createFakeRuntime({
       originalRunId: runId,
       ctx: resolvedRetryCtx,
     })),
+    getRunHistory: vi.fn(() => runHistory),
     get: vi.fn(() => workflowDefinition),
   };
   return {
@@ -453,6 +455,39 @@ describe("task simulate CLI", () => {
     );
 
     expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-mode-1", { mode: "replan_from_failed" });
+  });
+
+  it("resume prefers the latest same-task non-completed run over the stale cached run id", async () => {
+    const repoRoot = makeTempDir();
+    const task = { id: "task-newer", title: "Use latest interrupted run" };
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        runId: "run-stale-completed",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    const retryCtx = buildContext({ runId: "run-retried-latest", taskId: task.id, taskTitle: task.title });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      retryCtx,
+      ctx: retryCtx,
+      runHistory: [
+        { runId: "run-latest-running", taskId: task.id, status: "running" },
+        { runId: "run-stale-completed", taskId: task.id, status: "completed" },
+      ],
+    });
+
+    await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
+
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-latest-running", { mode: "from_failed" });
   });
 
   it("resume updates the state file with the new retry run ID", async () => {
