@@ -80,6 +80,7 @@ export async function validateImports({ rootDir, files } = {}) {
   const context = vm.createContext({});
   const moduleCache = new Map(); // absolute path → SourceTextModule | SyntheticModule
   const externalCache = new Map(); // specifier → SyntheticModule
+  const unresolvedExternals = new Set(); // specifiers that couldn't be dynamically imported
   const errors = [];
   const parseErrors = new Map(); // absolute path → Error
 
@@ -123,7 +124,10 @@ export async function validateImports({ rootDir, files } = {}) {
       exportNames = Object.keys(real);
       if (!exportNames.includes("default")) exportNames.push("default");
     } catch {
-      // Cannot import (optional dep, missing, etc.) — stub with default only.
+      // Cannot import (optional dep, missing from node_modules, etc.).
+      // Track as unresolved so we can suppress false-positive named-export
+      // errors that occur when running from a worktree without node_modules.
+      unresolvedExternals.add(specifier);
     }
 
     const synth = new vm.SyntheticModule(
@@ -221,7 +225,18 @@ export async function validateImports({ rootDir, files } = {}) {
     }
   }
 
-  return { errors, moduleCount: moduleCache.size };
+  // Suppress errors caused by unresolvable external packages (e.g. missing
+  // node_modules when running from a git worktree).  The pattern emitted by
+  // vm.SourceTextModule is: "The requested module '<spec>' does not provide
+  // an export named '<name>'".
+  const filteredErrors = errors.filter(({ error }) => {
+    for (const spec of unresolvedExternals) {
+      if (error.includes(`'${spec}'`)) return false;
+    }
+    return true;
+  });
+
+  return { errors: filteredErrors, moduleCount: moduleCache.size };
 }
 
 // ── CLI entrypoint ──────────────────────────────────────────────────────────
