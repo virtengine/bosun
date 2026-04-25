@@ -184,17 +184,17 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     // ── Execute agent (phase 1: planning) ───────────────────────────────
     agentPhase("run-agent-plan", "Agent Plan",
       "{{_taskPrompt}}\n\nExecution phase: planning. Produce a concrete implementation plan and identify required tests. Do not make code changes in this phase.",
-      { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1740 }),
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1740 }),
 
     // ── Execute agent (phase 2: tests-first) ────────────────────────────
     agentPhase("run-agent-tests", "Agent Tests",
       "{{_taskPrompt}}\n\nExecution phase: tests. Write or update tests first for the target behavior, then validate failures/pass criteria before implementation changes.",
-      { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1545 }),
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1545 }),
 
     // ── Execute agent (phase 3: implementation + verification) ──────────
     agentPhase("run-agent-implement", "Agent Implement",
       "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
-      { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1610 }),
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1610 }),
 
     node("plan-agent-ok", "condition.expression", "Plan Agent Succeeded?", {
       expression: "$ctx.getNodeOutput('run-agent-plan')?.success === true",
@@ -284,8 +284,8 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     }, { x: 160, y: 1940 }),
 
     agentPhase("auto-fix-validation", "Auto Fix Validation",
-      "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the validation issue, then stop.",
-      {}, { x: 160, y: 2060 }),
+      "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the reported validation issue below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('pre-pr-validation')?.stderr || $ctx.getNodeOutput('pre-pr-validation')?.output || $ctx.getNodeOutput('pre-pr-validation')?.error || 'Validation output unavailable.'}}",
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 160, y: 2060 }),
 
     node("retry-pre-pr-validation", "action.run_command", "Retry Pre-PR Validation", {
       command: "{{prePrValidationCommand}}",
@@ -305,8 +305,8 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     }, { x: 320, y: 2060 }),
 
     agentPhase("auto-fix-validation-2", "Auto Fix Validation 2",
-      "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining validation failures, then stop.",
-      {}, { x: 320, y: 2180 }),
+      "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining reported validation failures below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr || $ctx.getNodeOutput('retry-pre-pr-validation')?.output || $ctx.getNodeOutput('retry-pre-pr-validation')?.error || 'Validation output unavailable.'}}",
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 320, y: 2180 }),
 
     node("retry2-pre-pr-validation", "action.run_command", "Retry Pre-PR Validation 2", {
       command: "{{prePrValidationCommand}}",
@@ -382,7 +382,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     node("handoff-pr-progressor", "action.execute_workflow", "Handoff PR Progressor", {
       workflowId: "template-bosun-pr-progressor",
-      mode: "dispatch",
+      mode: "sync",
       input: {
         taskId: "{{taskId}}",
         taskTitle: "{{taskTitle}}",
@@ -472,7 +472,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     node("handoff-pr-progressor-stolen", "action.execute_workflow", "Handoff PR Progressor (Recovered)", {
       workflowId: "template-bosun-pr-progressor",
-      mode: "dispatch",
+      mode: "sync",
       input: {
         taskId: "{{taskId}}",
         taskTitle: "{{taskTitle}}",

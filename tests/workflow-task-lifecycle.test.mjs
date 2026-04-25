@@ -5489,6 +5489,7 @@ describe("template-task-lifecycle", () => {
     const t = getTemplate("template-task-lifecycle");
     const createPr = t.nodes.find((n) => n.id === "create-pr");
     const prCreated = t.nodes.find((n) => n.id === "pr-created");
+    const handoff = t.nodes.find((n) => n.id === "handoff-pr-progressor");
 
     expect(createPr?.config?.body).toBe("{{prBody}}");
     expect(createPr?.config?.enableAutoMerge).toBe("{{autoMergeOnCreate}}");
@@ -5500,6 +5501,7 @@ describe("template-task-lifecycle", () => {
     expect(prCreated?.config?.expression).not.toContain("handedOff");
     // gate requires success AND an actual PR reference
     expect(prCreated?.config?.expression).toContain("success === true");
+    expect(handoff?.config?.mode).toBe("sync");
     expect(t.edges.find((e) => e.source === "create-pr" && e.target === "pr-created")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pr-created" && e.target === "set-inreview")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pr-created" && e.target === "set-todo-push-failed")).toBeDefined();
@@ -5565,12 +5567,14 @@ describe("template-task-lifecycle", () => {
     const t = getTemplate("template-task-lifecycle");
     const retryPr = t.nodes.find((n) => n.id === "create-pr-retry");
     const prCreatedStolen = t.nodes.find((n) => n.id === "pr-created-stolen");
+    const recoveredHandoff = t.nodes.find((n) => n.id === "handoff-pr-progressor-stolen");
 
     expect(retryPr?.config?.body).toBe("{{prBody}}");
     expect(retryPr?.config?.branch).toBe("{{branch}}");
     expect(prCreatedStolen?.config?.expression).toContain("create-pr-retry");
     expect(prCreatedStolen?.config?.expression).toContain("prNumber");
     expect(prCreatedStolen?.config?.expression).toContain("prUrl");
+    expect(recoveredHandoff?.config?.mode).toBe("sync");
 
     expect(t.edges.find((e) => e.source === "claim-stolen" && e.target === "build-pr-body-stolen")).toBeDefined();
     expect(t.edges.find((e) => e.source === "build-pr-body-stolen" && e.target === "create-pr-retry")).toBeDefined();

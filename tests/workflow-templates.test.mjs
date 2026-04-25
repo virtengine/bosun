@@ -562,6 +562,17 @@ describe("workflow-templates", () => {
     expect(triggerNode?.config?.filter).toBeUndefined();
   });
 
+  it("backend agent template uses action.run_agent for implementation planning", () => {
+    const template = getTemplate("template-backend-agent");
+    expect(template).toBeDefined();
+
+    const planNode = template.nodes.find((n) => n.id === "plan-work");
+    expect(planNode?.type).toBe("action.run_agent");
+    expect(planNode?.config?.mode).toBe("plan");
+    expect(planNode?.config?.executionRole).toBe("architect");
+    expect(planNode?.config?.outputVariable).toBe("plan");
+  });
+
   it("research evidence agent template is registered with sidecar and reviewed knowledge stages", async () => {
     const module = await import("../workflow-templates/research-evidence.mjs");
     const template = module.RESEARCH_EVIDENCE_AGENT_TEMPLATE;
@@ -617,6 +628,24 @@ describe("workflow-templates", () => {
     expect(String(autoFix?.config?.prompt || "")).not.toContain("Commit with message \"fix: address validation failures\"");
   });
 
+  it("task lifecycle phase agents run locally instead of auto-delegating", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+
+    for (const nodeId of [
+      "run-agent-plan",
+      "run-agent-tests",
+      "run-agent-implement",
+      "auto-fix-validation",
+      "auto-fix-validation-2",
+    ]) {
+      const phaseNode = template.nodes.find((node) => node.id === nodeId);
+      expect(phaseNode?.type).toBe("action.run_agent");
+      expect(phaseNode?.config?.delegateTaskWorkflow).toBe(false);
+      expect(phaseNode?.config?.agentProfile).toBeUndefined();
+    }
+  });
+
   it("agent templates only advance to inreview after a real PR is linked", () => {
     const backendTemplate = getTemplate("template-backend-agent");
     expect(backendTemplate).toBeDefined();
@@ -639,7 +668,8 @@ describe("workflow-templates", () => {
       expect(runAgent?.type).toBe("action.run_agent");
       expect(runAgent?.config?.sdk).toBe("{{resolvedSdk}}");
       expect(runAgent?.config?.model).toBe("{{resolvedModel}}");
-      expect(runAgent?.config?.agentProfile).toBe("{{agentProfile}}");
+      expect(runAgent?.config?.agentProfile).toBeUndefined();
+      expect(runAgent?.config?.delegateTaskWorkflow).toBe(false);
     }
   });
 
@@ -1896,7 +1926,7 @@ describe("github template CLI compatibility", () => {
     expect(dependencyAudit.edges.find((e) => e.source === "fix-pr-created" && e.target === "log-pr-blocked")).toBeDefined();
   });
 
-  it("task lifecycle and repair templates directly dispatch the PR progressor after inreview transitions", () => {
+  it("task lifecycle waits for first-pass PR progressor completion while other templates still dispatch it", () => {
     const lifecycleTemplate = getTemplate("template-task-lifecycle");
     const finalizationTemplate = getTemplate("template-task-finalization-guard");
     const repairTemplate = getTemplate("template-task-repair-worktree");
@@ -1909,7 +1939,9 @@ describe("github template CLI compatibility", () => {
     const batchHandoff = batchPrTemplate.nodes.find((n) => n.id === "handoff-pr-progressor");
 
     expect(lifecycleHandoff?.type).toBe("action.execute_workflow");
+    expect(lifecycleHandoff?.config?.mode).toBe("sync");
     expect(lifecycleRecoveredHandoff?.config?.workflowId).toBe("template-bosun-pr-progressor");
+    expect(lifecycleRecoveredHandoff?.config?.mode).toBe("sync");
     expect(finalizationHandoff?.config?.mode).toBe("dispatch");
     expect(repairHandoff?.config?.workflowId).toBe("template-bosun-pr-progressor");
     expect(batchHandoff?.config?.workflowId).toBe("template-bosun-pr-progressor");
