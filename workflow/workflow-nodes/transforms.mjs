@@ -635,6 +635,8 @@ export {
   _noCommitCounts,
   _skipUntil,
   MAX_NO_COMMIT_ATTEMPTS,
+  NO_COMMIT_BASE_COOLDOWN_MS,
+  NO_COMMIT_MAX_COOLDOWN_MS,
 };
 
 export {

@@ -63,6 +63,18 @@ describe("monitor workflow startup guards", () => {
     );
   });
 
+  it("declares monitor-monitor runtime state before reload-time helpers use it", () => {
+    expect(monitorSource).toContain("const monitorMonitor = {");
+    expect(monitorSource).toContain("sdkFailures: new Map()");
+    expect(monitorSource).toContain("function refreshMonitorMonitorRuntime()");
+    expect(monitorSource).toContain("const previousMonitorRuntime = snapshotMonitorMonitorRuntime();");
+    expect(
+      monitorSource.indexOf("const monitorMonitor = {"),
+    ).toBeLessThan(
+      monitorSource.indexOf("function refreshMonitorMonitorRuntime()"),
+    );
+  });
+
   it("wires task-store start guards into workflow automation services", () => {
     expect(monitorSource).toContain("taskStore: {");
     expect(monitorSource).toContain("canStartTask,");
@@ -158,6 +170,20 @@ describe("monitor workflow startup guards", () => {
       monitorSource.indexOf('internalTaskExecutor.start();'),
     ).toBeLessThan(startupTaskPollHook);
     expect(monitorSource).toContain('scheduleStartupWorkflowRecovery(');
+  });
+
+  it("runs task recovery immediately after startup workflow cleanup when lifecycle is delegated", () => {
+    expect(monitorSource).toContain("async function runWorkflowOwnedTaskRecoveryPass(source)");
+    expect(monitorSource).toContain('await runWorkflowOwnedTaskRecoveryPass(');
+    expect(monitorSource).toContain('"startup-workflow-history-unstick"');
+    expect(monitorSource).toContain('"startup-stale-dispatch-task-poll-unstick"');
+    expect(monitorSource).toContain(`await engine.resumeInterruptedRuns();
+            await runWorkflowOwnedTaskRecoveryPass(
+              "startup-workflow-history-unstick",`);
+    expect(monitorSource).toContain(`throwOnError: true,
+              });
+              await runWorkflowOwnedTaskRecoveryPass(
+                "startup-stale-dispatch-task-poll-unstick",`);
   });
 
   it("kicks non-task schedule polling during workflow automation startup", () => {
@@ -454,7 +480,7 @@ describe("workflow-engine interrupted run deduplication", () => {
   });
 
   it("reads taskId from detail.data.taskId or detail.inputData.taskId", () => {
-    expect(engineSource).toContain("this._resolveRunTaskIdentity(run, d)?.taskId");
+    expect(engineSource).toContain("this._resolveRunTaskIdentity(run, detail)?.taskId");
   });
 
   it("bounds orphan interrupted-run scans so archived run details do not stall startup", () => {

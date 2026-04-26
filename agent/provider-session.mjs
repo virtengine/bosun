@@ -351,6 +351,43 @@ export function createLinkedAbortController(parentController = null) {
   return controller;
 }
 
+function createAbortError(reason = "aborted") {
+  const error = new Error(toTrimmedString(reason) || "aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+async function raceWithAbortSignal(promise, abortController = null) {
+  const signal = abortController?.signal || null;
+  if (!signal) return promise;
+  if (signal.aborted) {
+    throw createAbortError(signal.reason || "aborted");
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener("abort", handleAbort);
+    };
+    const handleResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const handleReject = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const handleAbort = () => {
+      handleReject(createAbortError(signal.reason || "aborted"));
+    };
+    signal.addEventListener("abort", handleAbort, { once: true });
+    Promise.resolve(promise).then(handleResolve, handleReject);
+  });
+}
+
 export async function runProviderSessionTurn({
   adapter,
   message,
@@ -483,21 +520,25 @@ export function createProviderSession(providerId = null, options = {}) {
         ...inputPayload,
         messages: workingMessages,
       };
+      const turnAbortController = turnOptions.abortController || options.abortController || null;
       for (let round = 0; round <= maxToolRounds; round += 1) {
-        const result = typeof runner === "function"
-          ? await runner(lastPayload, {
-            ...options,
-            ...turnOptions,
-            provider,
-            providerEntry: runtime.provider || null,
-            adapter,
-          })
-          : await adapter.exec(lastPayload, {
-            ...options,
-            ...turnOptions,
-            provider,
-            providerEntry: runtime.provider || null,
-          });
+        const result = await raceWithAbortSignal(
+          typeof runner === "function"
+            ? runner(lastPayload, {
+              ...options,
+              ...turnOptions,
+              provider,
+              providerEntry: runtime.provider || null,
+              adapter,
+            })
+            : adapter.exec(lastPayload, {
+              ...options,
+              ...turnOptions,
+              provider,
+              providerEntry: runtime.provider || null,
+            }),
+          turnAbortController,
+        );
         const normalized = normalizeProviderResult(result, {
           providerId: provider,
           model: lastPayload.model,

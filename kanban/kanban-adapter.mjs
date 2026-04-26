@@ -894,6 +894,12 @@ class InternalAdapter {
       resolveTaskField(task, "parentTaskId"),
     );
     const dueDate = normalizeTaskStringField(resolveTaskField(task, "dueDate"));
+    const consecutiveNoCommits = Number(
+      normalizeTaskNumericField(resolveTaskField(task, "consecutiveNoCommits")) || 0,
+    );
+    const cooldownUntil = normalizeTaskStringField(
+      resolveTaskField(task, "cooldownUntil"),
+    );
     const existingAttachments = []
       .concat(Array.isArray(task.attachments) ? task.attachments : [])
       .concat(Array.isArray(task.meta?.attachments) ? task.meta.attachments : []);
@@ -936,6 +942,8 @@ class InternalAdapter {
       createdAt: task.createdAt || null,
       updatedAt: task.updatedAt || null,
       lastActivityAt: task.lastActivityAt || task.updatedAt || null,
+      consecutiveNoCommits,
+      cooldownUntil,
       timeline: Array.isArray(task.timeline) ? task.timeline : [],
       workflowRuns: Array.isArray(task.workflowRuns) ? task.workflowRuns : [],
       statusHistory: Array.isArray(task.statusHistory) ? task.statusHistory : [],
@@ -949,6 +957,8 @@ class InternalAdapter {
         statusHistory: Array.isArray(task.statusHistory) ? task.statusHistory : (Array.isArray(task.meta?.statusHistory) ? task.meta.statusHistory : []),
         comments: normalizedComments,
         attachments: mergedAttachments,
+        consecutiveNoCommits,
+        cooldownUntil,
         prLinkage,
         prLinkageSource: primaryPrLinkage?.source || task.meta?.prLinkageSource || null,
         prLinkageFreshness: primaryPrLinkage?.freshness || task.meta?.prLinkageFreshness || null,
@@ -1062,6 +1072,11 @@ class InternalAdapter {
     if (hasOwnField(patch, "workflowRuns")) updates.workflowRuns = patch.workflowRuns;
     if (hasOwnField(patch, "workflowHistory")) updates.workflowHistory = patch.workflowHistory;
     if (hasOwnField(patch, "workflows")) updates.workflows = patch.workflows;
+      if (hasOwnField(patch, "consecutiveNoCommits")) {
+        updates.consecutiveNoCommits = Number(
+          normalizeTaskNumericField(patch.consecutiveNoCommits) || 0,
+        );
+      }
     if (hasOwnField(patch, "cooldownUntil")) {
       updates.cooldownUntil = normalizeTaskStringField(patch.cooldownUntil);
     }

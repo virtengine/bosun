@@ -361,6 +361,7 @@
     "lib/safe-box.mjs",
     "lib/session-insights.mjs",
     "lib/state-ledger-sqlite.mjs",
+    "lib/workflow-flowchart-utils.mjs",
     "lib/vault-keychain.mjs",
     "lib/vault.mjs",
     "monitor-tail-sanitizer.mjs",

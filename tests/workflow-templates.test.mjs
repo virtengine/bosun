@@ -643,6 +643,16 @@ describe("workflow-templates", () => {
     }
   });
 
+  it("task lifecycle treats commit-blocked implement sessions as recoverable", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+    const implementGate = template.nodes.find((n) => n.id === "implement-agent-ok");
+    expect(implementGate?.type).toBe("condition.expression");
+    expect(implementGate?.config?.expression).toContain("run-agent-implement");
+    expect(implementGate?.config?.expression).toContain("success === true");
+    expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
+  });
+
   it("continuation loop template exposes configurable turn/stuck controls", () => {
     const template = getTemplate("template-continuation-loop");
     expect(template).toBeDefined();
@@ -1390,6 +1400,33 @@ describe("workflow setup profiles", () => {
       meta: {
         planner: { impact: 7 },
       },
+    })).toBe(true);
+  });
+
+  it("skips todo tasks whose persisted cooldownUntil is still active", () => {
+    const baseTask = {
+      id: "task-cooling-batch",
+      title: "Cooling batch candidate",
+      status: "todo",
+      draft: false,
+      description: "Dispatchable task metadata is present.",
+      branchName: "task/task-cooling-batch",
+      baseBranch: "origin/main",
+      repository: "virtengine/bosun",
+      workspace: "virtengine-gh",
+      meta: {
+        planner: { impact: 5 },
+      },
+    };
+
+    expect(isTaskBatchDispatchEligible({
+      ...baseTask,
+      cooldownUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      ...baseTask,
+      cooldownUntil: new Date(Date.now() - 10 * 60_000).toISOString(),
     })).toBe(true);
   });
 

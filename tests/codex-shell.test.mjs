@@ -34,6 +34,17 @@ vi.mock("../shell/codex-sdk-import.mjs", () => ({
       return mockStartThread(...args);
     }
   },
+  loadBareCodexSdkModule: vi.fn(async () => ({
+    Codex: class MockCodex {
+      constructor(options) {
+        mockCodexCtor(options);
+      }
+
+      startThread(...args) {
+        return mockStartThread(...args);
+      }
+    },
+  })),
 }));
 
 vi.mock("../agent/agent-sdk.mjs", () => ({

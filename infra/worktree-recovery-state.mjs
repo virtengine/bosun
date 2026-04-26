@@ -52,15 +52,25 @@ function normalizeDetectedIssues(input) {
   return issues;
 }
 
+// Drop values that are obviously unresolved Mustache/template placeholders
+// (e.g. "{{$ctx.data?.recoveryContext?.branch || ''}}") so they never leak
+// into persisted state or the UI as identifying labels.
+function sanitizeIdentifier(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (text.includes("{{") || text.includes("}}")) return null;
+  return text;
+}
+
 function normalizeRecoveryEvent(event = {}) {
   const outcome = String(event?.outcome || "").trim().toLowerCase();
   return {
     outcome: VALID_OUTCOMES.has(outcome) ? outcome : "healthy_noop",
-    reason: String(event?.reason || "").trim() || null,
-    branch: String(event?.branch || "").trim() || null,
-    taskId: String(event?.taskId || "").trim() || null,
-    worktreePath: String(event?.worktreePath || "").trim() || null,
-    phase: String(event?.phase || "").trim() || null,
+    reason: sanitizeIdentifier(event?.reason),
+    branch: sanitizeIdentifier(event?.branch),
+    taskId: sanitizeIdentifier(event?.taskId),
+    worktreePath: sanitizeIdentifier(event?.worktreePath),
+    phase: sanitizeIdentifier(event?.phase),
     error: String(event?.error || "").trim() || null,
     detectedIssues: normalizeDetectedIssues(event?.detectedIssues),
     timestamp: toIsoTimestamp(event?.timestamp),

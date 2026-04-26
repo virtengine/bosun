@@ -559,10 +559,10 @@ describe("shared-knowledge", () => {
   });
 
   describe("appendKnowledgeEntry", () => {
-    let appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge;
+    let appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge, readKnowledgeEntries;
 
     beforeEach(async () => {
-      ({ appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge } =
+      ({ appendKnowledgeEntry, buildKnowledgeEntry, initSharedKnowledge, readKnowledgeEntries } =
         await import("../workspace/shared-knowledge.mjs"));
     });
 
@@ -646,6 +646,230 @@ describe("shared-knowledge", () => {
       const result = await appendKnowledgeEntry(entry);
       expect(result.success).toBe(false);
     });
+
+    it("allows concurrent writes from different agents and scopes", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Workspace memory: agent alpha can persist migration learnings independently.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        agentId: "agent-alpha",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Workspace memory: agent beta can persist fixture learnings without alpha blocking it.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-2",
+        agentId: "agent-beta",
+      });
+
+      const [firstResult, secondResult] = await Promise.all([
+        appendKnowledgeEntry(first),
+        appendKnowledgeEntry(second),
+      ]);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+
+      const { listKnowledgeEntriesFromStateLedger } = await import("../lib/state-ledger-sqlite.mjs");
+      const stateEntries = listKnowledgeEntriesFromStateLedger({
+        repoRoot: tempRoot,
+        scopeLevel: "workspace",
+        teamId: "team-a",
+      });
+      expect(stateEntries.map((entry) => entry.agentId)).toEqual(
+        expect.arrayContaining(["agent-alpha", "agent-beta"]),
+      );
+
+      const entries = await readKnowledgeEntries();
+      expect(entries.map((entry) => entry.agentId)).toContain("agent-beta");
+    });
+
+    it("allows concurrent writes in the same scope when agents differ", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Session memory: delta can persist recovery learnings in the shared session scope.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-shared",
+        agentId: "agent-delta",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Session memory: epsilon can also persist shared-session learnings without delta blocking it.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-shared",
+        agentId: "agent-epsilon",
+      });
+
+      const [firstResult, secondResult] = await Promise.all([
+        appendKnowledgeEntry(first),
+        appendKnowledgeEntry(second),
+      ]);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+    });
+
+    it("rate limits burst writes from the same agent or scope", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Workspace memory: first write from gamma succeeds before burst protection kicks in.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        agentId: "agent-gamma",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Workspace memory: second gamma write should be throttled for duplicate burst protection.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        agentId: "agent-gamma",
+      });
+
+      const firstResult = await appendKnowledgeEntry(first);
+      const secondResult = await appendKnowledgeEntry(second);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(false);
+      expect(String(secondResult.reason || "")).toContain("rate limited");
+    });
+
+    it("allows concurrent writes from different agents when their throttle keys differ", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Session memory: first write for the shared scope should succeed for delta.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-shared",
+        agentId: "agent-delta",
+      });
+      const second = buildKnowledgeEntry({
+        content: "Session memory: second write in the same session scope should still persist for epsilon when agent throttles are independent.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-shared",
+        agentId: "agent-epsilon",
+      });
+
+      const [firstResult, secondResult] = await Promise.all([
+        appendKnowledgeEntry(first),
+        appendKnowledgeEntry(second),
+      ]);
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+    });
+
+    it("keeps same-agent burst writes throttled even when other agents write concurrently", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const agentThetaFirst = buildKnowledgeEntry({
+        content: "Session memory: theta first write should persist before duplicate burst suppression activates.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-theta",
+        agentId: "agent-theta",
+      });
+      const agentThetaSecond = buildKnowledgeEntry({
+        content: "Session memory: theta second write should be throttled because it reuses the same agent and scope immediately.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-theta",
+        agentId: "agent-theta",
+      });
+      const agentIota = buildKnowledgeEntry({
+        content: "Session memory: iota concurrent write should still persist because only theta's throttle bucket is hot.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        teamId: "team-a",
+        workspaceId: "workspace-1",
+        sessionId: "session-theta",
+        agentId: "agent-iota",
+      });
+
+      const firstThetaResult = await appendKnowledgeEntry(agentThetaFirst);
+      const [secondThetaResult, iotaResult] = await Promise.all([
+        appendKnowledgeEntry(agentThetaSecond),
+        appendKnowledgeEntry(agentIota),
+      ]);
+
+      expect(firstThetaResult.success).toBe(true);
+      expect(secondThetaResult.success).toBe(false);
+      expect(String(secondThetaResult.reason || "")).toContain("rate limited");
+      expect(iotaResult.success).toBe(true);
+    });
+
+    it("rate limits the same agent within the same scope but not across scopes", async () => {
+      initSharedKnowledge({ repoRoot: tempRoot, targetFile: "TEST.md" });
+
+      const first = buildKnowledgeEntry({
+        content: "Run memory: first zeta write in workspace scope should persist successfully.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        workspaceId: "workspace-zeta",
+        agentId: "agent-zeta",
+      });
+      const throttled = buildKnowledgeEntry({
+        content: "Run memory: second zeta write in the same workspace scope should be throttled immediately.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "workspace",
+        workspaceId: "workspace-zeta",
+        agentId: "agent-zeta",
+      });
+      const differentScope = buildKnowledgeEntry({
+        content: "Run memory: zeta should still persist to a different session scope without workspace throttling blocking it.",
+        scope: "testing",
+        category: "pattern",
+        scopeLevel: "session",
+        sessionId: "session-zeta",
+        agentId: "agent-zeta",
+      });
+
+      const firstResult = await appendKnowledgeEntry(first);
+      const throttledResult = await appendKnowledgeEntry(throttled);
+      const differentScopeResult = await appendKnowledgeEntry(differentScope);
+
+      expect(firstResult.success).toBe(true);
+      expect(throttledResult.success).toBe(false);
+      expect(String(throttledResult.reason || "")).toContain("rate limited");
+      expect(differentScopeResult.success).toBe(true);
+    });
   });
 
   describe("readKnowledgeEntries", () => {
@@ -709,6 +933,7 @@ Always use deterministic TF ops.
       const state = getKnowledgeState();
       expect(state).toHaveProperty("entriesWritten");
       expect(state).toHaveProperty("targetFile");
+      expect(state).toHaveProperty("throttleKeys");
     });
 
     it("formats a summary string", () => {

@@ -48,6 +48,57 @@ import {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_TOOL_ROUNDS = 16;
+
+// ── Tier-1 helpers (BOSUN_NATIVE_HARNESS_GAP_PLAN §D.2 / §D.3 / §D.6) ───────
+
+/**
+ * Auto-detect prompt caching from the model name when the caller did not
+ * pass an explicit `promptCaching` flag. Anthropic and Anthropic-routed
+ * OpenAI-compatible endpoints benefit from `cache_control` injection;
+ * vanilla OpenAI ignores the field, so it is safe to enable for clearly
+ * Anthropic-flavoured routes only.
+ */
+export function shouldEnablePromptCaching(providerConfig, execOptions) {
+  const pc = providerConfig ?? {};
+  const explicit = pc.promptCaching ?? execOptions?.promptCaching;
+  if (explicit != null) return Boolean(explicit);
+  const model = String(pc.model || execOptions?.model || "").toLowerCase();
+  const provider = String(pc.provider || execOptions?.provider || "").toLowerCase();
+  if (provider === "anthropic" || provider === "claude") return true;
+  if (model.startsWith("claude-")) return true;
+  if (model.startsWith("anthropic/")) return true;
+  if (model.includes("/claude-")) return true; // openrouter/claude-3-opus etc.
+  return false;
+}
+
+/**
+ * Budget enforcement (§D.3). Thrown by exec() when a hard cost cap is set
+ * via execOptions.maxCostUsd or providerConfig.maxCostUsd and the running
+ * total surpasses it. Distinct class so callers can catch it specifically.
+ */
+export class BudgetExceededError extends Error {
+  constructor(message, { sessionId, costUsd, limitUsd } = {}) {
+    super(message);
+    this.name = "BudgetExceededError";
+    this.code = "BUDGET_EXCEEDED";
+    this.sessionId = sessionId ?? null;
+    this.costUsd = Number(costUsd) || 0;
+    this.limitUsd = Number(limitUsd) || 0;
+  }
+}
+
+/**
+ * Compute cache hit ratio as a percentage (§D.6). Defensive on missing
+ * fields and zero input — returns 0 rather than NaN/Infinity.
+ */
+export function computeCacheHitPct(usage) {
+  const inputTokens = Number(usage?.inputTokens) || 0;
+  const cacheInputTokens = Number(usage?.cacheInputTokens) || 0;
+  if (inputTokens <= 0) return 0;
+  const ratio = (cacheInputTokens / inputTokens) * 100;
+  if (!Number.isFinite(ratio)) return 0;
+  return Math.max(0, Math.min(100, Math.round(ratio * 10) / 10));
+}
 const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;  // 10 min stream idle
 const RESPONSES_API_VERSION_DEFAULT = "2025-03-01-preview";
 const OPENAI_BASE_URL = "https://api.openai.com";
@@ -282,10 +333,12 @@ function historyEntryToResponsesInput(entry) {
     return { type: "message", role: "assistant", content };
   }
   if (entry.type === "function_call") {
+    const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    if (!name || !entry.callId) return null;
     return {
       type: "function_call",
       call_id: entry.callId,
-      name: entry.name,
+      name,
       arguments: typeof entry.arguments === "string"
         ? entry.arguments
         : JSON.stringify(entry.arguments ?? {}),
@@ -412,7 +465,24 @@ function buildResponsesRequest(history, tools, execOptions, previousResponseId =
     pc.reasoningEffort || execOptions?.reasoningEffort || "",
   );
 
-  const input = history.map(historyEntryToResponsesInput).filter(Boolean);
+  // Drop any function_call entries with empty/missing names, plus their
+  // associated function_call_output entries — Azure rejects empty `name`.
+  const validCallIds = new Set();
+  for (const entry of history) {
+    if (entry?.type === "function_call" && entry.callId && typeof entry.name === "string" && entry.name.trim().length > 0) {
+      validCallIds.add(entry.callId);
+    }
+  }
+  const filteredHistory = history.filter((entry) => {
+    if (entry?.type === "function_call") {
+      return entry.callId && typeof entry.name === "string" && entry.name.trim().length > 0;
+    }
+    if (entry?.type === "function_call_output") {
+      return entry.callId && validCallIds.has(entry.callId);
+    }
+    return true;
+  });
+  const input = filteredHistory.map(historyEntryToResponsesInput).filter(Boolean);
   const normalizedTools = Array.isArray(tools)
     ? tools.map(toBosunToolToResponses).filter(Boolean)
     : [];
@@ -469,9 +539,10 @@ function buildChatRequest(history, tools, execOptions) {
   const reasoningEffort = toTrimmedString(
     pc.reasoningEffort || execOptions?.reasoningEffort || "",
   );
-  // Enable Anthropic-style cache_control injection when the caller signals it.
+  // Enable Anthropic-style cache_control injection when the caller signals it
+  // OR when the model name matches a known Anthropic route (auto-detect).
   // Safe to leave off for standard OpenAI — unknown fields are ignored by the API.
-  const promptCaching = Boolean(pc.promptCaching || execOptions?.promptCaching);
+  const promptCaching = shouldEnablePromptCaching(pc, execOptions);
 
   let messages = history.map(historyEntryToChatMessage).filter(Boolean);
 
@@ -631,7 +702,11 @@ async function streamResponsesTurn(url, headers, body, execOptions) {
       }
 
       if (eventType.includes("output_text.delta")) {
-        const delta = toTrimmedString(parsed.delta || parsed.text || "");
+        // IMPORTANT: do NOT trim here. The Responses API streams tokens with
+        // leading/trailing whitespace (e.g. " word", "word "); trimming each
+        // delta would concatenate words with no spaces between them.
+        const rawDelta = parsed.delta ?? parsed.text ?? "";
+        const delta = typeof rawDelta === "string" ? rawDelta : String(rawDelta);
         if (delta) {
           text += delta;
           // Route through smoother when available; otherwise emit directly.
@@ -646,7 +721,10 @@ async function streamResponsesTurn(url, headers, body, execOptions) {
 
       if (eventType.includes("function_call_arguments.delta")) {
         const callId = toTrimmedString(parsed.call_id || parsed.item_id || "");
-        const delta = toTrimmedString(parsed.delta || "");
+        // Function-call argument JSON must also preserve whitespace within
+        // string literals; trimming corrupts the resulting JSON parse.
+        const rawArgsDelta = parsed.delta ?? "";
+        const delta = typeof rawArgsDelta === "string" ? rawArgsDelta : String(rawArgsDelta);
         if (callId && delta) {
           const existing = toolCalls.get(callId) || { name: "", argumentsRaw: "" };
           existing.argumentsRaw += delta;
@@ -655,7 +733,7 @@ async function streamResponsesTurn(url, headers, body, execOptions) {
         continue;
       }
 
-      if (eventType.includes("output_item.done")) {
+      if (eventType.includes("output_item.added") || eventType.includes("output_item.done")) {
         const item = parsed.item || parsed;
         if (item?.type === "function_call") {
           const callId = toTrimmedString(item.call_id || item.id || "");
@@ -700,7 +778,9 @@ async function streamResponsesTurn(url, headers, body, execOptions) {
     clearTimeout(idleTimer);
   }
 
-  const resolvedToolCalls = [...toolCalls.entries()].map(([callId, tc]) => ({
+  const resolvedToolCalls = [...toolCalls.entries()]
+    .filter(([, tc]) => tc.name && tc.name.length > 0)
+    .map(([callId, tc]) => ({
     callId,
     name: tc.name,
     arguments: (() => {
@@ -1124,6 +1204,116 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
       };
     }
 
+    // ── /undo, /clear, /status slash commands (§D.5) ─────────────────────────
+    // Lightweight session-management commands that never make an API call.
+    if (trimmedMsg === "/undo") {
+      _busySet.delete(effectiveSessionId);
+      const removed = [];
+      // Remove trailing function_call_output / function_call pairs first, then
+      // the most recent assistant_message + user_message pair.
+      while (session.messages.length > 0) {
+        const tail = session.messages.at(-1);
+        if (!tail) break;
+        if (tail.type === "function_call_output" || tail.type === "function_call") {
+          removed.push(session.messages.pop());
+          continue;
+        }
+        if (tail.type === "assistant_message") {
+          removed.push(session.messages.pop());
+          // Now drop the matching user_message that prompted it, if present.
+          const next = session.messages.at(-1);
+          if (next?.type === "user_message") removed.push(session.messages.pop());
+          break;
+        }
+        if (tail.type === "user_message") {
+          removed.push(session.messages.pop());
+          break;
+        }
+        break;
+      }
+      session.lastResponseId = null; // can't reuse server-side thread after undo
+      onEvent?.({
+        type: "session.undo",
+        sessionId: effectiveSessionId,
+        removedCount: removed.length,
+        newMessageCount: session.messages.length,
+      });
+      return {
+        ok: true,
+        success: true,
+        finalResponse: `Undid last turn (removed ${removed.length} entries; ` +
+          `${session.messages.length} remain).`,
+        text: "",
+        items: session.messages,
+        usage: null,
+        sessionId: effectiveSessionId,
+        undone: true,
+        removedCount: removed.length,
+      };
+    }
+
+    if (trimmedMsg === "/clear") {
+      _busySet.delete(effectiveSessionId);
+      const removedCount = session.messages.length;
+      session.messages = [];
+      session.lastResponseId = null;
+      session.compactionCount = 0;
+      onEvent?.({
+        type: "session.cleared",
+        sessionId: effectiveSessionId,
+        removedCount,
+      });
+      return {
+        ok: true,
+        success: true,
+        finalResponse: `Cleared session history (${removedCount} entries removed). ` +
+          `System prompt and model preserved.`,
+        text: "",
+        items: [],
+        usage: null,
+        sessionId: effectiveSessionId,
+        cleared: true,
+        removedCount,
+      };
+    }
+
+    if (trimmedMsg === "/status") {
+      _busySet.delete(effectiveSessionId);
+      const tokenBudget = _compactor.getTokenBudget(effectiveSessionId);
+      const status = {
+        sessionId: effectiveSessionId,
+        model: session.model || model,
+        apiStyle,
+        messageCount: session.messages.length,
+        compactionCount: session.compactionCount ?? 0,
+        estimatedTokens: estimateTokenCount(session.messages),
+        tokenBudget,
+        lastResponseId: session.lastResponseId ?? null,
+      };
+      onEvent?.({ type: "session.status", ...status });
+      const lines = [
+        `Session ${status.sessionId}`,
+        `Model: ${status.model} (${status.apiStyle})`,
+        `Messages: ${status.messageCount} (≈${status.estimatedTokens} tokens)`,
+        `Compactions so far: ${status.compactionCount}`,
+        tokenBudget?.contextWindow
+          ? `Context window: ${tokenBudget.usedPct ?? 0}% used (${tokenBudget.usedTokens ?? 0}/${tokenBudget.contextWindow})`
+          : null,
+        status.lastResponseId ? `Last response id: ${status.lastResponseId}` : null,
+      ].filter(Boolean);
+      return {
+        ok: true,
+        success: true,
+        finalResponse: lines.join("\n"),
+        text: lines.join("\n"),
+        items: session.messages,
+        usage: null,
+        sessionId: effectiveSessionId,
+        status,
+        tokenBudget,
+      };
+    }
+
     // Append user turn
     session.messages.push({ type: "user_message", text: String(userMessage || "") });
 
@@ -1157,6 +1347,11 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
     let roundCount = 0;
     // Active execOptions may be mutated per-step by prepareStep
     let activeOpts = execOptions;
+    // Hard cost budget cap (§D.3). When exceeded we emit
+    // session.budget.exceeded and throw BudgetExceededError before the next round.
+    const maxCostUsd = Number(
+      execOptions?.maxCostUsd ?? pc?.maxCostUsd ?? 0,
+    ) || 0;
 
     try {
       while (roundCount < MAX_TOOL_ROUNDS) {
@@ -1258,8 +1453,43 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
             aggregatedUsage.outputTokens = (aggregatedUsage.outputTokens || 0) + (turnResult.usage.outputTokens || 0);
             aggregatedUsage.totalTokens  = (aggregatedUsage.totalTokens  || 0) + (turnResult.usage.totalTokens  || 0);
             aggregatedUsage.cacheInputTokens = (aggregatedUsage.cacheInputTokens || 0) + (turnResult.usage.cacheInputTokens || 0);
+            // Anthropic bills cache_creation_input_tokens separately from
+            // cached reads; track it on its own field when the provider
+            // surfaces it (§D.6 / §B.2).
+            aggregatedUsage.cacheCreationInputTokens =
+              (aggregatedUsage.cacheCreationInputTokens || 0) +
+              (turnResult.usage.cacheCreationInputTokens || 0);
             aggregatedUsage.costUsd      = (aggregatedUsage.costUsd      || 0) + (turnResult.usage.costUsd      || 0);
           }
+        }
+
+        // ── Hard cost budget enforcement (§D.3) ───────────────────────────────
+        // Surface a session.budget.update event every round so dashboards can
+        // render a live cost meter; throw BudgetExceededError when the cap is
+        // crossed so callers can catch and surface a clean abort to the user.
+        const cumulativeCostUsd = Number(aggregatedUsage?.costUsd) || 0;
+        const cacheHitPctRound = computeCacheHitPct(aggregatedUsage);
+        onEvent?.({
+          type: "session.budget.update",
+          sessionId: effectiveSessionId,
+          stepNumber: roundCount,
+          cumulativeCostUsd,
+          maxCostUsd,
+          cacheHitPct: cacheHitPctRound,
+          usage: aggregatedUsage ? { ...aggregatedUsage } : null,
+        });
+        if (maxCostUsd > 0 && cumulativeCostUsd > maxCostUsd) {
+          onEvent?.({
+            type: "session.budget.exceeded",
+            sessionId: effectiveSessionId,
+            stepNumber: roundCount,
+            cumulativeCostUsd,
+            limitUsd: maxCostUsd,
+          });
+          throw new BudgetExceededError(
+            `Session cost $${cumulativeCostUsd.toFixed(4)} exceeded limit $${maxCostUsd.toFixed(4)}`,
+            { sessionId: effectiveSessionId, costUsd: cumulativeCostUsd, limitUsd: maxCostUsd },
+          );
         }
 
         // Append assistant turn to history (before tool results)
@@ -1349,6 +1579,28 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
             });
           }
         }
+
+        // ── session.step.finish (§D.4) ───────────────────────────────────────
+        // Mirrors the AI SDK onStepFinish callback: one event per completed
+        // tool-call round bundling the LLM response, tool results, and usage.
+        onEvent?.({
+          type: "session.step.finish",
+          sessionId: effectiveSessionId,
+          stepNumber: roundCount,
+          text: finalText,
+          toolCalls: turnResult.toolCalls.map((tc) => ({
+            callId: tc.callId,
+            name: tc.name,
+            arguments: tc.arguments,
+          })),
+          toolResults: toolResults.map((tr) => ({
+            callId: tr.callId,
+            output: tr.output,
+          })),
+          stopReason: turnResult.stopReason || "",
+          usage: turnResult.usage ?? null,
+          isContinued: roundCount < MAX_TOOL_ROUNDS,
+        });
       }
 
       if (roundCount >= MAX_TOOL_ROUNDS) {
@@ -1362,7 +1614,16 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
       }
 
       const tokenBudget = _compactor.getTokenBudget(effectiveSessionId);
-      onEvent?.({ type: "session.turn.complete", sessionId: effectiveSessionId, text: finalText, usage: aggregatedUsage, tokenBudget });
+      const cacheHitPctFinal = computeCacheHitPct(aggregatedUsage);
+      onEvent?.({
+        type: "session.turn.complete",
+        sessionId: effectiveSessionId,
+        text: finalText,
+        usage: aggregatedUsage,
+        tokenBudget,
+        cacheHitPct: cacheHitPctFinal,
+        cumulativeCostUsd: Number(aggregatedUsage?.costUsd) || 0,
+      });
 
       return {
         ok: true,

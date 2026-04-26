@@ -795,6 +795,30 @@ export async function initPrimaryAgent(nameOrConfig = null) {
   }
 
   initialized = true;
+  try {
+    const cfg = loadConfig() || {};
+    const harness = cfg.harness || {};
+    const executors = Array.isArray(harness.executors) ? harness.executors : [];
+    const enabledExecutors = executors.filter((e) => e?.enabled !== false);
+    const primaryExecutor = harness.primaryExecutor || "<unset>";
+    const defaultProvider = cfg.providers?.defaultProvider || "<unset>";
+    const adapterName = getPrimaryAgentName();
+    const runtime = String(cfg.agentRuntime || "harness").toLowerCase();
+    const nativeRouting = runtime === "harness" ? "openai-native-adapter" : "sdk-cli";
+    console.log(
+      `[harness] active: agentRuntime=${runtime} ` +
+      `harness.enabled=${harness.enabled !== false} ` +
+      `primaryExecutor=${primaryExecutor} ` +
+      `defaultProvider=${defaultProvider} ` +
+      `executors=${enabledExecutors.length}/${executors.length} ` +
+      `primaryAdapter=${adapterName} ` +
+      `routing=${nativeRouting}` +
+      (primaryFallbackReason ? ` fallback="${primaryFallbackReason}"` : "")
+    );
+  } catch (err) {
+    // Banner is best-effort; never block agent init on logging failure
+    console.warn(`[harness] startup banner failed: ${err?.message || err}`);
+  }
   return getPrimaryAgentName();
 }
 

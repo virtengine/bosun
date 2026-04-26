@@ -1,3 +1,4 @@
+import { access, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -16,6 +17,8 @@ const serverPath = resolve(
   "scripts",
   "windows-desktop-mcp-server.mjs",
 );
+const pluginRoot = resolve(repoRoot, "plugins", "windows-desktop-control");
+const mcpConfigPath = resolve(pluginRoot, ".mcp.json");
 
 function createFrameReader(stream) {
   let buffer = "";
@@ -130,6 +133,19 @@ describe("windows desktop MCP server", () => {
       "uia_inspect",
       "uia_invoke",
     ]));
+  });
+
+  it("pins the MCP server cwd to the plugin root so the relative script path resolves", async () => {
+    const config = JSON.parse(await readFile(mcpConfigPath, "utf8"));
+    const serverConfig = config?.mcpServers?.windows_desktop_control;
+
+    expect(serverConfig?.command).toBe("node");
+    expect(serverConfig?.cwd).toBe(".");
+    expect(serverConfig?.args).toEqual(["./scripts/windows-desktop-mcp-server.mjs"]);
+
+    const launchCwd = resolve(pluginRoot, serverConfig.cwd);
+    const entryPath = resolve(launchCwd, serverConfig.args[0]);
+    await expect(access(entryPath)).resolves.toBeUndefined();
   });
 
   it("builds a display inventory query for list_displays", async () => {

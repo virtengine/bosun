@@ -205,7 +205,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     }, { x: 380, y: 1545, outputs: ["yes", "no"] }),
 
     node("implement-agent-ok", "condition.expression", "Implement Agent Succeeded?", {
-      expression: "$ctx.getNodeOutput('run-agent-implement')?.success === true",
+      expression:
+        "$ctx.getNodeOutput('run-agent-implement')?.success === true"
+        + " || $ctx.getNodeOutput('run-agent-implement')?.implementationState === 'implementation_done_commit_blocked'",
     }, { x: 380, y: 1610, outputs: ["yes", "no"] }),
 
     node("set-blocked-agent-plan-failed", "action.update_task_status", "Set Blocked (Plan Fail)", {
@@ -250,6 +252,10 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     node("has-commits", "condition.expression", "Has Commits?", {
       expression: "$ctx.getNodeOutput('detect-commits')?.hasCommits === true",
     }, { x: 120, y: 1870, outputs: ["yes", "no"] }),
+
+    node("no-commit-retries-exhausted", "condition.expression", "No-Commit Retries Exhausted?", {
+      expression: "$ctx.getNodeOutput('detect-commits')?.retryExhausted === true",
+    }, { x: 350, y: 1870, outputs: ["yes", "no"] }),
 
     // ── SUCCESS PATH: Local quality gate before push/PR ──────────────────
     node("pre-pr-validation", "action.run_command", "Pre-PR Validation", {
@@ -400,6 +406,18 @@ export const TASK_LIFECYCLE_TEMPLATE = {
       level: "warn",
     }, { x: 350, y: 2000 }),
 
+    node("log-no-commits-exhausted", "notify.log", "Log No Commits Exhausted", {
+      message: "Task \"{{taskTitle}}\" ({{taskId}}) — repeated no-commit runs exhausted retries, blocking task",
+      level: "warn",
+    }, { x: 520, y: 2000 }),
+
+    node("set-blocked-no-commits", "action.update_task_status", "Set Blocked (No Commits)", {
+      taskId: "{{taskId}}",
+      status: "blocked",
+      taskTitle: "{{taskTitle}}",
+      blockedReason: "{{$ctx.getNodeOutput('detect-commits')?.blockedReason || 'repeated_no_commit_runs'}}",
+    }, { x: 520, y: 2130 }),
+
     // ── NO COMMITS PATH: Set status → todo (cooldown) ────────────────────
     node("set-todo-cooldown", "action.update_task_status", "Set Todo (Cooldown)", {
       taskId: "{{taskId}}",
@@ -485,7 +503,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     node("join-outcomes", "flow.join", "Join Outcome Paths", {
       mode: "all",
-      sourceNodeIds: ["log-success", "set-todo-push-failed", "set-blocked-push-failed", "set-todo-cooldown", "notify-validation-blocked", "set-todo-stolen", "log-claim-stolen-recovered"],
+      sourceNodeIds: ["log-success", "set-todo-push-failed", "set-blocked-push-failed", "set-todo-cooldown", "set-blocked-no-commits", "notify-validation-blocked", "set-todo-stolen", "log-claim-stolen-recovered"],
       includeSkipped: true,
     }, { x: 200, y: 2560 }),
 
@@ -677,7 +695,11 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     edge("set-todo-push-failed", "join-outcomes"),
 
     // No-commits path
-    edge("has-commits", "log-no-commits", { condition: "$output?.result !== true", port: "no" }),
+    edge("has-commits", "no-commit-retries-exhausted", { condition: "$output?.result !== true", port: "no" }),
+    edge("no-commit-retries-exhausted", "log-no-commits-exhausted", { condition: "$output?.result === true", port: "yes" }),
+    edge("log-no-commits-exhausted", "set-blocked-no-commits"),
+    edge("set-blocked-no-commits", "join-outcomes"),
+    edge("no-commit-retries-exhausted", "log-no-commits", { condition: "$output?.result !== true", port: "no" }),
     edge("log-no-commits", "set-todo-cooldown"),
     edge("set-todo-cooldown", "join-outcomes"),
 

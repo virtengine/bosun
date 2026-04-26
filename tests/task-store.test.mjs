@@ -202,6 +202,79 @@ describe("task-store corruption recovery", () => {
       }
     }
   });
+
+  it("treats an all-NUL store file as corruption (Windows unflushed-write artifact)", async () => {
+    const dir = makeTempDir("task-store-nul-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+    // Simulate the post-crash NUL-fill: file size > 0, all bytes are 0x00.
+    writeFileSync(storePath, Buffer.alloc(2048, 0));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    // Original NUL bytes should be quarantined to a dedicated *.bak.corrupt-* path.
+    const warnMessages = warnSpy.mock.calls.map((c) => String(c[1] ?? c[0]));
+    expect(
+      warnMessages.some((m) => m.includes(".bak.corrupt-")),
+      "Expected a quarantine warning naming .bak.corrupt-* path",
+    ).toBe(true);
+    expect(
+      warnMessages.some((m) => /NUL|zero-fill/i.test(m)),
+      "Expected diagnostic mentioning NUL / zero-fill corruption",
+    ).toBe(true);
+    expect(ts.getAllTasks()).toEqual([]);
+  });
+
+  it("preserves a parseable .bak instead of overwriting it with corrupt bytes", async () => {
+    const dir = makeTempDir("task-store-bak-preserve-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+    const backupPath = `${storePath}.bak`;
+
+    const goodStore = {
+      _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: {} },
+      tasks: { "good-1": { id: "good-1", title: "Good task", status: "todo" } },
+    };
+    const goodJson = JSON.stringify(goodStore, null, 2);
+    writeFileSync(backupPath, goodJson, "utf8");
+    writeFileSync(storePath, "{not valid json!!!", "utf8");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    // .bak must still hold the prior good content
+    expect(readFileSync(backupPath, "utf8")).toBe(goodJson);
+  });
+
+  it("auto-recovers from .bak when primary store is corrupt", async () => {
+    const dir = makeTempDir("task-store-autorecover-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+    const backupPath = `${storePath}.bak`;
+
+    const goodStore = {
+      _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: {} },
+      tasks: { "recovered-1": { id: "recovered-1", title: "Recovered", status: "doing" } },
+    };
+    writeFileSync(backupPath, JSON.stringify(goodStore, null, 2), "utf8");
+    writeFileSync(storePath, Buffer.alloc(512, 0)); // NUL corruption
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    expect(ts.getAllTasks()).toEqual([
+      expect.objectContaining({ id: "recovered-1", title: "Recovered", status: "doing" }),
+    ]);
+  });
 });
 
 // ── Atomic Rename Fallback ─────────────────────────────────────────────────
@@ -316,6 +389,52 @@ describe("task-store concurrent save consistency", () => {
 });
 
 describe("task-store delegation topology", () => {
+  it("hydrates legacy top-level workflow fields from persisted topology", async () => {
+    const dir = makeTempDir("task-store-topology-compat-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    writeFileSync(storePath, JSON.stringify({
+      _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: { inprogress: 1 } },
+      tasks: {
+        "TASK-TOPOLOGY": {
+          id: "TASK-TOPOLOGY",
+          title: "Task topology compatibility",
+          status: "inprogress",
+          topology: {
+            workflowId: "wf-task-lifecycle",
+            workflowName: "Task Lifecycle",
+            latestRunId: "run-topology-1",
+            latestSessionId: "session-topology-1",
+            sessionId: "session-topology-1",
+            rootSessionId: "TASK-TOPOLOGY",
+            parentSessionId: "workflow:parent-session",
+          },
+        },
+      },
+      sprints: {},
+    }, null, 2), "utf8");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    expect(ts.getTask("TASK-TOPOLOGY")).toEqual(expect.objectContaining({
+      workflowId: "wf-task-lifecycle",
+      workflowName: "Task Lifecycle",
+      latestRunId: "run-topology-1",
+      latestSessionId: "session-topology-1",
+      sessionId: "session-topology-1",
+      rootSessionId: "TASK-TOPOLOGY",
+      parentSessionId: "workflow:parent-session",
+      topology: expect.objectContaining({
+        latestRunId: "run-topology-1",
+        sessionId: "session-topology-1",
+      }),
+    }));
+  });
+
   it("normalizes task graph topology and delegated workflow run lineage", async () => {
     const dir = makeTempDir("task-store-lineage-");
     const storeDir = join(dir, ".bosun", ".cache");

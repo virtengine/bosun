@@ -626,6 +626,7 @@ export function planPersistentThreadExecution(input = {}) {
   else if (requestedSdk === "copilot" && toTrimmedString(existingRecord.sdk) === "copilot") strategy = "resume_copilot";
   else if (requestedSdk === "claude" && toTrimmedString(existingRecord.sdk) === "claude") strategy = "resume_claude";
   else if (requestedSdk === "opencode" && toTrimmedString(existingRecord.sdk) === "opencode") strategy = "resume_opencode";
+  else if (requestedSdk === "openai-native" && toTrimmedString(existingRecord.sdk) === "openai-native") strategy = "resume_openai-native";
 
   return {
     ...result,

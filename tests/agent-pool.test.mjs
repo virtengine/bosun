@@ -14,6 +14,7 @@ let mockCopilotStart;
 let mockCopilotCreateSession;
 let mockCopilotResumeSession;
 let mockClaudeQuery;
+let mockCreateProviderKernel;
 let mockOpencodeExec;
 let mockLoadConfig;
 let mockMcpResolve;
@@ -41,6 +42,7 @@ const callMockCopilotStart = ensureMock("__agentPoolMockCopilotStart");
 const callMockCopilotCreateSession = ensureMock("__agentPoolMockCopilotCreateSession");
 const callMockCopilotResumeSession = ensureMock("__agentPoolMockCopilotResumeSession");
 const callMockClaudeQuery = ensureMock("__agentPoolMockClaudeQuery");
+const callMockCreateProviderKernel = ensureMock("__agentPoolMockCreateProviderKernel");
 const callMockOpencodeExec = ensureMock("__agentPoolMockOpencodeExec");
 const callMockLoadConfig = ensureMock("__agentPoolMockLoadConfig");
 const callMockMcpResolve = ensureMock("__agentPoolMockMcpResolve");
@@ -89,6 +91,7 @@ mockCopilotStart = vi.fn();
 mockCopilotCreateSession = vi.fn();
 mockCopilotResumeSession = vi.fn();
 mockClaudeQuery = vi.fn();
+mockCreateProviderKernel = vi.fn();
 mockOpencodeExec = vi.fn();
 mockLoadConfig = vi.fn();
 mockMcpResolve = vi.fn();
@@ -100,6 +103,7 @@ globalThis.__agentPoolMockCopilotStart = mockCopilotStart;
 globalThis.__agentPoolMockCopilotCreateSession = mockCopilotCreateSession;
 globalThis.__agentPoolMockCopilotResumeSession = mockCopilotResumeSession;
 globalThis.__agentPoolMockClaudeQuery = mockClaudeQuery;
+globalThis.__agentPoolMockCreateProviderKernel = mockCreateProviderKernel;
 globalThis.__agentPoolMockOpencodeExec = mockOpencodeExec;
 globalThis.__agentPoolMockLoadConfig = mockLoadConfig;
 globalThis.__agentPoolMockMcpResolve = mockMcpResolve;
@@ -302,6 +306,18 @@ vi.mock("../config/config.mjs", () => ({
   },
 }));
 
+vi.mock("../agent/provider-kernel.mjs", async () => {
+  const actual = await vi.importActual("../agent/provider-kernel.mjs");
+  return {
+    ...actual,
+    createProviderKernel: (...args) => {
+      const injected = callMockCreateProviderKernel(...args);
+      if (injected !== undefined) return injected;
+      return actual.createProviderKernel(...args);
+    },
+  };
+});
+
 vi.mock("../workflow/mcp-registry.mjs", () => ({
   resolveMcpServersForAgent: (...args) => {
     const candidate = globalThis.__agentPoolMockMcpResolve;
@@ -336,6 +352,7 @@ const ENV_KEYS = [
   "COPILOT_SDK_DISABLED",
   "CLAUDE_SDK_DISABLED",
   "OPENCODE_SDK_DISABLED",
+  "OPENAI_NATIVE_SDK_DISABLED",
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "OPENAI_ORGANIZATION",
@@ -391,6 +408,7 @@ function clearSdkEnv() {
   delete process.env.COPILOT_SDK_DISABLED;
   delete process.env.CLAUDE_SDK_DISABLED;
   delete process.env.OPENCODE_SDK_DISABLED;
+  delete process.env.OPENAI_NATIVE_SDK_DISABLED;
   delete process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_BASE_URL;
   delete process.env.OPENAI_ORGANIZATION;
@@ -487,6 +505,7 @@ beforeEach(async () => {
   mockCopilotCreateSession.mockReset();
   mockCopilotResumeSession.mockReset();
   mockClaudeQuery.mockReset();
+  mockCreateProviderKernel.mockReset();
   mockOpencodeExec.mockReset();
   mockLoadConfig.mockReset();
   mockLoadConfig.mockReturnValue({});
@@ -611,14 +630,16 @@ describe("SDK resolution", () => {
   it("uses fallback chain when all preferred are disabled", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     // Claude not disabled → should pick claude
     resetPoolSdkCache();
     expect(getPoolSdkName()).toBe("claude");
   });
 
   it("defaults to codex when nothing is set", () => {
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     resetPoolSdkCache();
-    // No env vars → fallback chain starts at codex
+    // No env vars (with native SDK disabled to mirror legacy default) → fallback chain starts at codex
     expect(getPoolSdkName()).toBe("codex");
   });
 
@@ -627,6 +648,7 @@ describe("SDK resolution", () => {
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
     process.env.OPENCODE_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     resetPoolSdkCache();
     // All disabled → last resort codex
     expect(getPoolSdkName()).toBe("codex");
@@ -638,6 +660,26 @@ describe("SDK resolution", () => {
     });
     resetPoolSdkCache();
     expect(getPoolSdkName()).toBe("opencode");
+  });
+
+  it("prefers openai-native when harness runtime is active even if primaryAgent still points at codex", () => {
+    mockLoadConfig.mockReturnValue({
+      agentRuntime: "harness",
+      primaryAgent: "codex-sdk",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-us",
+        executors: [
+          {
+            id: "azure-us",
+            providerId: "azure-openai-responses",
+            enabled: true,
+          },
+        ],
+      },
+    });
+    resetPoolSdkCache();
+    expect(getPoolSdkName()).toBe("openai-native");
   });
 });
 
@@ -688,7 +730,8 @@ describe("SDK management", () => {
     expect(available).toContain("copilot");
     expect(available).toContain("claude");
     expect(available).toContain("opencode");
-    expect(available).toHaveLength(4);
+    expect(available).toContain("openai-native");
+    expect(available).toHaveLength(5);
   });
 
   it("getAvailableSdks excludes disabled SDKs", () => {
@@ -698,7 +741,8 @@ describe("SDK management", () => {
     expect(available).toContain("codex");
     expect(available).toContain("claude");
     expect(available).toContain("opencode");
-    expect(available).toHaveLength(3);
+    expect(available).toContain("openai-native");
+    expect(available).toHaveLength(4);
   });
 
   it("getAvailableSdks returns empty when all disabled", () => {
@@ -706,6 +750,7 @@ describe("SDK management", () => {
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
     process.env.OPENCODE_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     expect(getAvailableSdks()).toHaveLength(0);
   });
 });
@@ -724,7 +769,7 @@ describe("launchEphemeralThread", () => {
     );
     expect(result).toHaveProperty("sdk");
     expect(typeof result.sdk).toBe("string");
-    expect(["codex", "copilot", "claude", "opencode"]).toContain(result.sdk);
+    expect(["codex", "copilot", "claude", "opencode", "openai-native"]).toContain(result.sdk);
   });
 
   it("launches via opencode when requested through opencode-sdk alias", async () => {
@@ -1047,6 +1092,102 @@ describe("launchEphemeralThread", () => {
     expect(result.sdk).toBe("copilot");
     expect(result.error).toBeNull();
     expect(result.output).toContain("copilot-output");
+  });
+
+  it("fails openai-native launches that never emit a first event", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("openai-native");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores non-meaningful openai-native lifecycle events when waiting for the first event", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          execOptions.onEvent?.({
+            type: "session.turn.start",
+            sessionId: "test-native-session",
+            model: "gpt-test",
+            apiStyle: "responses",
+          });
+          execOptions.onEvent?.({
+            type: "session.compaction",
+            sessionId: "test-native-session",
+            strategy: "proactive",
+            removedCount: 1,
+            checkpointAdded: false,
+            newMessageCount: 1,
+          });
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("openai-native");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
   });
 
   it("skips a cooled-down SDK after timeout and retries it after cooldown expiry", async () => {

@@ -78,7 +78,7 @@ describe("tui websocket bridge", () => {
     bridge.connect();
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].options.rejectUnauthorized).toBeUndefined();
+    expect(calls[0].options.rejectUnauthorized).toBe(true);
   });
 
   it("normalizes sessions:update snapshots to arrays", () => {

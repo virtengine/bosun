@@ -28,7 +28,7 @@ describe("mobile layout implementation", () => {
 
   it("tightens narrow header layout so the toolbar can shrink without overflow", () => {
     expect(layoutCss).toContain(".app-header-toolbar");
-    expect(layoutCss).toContain(".app-header .MuiToolbar-root > *");
+    expect(layoutCss).toContain(".app-header .MuiToolbar-root>*");
     expect(layoutCss).toContain(".app-breadcrumbs");
     expect(siteLayoutCss).toContain(".app-breadcrumbs");
     expect(siteLayoutCss).toContain("@media (max-width: 420px)");

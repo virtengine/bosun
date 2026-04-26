@@ -383,9 +383,11 @@ export function buildSessionInsights(fullSession = null) {
       referenced,
     },
     topTools,
+    // Cap to 6 — the InspectorPanel only renders the first 6, so transferring
+    // more across the worker boundary is wasted serialization cost.
     recentActions: recentActions
       .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
-      .slice(0, 10),
+      .slice(0, 6),
     contextWindow,
     contextBreakdown,
     tokenUsage,

@@ -896,6 +896,16 @@ async function ensureWorkflowAutomationEngine() {
             String(status || ""),
             options && typeof options === "object" ? options : {},
           ),
+        // Required by workflow action.update_task_status to persist patch fields
+        // such as blockedReason, branchName, prNumber, prUrl. Without this, the
+        // node's `typeof kanban.updateTask === "function"` guard evaluates false
+        // and blocked-state transitions land with empty blockedReason, which
+        // breaks downstream diagnosis (kanban UI / recovery / Telegram alerts).
+        updateTask: async (taskId, patch) =>
+          updateKanbanTask(
+            String(taskId || "").trim(),
+            patch && typeof patch === "object" ? patch : {},
+          ),
         listTasks: async (projectId, filters = {}) =>
           listKanbanTasks(String(projectId || ""), filters || {}),
         getTask: async (taskId) =>
@@ -2848,9 +2858,10 @@ function clearWorkspaceSyncWarnForWorkspace(workspaceId) {
   }
 }
 function isBenignWorkspaceSyncFailure(errorText) {
-  const text = String(errorText || "").toLowerCase();
+  const raw = String(errorText || "");
+  const text = raw.toLowerCase();
   if (!text) return false;
-  return (
+  if (
     text.includes("uncommitted changes") ||
     text.includes("unstaged changes") ||
     text.includes("your index contains uncommitted changes") ||
@@ -2865,7 +2876,24 @@ function isBenignWorkspaceSyncFailure(errorText) {
     text.includes("local changes would be overwritten by checkout") ||
     text.includes("cannot fast-forward") ||
     text.includes("is behind")
-  );
+  ) {
+    return true;
+  }
+  // git fetch / pull writes informational ref updates to stderr that some
+  // callers surface as "errors" even though the underlying command succeeded.
+  // Treat output that consists only of these benign ref-update lines as a
+  // non-failure so we don't spam the warn log on every poll cycle.
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+  const benignLine = (l) =>
+    /^From\s+\S+/i.test(l) ||
+    /\* \[new (branch|tag|ref)\]/i.test(l) ||
+    /\[deleted\]/i.test(l) ||
+    /\bup to date\b/i.test(l) ||
+    /^\s*[a-f0-9]{6,40}\.\.[a-f0-9]{6,40}\s+\S+\s+->\s+\S+/i.test(l) ||
+    /^\s*\+\s*[a-f0-9]{6,40}\.\.\.[a-f0-9]{6,40}\s+\S+\s+->\s+\S+\s+\(forced update\)/i.test(l) ||
+    /\(forced update\)$/i.test(l);
+  return lines.every(benignLine);
 }
 {
   const wsArray = config.repositories?.filter((r) => r.workspace) || [];
@@ -3289,6 +3317,7 @@ let cachedProjectId = null;
 let watcher = null;
 let watcherDebounce = null;
 let watchFileName = null;
+let watcherMissingPathLogged = false;
 let envWatchers = [];
 let envWatcherDebounce = null;
 let envPathMtimes = new Map();
@@ -11473,6 +11502,47 @@ function buildMonitorMonitorSdkOrder() {
   return order;
 }
 
+const monitorMonitor = {
+  enabled: false,
+  running: false,
+  timer: null,
+  statusTimer: null,
+  startupCycleTimer: null,
+  startupStatusTimer: null,
+  intervalMs: 0,
+  statusIntervalMs: 0,
+  timeoutMs: 0,
+  branch: "",
+  sdkOrder: [],
+  sdkIndex: 0,
+  sdkFailures: new Map(),
+  supervisorStartTimes: [],
+  supervisorRestartCountWindow: 0,
+  supervisorRestartLastWarnAt: 0,
+  supervisorStartCountTotal: 0,
+  supervisorLastStartedAt: 0,
+  lastRunAt: 0,
+  lastStatusAt: 0,
+  lastStatusReason: "",
+  lastStatusText: "",
+  lastTrigger: "",
+  lastOutcome: "",
+  lastError: "",
+  lastDigestText: "",
+  lastAttemptAt: 0,
+  lastAttemptTrigger: "",
+  lastSkipAt: 0,
+  lastSkipReason: "",
+  skipStreak: 0,
+  lastSkipStreakWarned: 0,
+  lastSkipStreakWarnAt: 0,
+  heartbeatAt: 0,
+  consecutiveFailures: 0,
+  abortController: null,
+  _watchdogAbortCount: 0,
+  _watchdogForceResetTimer: null,
+};
+
 function getCurrentMonitorSdk() {
   if (!monitorMonitor.sdkOrder.length) {
     monitorMonitor.sdkOrder = buildMonitorMonitorSdkOrder();
@@ -13366,7 +13436,7 @@ function selfRestartForSourceChange(
     selfRestartTimer = safeSetTimeout("self-restart-safety-net-retry", retryDeferredSelfRestart, 30_000);
     return;
   }
-  if (activeWorkflowRuns > 0 && !forceActiveAgentExit) {
+  if (activeWorkflowRuns > 0) {
     console.warn(
       `[monitor] SAFETY NET: selfRestartForSourceChange called with ${activeWorkflowRuns} active workflow run(s)! Deferring instead of killing.`,
     );
@@ -13377,11 +13447,6 @@ function selfRestartForSourceChange(
   if (activeSlots > 0 && forceActiveAgentExit) {
     console.warn(
       `[monitor] FORCED self-restart: proceeding with ${activeSlots} active agent(s) after defer hard cap`,
-    );
-  }
-  if (activeWorkflowRuns > 0 && forceActiveAgentExit) {
-    console.warn(
-      `[monitor] FORCED self-restart: proceeding with ${activeWorkflowRuns} active workflow run(s) after defer hard cap`,
     );
   }
   console.log(
@@ -13478,7 +13543,22 @@ function attemptSelfRestartAfterQuiet() {
 
     // Hard caps: after too many deferrals or too much deferred time the
     // active agent is likely stuck. Force-stop and restart so changes apply.
+    // Workflow-owned runs are different: restarting the monitor tears down
+    // real backlog work, so keep deferring until the workflow run clears.
     if (hitCountCap || hitTimeCap) {
+      const activeWorkflowRuns = getActiveWorkflowRunCount();
+      if (activeWorkflowRuns > 0) {
+        console.warn(
+          `[monitor] self-restart deferred ${deferCount} times over ${Math.round(deferElapsedMs / 1000)}s while waiting for ${activeWorkflowRuns} active workflow run(s) — continuing to defer until workflow work clears`,
+        );
+        selfRestartTimer = safeSetTimeout(
+          "self-restart-deferred-retry",
+          retryDeferredSelfRestart,
+          SELF_RESTART_RETRY_MS,
+        );
+        return;
+      }
+
       const youngAgentInfo = getYoungActiveAgentRestartDeferralInfo(now);
       if (youngAgentInfo) {
         console.warn(
@@ -13588,11 +13668,13 @@ function attemptSelfRestartAfterQuiet() {
     const hitTimeCap = deferElapsedMs >= SELF_RESTART_MAX_DEFER_MS;
     if (hitCountCap || hitTimeCap) {
       console.warn(
-        `[monitor] self-restart deferred ${deferCount} times over ${Math.round(deferElapsedMs / 1000)}s while waiting for active workflow runs — restarting anyway`,
+        `[monitor] self-restart deferred ${deferCount} times over ${Math.round(deferElapsedMs / 1000)}s while waiting for active workflow runs — continuing to defer until workflow work clears`,
       );
-      selfRestartDeferCount = 0;
-      selfRestartFirstDeferredAt = 0;
-      selfRestartForSourceChange(filename, { forceActiveAgentExit: true });
+      selfRestartTimer = safeSetTimeout(
+        "self-restart-workflow-wait-retry",
+        attemptSelfRestartAfterQuiet,
+        60_000,
+      );
       return;
     }
     const runNames = activeWorkflowRuns
@@ -13725,13 +13807,38 @@ async function startWatcher(force = false) {
   } catch {
     // The configured path does not exist.  Previous behaviour fell back to
     // watching the parent directory, which could be extremely broad (e.g. the
-    // entire AppData/Roaming tree) and trigger spurious restarts.  Disable the
-    // watcher entirely instead — the auto-update loop handles updates in
-    // npm/prod mode, and in dev mode the source-dir watcher covers restarts.
-    console.warn(
-      `[monitor] watcher disabled — configured watch path does not exist: ${watchPath}`,
-    );
-    return;
+    // entire AppData/Roaming tree) and trigger spurious restarts.  Try the
+    // running entry script (process.argv[1]) as a sensible fallback so the
+    // watcher still self-restarts on monitor-script edits, then disable
+    // entirely if that's also missing.
+    let fallbackScript = null;
+    try {
+      const argvScript = String(process.argv?.[1] || "").trim();
+      if (argvScript && existsSync(argvScript)) {
+        fallbackScript = resolve(argvScript);
+      }
+    } catch {
+      fallbackScript = null;
+    }
+    if (fallbackScript) {
+      if (!watcherMissingPathLogged) {
+        console.log(
+          `[monitor] configured watch path missing (${watchPath}); falling back to entry script ${fallbackScript}`,
+        );
+        watcherMissingPathLogged = true;
+      }
+      watchPath = fallbackScript;
+      watchFileName = fallbackScript.split(/[\\/]/).pop();
+      targetPath = fallbackScript.split(/[\\/]/).slice(0, -1).join("/") || ".";
+    } else {
+      if (!watcherMissingPathLogged) {
+        console.warn(
+          `[monitor] watcher disabled — configured watch path does not exist: ${watchPath}`,
+        );
+        watcherMissingPathLogged = true;
+      }
+      return;
+    }
   }
 
   if (!existsSync(targetPath)) {
@@ -13857,6 +13964,7 @@ function applyConfig(nextConfig, options = {}) {
   logDir = nextConfig.logDir;
   watchEnabled = nextConfig.watchEnabled;
   watchPath = resolve(nextConfig.watchPath);
+  watcherMissingPathLogged = false;
   echoLogs = nextConfig.echoLogs;
   autoFixEnabled = nextConfig.autoFixEnabled;
   shellState.enabled = !!nextConfig.interactiveShellEnabled;
@@ -14936,6 +15044,17 @@ try {
 // ── Internal Executor / Orchestrator startup ──────────────────────────────────
 /** @type {import("../task/task-executor.mjs").TaskExecutor|null} */
 let internalTaskExecutor = null;
+const workflowOwnsTaskExecutorLifecycle = isWorkflowReplacingModule("task-executor.mjs");
+async function runWorkflowOwnedTaskRecoveryPass(source) {
+  if (
+    !workflowOwnsTaskExecutorLifecycle ||
+    !internalTaskExecutor ||
+    typeof internalTaskExecutor._runInProgressRecoverySafely !== "function"
+  ) {
+    return;
+  }
+  await internalTaskExecutor._runInProgressRecoverySafely(source);
+}
 /** @type {import("../agent/agent-endpoint.mjs").AgentEndpoint|null} */
 let agentEndpoint = null;
 /** @type {import("../agent/agent-event-bus.mjs").AgentEventBus|null} */
@@ -14987,6 +15106,9 @@ if (!isMonitorTestRuntime) {
               throw new Error("workflow engine resumeInterruptedRuns unavailable");
             }
             await engine.resumeInterruptedRuns();
+            await runWorkflowOwnedTaskRecoveryPass(
+              "startup-workflow-history-unstick",
+            );
           },
           {
             trigger: "startup",
@@ -15035,7 +15157,6 @@ if (isExecutorDisabled()) {
 } else if (executorMode === "internal" || executorMode === "hybrid") {
   // Start internal executor
   try {
-    const workflowOwnsTaskExecutorLifecycle = isWorkflowReplacingModule("task-executor.mjs");
     if (workflowOwnsTaskExecutorLifecycle) {
       console.log(
         "[monitor] task-executor lifecycle delegation enabled — finalization/recovery handled by workflow replacement",
@@ -15256,12 +15377,16 @@ if (isExecutorDisabled()) {
         () =>
           void runWorkflowRecoveryWithPolicy(
             "stale-dispatch-task-poll-unstick",
-            () =>
-              pollWorkflowSchedulesOnce("startup", {
+            async () => {
+              await pollWorkflowSchedulesOnce("startup", {
                 includeScheduled: false,
                 requireEngine: true,
                 throwOnError: true,
-              }),
+              });
+              await runWorkflowOwnedTaskRecoveryPass(
+                "startup-stale-dispatch-task-poll-unstick",
+              );
+            },
             {
               trigger: "startup",
               operationType: "stale-dispatch-task-poll-unstick",

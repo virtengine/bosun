@@ -1,9 +1,13 @@
 # Bosun Native Harness — Comprehensive Gap Plan
 
-**Date:** 2026-04-04  
+**Date:** 2026-04-20  
 **Scope:** Everything that Claude Code (anthropic), Codex CLI (Rust), and OpenCode (Vercel AI SDK)  
 have that Bosun's internal native harness (`shell/openai-native-adapter.mjs` + supporting modules)  
-is still missing or only partially implements.  
+is still missing or only partially implements.
+
+**Status update (2026-04-20):** Tier 1 items D.1–D.6 are landed and covered
+by [tests/openai-native-adapter-tier1.test.mjs](../tests/openai-native-adapter-tier1.test.mjs)
+(23 tests passing). Tier 2/3 items remain as planned.  
 
 **Reference implementations:**
 - Claude Code: `@anthropic-ai/claude-code`, TypeScript, Anthropic Messages API
@@ -70,11 +74,11 @@ is not in the native path.
   Codex always passes `store: true` for real sessions so the server retains the response
   for the next `previous_response_id` call.
 
-**Bosun status (after Apr 2026 changes):**
+**Bosun status (2026-04-20):**
 - ✅ `previous_response_id` — wired since initial build
-- ✅ `store: true` — **newly added** (passed when `isPersistent = true`)
-- ✅ `instructions` field — **newly added** (system prompt extracted from `input[]` as stable prefix)
-- ⚠️ No telemetry surfacing the cache ratio to the session event stream
+- ✅ `store: true` — passed when `isPersistent = true`
+- ✅ `instructions` field — system prompt extracted from `input[]` as stable prefix
+- ✅ `cacheHitPct` and cumulative cost emitted on every `session.budget.update` and `session.turn.complete`
 
 #### Claude Code (Anthropic Messages API)
 - **Pattern: Explicit `cache_control: { type: "ephemeral" }` on content blocks.**  
@@ -88,12 +92,12 @@ is not in the native path.
 - **Pattern: `anthropic-beta: prompt-caching-2024-07-31` beta header** on early versions;
   now the standard API.
 
-**Bosun status (after Apr 2026 changes):**
-- ✅ System prompt `cache_control` on system message — **newly added** (activated by `promptCaching: true`)
-- ✅ Last-tool `cache_control` — **newly added** (activated by `promptCaching: true`)
-- ✅ History breakpoints — **newly added** (`injectHistoryCacheBreakpoints`, activated by `promptCaching: true`)
-- ⚠️ `promptCaching` flag must be set by caller; no auto-detect based on model name
-- ⚠️ `cache_creation_input_tokens` not separately tracked in usage normalizer
+**Bosun status (2026-04-20):**
+- ✅ System prompt `cache_control` on system message (activated by `promptCaching: true`)
+- ✅ Last-tool `cache_control` (activated by `promptCaching: true`)
+- ✅ History breakpoints (`injectHistoryCacheBreakpoints`)
+- ✅ `promptCaching` auto-detected from model name (`claude-*`, `anthropic/*`, `*/claude-*`, `provider=anthropic`)
+- ✅ `cache_creation_input_tokens` tracked separately on `aggregatedUsage.cacheCreationInputTokens`
 
 #### OpenCode (Vercel AI SDK)
 - **Pattern: Defers entirely to AI SDK provider plugins.**  
@@ -110,9 +114,9 @@ than OpenCode's approach once `promptCaching` is enabled.
 
 | Gap | Priority | Notes |
 |---|---|---|
-| Auto-detect `promptCaching` from model name | Medium | Identify `claude-*`, `anthropic/*` routes and flip the flag automatically |
-| Surface `cacheHitRatio` in `session.turn.complete` event | Medium | `cacheInputTokens / inputTokens` × 100 — valuable for cost dashboards |
-| `cache_creation_input_tokens` separate field in usage normalizer | Low | Currently merged into `inputTokens`; Anthropic bills these differently |
+| Auto-detect `promptCaching` from model name | ✅ Done (2026-04-20) | `shouldEnablePromptCaching()` covers `claude-*`, `anthropic/*`, `*/claude-*`, and `provider=anthropic` |
+| Surface `cacheHitRatio` in `session.turn.complete` event | ✅ Done (2026-04-20) | `computeCacheHitPct()` emitted on every `session.budget.update` and `session.turn.complete` |
+| `cache_creation_input_tokens` separate field in usage normalizer | ✅ Done (2026-04-20) | Tracked on `aggregatedUsage.cacheCreationInputTokens` |
 | Warm-up call to prime server cache at session start | Low | Send a no-op "hello" request to pre-cache the system prompt on turn 0 |
 
 ---
@@ -126,15 +130,17 @@ than OpenCode's approach once `promptCaching` is enabled.
 - Claude Code: JSONL transcript file per session at `~/.claude/projects/<id>/<session>.jsonl`
 - OpenCode: Full SQLite DB with `conversations`, `messages`, `tool_calls`, `usage` tables
 
-**Bosun native adapter:**
-- Pure in-memory `Map<sessionId, session>`. Lost on process restart, redeploy, or crash.
-- No cross-restart resumption. No session listing. No session browsing.
+**Bosun native adapter (2026-04-20):**
+- ✅ Append-only JSONL store at `~/.bosun/native-sessions/<id>.jsonl` via [shell/session-store.mjs](../shell/session-store.mjs)
+- ✅ Crash-safe (truncated tail lines are skipped)
+- ✅ `replayEvents()` reconstructs `messages[]`, `model`, `lastResponseId`, `aggregatedUsage`, `compactionCount`, `createdAt`, `updatedAt`
+- ⚠️ Adapter-level resume (`session-resume.mjs` wiring `ensureSession()` to call `store.load()`) is still on the Tier 2 list (D.9)
 
-**Files to build:**
+**Files built:**
 ```
-shell/session-store.mjs          — persistence driver (SQLite via `better-sqlite3` or JSONL)
-shell/session-resume.mjs         — resume from persisted session state into openai-native-adapter
-shell/session-list.mjs           — list/search/delete stored sessions
+shell/session-store.mjs          ✅ persistence driver (JSONL, no deps)
+shell/session-resume.mjs         ⏳ Tier 2 (D.9)
+shell/session-list.mjs           ⏳ not built; use store.list()/store.remove() directly for now
 ```
 
 **Key design choices:**
@@ -211,8 +217,10 @@ shell/content-builder.mjs        — build multi-part content arrays (text + ima
   cost exceeds the limit. Checked after every `response.completed` event.
 - Codex CLI: `--max-tokens` / `--budget` flags → abort session on exceeded threshold
 
-**Bosun status:** Cost is TRACKED (`aggregatedUsage.costUsd`) but never ENFORCED.
-A runaway agent can spend unlimited funds in a single session.
+**Bosun status (2026-04-20):** ✅ Done. `BudgetExceededError` is thrown after every
+round when `execOptions.maxCostUsd` (or `providerConfig.maxCostUsd`) is set and the
+cumulative `aggregatedUsage.costUsd` exceeds the cap. A `session.budget.exceeded`
+event fires immediately before the throw so callers can surface a clean abort.
 
 **Action:** In `exec()`, after each turn, check:
 ```js
@@ -233,8 +241,11 @@ before throwing so callers can surface it in the UI.
 - Codex CLI: Context window percentage shown in status line during agentic runs
 - OpenCode: Token/cost overlay in the UI
 
-**Bosun status:** `session.turn.complete` emits `usage` and `tokenBudget` — these exist.  
-Gap: The %used, cache hit ratio, and session cumulative cost are not emitted mid-stream.
+**Bosun status (2026-04-20):** ✅ Partially done. `session.budget.update` is emitted
+on every tool-call round with `cumulativeCostUsd`, `maxCostUsd`, `cacheHitPct`, and the
+full `aggregatedUsage` snapshot. `session.turn.complete` also carries `cacheHitPct` and
+`cumulativeCostUsd`. The remaining nice-to-have is %-of-context surfaced mid-stream
+between rounds (currently only included via `tokenBudget` on turn complete).
 
 **Action:** Emit `session.budget.update` between tool rounds with:
 ```js
@@ -270,13 +281,13 @@ inject a correction mid-stream. The session is left in a broken state after abor
 - Claude Code: `/clear` wipes session history but keeps the system prompt
 - OpenCode: Full conversation management UI
 
-**Bosun status:** Only `/compact` is implemented. No undo/clear/resume.
-
-**Actions:**
-- `/undo` → pop last 2 entries (user_message + assistant_message) from session
-- `/clear` → reset `session.messages = []`, keep `session.model` and `session.lastResponseId = null`
-- `/resume <session_id>` → load from session store (requires C.1)
-- `/status` → emit current `tokenBudget`, `compactionCount`, `model`, `cumulativeCost`
+**Bosun status (2026-04-20):** `/compact`, `/undo`, `/clear`, and `/status` are
+implemented. `/undo` removes the most recent assistant turn (and any trailing
+function-call/output entries) plus its prompting user message, and clears
+`lastResponseId` so the server-side thread is not reused. `/clear` empties
+history but preserves the model and system prompt. `/status` emits a
+`session.status` event with `messageCount`, `compactionCount`, `tokenBudget`,
+and `lastResponseId`. `/resume <session_id>` is still pending (depends on D.9).
 
 ---
 
@@ -306,30 +317,30 @@ The Vercel AI SDK's `streamText()` fires `onStepFinish(stepResult)` after every
 complete tool-call round (LLM response + tool execution). `stepResult` includes:
 `text`, `toolCalls`, `toolResults`, `finishReason`, `usage`, `isContinued`.
 
-**Bosun status:** Has `onEvent` callbacks (`session.turn.start`, `session.stream.delta`,
-`session.stream.complete`), but no unified "step is done" event that packages all of
-`turnResult + toolResults` together.
-
-**Action:** After each tool-call round completes and tool results are appended, emit:
-```js
-onEvent?.({ type: "session.step.finish", sessionId, stepNumber: roundCount,
-  text: finalText, toolCalls: turnResult.toolCalls, toolResults,
-  stopReason, usage: turnResult.usage, isContinued: hasMoreRounds })
-```
+**Bosun status (2026-04-20):** ✅ Done. `session.step.finish` is emitted at the
+end of every tool-call round with `stepNumber`, `text`, `toolCalls`, `toolResults`,
+`stopReason`, `usage`, and `isContinued`.
 
 ---
 
 ### C.11 Auto-Detect `promptCaching` from Model Name (LOW)
 
-**Current state:** `promptCaching` must be explicitly set by the caller.  
-**Desired:** Automatically enable when the model is an Anthropic model:
+**Status (2026-04-20):** ✅ Done. Auto-detect lives in
+`shouldEnablePromptCaching(providerConfig, execOptions)` exported from
+`shell/openai-native-adapter.mjs`:
 
 ```js
-function shouldEnablePromptCaching(providerConfig, execOptions) {
+export function shouldEnablePromptCaching(providerConfig, execOptions) {
   const pc = providerConfig ?? {};
-  if (pc.promptCaching != null) return Boolean(pc.promptCaching);
+  const explicit = pc.promptCaching ?? execOptions?.promptCaching;
+  if (explicit != null) return Boolean(explicit);
   const model = String(pc.model || execOptions?.model || "").toLowerCase();
-  return model.startsWith("claude-") || String(pc.provider || "").toLowerCase() === "anthropic";
+  const provider = String(pc.provider || execOptions?.provider || "").toLowerCase();
+  if (provider === "anthropic" || provider === "claude") return true;
+  if (model.startsWith("claude-")) return true;
+  if (model.startsWith("anthropic/")) return true;
+  if (model.includes("/claude-")) return true;
+  return false;
 }
 ```
 
@@ -398,16 +409,18 @@ This is a FUTURE item; requires the session store (C.1) and MCP client (C.2) fir
 
 ## D. Implementation Priority Queue
 
-### Tier 1 — Do Next (High Impact, Manageable Scope)
+### Tier 1 — Done (landed 2026-04-20)
 
-| # | Item | Module | Effort |
+| # | Item | Module | Status |
 |---|---|---|---|
-| D.1 | Session persistence (JSONL, no deps) | `shell/session-store.mjs` | Medium |
-| D.2 | Auto-detect `promptCaching` from model | `openai-native-adapter.mjs` | Small |
-| D.3 | Hard cost budget enforcement | `openai-native-adapter.mjs` | Small |
-| D.4 | `session.step.finish` event | `openai-native-adapter.mjs` | Small |
-| D.5 | `/undo`, `/clear`, `/status` slash commands | `openai-native-adapter.mjs` | Small |
-| D.6 | Surface `cacheHitPct` in usage events | `openai-native-adapter.mjs` | Small |
+| D.1 | Session persistence (JSONL, no deps) | [shell/session-store.mjs](../shell/session-store.mjs) | ✅ Done |
+| D.2 | Auto-detect `promptCaching` from model | `shell/openai-native-adapter.mjs` `shouldEnablePromptCaching()` | ✅ Done |
+| D.3 | Hard cost budget enforcement (`maxCostUsd` + `BudgetExceededError`) | `shell/openai-native-adapter.mjs` | ✅ Done |
+| D.4 | `session.step.finish` event | `shell/openai-native-adapter.mjs` | ✅ Done |
+| D.5 | `/undo`, `/clear`, `/status` slash commands | `shell/openai-native-adapter.mjs` | ✅ Done |
+| D.6 | Surface `cacheHitPct` (and separate `cacheCreationInputTokens`) in usage / `session.budget.update` / `session.turn.complete` | `shell/openai-native-adapter.mjs` `computeCacheHitPct()` | ✅ Done |
+
+Wiring is verified by [tests/openai-native-adapter-tier1.test.mjs](../tests/openai-native-adapter-tier1.test.mjs).
 
 ### Tier 2 — High Value, More Work
 

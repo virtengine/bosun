@@ -1,31 +1,34 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { resolve, join, relative } from "node:path";
-import { execSync } from "node:child_process";
 import vm from "node:vm";
-import { validateImports } from "./import-check.mjs";
+import { discoverSourceModules, validateImports } from "./import-check.mjs";
 import { collectPromptLintViolations, formatPromptLintViolations } from "./prompt-lint.mjs";
 
-function listTopLevelModules() {
-  try {
-    // Use git ls-files so untracked WIP files with syntax errors don't block commits.
-    // --cached: include staged files (new files added with git add)
-    // --others --exclude-standard: also include untracked non-ignored files? No — just cached.
-    const output = execSync("git ls-files --cached", {
-      encoding: "utf8",
-      cwd: process.cwd(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    return output
-      .split("\n")
-      .map((f) => f.trim())
-      .filter((f) => f.endsWith(".mjs") && !f.includes("/")) // top-level only
-      .sort((a, b) => a.localeCompare(b));
-  } catch {
-    // Fallback if not in a git repo
-    return readdirSync(process.cwd())
-      .filter((name) => name.endsWith(".mjs"))
+function discoverSyntaxModules(rootDir, files) {
+  if (Array.isArray(files) && files.length > 0) {
+    return [...new Set(files.map((file) => String(file || "").trim()).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b));
   }
+  const discovered = discoverSourceModules(rootDir);
+  if (discovered.length > 0) return discovered;
+  return readdirSync(rootDir)
+    .filter((name) => name.endsWith(".mjs"))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function parseArgs(argv = []) {
+  const parsed = {
+    rootDir: process.cwd(),
+    files: undefined,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--root" && argv[i + 1]) {
+      parsed.rootDir = resolve(argv[++i]);
+    } else if (argv[i] === "--files" && argv[i + 1]) {
+      parsed.files = argv[++i].split(",").map((file) => file.trim()).filter(Boolean);
+    }
+  }
+  return parsed;
 }
 
 /**
@@ -86,11 +89,12 @@ async function main() {
     );
   }
 
-  const files = listTopLevelModules();
+  const { rootDir, files: requestedFiles } = parseArgs(process.argv.slice(2));
+  const files = discoverSyntaxModules(rootDir, requestedFiles);
   let failed = false;
 
   for (const file of files) {
-    const filePath = resolve(process.cwd(), file);
+    const filePath = resolve(rootDir, file);
     try {
       validateModuleSyntax(filePath);
     } catch (error) {
@@ -109,8 +113,8 @@ async function main() {
   // These files are loaded directly in the browser via import maps. Keep
   // them free of syntax that older embedded WebViews reject at parse time.
   const browserRoots = [
-    resolve(process.cwd(), "ui"),
-    resolve(process.cwd(), "site", "ui"),
+    resolve(rootDir, "ui"),
+    resolve(rootDir, "site", "ui"),
   ];
   const browserFiles = [...new Set(browserRoots.flatMap((dir) => listJsFilesRecursive(dir)))];
   let uiFailed = false;
@@ -120,7 +124,7 @@ async function main() {
       validateScriptSyntax(filePath);
     } catch (error) {
       uiFailed = true;
-      const rel = relative(process.cwd(), filePath);
+      const rel = relative(rootDir, filePath);
       const message = error instanceof Error ? error.message : String(error);
       console.error(`Syntax error: ${rel}`);
       console.error(message);
@@ -138,7 +142,7 @@ async function main() {
   // verify that every named import actually exists as an export in the
   // target module.  This catches ghost imports from partial merges, WIP
   // saves, and renames that missed a call-site.
-  const { errors: importErrors, moduleCount } = await validateImports();
+  const { errors: importErrors, moduleCount } = await validateImports({ rootDir, files });
 
   if (importErrors.length > 0) {
     console.error("\nImport validation failed:\n");
@@ -151,7 +155,7 @@ async function main() {
 
   console.log(`Imports OK: ${moduleCount} modules linked, 0 broken imports`);
 
-  const promptLintViolations = collectPromptLintViolations(process.cwd());
+  const promptLintViolations = collectPromptLintViolations(rootDir);
   if (promptLintViolations.length > 0) {
     console.error("\nPrompt lint failed:\n");
     console.error(formatPromptLintViolations(promptLintViolations));

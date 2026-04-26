@@ -172,10 +172,29 @@ describe("tool orchestrator", () => {
     const orchestrator = createToolOrchestrator();
     const tools = orchestrator.listTools();
     const readFile = tools.find((entry) => entry.id === "read_file_content");
+    const searchFiles = tools.find((entry) => entry.id === "search_files");
+    const runWorkspaceCommand = tools.find((entry) => entry.id === "run_workspace_command");
     const spawnSubagent = tools.find((entry) => entry.id === "spawn_subagent");
 
     expect(readFile).toEqual(expect.objectContaining({
       aliases: expect.arrayContaining(["read_file"]),
+      parameters: expect.objectContaining({
+        required: ["filePath"],
+      }),
+    }));
+    expect(searchFiles).toEqual(expect.objectContaining({
+      parameters: expect.objectContaining({
+        required: ["query"],
+        properties: expect.objectContaining({
+          query: expect.any(Object),
+          pattern: expect.any(Object),
+        }),
+      }),
+    }));
+    expect(runWorkspaceCommand).toEqual(expect.objectContaining({
+      parameters: expect.objectContaining({
+        required: ["command"],
+      }),
     }));
     expect(spawnSubagent).toEqual(expect.objectContaining({
       aliases: expect.arrayContaining(["spawn_agent"]),

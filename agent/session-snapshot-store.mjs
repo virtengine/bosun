@@ -27,6 +27,7 @@ function normalizeStoreShape(snapshot = {}) {
     snapshots: snapshot?.snapshots && typeof snapshot.snapshots === "object" ? cloneValue(snapshot.snapshots) : {},
     events: snapshot?.events && typeof snapshot.events === "object" ? cloneValue(snapshot.events) : {},
     checkpoints: snapshot?.checkpoints && typeof snapshot.checkpoints === "object" ? cloneValue(snapshot.checkpoints) : {},
+    lastTouchedAt: snapshot?.lastTouchedAt && typeof snapshot.lastTouchedAt === "object" ? cloneValue(snapshot.lastTouchedAt) : {},
   };
 }
 
@@ -38,10 +39,15 @@ export function createSessionSnapshotStore(options = {}) {
   const filePath = resolveSnapshotStorePath(options.filePath);
   const maxSnapshotsPerSession = Number.isFinite(Number(options.maxSnapshotsPerSession))
     ? Math.max(10, Number(options.maxSnapshotsPerSession))
-    : 64;
+    : 20;
   const maxEventsPerSession = Number.isFinite(Number(options.maxEventsPerSession))
     ? Math.max(25, Number(options.maxEventsPerSession))
-    : 256;
+    : 80;
+  // Cap total sessions retained on disk so the snapshot store cannot grow
+  // unbounded and block the event loop on every persist().
+  const maxSessions = Number.isFinite(Number(options.maxSessions))
+    ? Math.max(5, Number(options.maxSessions))
+    : 50;
   let loaded = false;
   let state = normalizeStoreShape();
 
@@ -57,10 +63,33 @@ export function createSessionSnapshotStore(options = {}) {
     loaded = true;
   }
 
+  function pruneToMaxSessions() {
+    const ids = new Set([
+      ...Object.keys(state.snapshots || {}),
+      ...Object.keys(state.events || {}),
+      ...Object.keys(state.checkpoints || {}),
+    ]);
+    if (ids.size <= maxSessions) return;
+    const ranked = [...ids].map((id) => ({
+      id,
+      ts: String(state.lastTouchedAt?.[id] || ""),
+    })).sort((a, b) => a.ts.localeCompare(b.ts)); // oldest first
+    const toDrop = ranked.slice(0, ids.size - maxSessions);
+    for (const { id } of toDrop) {
+      delete state.snapshots[id];
+      delete state.events[id];
+      delete state.checkpoints[id];
+      delete state.lastTouchedAt[id];
+    }
+  }
+
   function persist() {
     ensureLoaded();
+    pruneToMaxSessions();
     mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, JSON.stringify(state, null, 2), "utf8");
+    // Compact (un-indented) JSON keeps the file small enough that the
+    // synchronous write does not block the event loop for whole seconds.
+    writeFileSync(filePath, JSON.stringify(state), "utf8");
   }
 
   function readSession(sessionId) {
@@ -85,6 +114,7 @@ export function createSessionSnapshotStore(options = {}) {
     } else if (!Object.prototype.hasOwnProperty.call(state.checkpoints, normalizedSessionId)) {
       state.checkpoints[normalizedSessionId] = null;
     }
+    state.lastTouchedAt[normalizedSessionId] = new Date().toISOString();
     persist();
     return readSession(normalizedSessionId);
   }
@@ -158,6 +188,7 @@ export function createSessionSnapshotStore(options = {}) {
       delete state.snapshots[normalizedSessionId];
       delete state.events[normalizedSessionId];
       delete state.checkpoints[normalizedSessionId];
+      delete state.lastTouchedAt[normalizedSessionId];
       persist();
       return true;
     },

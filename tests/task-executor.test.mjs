@@ -145,6 +145,10 @@ import {
 import { initPresence, getPresenceState } from "../infra/presence.mjs";
 import { loadConfig } from "../config/config.mjs";
 import { evaluateBranchSafetyForPush } from "../git/git-safety.mjs";
+import {
+  getSessionTracker,
+  _resetSingleton as resetSessionTrackerSingleton,
+} from "../infra/session-tracker.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -187,6 +191,7 @@ const ENV_KEYS = [
 describe("task-executor", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetSessionTrackerSingleton({ persistDir: null });
     for (const key of ENV_KEYS) delete process.env[key];
     getSharedState.mockResolvedValue(null);
     setTaskStatusTransitionHandler(null);
@@ -194,6 +199,8 @@ describe("task-executor", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
+    resetSessionTrackerSingleton({ persistDir: null });
     for (const key of ENV_KEYS) delete process.env[key];
     setTaskStatusTransitionHandler(null);
   });
@@ -1695,6 +1702,104 @@ describe("task-executor", () => {
           source: "task-executor-recovery-stale-workflow-claim",
         }),
       );
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it("resets workflow-owned tasks when a run is stuck at agent.started with no turn progress", async () => {
+      vi.useFakeTimers();
+      const now = new Date("2026-04-23T00:00:00.000Z");
+      vi.setSystemTime(now);
+
+      const turnSessionId = "wf-startup-stalled-1:agent:run-startup-stalled-1:run-agent-tests:turn";
+      const tracker = getSessionTracker();
+      tracker.createSession({
+        id: turnSessionId,
+        type: "task",
+        taskId: turnSessionId,
+        metadata: {},
+      });
+      tracker.recordEvent(turnSessionId, "agent.started");
+      vi.setSystemTime(new Date(now.getTime() + 21 * 60 * 1000));
+
+      const ex = new TaskExecutor({
+        projectId: "proj-1",
+        maxParallel: 2,
+        workflowOwnsTaskLifecycle: true,
+        workflowRunsDir: "/workflow-runs",
+      });
+      ex._running = true;
+      const executeSpy = vi
+        .spyOn(ex, "executeTask")
+        .mockResolvedValue(undefined);
+
+      listTasks.mockResolvedValueOnce([
+        {
+          id: "wf-startup-stalled-1",
+          title: "Workflow-owned startup-stalled run",
+          status: "inprogress",
+          updated_at: new Date(now.getTime()).toISOString(),
+          agentAttempts: 1,
+        },
+      ]);
+      getActiveThreads.mockReturnValueOnce([]);
+      existsSync.mockImplementation((targetPath) =>
+        [
+          resolve("/workflow-runs", "_active-runs.json"),
+          resolve("/workflow-runs", "run-startup-stalled-1.json"),
+        ].includes(targetPath),
+      );
+      readFileSync.mockImplementation((targetPath) => {
+        if (targetPath === resolve("/workflow-runs", "_active-runs.json")) {
+          return JSON.stringify([
+            {
+              runId: "run-startup-stalled-1",
+              taskId: "wf-startup-stalled-1",
+              sessionIds: [turnSessionId],
+            },
+          ]);
+        }
+        if (targetPath === resolve("/workflow-runs", "run-startup-stalled-1.json")) {
+          return JSON.stringify({
+            id: "run-startup-stalled-1",
+            status: "running",
+            startedAt: new Date(now.getTime() - 25 * 60 * 1000).toISOString(),
+            endedAt: null,
+            sessionIds: [turnSessionId],
+            latestCheckpoint: {
+              eventType: "agent.started",
+              nodeId: "run-agent-tests",
+              updatedAt: new Date(now.getTime() - 21 * 60 * 1000).toISOString(),
+              counters: {
+                toolCallCount: 0,
+                toolResultCount: 0,
+                spillCount: 0,
+              },
+            },
+            data: {
+              taskId: "wf-startup-stalled-1",
+              _dagState: {
+                status: "running",
+                updatedAt: new Date(now.getTime() - 21 * 60 * 1000).toISOString(),
+              },
+            },
+          });
+        }
+        return "";
+      });
+
+      await ex._recoverInterruptedInProgressTasks();
+
+      expect(updateTaskStatus).toHaveBeenCalledWith(
+        "wf-startup-stalled-1",
+        "todo",
+        expect.objectContaining({
+          source: "task-executor-recovery-missing-workflow-run",
+        }),
+      );
+      expect(releaseTaskClaim).toHaveBeenCalledWith({
+        taskId: "wf-startup-stalled-1",
+        force: true,
+      });
       expect(executeSpy).not.toHaveBeenCalled();
     });
 

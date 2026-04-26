@@ -65,6 +65,7 @@ import { resolveRepoRoot, resolveAgentRepoRoot } from "../config/repo-root.mjs";
 import { resolveCodexProfileRuntime, readCodexConfigRuntimeDefaults } from "../shell/codex-model-profiles.mjs";
 import { buildTaskWritableRoots } from "../shell/codex-config.mjs";
 import { resolveCopilotCliLaunchConfig } from "../shell/copilot-shell.mjs";
+import openaiNativeAdapter from "../shell/openai-native-adapter.mjs";
 import { getGitHubToken } from "../github/github-auth-manager.mjs";
 import {
   isTransientStreamError,
@@ -966,6 +967,37 @@ function getFirstEventTimeoutMs(totalTimeoutMs) {
   return resolveCodexStreamSafety(totalTimeoutMs).firstEventTimeoutMs;
 }
 
+const OPENAI_NATIVE_MEANINGFUL_EVENT_TYPES = new Set([
+  "session.stream.start",
+  "session.stream.delta",
+  "session.stream.complete",
+  "session.step.finish",
+  "session.turn.complete",
+  "session.turn.error",
+]);
+
+function isMeaningfulOpenaiNativeEvent(event) {
+  if (typeof event === "string") {
+    return event.trim().length > 0;
+  }
+  if (!event || typeof event !== "object") {
+    return false;
+  }
+
+  const eventType = String(event.type || event.eventType || "").trim().toLowerCase();
+  if (OPENAI_NATIVE_MEANINGFUL_EVENT_TYPES.has(eventType)) {
+    return true;
+  }
+
+  if (typeof event.delta === "string" && event.delta.trim()) return true;
+  if (typeof event.text === "string" && event.text.trim()) return true;
+  if (typeof event.error === "string" && event.error.trim()) return true;
+  if (Array.isArray(event.toolCalls) && event.toolCalls.length > 0) return true;
+  if (Array.isArray(event.toolResults) && event.toolResults.length > 0) return true;
+  if (Array.isArray(event.items) && event.items.length > 0) return true;
+  return false;
+}
+
 function normalizeHarnessTimeoutMs(timeoutMs) {
   const parsed = Number(timeoutMs);
   if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
@@ -1335,6 +1367,19 @@ function hasSdkPrerequisites(name, runtimeEnv = process.env) {
     }
     return { ok: true, reason: null };
   }
+  if (name === "openai-native") {
+    // The in-process native adapter only needs an API key reachable by the
+    // configured harness executor. Accept any of the common credential keys.
+    const hasKey =
+      runtimeEnv.OPENAI_API_KEY
+      || runtimeEnv.AZURE_OPENAI_API_KEY
+      || runtimeEnv.AZURE_API_KEY
+      || runtimeEnv.AZURE_SWEDEN_OPENAI_API_KEY;
+    if (!hasKey) {
+      return { ok: false, reason: "no OPENAI_API_KEY / AZURE_OPENAI_API_KEY" };
+    }
+    return { ok: true, reason: null };
+  }
   return { ok: true, reason: null };
 }
 
@@ -1596,6 +1641,16 @@ function normalizePoolSdkName(value) {
   if (!raw) return "";
   if (raw === "auto") return "";
   if (raw.includes("copilot")) return "copilot";
+  if (
+    raw === "openai-native"
+    || raw === "openai_native"
+    || raw === "azure"
+    || raw === "azure-openai"
+    || raw === "azure-openai-responses"
+    || raw === "openai-responses"
+  ) {
+    return "openai-native";
+  }
   if (raw.includes("codex") || raw.includes("gpt")) return "codex";
   if (raw.includes("claude")) return "claude";
   if (raw.includes("opencode")) return "opencode";
@@ -1623,13 +1678,23 @@ const SDK_ADAPTERS = {
     load: loadOpencodeAdapter,
     envDisableKey: "OPENCODE_SDK_DISABLED",
   },
+  "openai-native": {
+    name: "openai-native",
+    load: loadOpenaiNativeAdapter,
+    envDisableKey: "OPENAI_NATIVE_SDK_DISABLED",
+  },
 };
 
 /**
  * Ordered fallback chain for SDK resolution.
  * Configurable via bosun.config.json → agentPool.fallbackOrder
+ *
+ * "openai-native" is listed first: it is the in-process kernel path that
+ * connects directly to the configured harness executor (Azure OpenAI by
+ * default) and avoids subprocess CLI failure modes (codex CLI / copilot
+ * OAuth / etc.) when `agentRuntime: "harness"` is enabled.
  */
-let SDK_FALLBACK_ORDER = ["codex", "copilot", "claude", "opencode"];
+let SDK_FALLBACK_ORDER = ["openai-native", "codex", "copilot", "claude", "opencode"];
 
 function getSdkFallbackOrder() {
   const envOrder = String(process.env.BOSUN_AGENT_POOL_FALLBACK_ORDER || "").trim();
@@ -1676,7 +1741,36 @@ let resolutionLogged = false;
 function isDisabled(name) {
   const adapter = SDK_ADAPTERS[name];
   if (!adapter) return true;
+  if (processDisabledSdks.has(name)) return true;
   return envFlagEnabled(process.env[adapter.envDisableKey]);
+}
+
+/**
+ * SDKs marked dead for the lifetime of this process. We populate this when an
+ * SDK returns a deterministic 400-class auth/configuration error (e.g.
+ * Copilot's "Failed to list models: 400") that will never succeed without
+ * external action. Without this, every task launch retries the same broken
+ * fallback SDK and floods the logs.
+ */
+const processDisabledSdks = new Map();
+
+function markSdkProcessDisabled(name, reason) {
+  if (!name || !SDK_ADAPTERS[name] || processDisabledSdks.has(name)) return;
+  processDisabledSdks.set(name, String(reason || "deterministic failure"));
+  console.warn(
+    `${TAG} SDK "${name}" disabled for the rest of this process: ${reason}`,
+  );
+}
+
+function isDeterministicAuthFailure(error) {
+  const message = String(error || "").toLowerCase();
+  if (!message) return false;
+  if (message.includes("failed to list models") && message.includes("400")) {
+    return true;
+  }
+  if (message.includes("401") && message.includes("unauthorized")) return true;
+  if (message.includes("403") && message.includes("forbidden")) return true;
+  return false;
 }
 
 const DEFAULT_SDK_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
@@ -1870,6 +1964,26 @@ function resolvePoolSdkName() {
   // 3. bosun.config.json → agentPool.sdk
   try {
     const config = loadConfig();
+    // 3. agentRuntime: "harness" + an enabled native executor → use openai-native
+    // by default. This routes workflow agent runs through the in-process kernel +
+    // native adapter (Azure OpenAI / OpenAI Responses) instead of subprocess CLI
+    // SDKs that may have transient stdin/auth failures.
+    const runtime = String(config?.agentRuntime || "").trim().toLowerCase();
+    if (runtime === "harness" && config?.harness?.enabled !== false) {
+      const harnessSelectionId = resolveHarnessNativeSelectionId(process.env);
+      if (
+        harnessSelectionId
+        && SDK_ADAPTERS["openai-native"]
+        && !isDisabled("openai-native")
+      ) {
+        const prereq = hasSdkPrerequisites("openai-native", process.env);
+        if (prereq.ok) {
+          resolvedSdkName = "openai-native";
+          logResolution("openai-native", `harness primary executor "${harnessSelectionId}"`);
+          return resolvedSdkName;
+        }
+      }
+    }
     const configSdk = normalizePoolSdkName(
       config?.agentPool?.sdk ||
       config?.primaryAgent ||
@@ -3180,6 +3294,245 @@ async function resumeClaudeThread(
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI Native (Azure / OpenAI Responses / OpenAI-compatible) launcher
+// ---------------------------------------------------------------------------
+
+function resolveHarnessNativeSelectionId(envInput = process.env) {
+  // 1. Explicit env override always wins
+  const envOverride = String(envInput?.BOSUN_HARNESS_NATIVE_SELECTION || "").trim();
+  if (envOverride) return envOverride;
+  // 2. Inspect harness config for a primary executor whose providerId maps to openai-native
+  try {
+    const cfg = loadConfig() || {};
+    const harness = cfg.harness || {};
+    const executors = Array.isArray(harness.executors) ? harness.executors : [];
+    const primaryId = String(harness.primaryExecutor || "").trim();
+    if (primaryId) {
+      const found = executors.find((e) => String(e?.id || "") === primaryId && e?.enabled !== false);
+      if (found) return String(found.id || found.providerId || "").trim();
+    }
+    // Fall back to the highest-weight enabled executor backed by an openai-native provider
+    const candidates = executors
+      .filter((e) => e && e.enabled !== false)
+      .filter((e) => {
+        const pid = String(e.providerId || e.provider || "").trim();
+        return pid === "azure-openai-responses"
+          || pid === "openai-responses"
+          || pid === "openai-compatible";
+      })
+      .sort((a, b) => Number(b?.weight || 0) - Number(a?.weight || 0));
+    if (candidates.length > 0) return String(candidates[0].id || candidates[0].providerId || "").trim();
+  } catch {
+    // best effort
+  }
+  return "";
+}
+
+function resolveRequestedNativeSelection(extra = {}, envInput = process.env) {
+  const providerConfig =
+    extra?.providerConfig && typeof extra.providerConfig === "object" && !Array.isArray(extra.providerConfig)
+      ? extra.providerConfig
+      : null;
+  const candidates = [
+    providerConfig?.selectionId,
+    extra?.selectionId,
+    extra?.providerSelection,
+    extra?.provider,
+    providerConfig?.provider,
+    providerConfig?.providerId,
+  ];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || "").trim();
+    if (!normalized || normalized === "openai-native") continue;
+    return normalized;
+  }
+  return resolveHarnessNativeSelectionId(envInput);
+}
+
+async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
+  timeoutMs = Number(timeoutMs) || DEFAULT_TIMEOUT_MS;
+  const {
+    onEvent = null,
+    abortController: externalAbortController = null,
+    onThreadReady = null,
+    resumeThreadId = null,
+    envOverrides = null,
+    model = null,
+    taskKey = null,
+  } = extra;
+
+  const runtimeSessionEnv =
+    envOverrides && typeof envOverrides === "object"
+      ? { ...process.env, ...envOverrides }
+      : { ...process.env };
+  const logicalSessionId = String(
+    resumeThreadId
+      || extra.sessionId
+      || extra.workflowSessionId
+      || taskKey
+      || "",
+  ).trim() || null;
+  const persistent = Boolean(logicalSessionId);
+  const providerConfig =
+    extra?.providerConfig && typeof extra.providerConfig === "object" && !Array.isArray(extra.providerConfig)
+      ? { ...extra.providerConfig }
+      : null;
+  const normalizedProvider = String(
+    extra?.provider || providerConfig?.provider || providerConfig?.providerId || "",
+  ).trim() || null;
+  const trimmedModel = String(model || "").trim();
+  const selectionId = resolveRequestedNativeSelection({
+    ...extra,
+    provider: normalizedProvider,
+    providerConfig,
+  }, runtimeSessionEnv);
+
+  if (persistent && typeof onThreadReady === "function") {
+    try {
+      onThreadReady(logicalSessionId, "openai-native");
+    } catch {
+      /* caller errors must not break execution */
+    }
+  }
+
+  const { controller, cleanup: clearAbortScope } = createScopedAbortController(
+    externalAbortController,
+    timeoutMs,
+  );
+  const firstEventTimeoutMs = getFirstEventTimeoutMs(timeoutMs);
+  let firstEventTimer = null;
+  let firstEventTimeoutHit = false;
+  let nativeEventCount = 0;
+  const handleNativeEvent = (event) => {
+    if (isMeaningfulOpenaiNativeEvent(event)) {
+      nativeEventCount += 1;
+      if (firstEventTimer) {
+        clearTimeout(firstEventTimer);
+        firstEventTimer = null;
+      }
+    }
+    if (typeof onEvent === "function") {
+      try {
+        onEvent(event);
+      } catch {
+        /* best effort */
+      }
+    }
+  };
+
+  try {
+    const providerKernel = createProviderKernel({
+      adapters: {
+        "openai-native": openaiNativeAdapter,
+      },
+      getConfig: () => loadConfig() || {},
+      env: runtimeSessionEnv,
+      sessionManager: getBosunSessionManager(),
+      onEvent: handleNativeEvent,
+    });
+    const providerSession = providerKernel.createExecutionSession({
+      adapterName: "openai-native",
+      selectionId: selectionId || normalizedProvider || "azure-openai-responses",
+      ...(normalizedProvider ? { provider: normalizedProvider } : {}),
+      ...(providerConfig ? { providerConfig } : {}),
+      sessionId: logicalSessionId,
+      threadId: logicalSessionId,
+      model: trimmedModel || providerConfig?.model || null,
+      cwd,
+      repoRoot: cwd,
+      taskKey: taskKey || logicalSessionId,
+      sessionType: extra.sessionType || "task",
+      sessionManager: getBosunSessionManager(),
+      onEvent: handleNativeEvent,
+      subagentMaxParallel: extra.subagentMaxParallel,
+    });
+
+    if (firstEventTimeoutMs) {
+      firstEventTimer = setTimeout(() => {
+        if (nativeEventCount > 0 || controller.signal.aborted) return;
+        firstEventTimeoutHit = true;
+        controller.abort("first_event_timeout");
+      }, firstEventTimeoutMs);
+      if (typeof firstEventTimer.unref === "function") {
+        firstEventTimer.unref();
+      }
+    }
+
+    const result = await providerSession.runTurn(prompt, {
+      onEvent: handleNativeEvent,
+      timeoutMs,
+      sessionId: logicalSessionId,
+      threadId: logicalSessionId,
+      abortController: controller,
+      model: trimmedModel || providerConfig?.model || null,
+      cwd,
+      repoRoot: cwd,
+      taskKey: taskKey || logicalSessionId,
+      sessionType: extra.sessionType || "task",
+      sessionManager: getBosunSessionManager(),
+      subagentMaxParallel: extra.subagentMaxParallel,
+    });
+    const finalResponse = String(
+      result?.finalResponse || result?.output || result?.text || "",
+    ).trim();
+    const success = result?.success !== false && result?.ok !== false;
+    return {
+      success,
+      output: success ? finalResponse : "",
+      items: Array.isArray(result?.items) ? result.items : [],
+      error: success ? null : String(result?.error || finalResponse || "openai-native execution failed"),
+      sdk: "openai-native",
+      threadId: persistent ? logicalSessionId : null,
+    };
+  } catch (err) {
+    const abortReason = controller.signal.aborted
+      ? String(controller.signal.reason || "")
+      : "";
+    if (abortReason === "first_event_timeout") {
+      const noEventsSuffix = firstEventTimeoutMs
+        ? ` (no events received within ${firstEventTimeoutMs}ms)`
+        : "";
+      return {
+        success: false,
+        output: "",
+        items: [],
+        error: `OpenAI Native execution error: first_event_timeout${noEventsSuffix}`,
+        sdk: "openai-native",
+        threadId: persistent ? logicalSessionId : null,
+      };
+    }
+    return {
+      success: false,
+      output: "",
+      items: [],
+      error: `OpenAI Native execution error: ${err?.message || err}`,
+      sdk: "openai-native",
+      threadId: persistent ? logicalSessionId : null,
+    };
+  } finally {
+      clearTimeout(firstEventTimer);
+    if (firstEventTimer) {
+      clearTimeout(firstEventTimer);
+    }
+    clearAbortScope();
+  }
+}
+
+async function resumeOpenaiNativeThread(
+  threadId,
+  prompt,
+  cwd,
+  timeoutMs,
+  extra = {},
+) {
+  return launchOpenaiNativeThread(prompt, cwd, timeoutMs, {
+    ...extra,
+    resumeThreadId: threadId,
+    taskKey: extra.taskKey,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Adapter loader functions (return the per-SDK launcher)
 // ---------------------------------------------------------------------------
 
@@ -3211,12 +3564,20 @@ async function loadOpencodeAdapter() {
   return launchOpencodeThread;
 }
 
+/**
+ * @returns {Promise<Function>} The OpenAI Native launcher function (Azure / OpenAI Responses).
+ */
+async function loadOpenaiNativeAdapter() {
+  return launchOpenaiNativeThread;
+}
+
 const poolProviderSessionRuntime = createHarnessProviderSessionRuntime({
   launchers: {
     codex: launchCodexThread,
     copilot: launchCopilotThread,
     claude: launchClaudeThread,
     opencode: launchOpencodeThread,
+    "openai-native": launchOpenaiNativeThread,
   },
   resumers: {
     resume_codex: resumeCodexThread,
@@ -3228,6 +3589,7 @@ const poolProviderSessionRuntime = createHarnessProviderSessionRuntime({
         resumeThreadId: threadId,
         taskKey: extra.taskKey,
       }),
+    "resume_openai-native": resumeOpenaiNativeThread,
     resume_generic: resumeGenericThread,
   },
 });
@@ -3586,6 +3948,21 @@ export async function launchEphemeralThread(
     }
 
     applySdkFailureCooldown(name, result.error);
+
+    // Permanently disable a *fallback* SDK for this process if it returned a
+    // deterministic auth/config error (e.g. Copilot "Failed to list models:
+    // 400"). Otherwise every subsequent task launch will retry the same
+    // broken fallback and flood the logs with identical warnings. Never
+    // process-disable Codex this way: Codex 400s are often transient
+    // upstream / Azure config drift, and existing tests rely on Codex
+    // remaining retryable after such errors.
+    if (
+      name !== "codex" &&
+      name !== primaryName &&
+      isDeterministicAuthFailure(result.error)
+    ) {
+      markSdkProcessDisabled(name, result.error);
+    }
 
     if (name === primaryName) {
       console.warn(

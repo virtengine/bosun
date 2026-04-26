@@ -252,6 +252,346 @@ describe("workflow modular actions", () => {
     });
   });
 
+  it("treats structured tool-session blocks as failed agent runs", async () => {
+    const nodeType = getNodeType("action.run_agent");
+    const sessionManager = createHarnessSessionManager();
+    const launchOrResumeThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Still blocked in this same poisoned tool session.\n\nResult:\n- blocked: tool-session failure",
+      items: [],
+      sdk: "openai-native",
+      threadId: "workflow-thread-tool-session",
+      resumed: false,
+    });
+    const node = {
+      id: "run-agent-tests",
+      type: "action.run_agent",
+      config: {
+        prompt: "Write tests for the requested change.",
+        failOnError: false,
+        autoRecover: false,
+      },
+    };
+    const ctx = {
+      id: "run-parent-poisoned",
+      data: {
+        _workflowId: "template-task-lifecycle",
+        _workflowName: "Task Lifecycle",
+        _workflowSessionId: "session-parent-poisoned",
+        _workflowRootSessionId: "session-root-poisoned",
+        taskId: "TASK-TOOL-SESSION-1",
+        taskTitle: "Surface poisoned tool sessions as blocked",
+        task: {
+          id: "TASK-TOOL-SESSION-1",
+          title: "Surface poisoned tool sessions as blocked",
+        },
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+      setNodeStatus: vi.fn(),
+    };
+    const engine = {
+      services: {
+        sessionManager,
+        agentPool: {
+          launchEphemeralThread: vi.fn().mockResolvedValue({
+            success: true,
+            output: "fallback should not be used",
+            items: [],
+            sdk: "openai-native",
+            threadId: "workflow-thread-fallback-tool-session",
+          }),
+          launchOrResumeThread,
+        },
+      },
+      list: () => [],
+      execute: vi.fn(),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+    const tracker = getSessionTracker();
+
+    expect(result).toMatchObject({
+      success: false,
+      blockedReason: "blocked_by_env",
+      error: expect.stringContaining("tool-session failure"),
+      output: expect.stringContaining("Still blocked in this same poisoned tool session"),
+    });
+    expect(tracker.getSessionById("TASK-TOOL-SESSION-1")?.status).toBe("blocked_by_env");
+    expect(tracker.getSessionById("TASK-TOOL-SESSION-1:agent:run-parent-poisoned:run-agent-tests:turn")?.status).toBe("blocked_by_env");
+  });
+
+  it("treats doom-loop tool invocation blocks as failed agent runs", async () => {
+    const nodeType = getNodeType("action.run_agent");
+    const sessionManager = createHarnessSessionManager();
+    const launchOrResumeThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Blocked: tool invocation failure.\n\nThis session is permanently stuck behind doom-loop protection because repeated tool calls were made with empty arguments. I cannot inspect or modify files from this turn.",
+      items: [],
+      sdk: "openai-native",
+      threadId: "workflow-thread-doom-loop",
+      resumed: false,
+    });
+    const node = {
+      id: "run-agent-tests",
+      type: "action.run_agent",
+      config: {
+        prompt: "Write tests for the requested change.",
+        failOnError: false,
+        autoRecover: false,
+      },
+    };
+    const ctx = {
+      id: "run-parent-doom-loop",
+      data: {
+        _workflowId: "template-task-lifecycle",
+        _workflowName: "Task Lifecycle",
+        _workflowSessionId: "session-parent-doom-loop",
+        _workflowRootSessionId: "session-root-doom-loop",
+        taskId: "TASK-TOOL-SESSION-2",
+        taskTitle: "Surface doom-loop blocks as blocked",
+        task: {
+          id: "TASK-TOOL-SESSION-2",
+          title: "Surface doom-loop blocks as blocked",
+        },
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+      setNodeStatus: vi.fn(),
+    };
+    const engine = {
+      services: {
+        sessionManager,
+        agentPool: {
+          launchEphemeralThread: vi.fn().mockResolvedValue({
+            success: true,
+            output: "fallback should not be used",
+            items: [],
+            sdk: "openai-native",
+            threadId: "workflow-thread-fallback-doom-loop",
+          }),
+          launchOrResumeThread,
+        },
+      },
+      list: () => [],
+      execute: vi.fn(),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+    const tracker = getSessionTracker();
+
+    expect(result).toMatchObject({
+      success: false,
+      blockedReason: "blocked_by_env",
+      error: expect.stringContaining("tool invocation failure"),
+      output: expect.stringContaining("doom-loop protection"),
+    });
+    expect(tracker.getSessionById("TASK-TOOL-SESSION-2")?.status).toBe("blocked_by_env");
+    expect(tracker.getSessionById("TASK-TOOL-SESSION-2:agent:run-parent-doom-loop:run-agent-tests:turn")?.status).toBe("blocked_by_env");
+  });
+
+  it("keeps workflow agent sessions active during silent heartbeats", async () => {
+    vi.useFakeTimers();
+    try {
+      const nodeType = getNodeType("action.run_agent");
+      const sessionManager = createHarnessSessionManager();
+      let resolveLaunch = null;
+      const launchOrResumeThread = vi.fn().mockImplementation(() => new Promise((resolve) => {
+        resolveLaunch = resolve;
+      }));
+      const node = {
+        id: "run-agent",
+        type: "action.run_agent",
+        config: {
+          prompt: "Run a long silent validation step.",
+          failOnError: false,
+          autoRecover: false,
+        },
+      };
+      const ctx = {
+        id: "run-parent-heartbeat",
+        data: {
+          _workflowId: "wf-heartbeat",
+          _workflowName: "Heartbeat Workflow",
+          _workflowSessionId: "session-parent-heartbeat",
+          _workflowRootSessionId: "session-root-heartbeat",
+          taskId: "TASK-HEARTBEAT-1",
+          taskTitle: "Keep session alive while agent is quiet",
+          task: {
+            id: "TASK-HEARTBEAT-1",
+            title: "Keep session alive while agent is quiet",
+          },
+        },
+        resolve(value) {
+          return value;
+        },
+        log: vi.fn(),
+        setNodeStatus: vi.fn(),
+      };
+      const engine = {
+        services: {
+          sessionManager,
+          agentPool: {
+            launchEphemeralThread: vi.fn().mockResolvedValue({
+              success: true,
+              output: "fallback should not be used",
+              items: [],
+              sdk: "codex",
+              threadId: "workflow-thread-fallback-heartbeat",
+            }),
+            launchOrResumeThread,
+          },
+        },
+        list: () => [],
+        execute: vi.fn(),
+      };
+
+      const executionPromise = nodeType.execute(node, ctx, engine);
+
+      await vi.advanceTimersByTimeAsync(181_000);
+
+      const tracker = getSessionTracker();
+      const taskSession = tracker.getSessionById("TASK-HEARTBEAT-1");
+      const delegateSession = tracker.getSessionById("TASK-HEARTBEAT-1:agent:run-parent-heartbeat:run-agent:turn");
+
+      expect(taskSession?.status).toBe("active");
+      expect(delegateSession?.status).toBe("active");
+      expect(Date.now() - Number(taskSession?.lastActivityAt || 0)).toBeLessThan(180_000);
+      expect(Date.now() - Number(delegateSession?.lastActivityAt || 0)).toBeLessThan(180_000);
+
+      resolveLaunch?.({
+        success: true,
+        output: "workflow agent completed",
+        items: [],
+        sdk: "codex",
+        threadId: "workflow-thread-heartbeat",
+        resumed: false,
+      });
+
+      const result = await executionPromise;
+
+      expect(result.success).toBe(true);
+      expect(launchOrResumeThread).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a structured failure result when stale-session recovery still throws", async () => {
+    const nodeType = getNodeType("action.run_agent");
+    const sessionManager = createHarnessSessionManager();
+    const invalidateThread = vi.fn();
+    const launchOrResumeThread = vi.fn()
+      .mockRejectedValueOnce(new Error("Cannot read properties of null (reading 'sessionId')"))
+      .mockRejectedValueOnce(new Error("Cannot read properties of null (reading 'sessionId')"));
+    const node = {
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: {
+        prompt: "Implement the requested change end-to-end.",
+        failOnError: false,
+      },
+    };
+    const ctx = {
+      id: "retry-run-1",
+      data: {
+        _workflowId: "template-task-lifecycle",
+        _workflowName: "Task Lifecycle",
+        _workflowSessionId: "session-parent-1",
+        _workflowRootSessionId: "session-root-1",
+        taskId: "TASK-STALE-FAIL-1",
+        taskTitle: "Recover stale session gracefully",
+        task: {
+          id: "TASK-STALE-FAIL-1",
+          title: "Recover stale session gracefully",
+          description: "Ensure stale session crashes do not hard-stop the workflow.",
+          taskUrl: "https://example.test/tasks/TASK-STALE-FAIL-1",
+          branchName: "feat/recover-stale-session-gracefully",
+        },
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+      setNodeStatus: vi.fn(),
+    };
+    const engine = {
+      services: {
+        sessionManager,
+        agentPool: {
+          invalidateThread,
+          launchOrResumeThread,
+        },
+      },
+      list: () => [],
+      execute: vi.fn(),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "Cannot read properties of null (reading 'sessionId')",
+    });
+    expect(launchOrResumeThread).toHaveBeenCalledTimes(2);
+    expect(invalidateThread).toHaveBeenCalledWith(
+      "template-task-lifecycle:retry-run-1:run-agent-plan",
+    );
+  });
+
+  it("clears blockedReason when returning a task to inprogress", async () => {
+    const nodeType = getNodeType("action.update_task_status");
+    const updateTaskStatus = vi.fn().mockResolvedValue({ success: true });
+    const updateTask = vi.fn().mockResolvedValue({ success: true });
+    const getTask = vi.fn().mockResolvedValue({
+      id: "TASK-RESET-1",
+      title: "Recover blocked task",
+      blockedReason: "blocked_by_repo",
+    });
+    const node = {
+      id: "set-inprogress",
+      type: "action.update_task_status",
+      config: {
+        taskId: "TASK-RESET-1",
+        status: "inprogress",
+        taskTitle: "Recover blocked task",
+      },
+    };
+    const ctx = {
+      data: {},
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+    };
+    const engine = {
+      services: {
+        kanban: {
+          getTask,
+          updateTaskStatus,
+          updateTask,
+        },
+      },
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+
+    expect(result.success).toBe(true);
+    expect(updateTaskStatus).toHaveBeenCalledWith(
+      "TASK-RESET-1",
+      "inprogress",
+      expect.any(Object),
+    );
+    expect(updateTask).toHaveBeenCalledWith(
+      "TASK-RESET-1",
+      expect.objectContaining({ blockedReason: null }),
+    );
+  });
+
   it("inherits resolved executor settings for workflow agent launches when sdk is auto", async () => {
     const nodeType = getNodeType("action.run_agent");
     const sessionManager = createHarnessSessionManager();

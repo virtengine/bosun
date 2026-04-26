@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -491,6 +491,69 @@ describe("session telemetry spine", () => {
       lastBufferedEventAt: "2026-04-04T10:00:01.000Z",
     }));
     expect(events).toHaveLength(2);
+  });
+
+  it("restores a bounded tail window from oversized telemetry logs", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "bosun-telemetry-runtime-tail-"));
+    tempDirs.push(configDir);
+    const paths = resolveHarnessTelemetryPaths(configDir);
+    mkdirSync(join(configDir, ".cache", "harness", "observability"), { recursive: true });
+    const lines = [];
+    for (let index = 0; index < 40; index += 1) {
+      lines.push(JSON.stringify({
+        timestamp: `2026-04-04T11:00:${String(index).padStart(2, "0")}.000Z`,
+        eventType: "workflow.node.complete",
+        source: "workflow-engine",
+        taskId: `task-tail-${index}`,
+        sessionId: `session-tail-${index}`,
+        runId: `run-tail-${index}`,
+        status: index === 39 ? "running" : "completed",
+        summary: `tail event ${index}`,
+      }));
+    }
+    writeFileSync(paths.eventsPath, `${lines.join("\n")}\n`, "utf8");
+
+    const runtime = createHarnessTelemetryRuntime({
+      persist: true,
+      paths,
+      projector: new LiveEventProjector(),
+      metrics: new RuntimeMetrics(),
+      providerUsage: new ProviderUsageLedger(),
+      maxInMemoryEvents: 10,
+      maxRestoreBytes: 512,
+      maxRestoreEvents: 5,
+    });
+
+    const restored = runtime.restoreFromDisk();
+    const status = runtime.getStatus();
+    const events = runtime.getEvents();
+
+    expect(restored).toEqual(expect.objectContaining({
+      restoredFromDisk: true,
+      restoredEvents: 5,
+      latestSessionId: "session-tail-39",
+      latestRunId: "run-tail-39",
+      latestLiveStatus: "running",
+    }));
+    expect(events).toHaveLength(5);
+    expect(events.map((event) => event.runId)).toEqual([
+      "run-tail-35",
+      "run-tail-36",
+      "run-tail-37",
+      "run-tail-38",
+      "run-tail-39",
+    ]);
+    expect(status).toEqual(expect.objectContaining({
+      restoredFromDisk: true,
+      restoredEvents: 5,
+      restoredFileBytes: expect.any(Number),
+      restoredReadBytes: expect.any(Number),
+      restoreTruncated: true,
+      latestSessionId: "session-tail-39",
+      latestRunId: "run-tail-39",
+      latestLiveStatus: "running",
+      lastRestoredEventAt: "2026-04-04T11:00:39.000Z",
+    }));
   });
 
   it("can use native telemetry export acceleration without changing canonical event storage", async () => {

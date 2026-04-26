@@ -126,6 +126,7 @@ async function resolveExplicitTaskContext(ctx, engine, explicitTaskId, explicitT
   const normalizedTaskId = String(explicitTaskId || "").trim();
   if (!normalizedTaskId) return null;
   let attemptedLookup = false;
+  let matchingCandidate = null;
 
   const providedCandidates = [
     ctx?.data?.task,
@@ -136,12 +137,15 @@ async function resolveExplicitTaskContext(ctx, engine, explicitTaskId, explicitT
     if (!candidate || typeof candidate !== "object") continue;
     const candidateId = String(candidate.id || candidate.task_id || "").trim();
     if (candidateId !== normalizedTaskId) continue;
-    return {
-      taskId: normalizedTaskId,
-      taskTitle: pickTaskString(explicitTaskTitle, candidate.title, candidate.task_title),
-      task: candidate,
-    };
+    matchingCandidate = candidate;
+    break;
   }
+
+  const mergeResolvedTask = (task) => (
+    matchingCandidate && typeof matchingCandidate === "object"
+      ? { ...matchingCandidate, ...task }
+      : task
+  );
 
   const kanban = ctx?.data?._services?.kanban || engine?.services?.kanban || null;
   if (typeof kanban?.getTask === "function") {
@@ -151,8 +155,14 @@ async function resolveExplicitTaskContext(ctx, engine, explicitTaskId, explicitT
       if (task && typeof task === "object") {
         return {
           taskId: normalizedTaskId,
-          taskTitle: pickTaskString(explicitTaskTitle, task.title, task.task_title),
-          task,
+          taskTitle: pickTaskString(
+            explicitTaskTitle,
+            task.title,
+            task.task_title,
+            matchingCandidate?.title,
+            matchingCandidate?.task_title,
+          ),
+          task: mergeResolvedTask(task),
         };
       }
     } catch {
@@ -171,13 +181,32 @@ async function resolveExplicitTaskContext(ctx, engine, explicitTaskId, explicitT
       if (task && typeof task === "object") {
         return {
           taskId: normalizedTaskId,
-          taskTitle: pickTaskString(explicitTaskTitle, task.title, task.task_title),
-          task,
+          taskTitle: pickTaskString(
+            explicitTaskTitle,
+            task.title,
+            task.task_title,
+            matchingCandidate?.title,
+            matchingCandidate?.task_title,
+          ),
+          task: mergeResolvedTask(task),
         };
       }
     } catch {
       // stale explicit task context should fall back to normal polling
     }
+  }
+
+  if (matchingCandidate) {
+    return {
+      taskId: normalizedTaskId,
+      taskTitle: pickTaskString(
+        explicitTaskTitle,
+        matchingCandidate.title,
+        matchingCandidate.task_title,
+        normalizedTaskId,
+      ),
+      task: matchingCandidate,
+    };
   }
 
   if (!attemptedLookup) {
@@ -965,6 +994,9 @@ registerNodeType("trigger.task_available", {
       // Skip-until cooldown (anti-thrash)
       const skipUntil = _skipUntil.get(id);
       if (skipUntil && now < skipUntil) return false;
+      // Persisted task cooldown survives workflow/session boundaries.
+      const persistedCooldownUntil = Date.parse(String(t.cooldownUntil || ""));
+      if (Number.isFinite(persistedCooldownUntil) && now < persistedCooldownUntil) return false;
       // Hard-blocked after MAX_NO_COMMIT_ATTEMPTS
       const noCommitCount = _noCommitCounts.get(id) || 0;
       if (noCommitCount >= MAX_NO_COMMIT_ATTEMPTS) return false;

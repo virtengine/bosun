@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Internal Harness Adoption — Release Sign-off Flipped to GO (2026-04-20)
+
+- Re-audited [_docs/INTERNAL_HARNESS_RELEASE_SIGNOFF.md](_docs/INTERNAL_HARNESS_RELEASE_SIGNOFF.md):
+  every blocker from the prior 2026-04-03 NO-GO judgment is closed.
+- IH-GAP-006 (workflow-nodes-security drift) closed; the suite is green at
+  74 passed and `npm test` reports 12 files / 207 passed.
+- IH-GAP-007 reduced to environment-only (Windows MSVC linker absent); the
+  control-plane contract is intact.
+
+### Native Harness — Tier 1 (`shell/openai-native-adapter.mjs`)
+
+- **Added** [shell/session-store.mjs](shell/session-store.mjs): crash-safe
+  append-only JSONL session store with `replayEvents()` reconstruction
+  (no external dependency).
+- **Added** `shouldEnablePromptCaching()` auto-detect for Anthropic-routed
+  models (`claude-*`, `anthropic/*`, `*/claude-*`, `provider=anthropic`).
+- **Added** hard cost budget enforcement: `execOptions.maxCostUsd` /
+  `providerConfig.maxCostUsd` with `BudgetExceededError` and a
+  `session.budget.exceeded` event.
+- **Added** `session.step.finish` event after every tool-call round
+  (mirrors AI SDK `onStepFinish`).
+- **Added** `/undo`, `/clear`, `/status` slash commands (no API call;
+  emit `session.undo` / `session.cleared` / `session.status`).
+- **Added** `cacheHitPct` and `cumulativeCostUsd` fields on
+  `session.budget.update` and `session.turn.complete`.
+- **Added** separate `aggregatedUsage.cacheCreationInputTokens` tracking
+  (Anthropic bills cache creation separately from cached reads).
+- **Added** [tests/openai-native-adapter-tier1.test.mjs](tests/openai-native-adapter-tier1.test.mjs)
+  covering the above (23 tests passing).
+
+### Test Tooling
+
+- **Fixed** Playwright `EADDRINUSE :::4444` regression: `playwright.config.mjs`
+  now uses a regex `testMatch` of `/playwright-ui-(e2e|smoke|inspect)\.mjs$/`
+  so the bundled `playwright-ui-server.mjs` web server file is no longer
+  loaded by the test runner.
+
+### Documentation
+
+- Refreshed [_docs/INTERNAL_HARNESS_RELEASE_SIGNOFF.md](_docs/INTERNAL_HARNESS_RELEASE_SIGNOFF.md),
+  [_docs/INTERNAL_HARNESS_GAP_REGISTER.md](_docs/INTERNAL_HARNESS_GAP_REGISTER.md),
+  [_docs/INTERNAL_HARNESS_CUTOVER_MATRIX.md](_docs/INTERNAL_HARNESS_CUTOVER_MATRIX.md),
+  and [_docs/BOSUN_NATIVE_HARNESS_GAP_PLAN.md](_docs/BOSUN_NATIVE_HARNESS_GAP_PLAN.md)
+  to reflect closed gaps and Tier 1 native-harness completion.
+- Filled out [RELEASE_DRAFT.md](RELEASE_DRAFT.md) (was an unrendered
+  `{{releaseNotes}}` template placeholder).
+
 ## [0.40.6] - 2026-03-08
 
 ### Features

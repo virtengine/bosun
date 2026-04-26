@@ -15,7 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
 import { testTimeout } from "./timeout-helper.mjs";
@@ -36,6 +36,10 @@ let resolveAutoCommand;
 let getTemplate;
 let installTemplate;
 let reconcileInstalledTemplates;
+let MAX_NO_COMMIT_ATTEMPTS;
+let completedWithPR;
+let noCommitCounts;
+let skipUntil;
 
 if (SPAWN_BLOCKED) {
   describe("workflow-task-lifecycle", () => {
@@ -47,6 +51,12 @@ if (SPAWN_BLOCKED) {
   ({ WorkflowEngine, WorkflowContext } = await import("../workflow/workflow-engine.mjs"));
   ({ detectProjectStack, resolveAutoCommand } = await import("../workflow/project-detection.mjs"));
   ({ getTemplate, installTemplate, reconcileInstalledTemplates } = await import("../workflow/workflow-templates.mjs"));
+  ({
+    MAX_NO_COMMIT_ATTEMPTS,
+    _completedWithPR: completedWithPR,
+    _noCommitCounts: noCommitCounts,
+    _skipUntil: skipUntil,
+  } = await import("../workflow/workflow-nodes/transforms.mjs"));
 
 // -- Helpers -----------------------------------------------------------------
 
@@ -396,6 +406,67 @@ describe("trigger.task_available", () => {
       tasks: [{ id: "direct-task-1" }],
     });
     expect(listTasks).not.toHaveBeenCalled();
+  });
+
+  it("rehydrates explicit task context when the carried snapshot is minimal", async () => {
+    const nt = getNodeType("trigger.task_available");
+    const listTasks = vi.fn().mockResolvedValue([]);
+    const retryAt = "2026-04-22T04:00:13.000Z";
+    const getTask = vi.fn().mockResolvedValue({
+      id: "direct-task-1",
+      title: "Direct task",
+      status: "inprogress",
+      branchName: "task/direct-task-1",
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+      blockedReason: "Repeated no-output agent starts detected; stopping retries",
+    });
+    const ctx = makeCtx({
+      activeSlotCount: 1,
+      taskId: "direct-task-1",
+      task: {
+        id: "direct-task-1",
+        title: "Direct task",
+        status: "todo",
+      },
+    });
+    const node = makeNode("trigger.task_available", {
+      maxParallel: 1,
+      status: "todo",
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          listTasks,
+          getTask,
+        },
+      },
+      getActiveRuns: () => [{ taskId: "direct-task-1" }],
+    });
+
+    expect(result).toMatchObject({
+      triggered: true,
+      reason: "direct_task",
+      taskId: "direct-task-1",
+      task: expect.objectContaining({
+        id: "direct-task-1",
+        status: "inprogress",
+        branchName: "task/direct-task-1",
+        consecutiveNoCommits: 3,
+        cooldownUntil: retryAt,
+        blockedReason: "Repeated no-output agent starts detected; stopping retries",
+      }),
+    });
+    expect(ctx.data.task).toEqual(expect.objectContaining({
+      id: "direct-task-1",
+      status: "inprogress",
+      branchName: "task/direct-task-1",
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    }));
+    expect(listTasks).not.toHaveBeenCalled();
+    expect(getTask).toHaveBeenCalledWith("direct-task-1");
   });
 
   it("ignores stale explicit task context and falls back to real task polling", async () => {
@@ -1086,6 +1157,48 @@ describe("trigger.task_available", () => {
       }
       try { rmSync(repoRoot, { recursive: true, force: true }); } catch { /* ok */ }
     }
+  });
+
+  it("skips todo tasks whose persisted cooldownUntil is still active", async () => {
+    const trigger = getNodeType("trigger.task_available");
+    const coolingTask = {
+      id: "task-cooling",
+      title: "Cooling down after no-commit bounce",
+      status: "todo",
+      cooldownUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+      createdAt: "2026-04-22T00:00:00.000Z",
+    };
+    const readyTask = {
+      id: "task-ready",
+      title: "Ready for dispatch",
+      status: "todo",
+      createdAt: "2026-04-21T00:00:00.000Z",
+    };
+    const listTasks = vi.fn(async (_projectId, opts = {}) => {
+      if (opts.status === "todo") {
+        return [coolingTask, readyTask];
+      }
+      return [];
+    });
+    const ctx = makeCtx({ activeSlotCount: 0 });
+    const node = makeNode("trigger.task_available", {
+      maxParallel: 3,
+      status: "todo",
+      filterDrafts: false,
+    });
+
+    const result = await trigger.execute(node, ctx, {
+      services: {
+        kanban: {
+          listTasks,
+        },
+      },
+    });
+
+    expect(result.triggered).toBe(true);
+    expect(result.selectedTaskId).toBe("task-ready");
+    expect(result.task.id).toBe("task-ready");
+    expect(result.tasks.map((task) => task.id)).toEqual(["task-ready"]);
   });
 
   it("monitor polling reclaims stale placeholder-blocked tasks", async () => {
@@ -2023,6 +2136,84 @@ describe("action.resolve_executor", () => {
     }
   });
 
+  it("prefers the harness primary executor over legacy codex defaults when harness runtime is active", async () => {
+    const configMod = await import("../config/config.mjs");
+    const loadConfigSpy = vi.spyOn(configMod, "loadConfig").mockReturnValue({
+      agentRuntime: "harness",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-openai-responses-2",
+        executors: [
+          {
+            id: "azure-openai-responses-1",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            defaultModel: "gpt-4.1-mini",
+            endpoint: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+          {
+            id: "azure-openai-responses-2",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            defaultModel: "gpt-4.1",
+            endpoint: "https://secondary.example/openai/v1",
+            apiVersion: "2024-10-01-preview",
+          },
+        ],
+      },
+      executorConfig: {
+        executors: [
+          {
+            name: "codex-default",
+            executor: "CODEX",
+            variant: "DEFAULT",
+            role: "primary",
+            weight: 100,
+            enabled: true,
+            models: [],
+          },
+        ],
+      },
+      internalExecutor: { sdk: "codex" },
+      primaryAgent: "codex",
+    });
+
+    try {
+      const nt = getNodeType("action.resolve_executor");
+      const ctx = makeCtx({});
+      const node = makeNode("action.resolve_executor", {
+        defaultSdk: "auto",
+      });
+      const result = await nt.execute(node, ctx);
+      expect(result.success).toBe(true);
+      expect(result.sdk).toBe("openai-native");
+      expect(result.model).toBe("gpt-4.1");
+      expect(result.provider).toBe("azure-openai-responses-2");
+      expect(result.providerConfig).toEqual(expect.objectContaining({
+        selectionId: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        providerId: "azure-openai-responses",
+        endpoint: "https://secondary.example/openai/v1",
+        apiVersion: "2024-10-01-preview",
+        model: "gpt-4.1",
+      }));
+      expect(ctx.data.resolvedSdk).toBe("openai-native");
+      expect(ctx.data.resolvedModel).toBe("gpt-4.1");
+      expect(ctx.data.resolvedProvider).toBe("azure-openai-responses-2");
+      expect(ctx.data.resolvedProviderConfig).toEqual(expect.objectContaining({
+        selectionId: "azure-openai-responses-2",
+        provider: "azure-openai-responses",
+        providerId: "azure-openai-responses",
+        endpoint: "https://secondary.example/openai/v1",
+        apiVersion: "2024-10-01-preview",
+        model: "gpt-4.1",
+      }));
+    } finally {
+      loadConfigSpy.mockRestore();
+    }
+  });
+
   it("applies library profile and skill resolution into context", async () => {
     const nt = getNodeType("action.resolve_executor");
     const root = mkdtempSync(join(tmpdir(), "wf-resolve-executor-library-"));
@@ -2241,6 +2432,90 @@ describe("action.resolve_executor", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("does not auto-apply low-confidence profiles just because they carry skills", async () => {
+    const nt = getNodeType("action.resolve_executor");
+    const root = mkdtempSync(join(tmpdir(), "wf-resolve-executor-low-confidence-skills-"));
+    const bosunDir = join(root, ".bosun");
+    const profilesDir = join(bosunDir, "profiles");
+    const skillsDir = join(bosunDir, "skills");
+    mkdirSync(profilesDir, { recursive: true });
+    mkdirSync(skillsDir, { recursive: true });
+
+    const now = new Date().toISOString();
+    writeFileSync(join(bosunDir, "library.json"), JSON.stringify({
+      generated: now,
+      entries: [
+        {
+          id: "generic-agent",
+          type: "agent",
+          name: "Imported Generic Agent",
+          description: "Broad imported-style profile with weak pattern",
+          filename: "generic-agent.json",
+          tags: ["generic", "agent", "imported"],
+          scope: "global",
+          workspace: null,
+          meta: {},
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "generic-guidance",
+          type: "skill",
+          name: "Generic Guidance",
+          description: "Generic skill that should not force profile auto-apply",
+          filename: "generic-guidance.md",
+          tags: ["generic", "agent", "imported"],
+          scope: "global",
+          workspace: null,
+          meta: {},
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    }, null, 2));
+    writeFileSync(
+      join(profilesDir, "generic-agent.json"),
+      JSON.stringify({
+        id: "generic-agent",
+        name: "Imported Generic Agent",
+        description: "Broad profile with weak pattern and auxiliary skill",
+        titlePatterns: ["\\bagent\\b"],
+        scopes: ["generic"],
+        tags: ["generic", "agent", "imported"],
+        skills: ["generic-guidance"],
+        importMeta: {
+          sourceId: "external-library",
+          repoUrl: "https://example.com/external-library.git",
+          branch: "main",
+          relPath: ".github/agents/imported-generic-agent.md",
+        },
+      }, null, 2),
+    );
+    writeFileSync(join(skillsDir, "generic-guidance.md"), "# Skill\nGeneric guidance.");
+
+    const ctx = makeCtx({
+      repoRoot: root,
+      task: {
+        tags: ["workflow", "automation"],
+      },
+    });
+    const node = makeNode("action.resolve_executor", {
+      taskTitle: "feat(workflow): issue-state continuation loop workflow template",
+      taskDescription: "Design continuation-loop workflow template with maxTurns and stuckDetection for the agent runtime.",
+      repoRoot: root,
+      defaultSdk: "codex",
+    });
+
+    const result = await nt.execute(node, ctx);
+    expect(result.success).toBe(true);
+    expect(result.tier).not.toBe("profile");
+    expect(ctx.data.agentProfile).toBeUndefined();
+    expect(ctx.data.resolvedAgentProfile).toBeUndefined();
+    expect(ctx.data.resolvedSkillIds).toBeUndefined();
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("honors profile sdk/model preference when defined", async () => {
     const nt = getNodeType("action.resolve_executor");
     const root = mkdtempSync(join(tmpdir(), "wf-resolve-executor-profile-sdk-"));
@@ -2445,6 +2720,80 @@ describe("action.resolve_executor", () => {
     expect(safeDirectories.map((value) => resolve(value))).toContain(resolve("/tmp/opencode-repo"));
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
+  it("persists workflow topology for task-backed action.run_agent executions", async () => {
+    const handler = getNodeType("action.run_agent");
+    const taskStoreMod = await import("../task/task-store.mjs");
+    const originalStorePath = taskStoreMod.getStorePath();
+    const taskStoreDir = mkdtempSync(join(tmpdir(), "wf-run-agent-task-store-"));
+    const workingDir = mkdtempSync(join(tmpdir(), "wf-run-agent-task-cwd-"));
+    const storePath = join(taskStoreDir, "kanban-state.json");
+    const taskId = "TASK-RUN-AGENT-TOPOLOGY";
+
+    try {
+      taskStoreMod.configureTaskStore({ storePath });
+      await taskStoreMod._resetForTests();
+      taskStoreMod.addTask({ id: taskId, title: "Persist workflow topology", status: "inprogress" });
+
+      const ctx = makeCtx({
+        worktreePath: workingDir,
+        repoRoot: workingDir,
+        taskId,
+        task: {
+          id: taskId,
+          title: "Persist workflow topology",
+          branchName: "task-run-agent-topology",
+        },
+        _workflowId: "wf-task-topology",
+        _workflowName: "Task Topology Workflow",
+      });
+      ctx.id = "run-task-topology-1";
+
+      const launchEphemeralThread = vi.fn().mockResolvedValue({
+        success: true,
+        output: "topology synced",
+        sdk: "copilot",
+        items: [],
+        threadId: "agent-thread-1",
+      });
+      const mockEngine = {
+        services: {
+          agentPool: {
+            launchEphemeralThread,
+          },
+        },
+      };
+      const node = makeNode("action.run_agent", {
+        prompt: "Persist task workflow topology",
+        autoRecover: false,
+        failOnError: true,
+      }, "run-agent-task-topology");
+
+      const result = await handler.execute(node, ctx, mockEngine);
+
+      expect(result.success).toBe(true);
+      const storedTask = taskStoreMod.getTask(taskId);
+      expect(storedTask?.topology).toEqual(expect.objectContaining({
+        latestRunId: "run-task-topology-1",
+        workflowName: "Task Topology Workflow",
+      }));
+      expect(storedTask?.worktreePath).toBe(workingDir);
+      expect(String(storedTask?.topology?.sessionId || "")).not.toBe("");
+      expect(storedTask?.workflowRuns).toEqual([
+        expect.objectContaining({
+          runId: "run-task-topology-1",
+          workflowName: "Task Topology Workflow",
+        }),
+      ]);
+      expect(String(storedTask?.workflowRuns?.[0]?.sessionId || "")).not.toBe("");
+      expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+    } finally {
+      await taskStoreMod.waitForStoreWrites();
+      taskStoreMod.configureTaskStore({ storePath: originalStorePath });
+      await removeDirAfterLedgerReset(taskStoreDir);
+      rmSync(workingDir, { recursive: true, force: true });
+    }
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
   it("forwards OpenCode restart config through action.restart_agent execution", async () => {
     const handler = getNodeType("action.restart_agent");
     const ctx = makeCtx({
@@ -2551,6 +2900,290 @@ describe("action.acquire_worktree", () => {
     expect(ctx.data.baseBranch).toBe("main");
     expect(result.created).toBe(true);
     expect(existsSync(result.worktreePath)).toBe(true);
+  });
+
+  it("rebases a reused task worktree onto a local base branch override", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/local-base-reuse";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reuse-local-base-1",
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({}));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+    writeFileSync(join(first.worktreePath, "feature.txt"), "task work\n");
+    gitExec("git add feature.txt && git commit -m task-work", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    const overrideNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reuse-local-base-1",
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(overrideNode, makeCtx({}));
+    expect(second.success).toBe(true);
+    expect(second.reused).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    const headContainsLocalBase = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} HEAD`,
+      { cwd: second.worktreePath, encoding: "utf8" },
+    );
+    expect(headContainsLocalBase).toBe("");
+  });
+
+  it("rebases a newly attached task branch worktree onto a local base branch override", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/local-base-reattach";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reattach-local-base-1",
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({}));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+    writeFileSync(join(first.worktreePath, "feature.txt"), "task work\n");
+    gitExec("git add feature.txt && git commit -m task-work", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+    gitExec(`git worktree remove "${first.worktreePath}" --force`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const overrideNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "reattach-local-base-1",
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(overrideNode, makeCtx({}));
+    expect(second.success).toBe(true);
+    expect(second.created).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    const headContainsLocalBase = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} HEAD`,
+      { cwd: second.worktreePath, encoding: "utf8" },
+    );
+    expect(headContainsLocalBase).toBe("");
+  });
+
+  it("recreates large stale detached task branches from the latest base when no PR exists", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "blocked-stale-1";
+    const branch = "task/blockedstale1-stale-ref";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale ref",
+        status: "blocked",
+      },
+    }));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+
+    for (let index = 0; index < 205; index += 1) {
+      const name = `stale-${String(index).padStart(3, "0")}.txt`;
+      writeFileSync(join(first.worktreePath, name), `stale ${index}\n`);
+    }
+    gitExec("git add . && git commit -m stale-task-history", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    gitExec(`git show ${branch}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    gitExec(`git worktree remove "${first.worktreePath}" --force`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const secondNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(secondNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale ref",
+        status: "inprogress",
+        prNumber: null,
+        prUrl: null,
+      },
+    }));
+    expect(second.success).toBe(true);
+    expect(second.created).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    expect(existsSync(join(second.worktreePath, "stale-000.txt"))).toBe(false);
+
+    const recreatedBranchFile = gitExec(`git show ${branch}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(recreatedBranchFile).toContain("export async function loadCodex() {}");
+    const baseAncestor = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} ${branch}`,
+      { cwd: repoDir, encoding: "utf8" },
+    );
+    expect(baseAncestor).toBe("");
+
+    const backupBranches = gitExec("git branch --format=\"%(refname:short)\"", {
+      cwd: repoDir,
+      encoding: "utf8",
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => line.startsWith(`${branch}-recovery-`));
+    expect(backupBranches.length).toBe(1);
+    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(backupBranchFile).toContain("export { Codex }");
+  });
+
+  it("persists acquired worktree branch metadata back to the task store projection", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const ctx = makeCtx({
+      task: {
+        id: "task-persist-branch-1",
+        branchName: "task/old-stale-branch",
+        baseBranch: "origin/main",
+      },
+    });
+    const updateTask = vi.fn(async () => true);
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "task-persist-branch-1",
+      branch: "task/task-persist-branch-1-clean-branch",
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: { updateTask },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(updateTask).toHaveBeenCalledWith(
+      "task-persist-branch-1",
+      expect.objectContaining({
+        branchName: "task/task-persist-branch-1-clean-branch",
+        baseBranch: "main",
+        worktreePath: result.worktreePath,
+      }),
+    );
+    expect(ctx.data.task.branchName).toBe("task/task-persist-branch-1-clean-branch");
+    expect(ctx.data.task.baseBranch).toBe("main");
+    expect(ctx.data.task.worktreePath).toBe(result.worktreePath);
   });
 
   it("returns explicit non-retryable metadata for config validation failures", async () => {
@@ -2737,6 +3370,79 @@ describe("action.acquire_worktree", () => {
       taskId: "recreate-invalid-1",
     });
   }, 15000);
+
+  it.skipIf(process.platform !== "win32")("switches to a recovery path when a poisoned managed worktree directory cannot be removed", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/recreate-locked-managed";
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "recreate-locked-1",
+      branch,
+      baseBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+
+    const first = await nt.execute(node, makeCtx({}));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+
+    gitExec('git worktree remove "' + first.worktreePath + '" --force', {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const orphanGitDir = join(repoDir, ".git", "worktrees", first.worktreePath.split(/[/\\]/).pop());
+    mkdirSync(first.worktreePath, { recursive: true });
+    writeFileSync(join(first.worktreePath, ".git"), `gitdir: ${orphanGitDir.replace(/\\/g, "/")}\n`);
+    writeFileSync(join(first.worktreePath, "stale.txt"), "stale");
+
+    const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const second = await nt.execute(node, makeCtx({}));
+      expect(second.success).toBe(true);
+      expect(String(second.worktreePath).replace(/\\/g, "/"))
+        .not.toBe(String(first.worktreePath).replace(/\\/g, "/"));
+      expect(String(second.worktreePath).replace(/\\/g, "/"))
+        .toContain(`${String(first.worktreePath).replace(/\\/g, "/")}-recovery-`);
+
+      const isGit = gitExec("git rev-parse --is-inside-work-tree", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(isGit).toBe("true");
+
+      const recovery = readWorktreeRecoveryStatus(repoDir);
+      expect(recovery?.health).toBe("recovered");
+      expect(recovery?.recentEvents?.[0]).toMatchObject({
+        outcome: "recreated",
+        reason: "poisoned_worktree",
+        branch,
+        taskId: "recreate-locked-1",
+      });
+      expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("path_still_present");
+    } finally {
+      let exited = false;
+      holder.once("exit", () => {
+        exited = true;
+      });
+      try {
+        holder.kill();
+      } catch {
+        // Best-effort cleanup.
+      }
+      if (!exited) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+  }, 20000);
 
   it("recreates managed worktrees left in unresolved rebase state before reuse", async () => {
     const nt = getNodeType("action.acquire_worktree");
@@ -3877,6 +4583,8 @@ describe("action.detect_new_commits", () => {
     });
 
   beforeEach(() => {
+    noCommitCounts.clear();
+    skipUntil.clear();
     gitDir = mkdtempSync(join(tmpdir(), "wf-detect-commits-"));
     execGit("git init", { cwd: gitDir, stdio: "ignore" });
     execGit("git config --local user.email test@test.com", { cwd: gitDir, stdio: "ignore" });
@@ -3886,6 +4594,8 @@ describe("action.detect_new_commits", () => {
   });
 
   afterEach(() => {
+    noCommitCounts.clear();
+    skipUntil.clear();
     try { rmSync(gitDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
@@ -3899,6 +4609,105 @@ describe("action.detect_new_commits", () => {
     const result = await nt.execute(node, ctx);
     expect(result.success).toBe(true);
     expect(result.hasNewCommits).toBe(false);
+  });
+
+  it("records anti-thrash cooldown when no commits are produced", async () => {
+    const taskId = "task-no-commit-123";
+    const nt = getNodeType("action.detect_new_commits");
+    const head = execGit("git rev-parse HEAD", { cwd: gitDir, encoding: "utf8" }).trim();
+    const ctx = makeCtx({ taskId, _preExecHead: head });
+    const node = makeNode("action.detect_new_commits", {
+      worktreePath: gitDir,
+    });
+
+    const before = Date.now();
+    const result = await nt.execute(node, ctx);
+
+    expect(result.success).toBe(true);
+    expect(result.hasCommits).toBe(false);
+    expect(noCommitCounts.get(taskId)).toBe(1);
+    expect(skipUntil.get(taskId)).toBeGreaterThan(before);
+  });
+
+  it("persists anti-thrash cooldown fields to the task store when no commits are produced", async () => {
+    const taskId = "task-no-commit-persisted";
+    const nt = getNodeType("action.detect_new_commits");
+    const head = execGit("git rev-parse HEAD", { cwd: gitDir, encoding: "utf8" }).trim();
+    const updateTask = vi.fn().mockResolvedValue({});
+    const ctx = makeCtx({
+      taskId,
+      _preExecHead: head,
+      task: { id: taskId },
+    });
+    const node = makeNode("action.detect_new_commits", {
+      worktreePath: gitDir,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          updateTask,
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(updateTask).toHaveBeenCalledWith(
+      taskId,
+      expect.objectContaining({
+        consecutiveNoCommits: 1,
+        cooldownUntil: expect.any(String),
+      }),
+    );
+    expect(ctx.data.task.consecutiveNoCommits).toBe(1);
+    expect(typeof ctx.data.task.cooldownUntil).toBe("string");
+  });
+
+  it("marks no-commit retries exhausted at the retry cap", async () => {
+    const taskId = "task-no-commit-exhausted";
+    noCommitCounts.set(taskId, MAX_NO_COMMIT_ATTEMPTS - 1);
+    skipUntil.set(taskId, Date.now() + 60_000);
+    const nt = getNodeType("action.detect_new_commits");
+    const head = execGit("git rev-parse HEAD", { cwd: gitDir, encoding: "utf8" }).trim();
+    const updateTask = vi.fn().mockResolvedValue({});
+    const ctx = makeCtx({
+      taskId,
+      _preExecHead: head,
+      task: {
+        id: taskId,
+        consecutiveNoCommits: MAX_NO_COMMIT_ATTEMPTS - 1,
+        cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+    const node = makeNode("action.detect_new_commits", {
+      worktreePath: gitDir,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          updateTask,
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.hasCommits).toBe(false);
+    expect(result.retryExhausted).toBe(true);
+    expect(result.blockedReason).toBe("repeated_no_commit_runs");
+    expect(result.consecutiveNoCommits).toBe(MAX_NO_COMMIT_ATTEMPTS);
+    expect(result.cooldownUntil).toBeNull();
+    expect(noCommitCounts.get(taskId)).toBe(MAX_NO_COMMIT_ATTEMPTS);
+    expect(skipUntil.has(taskId)).toBe(false);
+    expect(updateTask).toHaveBeenCalledWith(
+      taskId,
+      expect.objectContaining({
+        consecutiveNoCommits: MAX_NO_COMMIT_ATTEMPTS,
+        cooldownUntil: null,
+      }),
+    );
+    expect(ctx.data.task.consecutiveNoCommits).toBe(MAX_NO_COMMIT_ATTEMPTS);
+    expect(ctx.data.task.cooldownUntil).toBeNull();
   });
 
   it("detects new commits when HEAD changed", async () => {
@@ -3917,6 +4726,48 @@ describe("action.detect_new_commits", () => {
     expect(result.hasCommits).toBe(true);
     expect(result.preExecHead).toBe(preHead);
     expect(result.postExecHead).not.toBe(preHead);
+  }, 15000);
+
+  it("clears persisted anti-thrash cooldown fields when commits are produced", async () => {
+    const taskId = "task-commit-clears-cooldown";
+    noCommitCounts.set(taskId, 2);
+    skipUntil.set(taskId, Date.now() + 60_000);
+    const nt = getNodeType("action.detect_new_commits");
+    const preHead = execGit("git rev-parse HEAD", { cwd: gitDir, encoding: "utf8" }).trim();
+    writeFileSync(join(gitDir, "new.txt"), "new content");
+    execGit("git add . && git commit -m new", { cwd: gitDir, stdio: "ignore" });
+    const updateTask = vi.fn().mockResolvedValue({});
+    const ctx = makeCtx({
+      taskId,
+      _preExecHead: preHead,
+      task: {
+        id: taskId,
+        consecutiveNoCommits: 2,
+        cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+    const node = makeNode("action.detect_new_commits", {
+      worktreePath: gitDir,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          updateTask,
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.hasCommits).toBe(true);
+    expect(noCommitCounts.has(taskId)).toBe(false);
+    expect(skipUntil.has(taskId)).toBe(false);
+    expect(updateTask).toHaveBeenCalledWith(taskId, {
+      consecutiveNoCommits: 0,
+      cooldownUntil: null,
+    });
+    expect(ctx.data.task.consecutiveNoCommits).toBe(0);
+    expect(ctx.data.task.cooldownUntil).toBeNull();
   }, 15000);
 
   it("stores results in ctx.data", async () => {
@@ -4050,6 +4901,8 @@ describe("action.push_branch", () => {
     expect(nt.schema.properties.rebaseBeforePush).toBeDefined();
     expect(nt.schema.properties.skipHooks).toBeDefined();
     expect(nt.schema.properties.skipHooks.default).toBe(false);
+    expect(nt.schema.properties.pushTimeout).toBeDefined();
+    expect(nt.schema.properties.pushTimeout.default).toBe(300000);
     expect(nt.schema.properties.emptyDiffGuard).toBeDefined();
     expect(nt.schema.properties.syncMainForModuleBranch).toBeDefined();
     expect(nt.schema.properties.requireApproval).toBeDefined();
@@ -4253,6 +5106,18 @@ describe("action.release_claim", () => {
 
 
 describe("action.update_task_status", () => {
+  beforeEach(() => {
+    completedWithPR.clear();
+    noCommitCounts.clear();
+    skipUntil.clear();
+  });
+
+  afterEach(() => {
+    completedWithPR.clear();
+    noCommitCounts.clear();
+    skipUntil.clear();
+  });
+
   it("falls back to ctx taskId when config taskId is unresolved", async () => {
     const nt = getNodeType("action.update_task_status");
     const updateTaskStatus = vi.fn().mockResolvedValue(true);
@@ -4474,6 +5339,46 @@ describe("action.update_task_status", () => {
       expect.objectContaining({ source: "workflow" }),
     );
   });
+
+  it("clears no-commit anti-thrash state when moving a task to inreview", async () => {
+    const nt = getNodeType("action.update_task_status");
+    const taskId = "task-review-clear-123";
+    const updateTaskStatus = vi.fn().mockResolvedValue(true);
+    const updateTask = vi.fn().mockResolvedValue(true);
+
+    noCommitCounts.set(taskId, 2);
+    skipUntil.set(taskId, Date.now() + 60_000);
+
+    const ctx = makeCtx({
+      taskId,
+      taskTitle: "Review-ready task",
+      branch: "task/task-review-clear-123",
+    });
+    ctx.getNodeOutput = vi.fn((id) => {
+      if (id !== "create-pr") return null;
+      return {
+        prNumber: 42,
+        prUrl: "https://github.com/virtengine/bosun/pull/42",
+        branch: "task/task-review-clear-123",
+      };
+    });
+    const node = makeNode("action.update_task_status", {
+      taskId: "{{taskId}}",
+      status: "inreview",
+      taskTitle: "{{taskTitle}}",
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: { updateTaskStatus, updateTask },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(completedWithPR.has(taskId)).toBe(true);
+    expect(noCommitCounts.has(taskId)).toBe(false);
+    expect(skipUntil.has(taskId)).toBe(false);
+  });
 });
 
 describe("template-task-lifecycle", () => {
@@ -4508,15 +5413,31 @@ describe("template-task-lifecycle", () => {
       "workflow-contract-validation", "build-prompt", "run-agent-plan", "run-agent-tests", "run-agent-implement",
       "plan-agent-ok", "tests-agent-ok", "implement-agent-ok",
       "set-blocked-agent-plan-failed", "set-blocked-agent-tests-failed", "set-blocked-agent-implement-failed",
-      "claim-stolen", "detect-commits", "has-commits",
+      "claim-stolen", "detect-commits", "has-commits", "no-commit-retries-exhausted",
       "pre-pr-validation", "pre-pr-validation-ok", "set-fix-summary", "auto-fix-validation", "retry-pre-pr-validation", "retry-validation-ok", "log-validation-failed", "set-blocked-validation-failed", "notify-validation-blocked",
       "push-branch", "push-ok", "build-pr-body", "create-pr", "set-inreview", "handoff-pr-progressor", "log-success",
-      "log-no-commits", "set-todo-cooldown", "build-pr-body-stolen", "create-pr-retry", "pr-created-stolen", "set-inreview-stolen", "handoff-pr-progressor-stolen", "log-claim-stolen-recovered",
+      "log-no-commits", "log-no-commits-exhausted", "set-todo-cooldown", "set-blocked-no-commits", "build-pr-body-stolen", "create-pr-retry", "pr-created-stolen", "set-inreview-stolen", "handoff-pr-progressor-stolen", "log-claim-stolen-recovered",
       "release-worktree", "release-claim", "release-slot",
     ];
     for (const id of required) {
       expect(ids, `missing node: ${id}`).toContain(id);
     }
+  });
+
+  it("blocks tasks when no-commit retries are exhausted", () => {
+    const t = getTemplate("template-task-lifecycle");
+    const noCommitGate = t.nodes.find((n) => n.id === "no-commit-retries-exhausted");
+    const blockedNode = t.nodes.find((n) => n.id === "set-blocked-no-commits");
+
+    expect(noCommitGate?.config?.expression).toContain("detect-commits");
+    expect(noCommitGate?.config?.expression).toContain("retryExhausted === true");
+    expect(blockedNode?.config?.status).toBe("blocked");
+    expect(blockedNode?.config?.blockedReason).toContain("detect-commits");
+    expect(t.edges.find((e) => e.source === "has-commits" && e.target === "no-commit-retries-exhausted")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "no-commit-retries-exhausted" && e.target === "log-no-commits-exhausted")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "no-commit-retries-exhausted" && e.target === "log-no-commits")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "log-no-commits-exhausted" && e.target === "set-blocked-no-commits")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "set-blocked-no-commits" && e.target === "join-outcomes")).toBeDefined();
   });
 
   it("does NOT reference resolvedSdk/resolvedModel in allocate-slot config", () => {
@@ -4540,6 +5461,7 @@ describe("template-task-lifecycle", () => {
 
   it("gates each agent phase before entering the next stage or cleanup", () => {
     const t = getTemplate("template-task-lifecycle");
+    const implementGate = t.nodes.find((n) => n.id === "implement-agent-ok");
     expect(t.edges.find((e) => e.source === "build-prompt" && e.target === "run-agent-plan")).toBeDefined();
     expect(t.edges.find((e) => e.source === "run-agent-plan" && e.target === "plan-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "plan-agent-ok" && e.target === "run-agent-tests")).toBeDefined();
@@ -4550,6 +5472,7 @@ describe("template-task-lifecycle", () => {
     expect(t.edges.find((e) => e.source === "run-agent-implement" && e.target === "implement-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "claim-stolen")).toBeDefined();
     expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "set-blocked-agent-implement-failed")).toBeDefined();
+    expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
   });
 
   it("push-branch uses merge-based push config", () => {
@@ -4586,6 +5509,8 @@ describe("template-task-lifecycle", () => {
 
   it("runs pre-PR validation before pushing", () => {
     const t = getTemplate("template-task-lifecycle");
+    const autoFixValidation = t.nodes.find((n) => n.id === "auto-fix-validation");
+    const autoFixValidation2 = t.nodes.find((n) => n.id === "auto-fix-validation-2");
     expect(t.edges.find((e) => e.source === "has-commits" && e.target === "pre-pr-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation" && e.target === "pre-pr-validation-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "push-branch")).toBeDefined();
@@ -4605,6 +5530,10 @@ describe("template-task-lifecycle", () => {
     expect(t.edges.find((e) => e.source === "set-blocked-validation-failed" && e.target === "notify-validation-blocked")).toBeDefined();
     expect(t.edges.find((e) => e.source === "notify-validation-blocked" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "push-branch" && e.target === "push-ok")).toBeDefined();
+    expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.stderr");
+    expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.output");
+    expect(autoFixValidation2?.config?.prompt).toContain("$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr");
+    expect(autoFixValidation2?.config?.prompt).toContain("$ctx.getNodeOutput('retry-pre-pr-validation')?.output");
   });
 
   it("passes repository scope metadata into build-prompt node", () => {
@@ -4621,6 +5550,7 @@ describe("template-task-lifecycle", () => {
     // outcomes -> join-outcomes
     expect(t.edges.find((e) => e.source === "log-success" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-todo-cooldown" && e.target === "join-outcomes")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "set-blocked-no-commits" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-todo-stolen" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "log-claim-stolen-recovered" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-todo-push-failed" && e.target === "join-outcomes")).toBeDefined();
