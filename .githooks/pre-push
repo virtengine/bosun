@@ -95,7 +95,7 @@ ADJACENCY_MAP=(
   "github/|github-*|hook-profiles*"
   "git/|git-*|branch-*|diff-stats*|conflict-*"
   "shell/|*-shell*|codex-shell*|gemini-shell*|opencode-shell*|shell-session-compat*|sdk-shell*|continue-detection*"
-  "tools/|apply-pr-suggestions*|demo-defaults-sync*|prepublish-check*|vitest-runner*"
+  "tools/|apply-pr-suggestions*|demo-defaults-sync*|sync-demo-ui*|prepublish-check*|vitest-runner*"
   "plugins/|windows-desktop-mcp-server*"
   "lib/|logger*|log-tail*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*|hot-path-runtime*"
   # Top-level runtime files that don't live in a subdirectory.

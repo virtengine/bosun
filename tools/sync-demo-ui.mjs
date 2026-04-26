@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +37,53 @@ function ensureParentDir(filePath) {
 
 function toPosixPath(filePath) {
   return String(filePath || "").replace(/\\/g, "/");
+}
+
+function extractExecFileErrorText(error) {
+  return [error?.stdout, error?.stderr, error?.message]
+    .map((value) => {
+      if (!value) return "";
+      if (Buffer.isBuffer(value)) return value.toString("utf8");
+      return String(value);
+    })
+    .join("\n")
+    .trim();
+}
+
+export function refreshMirroredUiGitIndex({ repoRoot = ROOT, targetRoot = TARGET_ROOT } = {}) {
+  const pathspec = toPosixPath(relative(repoRoot, targetRoot)) || ".";
+  const trackedPathsRaw = execFileSync("git", ["ls-files", "-z", "--", pathspec], {
+    cwd: repoRoot,
+    stdio: "pipe",
+  });
+  const trackedPaths = Buffer.from(trackedPathsRaw || "")
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+  if (trackedPaths.length === 0) {
+    return { attempted: false, refreshed: false, reason: "no_tracked_files" };
+  }
+  try {
+    execFileSync("git", ["update-index", "-q", "--refresh", "-z", "--stdin"], {
+      cwd: repoRoot,
+      input: `${trackedPaths.join("\0")}\0`,
+      stdio: "pipe",
+    });
+  } catch (error) {
+    const exitCode = Number(error?.status ?? error?.exitCode ?? 0);
+    if (exitCode === 1) {
+      return { attempted: true, refreshed: false, reason: "dirty_paths", details: extractExecFileErrorText(error) };
+    }
+    throw error;
+  }
+  const remainingStatus = execFileSync("git", ["status", "--porcelain", "--", pathspec], {
+    cwd: repoRoot,
+    stdio: "pipe",
+  }).toString("utf8").trim();
+  if (remainingStatus) {
+    return { attempted: true, refreshed: false, reason: "dirty_paths", details: remainingStatus };
+  }
+  return { attempted: true, refreshed: true, reason: "refreshed" };
 }
 
 function rewriteMirroredUiImports(sourceText, sourcePath, targetPath) {
@@ -111,6 +159,8 @@ export async function syncDemoUi({ silent = false } = {}) {
   for (const dirName of ROOT_DIRS) {
     syncDirectory(dirName, updatedPaths);
   }
+
+  refreshMirroredUiGitIndex();
 
   if (!silent && updatedPaths.length > 0) {
     console.log(`[demo-ui] synced ${updatedPaths.length} file(s)`);
