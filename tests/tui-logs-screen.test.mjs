@@ -10,6 +10,7 @@ import {
   buildExportFileName,
   buildSearchMatches,
   createDefaultLogsFilterState,
+  exportVisibleLogs,
   filterLogEntries,
   formatLogTimestamp,
   getActiveLogSources,
@@ -115,18 +116,27 @@ describe("tui logs screen helpers", () => {
     expect(nav.matches[0].entryId).toBe(nav.matches[1].entryId);
   });
 
-  it("formats timestamps with millisecond precision and export-safe file names", () => {
+  it("formats timestamps with millisecond precision and exports visible logs into the logs folder", () => {
     expect(formatLogTimestamp("2026-03-06T14:30:12.345Z")).toBe("14:30:12.345");
     expect(buildExportFileName(new Date("2026-03-06T14:30:00.000Z"))).toBe("bosun-2026-03-06T14-30-00.log");
 
     const dir = createTempDir();
-    const exportPath = join(dir, buildExportFileName(new Date("2026-03-06T14:30:00.000Z")));
     const contents = [
       "14:30:00.000 | INFO | monitor | first line",
       "14:30:01.000 | ERROR | workflow | second line",
-    ].join("\n");
+    ];
 
-    writeFileSync(exportPath, contents, "utf8");
-    expect(readFileSync(exportPath, "utf8")).toBe(contents);
+    const result = exportVisibleLogs({
+      cwd: dir,
+      entries: contents,
+      date: new Date("2026-03-06T14:30:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      fileName: "bosun-2026-03-06T14-30-00.log",
+      filePath: join(dir, "logs", "bosun-2026-03-06T14-30-00.log"),
+      relativePath: "logs/bosun-2026-03-06T14-30-00.log",
+    });
+    expect(readFileSync(result.filePath, "utf8")).toBe(contents.join("\n"));
   });
 });
