@@ -3083,6 +3083,48 @@ describe("action.acquire_worktree", () => {
     expect(existsSync(result.worktreePath)).toBe(true);
   });
 
+  it("bootstraps shared node_modules for created and reused task worktrees", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "task/bootstrap-node-modules";
+    mkdirSync(join(repoDir, "tools"), { recursive: true });
+    mkdirSync(join(repoDir, "node_modules", "vitest"), { recursive: true });
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({
+      name: "wf-acquire-worktree-node",
+      version: "1.0.0",
+      devDependencies: {
+        vitest: "^4.0.0",
+      },
+    }, null, 2));
+    writeFileSync(join(repoDir, "tools", "vitest-runner.mjs"), "export {};\n");
+    writeFileSync(join(repoDir, "node_modules", "vitest", "vitest.mjs"), "export {};\n");
+    gitExec("git add package.json tools/vitest-runner.mjs && git commit -m add-node-markers", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId: "bootstrap-node-modules-1",
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+
+    const first = await nt.execute(node, makeCtx({}));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+    expect(existsSync(join(first.worktreePath, "node_modules", "vitest", "vitest.mjs"))).toBe(true);
+
+    rmSync(join(first.worktreePath, "node_modules"), { recursive: true, force: true });
+
+    const second = await nt.execute(node, makeCtx({}));
+    expect(second.success).toBe(true);
+    expect(second.reused).toBe(true);
+    expect(existsSync(join(second.worktreePath, "node_modules", "vitest", "vitest.mjs"))).toBe(true);
+  });
+
   it("rebases a reused task worktree onto a local base branch override", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const branch = "task/local-base-reuse";
@@ -5850,7 +5892,7 @@ describe("template-task-lifecycle", () => {
       "claim-stolen", "detect-commits", "has-commits", "no-commit-retries-exhausted",
       "pre-pr-validation", "pre-pr-validation-ok", "set-fix-summary", "auto-fix-validation", "retry-pre-pr-validation", "retry-validation-ok", "log-validation-failed", "set-blocked-validation-failed", "notify-validation-blocked",
       "auto-commit-pre-push",
-      "push-branch", "push-ok", "build-pr-body", "create-pr", "set-inreview", "handoff-pr-progressor", "log-success",
+      "push-branch", "push-ok", "build-pr-body", "create-pr", "push-pr-linked", "set-inreview", "handoff-pr-progressor", "log-success",
       "log-no-commits", "log-no-commits-exhausted", "set-todo-cooldown", "set-blocked-no-commits", "build-pr-body-stolen", "create-pr-retry", "pr-created-stolen", "set-inreview-stolen", "handoff-pr-progressor-stolen", "log-claim-stolen-recovered",
       "release-worktree", "release-claim", "release-slot",
     ];
@@ -5942,6 +5984,21 @@ describe("template-task-lifecycle", () => {
     expect(t.edges.find((e) => e.source === "pr-created" && e.target === "set-todo-push-failed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-inreview" && e.target === "handoff-pr-progressor")).toBeDefined();
     expect(t.edges.find((e) => e.source === "handoff-pr-progressor" && e.target === "log-success")).toBeDefined();
+  });
+
+  it("reuses existing PR linkage when a clean rerun hits a commit-blocked push", () => {
+    const t = getTemplate("template-task-lifecycle");
+    const existingPrLinked = t.nodes.find((n) => n.id === "push-pr-linked");
+    const logSuccess = t.nodes.find((n) => n.id === "log-success");
+
+    expect(existingPrLinked?.config?.expression).toContain("$data?.prNumber");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.prUrl");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.task?.prNumber");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.task?.prUrl");
+    expect(t.edges.find((e) => e.source === "push-failure-blocking" && e.target === "push-pr-linked")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-inreview")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-blocked-push-failed")).toBeDefined();
+    expect(logSuccess?.config?.message).toContain("PR linked");
   });
 
   it("runs pre-PR validation before pushing", () => {

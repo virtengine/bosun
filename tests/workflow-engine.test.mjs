@@ -8947,6 +8947,50 @@ describe("Session chaining - action.run_agent", () => {
     expect(String(result.error || "")).toMatch(/delegated session produced no output/i);
   });
 
+  it("does not treat successful planning notes mentioning timeout helpers as blocked_by_env", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const planningOutput = [
+      "Plan only, no code changes:",
+      "",
+      "1. Trace the write throttle path.",
+      "2. Use existing timeout helpers if new async tests are slow.",
+      "",
+      "You’re still in **planning-only** phase, so the concrete plan is ready.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: planningOutput,
+      summary: planningOutput,
+      narrative: planningOutput,
+      sdk: "openai-native",
+      threadId: "thread-plan-timeout-helpers",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "a-plan-timeout-helpers",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.blockedReason).toBeNull();
+    expect(String(result.output || "")).toMatch(/timeout helpers/i);
+  });
+
   it("treats digest-only delegated no-output blockers as blocked_by_env", async () => {
     const handler = getNodeType("action.run_agent");
     expect(handler).toBeDefined();

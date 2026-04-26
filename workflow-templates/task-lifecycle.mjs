@@ -400,7 +400,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     // ── SUCCESS PATH: Log success ────────────────────────────────────────
     node("log-success", "notify.log", "Log Success", {
-      message: "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR created",
+      message: "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR linked",
       level: "info",
     }, { x: -120, y: 2650 }),
 
@@ -439,6 +439,10 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     node("push-failure-blocking", "condition.expression", "Push Failure Blocks?", {
       expression: "$ctx.getNodeOutput('push-branch')?.implementationDone === true",
     }, { x: 360, y: 2195, outputs: ["yes", "no"] }),
+
+    node("push-pr-linked", "condition.expression", "Existing PR Linked?", {
+      expression: "Boolean($data?.prNumber || $data?.prUrl || $data?.task?.prNumber || $data?.task?.prUrl)",
+    }, { x: 180, y: 2325, outputs: ["yes", "no"] }),
 
     node("set-blocked-push-failed", "action.update_task_status", "Set Blocked (Push Fail)", {
       taskId: "{{taskId}}",
@@ -695,7 +699,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     // Push failed path
     edge("push-ok", "push-failure-blocking", { condition: "$output?.result !== true", port: "no" }),
-    edge("push-failure-blocking", "set-blocked-push-failed", { condition: "$output?.result === true", port: "yes" }),
+    edge("push-failure-blocking", "push-pr-linked", { condition: "$output?.result === true", port: "yes" }),
+    edge("push-pr-linked", "set-inreview", { condition: "$output?.result === true", port: "yes" }),
+    edge("push-pr-linked", "set-blocked-push-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("push-failure-blocking", "set-todo-push-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("set-blocked-push-failed", "join-outcomes"),
     edge("set-todo-push-failed", "join-outcomes"),

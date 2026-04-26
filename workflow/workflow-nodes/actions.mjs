@@ -876,7 +876,7 @@ const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
   /connection refused/i,
   /connection reset/i,
   /network/i,
-  /timeout/i,
+  /\b(?:timed? out|etimedout|timeout(?:\s+(?:error|after|while|during|waiting)))\b/i,
   /enoent/i,
   /not authenticated/i,
   /missing credentials/i,
@@ -9941,6 +9941,7 @@ registerNodeType("action.acquire_worktree", {
           return null;
         }
         fixGitConfigCorruption(repoRoot);
+        bootstrapWorktreeForPath(repoRoot, candidatePath);
         ctx.data.worktreePath = candidatePath;
         ctx.data.baseBranch = baseBranch;
         ctx.data._worktreeCreated = false;
@@ -10192,6 +10193,7 @@ registerNodeType("action.acquire_worktree", {
         }
         if (!recreatedManagedWorktree && existsSync(worktreePath)) {
           fixGitConfigCorruption(repoRoot);
+          bootstrapWorktreeForPath(repoRoot, worktreePath);
           ctx.data.worktreePath = worktreePath;
           ctx.data.baseBranch = baseBranch;
           ctx.data._worktreeCreated = false;
@@ -10284,6 +10286,7 @@ registerNodeType("action.acquire_worktree", {
             createdFromExistingBranch = branchExistsLocally;
           } else {
             fixGitConfigCorruption(repoRoot);
+            bootstrapWorktreeForPath(repoRoot, attachedPath);
             ctx.data.worktreePath = attachedPath;
             ctx.data.baseBranch = baseBranch;
             ctx.data._worktreeCreated = false;
@@ -10343,6 +10346,7 @@ registerNodeType("action.acquire_worktree", {
               recreatedAttachedWorktree = true;
             } else {
               fixGitConfigCorruption(repoRoot);
+              bootstrapWorktreeForPath(repoRoot, attachedPath);
               ctx.data.worktreePath = attachedPath;
               ctx.data.baseBranch = baseBranch;
               ctx.data._worktreeCreated = false;
@@ -10408,6 +10412,7 @@ registerNodeType("action.acquire_worktree", {
       const worktreeGitDir = ensureCreatedManagedWorktree("post-create");
       clearWorktreeGitState(worktreeGitDir, repoRoot);
       fixGitConfigCorruption(repoRoot);
+      bootstrapWorktreeForPath(repoRoot, worktreePath);
 
       ctx.data.worktreePath = worktreePath;
       ctx.data.baseBranch = baseBranch;

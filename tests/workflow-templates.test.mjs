@@ -683,6 +683,20 @@ describe("workflow-templates", () => {
     expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
   });
 
+  it("task lifecycle reuses an existing PR when push is commit-blocked", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+    const existingPrLinked = template.nodes.find((n) => n.id === "push-pr-linked");
+    const logSuccess = template.nodes.find((n) => n.id === "log-success");
+    expect(existingPrLinked?.type).toBe("condition.expression");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.prNumber");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.task?.prUrl");
+    expect(template.edges.find((e) => e.source === "push-failure-blocking" && e.target === "push-pr-linked")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-inreview")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-blocked-push-failed")).toBeDefined();
+    expect(logSuccess?.config?.message).toContain("PR linked");
+  });
+
   it("continuation loop template exposes configurable turn/stuck controls", () => {
     const template = getTemplate("template-continuation-loop");
     expect(template).toBeDefined();
