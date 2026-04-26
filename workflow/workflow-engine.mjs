@@ -4031,6 +4031,26 @@ export class WorkflowEngine extends EventEmitter {
     return null;
   }
 
+  _resolveEnabledInstalledWorkflow(workflowId) {
+    if (!this._loaded) this.load();
+    const requestedId = String(workflowId || "").trim();
+    if (!requestedId) return null;
+    const candidates = [];
+    for (const workflow of this._workflows.values()) {
+      if (workflow?.metadata?.installedFrom !== requestedId) continue;
+      const hydrated = hydrateWorkflowDefinition(workflow, { strict: true });
+      if (hydrated.enabled === false) continue;
+      candidates.push(hydrated);
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((left, right) => {
+      const leftUpdatedAt = Date.parse(left?.metadata?.updatedAt || "") || 0;
+      const rightUpdatedAt = Date.parse(right?.metadata?.updatedAt || "") || 0;
+      return rightUpdatedAt - leftUpdatedAt;
+    });
+    return candidates[0];
+  }
+
   /** Save (create or update) a workflow definition */
   save(def) {
     def = hydrateWorkflowDefinition(def, { strict: true });
@@ -4227,7 +4247,13 @@ export class WorkflowEngine extends EventEmitter {
   async execute(workflowId, inputData = {}, opts = {}) {
     const persistedDef = this.get(workflowId);
     if (!persistedDef) throw new Error(`${TAG} Workflow "${workflowId}" not found`);
-    const def = hydrateWorkflowDefinition(persistedDef, { strict: true });
+    let def = hydrateWorkflowDefinition(persistedDef, { strict: true });
+    if (def.enabled === false && !opts.force) {
+      const installedAlias = this._resolveEnabledInstalledWorkflow(workflowId);
+      if (installedAlias) {
+        def = installedAlias;
+      }
+    }
     if (def.enabled === false && !opts.force) {
       throw new Error(`${TAG} Workflow "${def.name}" is disabled`);
     }

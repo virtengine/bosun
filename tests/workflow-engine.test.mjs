@@ -6880,6 +6880,72 @@ describe("action.execute_workflow", () => {
     expect(engine.get(childDetail.workflowId)?.id).toBe(childWorkflow.id);
   }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
 
+  it("sync mode prefers enabled installed workflows when the exact template record is disabled", async () => {
+    const disabledTemplateWorkflow = makeSimpleWorkflow(
+      [
+        { id: "disabled-trigger", type: "trigger.manual", label: "Disabled Template Trigger", config: {} },
+      ],
+      [],
+      { id: "template-disabled-child", name: "Disabled Template Child" },
+    );
+    disabledTemplateWorkflow.enabled = false;
+    const installedWorkflow = makeSimpleWorkflow(
+      [
+        { id: "installed-trigger", type: "trigger.manual", label: "Installed Template Trigger", config: {} },
+      ],
+      [],
+      { id: "child-enabled-installed", name: "Enabled Installed Child" },
+    );
+    installedWorkflow.metadata = {
+      ...(installedWorkflow.metadata || {}),
+      installedFrom: "template-disabled-child",
+      updatedAt: "2026-04-26T00:00:00.000Z",
+    };
+
+    const parentWorkflow = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start Parent", config: {} },
+        {
+          id: "invoke-child",
+          type: "action.execute_workflow",
+          label: "Invoke Disabled Template Alias",
+          config: {
+            workflowId: "template-disabled-child",
+            outputVariable: "childSummary",
+          },
+        },
+      ],
+      [{ id: "e1", source: "trigger", target: "invoke-child" }],
+      { id: "parent-disabled-template-alias", name: "Parent Disabled Template Alias Workflow" },
+    );
+
+    engine.save(disabledTemplateWorkflow);
+    engine.save(installedWorkflow);
+    engine.save(parentWorkflow);
+
+    expect(engine.get("template-disabled-child")?.id).toBe("template-disabled-child");
+
+    const parentCtx = await engine.execute(parentWorkflow.id, {});
+
+    expect(parentCtx.errors).toEqual([]);
+    const output = parentCtx.getNodeOutput("invoke-child");
+    expect(output).toMatchObject({
+      success: true,
+      queued: false,
+      mode: "sync",
+      workflowId: "template-disabled-child",
+      status: "completed",
+      errorCount: 0,
+    });
+    expect(parentCtx.data.childSummary).toEqual(output);
+
+    const childDetail = engine.getRunDetail(output.runId);
+    expect(childDetail).toBeTruthy();
+    expect(childDetail.workflowId).toBe("template-disabled-child");
+    expect(Object.keys(childDetail.detail?.nodeStatuses || {})).toContain("installed-trigger");
+    expect(Object.keys(childDetail.detail?.nodeStatuses || {})).not.toContain("disabled-trigger");
+  }, SLOW_WORKFLOW_ENGINE_EXECUTE_WORKFLOW_SYNC_TEST_TIMEOUT_MS);
+
   it("decorates run detail with planner timeline and proof bundle surfaces", () => {
     const runId = "run-proof-bundle-1";
     const workflowId = "wf-proof-bundle";
