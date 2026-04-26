@@ -5989,12 +5989,18 @@ describe("template-task-lifecycle", () => {
   it("reuses existing PR linkage when a clean rerun hits a commit-blocked push", () => {
     const t = getTemplate("template-task-lifecycle");
     const existingPrLinked = t.nodes.find((n) => n.id === "push-pr-linked");
+    const handoff = t.nodes.find((n) => n.id === "handoff-pr-progressor");
     const logSuccess = t.nodes.find((n) => n.id === "log-success");
 
     expect(existingPrLinked?.config?.expression).toContain("$data?.prNumber");
     expect(existingPrLinked?.config?.expression).toContain("$data?.prUrl");
     expect(existingPrLinked?.config?.expression).toContain("$data?.task?.prNumber");
     expect(existingPrLinked?.config?.expression).toContain("$data?.task?.prUrl");
+    expect(handoff?.config?.input?.prNumber).toContain("$data?.task?.prNumber");
+    expect(handoff?.config?.input?.prUrl).toContain("$data?.task?.prUrl");
+    expect(handoff?.config?.input?.repo).toContain("$data?.task?.repo");
+    expect(handoff?.config?.input?.repo).toContain("$data?.task?.repoSlug");
+    expect(handoff?.config?.input?.repo).toContain("$data?.task?.repository");
     expect(t.edges.find((e) => e.source === "push-failure-blocking" && e.target === "push-pr-linked")).toBeDefined();
     expect(t.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-inreview")).toBeDefined();
     expect(t.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-blocked-push-failed")).toBeDefined();

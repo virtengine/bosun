@@ -392,9 +392,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
         taskTitle: "{{taskTitle}}",
         branch: "{{branch}}",
         baseBranch: "{{baseBranch}}",
-        prNumber: "{{$ctx.getNodeOutput('create-pr')?.prNumber ?? $data?.prNumber ?? null}}",
-        prUrl: "{{$ctx.getNodeOutput('create-pr')?.prUrl || $data?.prUrl || ''}}",
-        repo: "{{$ctx.getNodeOutput('create-pr')?.repoSlug || $data?.repo || $data?.repoSlug || $data?.repository || ''}}",
+        prNumber: "{{$ctx.getNodeOutput('create-pr')?.prNumber ?? $data?.prNumber ?? $data?.task?.prNumber ?? null}}",
+        prUrl: "{{$ctx.getNodeOutput('create-pr')?.prUrl || $data?.prUrl || $data?.task?.prUrl || ''}}",
+        repo: "{{$ctx.getNodeOutput('create-pr')?.repoSlug || $data?.repo || $data?.repoSlug || $data?.repository || $data?.task?.repo || $data?.task?.repoSlug || $data?.task?.repository || ''}}",
       },
     }, { x: -120, y: 2520 }),
 
