@@ -1286,7 +1286,7 @@ describe("kanban-adapter internal backend", () => {
     expect(reloaded.meta?.prLinkageUpdatedAt).toBe("2026-03-22T12:00:00.000Z");
   });
 
-  it("exposes internal timeline and workflow tracking fields on task detail", async () => {
+  it("exposes internal timeline, workflow tracking, and planner provenance on task detail", async () => {
     const adapter = getKanbanAdapter();
 
     addTask({
@@ -1297,7 +1297,15 @@ describe("kanban-adapter internal backend", () => {
       workflowRuns: [{ workflowId: "wf-1", runId: "run-1", status: "completed", endedAt: "2026-03-08T10:05:00.000Z" }],
       statusHistory: [{ status: "inprogress", timestamp: "2026-03-08T09:55:00.000Z", source: "workflow" }],
       lastActivityAt: "2026-03-08T10:05:00.000Z",
-      meta: {},
+      meta: {
+        plannerProvenance: {
+          plannerRunId: "planner-1",
+          workflowRunId: "run-1",
+          generatedAt: "2026-03-08T10:00:00.000Z",
+          sourceLabels: ["scheduled-replenishment", "workflow"],
+          plannerNodeId: "run-planner",
+        },
+      },
     });
 
     const task = await adapter.getTask("internal-detail-1");
@@ -1310,6 +1318,13 @@ describe("kanban-adapter internal backend", () => {
     expect(task.lastActivityAt).toBe("2026-03-08T10:05:00.000Z");
     expect(Array.isArray(task.meta.workflowRuns)).toBe(true);
     expect(Array.isArray(task.meta.timeline)).toBe(true);
+    expect(task.meta?.plannerProvenance).toMatchObject({
+      plannerRunId: "planner-1",
+      workflowRunId: "run-1",
+      generatedAt: "2026-03-08T10:00:00.000Z",
+      sourceLabels: ["scheduled-replenishment", "workflow"],
+      plannerNodeId: "run-planner",
+    });
   });
 
   it("recovers title/description from legacy malformed planner payloads", async () => {

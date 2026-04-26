@@ -2112,11 +2112,12 @@ function attachWorkflowTaskMetadata(ctx, taskData = {}, extra = {}) {
     existingMeta.workflow && typeof existingMeta.workflow === "object" && !Array.isArray(existingMeta.workflow)
       ? { ...existingMeta.workflow }
       : {};
+  const resolvedWorkflowRunId = String(extra.runId || ctx?.id || workflowMeta.runId || "").trim() || undefined;
   const nextWorkflowMeta = {
     ...workflowMeta,
     workflowId: String(extra.workflowId || ctx?.data?._workflowId || workflowMeta.workflowId || "").trim() || undefined,
     workflowName: String(extra.workflowName || ctx?.data?._workflowName || workflowMeta.workflowName || "").trim() || undefined,
-    runId: String(extra.runId || ctx?.id || workflowMeta.runId || "").trim() || undefined,
+    runId: resolvedWorkflowRunId,
     rootRunId: String(extra.rootRunId || ctx?.data?._workflowRootRunId || workflowMeta.rootRunId || "").trim() || undefined,
     parentRunId: String(extra.parentRunId || ctx?.data?._workflowParentRunId || workflowMeta.parentRunId || "").trim() || undefined,
     sourceNodeId: String(extra.sourceNodeId || workflowMeta.sourceNodeId || "").trim() || undefined,
@@ -2128,6 +2129,55 @@ function attachWorkflowTaskMetadata(ctx, taskData = {}, extra = {}) {
     return payload;
   }
   existingMeta.workflow = nextWorkflowMeta;
+
+  const plannerMeta =
+    existingMeta.planner && typeof existingMeta.planner === "object" && !Array.isArray(existingMeta.planner)
+      ? existingMeta.planner
+      : null;
+  const existingPlannerProvenance =
+    existingMeta.plannerProvenance && typeof existingMeta.plannerProvenance === "object" && !Array.isArray(existingMeta.plannerProvenance)
+      ? { ...existingMeta.plannerProvenance }
+      : {};
+  const plannerSourceLabels = new Set(
+    (Array.isArray(existingPlannerProvenance.sourceLabels)
+      ? existingPlannerProvenance.sourceLabels
+      : [])
+      .map((label) => String(label || "").trim())
+      .filter(Boolean),
+  );
+  plannerSourceLabels.add("workflow");
+  if (plannerMeta) plannerSourceLabels.add("planner");
+  if (extra.sourceNodeType) plannerSourceLabels.add(String(extra.sourceNodeType || "").trim());
+  const nextPlannerProvenance = {
+    ...existingPlannerProvenance,
+    plannerRunId:
+      String(
+        extra.plannerRunId ||
+        plannerMeta?.runId ||
+        plannerMeta?.plannerRunId ||
+        plannerMeta?.nodeRunId ||
+        existingPlannerProvenance.plannerRunId ||
+        "",
+      ).trim() || undefined,
+    workflowRunId:
+      String(extra.workflowRunId || resolvedWorkflowRunId || existingPlannerProvenance.workflowRunId || "").trim() || undefined,
+    generatedAt:
+      String(
+        extra.generatedAt ||
+        plannerMeta?.generatedAt ||
+        plannerMeta?.createdAt ||
+        existingPlannerProvenance.generatedAt ||
+        new Date().toISOString(),
+      ).trim() || undefined,
+    plannerNodeId:
+      String(extra.plannerNodeId || plannerMeta?.nodeId || existingPlannerProvenance.plannerNodeId || "").trim() || undefined,
+    sourceNodeId:
+      String(extra.sourceNodeId || existingPlannerProvenance.sourceNodeId || "").trim() || undefined,
+    sourceNodeType:
+      String(extra.sourceNodeType || existingPlannerProvenance.sourceNodeType || "").trim() || undefined,
+    sourceLabels: [...plannerSourceLabels],
+  };
+  existingMeta.plannerProvenance = nextPlannerProvenance;
   payload.meta = existingMeta;
   return payload;
 }

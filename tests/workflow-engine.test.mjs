@@ -5078,6 +5078,17 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
         risk: "low",
         repo_areas: ["workflow"],
       }),
+      workflow: expect.objectContaining({
+        runId: expect.any(String),
+      }),
+      plannerProvenance: expect.objectContaining({
+        plannerNodeId: "run-planner",
+        sourceNodeId: "materialize",
+        sourceNodeType: "action.materialize_planner_tasks",
+        workflowRunId: expect.any(String),
+        generatedAt: expect.any(String),
+        sourceLabels: ["workflow", "planner", "materialize_planner_tasks"],
+      }),
     }),
   }));
 });
