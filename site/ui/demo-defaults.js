@@ -23138,8 +23138,8 @@
         "workflow-first",
         "core"
       ],
-      "nodeCount": 83,
-      "edgeCount": 99,
+      "nodeCount": 84,
+      "edgeCount": 101,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.task_available",
@@ -24087,7 +24087,7 @@
           "type": "notify.log",
           "label": "Log Success",
           "config": {
-            "message": "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR created",
+            "message": "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR linked",
             "level": "info"
           },
           "position": {
@@ -24192,6 +24192,22 @@
           "position": {
             "x": 360,
             "y": 2195
+          },
+          "outputs": [
+            "yes",
+            "no"
+          ]
+        },
+        {
+          "id": "push-pr-linked",
+          "type": "condition.expression",
+          "label": "Existing PR Linked?",
+          "config": {
+            "expression": "Boolean($data?.prNumber || $data?.prUrl || $data?.task?.prNumber || $data?.task?.prUrl)"
+          },
+          "position": {
+            "x": 180,
+            "y": 2325
           },
           "outputs": [
             "yes",
@@ -25058,11 +25074,25 @@
           "condition": "$output?.result !== true"
         },
         {
-          "id": "push-failure-blocking->set-blocked-push-failed",
+          "id": "push-failure-blocking->push-pr-linked",
           "source": "push-failure-blocking",
-          "target": "set-blocked-push-failed",
+          "target": "push-pr-linked",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
+        },
+        {
+          "id": "push-pr-linked->set-inreview",
+          "source": "push-pr-linked",
+          "target": "set-inreview",
+          "sourcePort": "yes",
+          "condition": "$output?.result === true"
+        },
+        {
+          "id": "push-pr-linked->set-blocked-push-failed",
+          "source": "push-pr-linked",
+          "target": "set-blocked-push-failed",
+          "sourcePort": "no",
+          "condition": "$output?.result !== true"
         },
         {
           "id": "push-failure-blocking->set-todo-push-failed",
@@ -47658,7 +47688,7 @@
       "description": "Complete task execution pipeline: poll for tasks → claim → worktree → agent dispatch → commit detection → PR creation → status transition. Replaces the monolithic TaskExecutor.executeTask() method with a composable workflow DAG.",
       "category": "task-execution",
       "enabled": true,
-      "nodeCount": 83,
+      "nodeCount": 84,
       "trigger": "trigger.task_available",
       "variables": {
         "maxParallel": 3,
@@ -48572,7 +48602,7 @@
           "type": "notify.log",
           "label": "Log Success",
           "config": {
-            "message": "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR created",
+            "message": "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR linked",
             "level": "info"
           },
           "position": {
@@ -48677,6 +48707,22 @@
           "position": {
             "x": 360,
             "y": 2195
+          },
+          "outputs": [
+            "yes",
+            "no"
+          ]
+        },
+        {
+          "id": "push-pr-linked",
+          "type": "condition.expression",
+          "label": "Existing PR Linked?",
+          "config": {
+            "expression": "Boolean($data?.prNumber || $data?.prUrl || $data?.task?.prNumber || $data?.task?.prUrl)"
+          },
+          "position": {
+            "x": 180,
+            "y": 2325
           },
           "outputs": [
             "yes",
@@ -49543,11 +49589,25 @@
           "condition": "$output?.result !== true"
         },
         {
-          "id": "push-failure-blocking->set-blocked-push-failed",
+          "id": "push-failure-blocking->push-pr-linked",
           "source": "push-failure-blocking",
-          "target": "set-blocked-push-failed",
+          "target": "push-pr-linked",
           "sourcePort": "yes",
           "condition": "$output?.result === true"
+        },
+        {
+          "id": "push-pr-linked->set-inreview",
+          "source": "push-pr-linked",
+          "target": "set-inreview",
+          "sourcePort": "yes",
+          "condition": "$output?.result === true"
+        },
+        {
+          "id": "push-pr-linked->set-blocked-push-failed",
+          "source": "push-pr-linked",
+          "target": "set-blocked-push-failed",
+          "sourcePort": "no",
+          "condition": "$output?.result !== true"
         },
         {
           "id": "push-failure-blocking->set-todo-push-failed",
