@@ -42,6 +42,8 @@ let noCommitCounts;
 let skipUntil;
 let buildCommandTerminationDiagnostic;
 let deriveManagedWorktreeDirName;
+let getSessionTracker;
+let resetSessionTrackerSingleton;
 
 if (SPAWN_BLOCKED) {
   describe("workflow-task-lifecycle", () => {
@@ -61,6 +63,7 @@ if (SPAWN_BLOCKED) {
   } = await import("../workflow/workflow-nodes/transforms.mjs"));
   ({ buildCommandTerminationDiagnostic } = await import("../workflow/workflow-nodes/actions.mjs"));
   ({ deriveManagedWorktreeDirName } = await import("../workflow/workflow-nodes/definitions.mjs"));
+  ({ getSessionTracker, _resetSingleton: resetSessionTrackerSingleton } = await import("../infra/session-tracker.mjs"));
 
 // -- Helpers -----------------------------------------------------------------
 
@@ -2898,6 +2901,120 @@ describe("action.resolve_executor", () => {
     }));
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
+  it("disables completion-signal enforcement by default for plan-mode run_agent", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Concrete implementation plan",
+      sdk: "copilot",
+      items: [],
+      threadId: "plan-thread-1",
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Plan the work",
+      mode: "plan",
+      failOnError: true,
+    }, "run-agent-plan-defaults");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(execWithRetry.mock.calls[0][1]).toEqual(expect.objectContaining({
+      maxContinues: 24,
+      requireCompletionSignal: false,
+    }));
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("respects explicit completion-signal enforcement for plan-mode run_agent", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Completion: planning complete.",
+      sdk: "copilot",
+      items: [],
+      threadId: "plan-thread-2",
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Plan the work",
+      mode: "plan",
+      requireCompletionSignal: true,
+      failOnError: true,
+    }, "run-agent-plan-explicit-completion");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(execWithRetry.mock.calls[0][1]).toEqual(expect.objectContaining({
+      requireCompletionSignal: true,
+    }));
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("uses ephemeral launches by default for plan-mode run_agent passes", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "should-not-be-used",
+      sdk: "copilot",
+      items: [],
+      threadId: "plan-thread-retry",
+    });
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Concrete implementation plan",
+      sdk: "copilot",
+      items: [],
+      threadId: "plan-thread-ephemeral",
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+          launchEphemeralThread,
+          launchOrResumeThread: vi.fn(),
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Plan the work",
+      mode: "plan",
+      failOnError: true,
+    }, "run-agent-plan-ephemeral-default");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+    expect(execWithRetry).not.toHaveBeenCalled();
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
   it("uses completion-aware default continuation prompt when resuming an existing session", async () => {
     const handler = getNodeType("action.run_agent");
     const continueSession = vi.fn().mockResolvedValue({
@@ -3004,6 +3121,92 @@ describe("action.resolve_executor", () => {
       await taskStoreMod.waitForStoreWrites();
       taskStoreMod.configureTaskStore({ storePath: originalStorePath });
       await removeDirAfterLedgerReset(taskStoreDir);
+      rmSync(workingDir, { recursive: true, force: true });
+    }
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("records openai-native step-finish events into workflow-linked tracker sessions", async () => {
+    const handler = getNodeType("action.run_agent");
+    const workingDir = mkdtempSync(join(tmpdir(), "wf-run-agent-openai-tracker-"));
+    const taskId = "TASK-RUN-AGENT-OPENAI-TRACKER";
+    resetSessionTrackerSingleton({ persistDir: null });
+    const tracker = getSessionTracker();
+
+    try {
+      const ctx = makeCtx({
+        worktreePath: workingDir,
+        repoRoot: workingDir,
+        taskId,
+        task: {
+          id: taskId,
+          title: "OpenAI native tracker visibility",
+          branchName: "task-openai-native-tracker",
+        },
+        _workflowId: "wf-openai-native-tracker",
+        _workflowName: "OpenAI Native Tracker Workflow",
+      });
+      ctx.id = "run-openai-native-tracker-1";
+
+      const launchEphemeralThread = vi.fn(async (_prompt, _cwd, _timeoutMs, extra = {}) => {
+        extra.onEvent?.({
+          type: "session.step.finish",
+          sessionId: "test-openai-native-session",
+          text: "Applied immediate checkpoint persistence.",
+          toolCalls: [
+            {
+              name: "view",
+              arguments: { path: "workflow/workflow-engine.mjs" },
+            },
+          ],
+          toolResults: [
+            {
+              output: "ok",
+            },
+          ],
+        });
+        return {
+          success: true,
+          output: "Applied immediate checkpoint persistence.",
+          sdk: "openai-native",
+          items: [],
+          threadId: null,
+        };
+      });
+      const mockEngine = {
+        services: {
+          agentPool: {
+            launchEphemeralThread,
+          },
+        },
+      };
+      const node = makeNode("action.run_agent", {
+        prompt: "Implement immediate checkpoint persistence",
+        autoRecover: false,
+        failOnError: true,
+      }, "run-agent-tests");
+
+      const result = await handler.execute(node, ctx, mockEngine);
+
+      expect(result.success).toBe(true);
+      const delegateSessionId = `${taskId}:agent:${ctx.id}:run-agent-tests:turn`;
+      const delegateSession = tracker.getSessionById(delegateSessionId);
+      expect(delegateSession?.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool_call",
+          content: expect.stringContaining("view"),
+        }),
+        expect.objectContaining({
+          type: "tool_result",
+          content: expect.stringContaining("ok"),
+        }),
+        expect.objectContaining({
+          type: "agent_message",
+          content: "Applied immediate checkpoint persistence.",
+        }),
+      ]));
+      expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+    } finally {
+      resetSessionTrackerSingleton({ persistDir: null });
       rmSync(workingDir, { recursive: true, force: true });
     }
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
@@ -3660,6 +3863,107 @@ describe("action.acquire_worktree", () => {
       encoding: "utf8",
     });
     expect(backupBranchFile).toContain("stale 0");
+  });
+
+  it("recreates restart-selected task branches even when the stale diff is small", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "restart-small-1";
+    const branch = "task/restartsmall-clean-restart";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Restart stale branch",
+        status: "inprogress",
+        prNumber: null,
+        prUrl: null,
+      },
+    }));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+
+    writeFileSync(join(first.worktreePath, "small-stale-a.txt"), "stale a\n");
+    writeFileSync(join(first.worktreePath, "small-stale-b.txt"), "stale b\n");
+    gitExec("git add small-stale-a.txt small-stale-b.txt && git commit -m stale-task-history", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m main-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const secondNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(secondNode, makeCtx({
+      _triggerSource: "simulate.task.restart",
+      task: {
+        id: taskId,
+        title: "Restart stale branch",
+        status: "inprogress",
+        prNumber: null,
+        prUrl: null,
+      },
+    }));
+    expect(second.success).toBe(true);
+    expect(second.created).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    expect(existsSync(join(second.worktreePath, "small-stale-a.txt"))).toBe(false);
+    expect(existsSync(join(second.worktreePath, "small-stale-b.txt"))).toBe(false);
+
+    const secondHead = gitExec("git rev-parse HEAD", {
+      cwd: second.worktreePath,
+      encoding: "utf8",
+    }).trim();
+    const mainHead = gitExec("git rev-parse main", {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).trim();
+    expect(secondHead).toBe(mainHead);
+
+    const backupBranches = gitExec("git branch --format=\"%(refname:short)\"", {
+      cwd: repoDir,
+      encoding: "utf8",
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => line.startsWith(`${branch}-recovery-`));
+    expect(backupBranches.length).toBe(1);
+    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:small-stale-a.txt`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(backupBranchFile).toContain("stale a");
   });
 
   it("persists acquired worktree branch metadata back to the task store projection", async () => {

@@ -603,7 +603,7 @@ describe("task simulate CLI", () => {
     expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-mode-1", { mode: "replan_from_failed" });
   });
 
-  it("resume keeps the cached run id even when a newer same-task non-completed run exists", async () => {
+  it("resume prefers a newer same-lineage task run over the cached completed root run", async () => {
     const repoRoot = makeTempDir();
     const task = { id: "task-newer", title: "Use latest interrupted run" };
     const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
@@ -626,14 +626,147 @@ describe("task simulate CLI", () => {
       retryCtx,
       ctx: retryCtx,
       runHistory: [
-        { runId: "run-latest-running", taskId: task.id, status: "running", startedAt: "2026-04-26T15:05:00.000Z" },
-        { runId: "run-stale-completed", taskId: task.id, status: "completed", endedAt: "2026-04-26T14:59:00.000Z" },
+        {
+          runId: "run-latest-running",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-stale-completed",
+          retryOf: "run-stale-completed",
+          status: "running",
+          startedAt: "2026-04-26T15:05:00.000Z",
+          latestCheckpoint: { eventCursor: 25, updatedAt: "2026-04-26T15:07:00.000Z" },
+        },
+        {
+          runId: "run-stale-completed",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-stale-completed",
+          status: "completed",
+          endedAt: "2026-04-26T14:59:00.000Z",
+          latestCheckpoint: { eventCursor: 12, updatedAt: "2026-04-26T14:59:00.000Z" },
+        },
       ],
     });
 
     await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
 
-    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-stale-completed", { mode: "from_failed" });
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-latest-running", { mode: "from_failed" });
+  });
+
+  it("resume prefers the most advanced same-lineage frontier over a newer but less progressed retry", async () => {
+    const repoRoot = makeTempDir();
+    const task = { id: "task-progress", title: "Use most advanced interrupted run" };
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        runId: "run-root",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: "2026-04-26T15:00:00.000Z",
+      }),
+      "utf8",
+    );
+    const retryCtx = buildContext({ runId: "run-retried-frontier", taskId: task.id, taskTitle: task.title });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      retryCtx,
+      ctx: retryCtx,
+      runHistory: [
+        {
+          runId: "run-newer-less-progressed",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-root",
+          retryOf: "run-root",
+          status: "running",
+          startedAt: "2026-04-26T15:10:00.000Z",
+          latestCheckpoint: { eventCursor: 20, updatedAt: "2026-04-26T15:11:00.000Z" },
+        },
+        {
+          runId: "run-older-more-progressed",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-root",
+          retryOf: "run-root",
+          status: "running",
+          startedAt: "2026-04-26T15:05:00.000Z",
+          latestCheckpoint: { eventCursor: 51, updatedAt: "2026-04-26T15:12:00.000Z" },
+        },
+        {
+          runId: "run-root",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-root",
+          status: "completed",
+          startedAt: "2026-04-26T15:00:00.000Z",
+          endedAt: "2026-04-26T15:04:00.000Z",
+          latestCheckpoint: { eventCursor: 18, updatedAt: "2026-04-26T15:04:00.000Z" },
+        },
+      ],
+    });
+
+    await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
+
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-older-more-progressed", { mode: "from_failed" });
+  });
+
+  it("resume calls getRunHistory with the live engine binding before choosing a newer lineage run", async () => {
+    const repoRoot = makeTempDir();
+    const task = { id: "task-bound", title: "Bound run history" };
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        runId: "run-root-bound",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: "2026-04-26T15:00:00.000Z",
+      }),
+      "utf8",
+    );
+    const retryCtx = buildContext({ runId: "run-bound-retry", taskId: task.id, taskTitle: task.title });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      retryCtx,
+      ctx: retryCtx,
+      runHistory: [],
+    });
+    runtime.engine._history = [
+      {
+        runId: "run-frontier-bound",
+        workflowId: "workflow-task-lifecycle",
+        taskId: task.id,
+        rootRunId: "run-root-bound",
+        retryOf: "run-root-bound",
+        status: "running",
+        startedAt: "2026-04-26T15:05:00.000Z",
+        latestCheckpoint: { eventCursor: 33, updatedAt: "2026-04-26T15:06:00.000Z" },
+      },
+      {
+        runId: "run-root-bound",
+        workflowId: "workflow-task-lifecycle",
+        taskId: task.id,
+        rootRunId: "run-root-bound",
+        status: "completed",
+        startedAt: "2026-04-26T15:00:00.000Z",
+        endedAt: "2026-04-26T15:04:00.000Z",
+      },
+    ];
+    runtime.engine.getRunHistory = vi.fn(function getRunHistoryBound() {
+      return this._history;
+    });
+
+    await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
+
+    expect(runtime.engine.getRunHistory).toHaveBeenCalledWith("workflow-task-lifecycle", 200);
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-frontier-bound", { mode: "from_failed" });
   });
 
   it("resume updates the state file with the new retry run ID", async () => {

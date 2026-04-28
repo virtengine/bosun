@@ -3743,6 +3743,26 @@ export class WorkflowEngine extends EventEmitter {
       || String(acquireWorktreeOutput.worktreePath || "").trim(),
     );
     if (!hadClaimOrWorktreeState) return null;
+    const persistedClaimToken = String(
+      data?.claimToken
+      || data?._claimToken
+      || claimTaskOutput?.claimToken
+      || "",
+    ).trim();
+    if (persistedClaimToken) {
+      return null;
+    }
+    const taskId = this._sanitizeTaskId(
+      data?.taskId
+      || data?._workflowTaskId
+      || claimTaskOutput.taskId
+      || claimTaskOutput.id
+      || claimOkOutput.taskId
+      || claimOkOutput.id,
+    );
+    if (taskId && this._getLiveLocalTaskClaim(taskId)) {
+      return null;
+    }
     return Array.isArray(def?.nodes) && def.nodes.some((node) => String(node?.id || "").trim() === "claim-task")
       ? "claim-task"
       : null;

@@ -9,6 +9,7 @@ Resume the Bosun local operations monitor for this workspace in continuous mode.
 Mandatory behavior:
 - Read the latest three `.bosun-monitor/session*.md` notes before touching runtime state.
 - Rebuild the open-blocker list from the newest note and continue from the narrowest unresolved blocker.
+- Confirm the global `bosun` npm link points at `D:/source/repos/virtengine-gh/bosun`; run `npm link` from this repo first if it still points at an older checkout.
 - Resume with `bosun simulate task <task-id>`, `bosun simulate task restart`, or `bosun simulate task` before using the full daemon as the main monitor path.
 - Re-check simulator progress first. Only re-check daemon health, active paths, live task progress, workflow-run behavior, and recent non-monitor throughput after the simulator proves a real task can complete end to end or when you need minimal comparison evidence for the blocker.
 - Inspect at least one real task path end to end before declaring health, including task execution, PR creation, review, fixes if review finds issues, and merge.

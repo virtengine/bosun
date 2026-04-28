@@ -121,10 +121,22 @@ const ENV_BLOCK_PATTERNS = [
 const COMMIT_BLOCK_PATTERNS = [
   /commit blocked/i,
   /implementation_done_commit_blocked/i,
-  /git commit/i,
-  /git push/i,
+];
+
+const COMMIT_BLOCK_CONTEXT_PATTERNS = [
   /pre-push hook/i,
-  /hook/i,
+  /\bgit commit\b/i,
+  /\bgit push\b/i,
+];
+
+const COMMIT_BLOCK_FAILURE_PATTERNS = [
+  /\bfailed\b/i,
+  /\bdeclined\b/i,
+  /\brejected\b/i,
+  /\bblocked\b/i,
+  /\btimeout\b/i,
+  /\betimedout\b/i,
+  /not completed/i,
 ];
 
 function isTerminalSessionStatus(status) {
@@ -179,6 +191,12 @@ function classifyBlockedSessionText(text) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
   if (COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return "implementation_done_commit_blocked";
+  }
+  if (
+    COMMIT_BLOCK_CONTEXT_PATTERNS.some((pattern) => pattern.test(normalized))
+    && COMMIT_BLOCK_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
     return "implementation_done_commit_blocked";
   }
   if (REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {

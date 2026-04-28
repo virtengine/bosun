@@ -478,6 +478,10 @@ function buildHarnessNativeDefinitions(options = {}) {
             enum: ["overwrite", "append"],
             description: "Write mode. Defaults to overwrite.",
           },
+          overwrite_existing: {
+            type: "boolean",
+            description: "When true, allows replacing an existing file with full new content.",
+          },
         },
         required: ["path", "content"],
       },
@@ -490,6 +494,14 @@ function buildHarnessNativeDefinitions(options = {}) {
           const existing = await readFile(target.absolute, "utf8").catch(() => "");
           await writeFile(target.absolute, `${existing}${content}`, "utf8");
         } else {
+          const overwriteExisting = args.overwrite_existing === true;
+          const existing = await readFile(target.absolute, "utf8").catch(() => null);
+          if (existing !== null && !overwriteExisting) {
+            throw new Error(
+              `write_file refuses to overwrite existing file: ${target.relativePath}. `
+              + "Use edit_file for targeted edits, or pass overwrite_existing=true for an intentional full rewrite.",
+            );
+          }
           await writeFile(target.absolute, content, "utf8");
         }
         return {

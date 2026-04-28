@@ -1,10 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { buildToolPolicyContract } from "../agent/tool-contract.mjs";
 import { createToolRunner } from "../agent/harness/tool-runner.mjs";
 import { createToolOrchestrator } from "../agent/tool-orchestrator.mjs";
 import { resolveToolRetryPolicy } from "../agent/tool-retry-policy.mjs";
 import { buildToolExecutionEnvelope } from "../agent/tool-runtime-context.mjs";
+
+const cleanupDirs = [];
+
+afterEach(() => {
+  for (const dir of cleanupDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("tool orchestrator", () => {
   it("builds a canonical execution envelope with lineage metadata", () => {
@@ -201,6 +212,7 @@ describe("tool orchestrator", () => {
           filePath: expect.any(Object),
           content: expect.any(Object),
           mode: expect.any(Object),
+          overwrite_existing: expect.any(Object),
         }),
       }),
     }));
@@ -246,6 +258,39 @@ describe("tool orchestrator", () => {
     await expect(runner.runTool("echo_tool", { ok: true })).resolves.toEqual({
       echoed: { ok: true },
     });
+  });
+
+  it("refuses to overwrite existing files through the native write_file tool unless overwrite_existing=true", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "bosun-write-file-"));
+    cleanupDirs.push(workspaceRoot);
+    const targetPath = join(workspaceRoot, "src", "example.mjs");
+    mkdirSync(join(workspaceRoot, "src"), { recursive: true });
+    writeFileSync(targetPath, "export const value = 1;\n", "utf8");
+
+    const orchestrator = createToolOrchestrator();
+
+    await expect(orchestrator.execute("write_file", {
+      path: "src/example.mjs",
+      content: "export const value = 2;\n",
+    }, {
+      repoRoot: workspaceRoot,
+    })).rejects.toThrow(/refuses to overwrite existing file/i);
+
+    expect(readFileSync(targetPath, "utf8")).toBe("export const value = 1;\n");
+
+    await expect(orchestrator.execute("write_file", {
+      path: "src/example.mjs",
+      content: "export const value = 2;\n",
+      overwrite_existing: true,
+    }, {
+      repoRoot: workspaceRoot,
+    })).resolves.toMatchObject({
+      ok: true,
+      path: expect.stringMatching(/src[\\/]example\.mjs$/),
+      mode: "overwrite",
+    });
+
+    expect(readFileSync(targetPath, "utf8")).toBe("export const value = 2;\n");
   });
 
   it("prefers exact tool ids over aliases when both are present", async () => {

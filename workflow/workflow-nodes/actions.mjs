@@ -887,15 +887,21 @@ const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
 const WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS = [
   /implementation_done_commit_blocked/i,
   /commit blocked/i,
+];
+
+const WORKFLOW_AGENT_COMMIT_CONTEXT_PATTERNS = [
   /pre-push hook/i,
-  /git push/i,
-  /git commit/i,
+  /\bgit push\b/i,
+  /\bgit commit\b/i,
 ];
 
 const WORKFLOW_AGENT_COMMIT_FOLLOWUP_FAILURE_PATTERNS = [
+  /pre-push hook (?:declined|failed|rejected)/i,
   /push attempt failed/i,
   /push failed/i,
   /failed (?:to )?push/i,
+  /git push failed/i,
+  /git commit failed/i,
   /pr update not completed/i,
   /spawnsync git etimedout/i,
   /git etimedout/i,
@@ -924,8 +930,17 @@ function isWorkflowAgentCommitBlockedText(text = "") {
   if (WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return true;
   }
+  const hasCommitContext = WORKFLOW_AGENT_COMMIT_CONTEXT_PATTERNS.some(
+    (pattern) => pattern.test(normalized),
+  );
+  const hasFollowupFailure = WORKFLOW_AGENT_COMMIT_FOLLOWUP_FAILURE_PATTERNS.some(
+    (pattern) => pattern.test(normalized),
+  );
+  if (hasCommitContext && hasFollowupFailure) {
+    return true;
+  }
   return WORKFLOW_AGENT_IMPLEMENTED_WORK_PATTERNS.some((pattern) => pattern.test(normalized))
-    && WORKFLOW_AGENT_COMMIT_FOLLOWUP_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
+    && hasFollowupFailure;
 }
 
 function parseWorkflowAgentTimeoutMs(value, fallback = null) {
@@ -979,6 +994,109 @@ function isMeaningfulWorkflowAgentEvent(event) {
   if (Array.isArray(event.toolCalls) && event.toolCalls.length > 0) return true;
   if (Array.isArray(event.toolResults) && event.toolResults.length > 0) return true;
   return false;
+}
+
+function buildWorkflowSessionTrackerEvents(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return [];
+  const type = String(event.type || "").trim();
+  if (!type) return [];
+  const timestamp = String(event.timestamp || new Date().toISOString()).trim() || new Date().toISOString();
+  const lifecycle = type.replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").toLowerCase() || undefined;
+  const text = String(event.text || event.content || "").trim();
+  const toolCalls = Array.isArray(event.toolCalls) ? event.toolCalls : [];
+  const toolResults = Array.isArray(event.toolResults) ? event.toolResults : [];
+  const mapped = [];
+  const pushToolCall = (name, argsValue = null) => {
+    const label = String(name || "").trim() || "tool";
+    let content = `${label}(…)`;
+    if (argsValue != null) {
+      let serialized = "";
+      try {
+        serialized = typeof argsValue === "string" ? argsValue : JSON.stringify(argsValue);
+      } catch {
+        serialized = String(argsValue);
+      }
+      const trimmedArgs = trimLogText(serialized, 180);
+      if (trimmedArgs) {
+        content = `${label}(${trimmedArgs})`;
+      }
+    }
+    mapped.push({
+      role: "system",
+      type: "tool_call",
+      content,
+      timestamp,
+      meta: {
+        toolName: label,
+        lifecycle,
+      },
+    });
+  };
+  const pushToolResult = (name, outputValue = "") => {
+    const label = String(name || "").trim() || "tool";
+    let renderedOutput = "";
+    try {
+      renderedOutput = typeof outputValue === "string" ? outputValue : JSON.stringify(outputValue);
+    } catch {
+      renderedOutput = String(outputValue || "");
+    }
+    const trimmedOutput = trimLogText(renderedOutput, 220);
+    mapped.push({
+      role: "system",
+      type: "tool_result",
+      content: trimmedOutput ? `${label}: ${trimmedOutput}` : `${label}: completed`,
+      timestamp,
+      meta: {
+        toolName: label,
+        lifecycle,
+      },
+    });
+  };
+
+  if (type === "function_call") {
+    pushToolCall(event.name || event.tool_name || event.toolName, event.arguments || event.input || null);
+  } else if (type === "function_call_output" || type === "tool_output") {
+    pushToolResult(event.name || event.tool_name || event.toolName, event.output || event.result || "");
+  } else if (type === "assistant_message" && text) {
+    mapped.push({
+      role: "assistant",
+      type: "agent_message",
+      content: text,
+      timestamp,
+      meta: { lifecycle },
+    });
+  } else if (type === "session.step.finish") {
+    for (const toolCall of toolCalls) {
+      pushToolCall(toolCall?.name || toolCall?.tool_name || toolCall?.toolName, toolCall?.arguments ?? toolCall?.input ?? null);
+    }
+    for (let index = 0; index < toolResults.length; index += 1) {
+      const toolResult = toolResults[index];
+      const fallbackToolCall = toolCalls[index] || null;
+      pushToolResult(
+        fallbackToolCall?.name || fallbackToolCall?.tool_name || fallbackToolCall?.toolName || toolResult?.name || toolResult?.tool_name || toolResult?.toolName,
+        toolResult?.output ?? toolResult?.result ?? "",
+      );
+    }
+    if (text) {
+      mapped.push({
+        role: "assistant",
+        type: "agent_message",
+        content: text,
+        timestamp,
+        meta: { lifecycle },
+      });
+    }
+  } else if ((type === "session.stream.complete" || type === "session.turn.complete") && text) {
+    mapped.push({
+      role: "assistant",
+      type: "agent_message",
+      content: text,
+      timestamp,
+      meta: { lifecycle },
+    });
+  }
+
+  return mapped;
 }
 
 function collectWorkflowAgentResultFragments(result = {}) {
@@ -3279,7 +3397,11 @@ registerNodeType("action.run_agent", {
         const parsedMaxContinues = Number(node.config?.maxContinues);
         const requireCompletionSignal =
           options.requireCompletionSignal
-          ?? parseBooleanSetting(node.config?.requireCompletionSignal, true);
+          ?? (
+            node.config?.requireCompletionSignal == null && effectiveMode === "plan"
+              ? false
+              : parseBooleanSetting(node.config?.requireCompletionSignal, true)
+          );
         const sessionRetries = Number.isFinite(parsedSessionRetries)
           ? Math.max(0, Math.floor(parsedSessionRetries))
           : 2;
@@ -3309,6 +3431,11 @@ registerNodeType("action.run_agent", {
                 : {}),
             }
           : undefined;
+        const pinResolvedSdk = Boolean(
+          (sdk === "auto" && resolvedSdkFromContext)
+          || providerOverride
+          || providerConfigOverride,
+        );
         const maxRetainedEvents = Number.isFinite(Number(node.config?.maxRetainedEvents))
           ? Math.max(10, Math.min(500, Math.trunc(Number(node.config.maxRetainedEvents))))
           : WORKFLOW_AGENT_EVENT_PREVIEW_LIMIT;
@@ -3546,15 +3673,23 @@ registerNodeType("action.run_agent", {
               clearFirstEventGuard();
             }
             if (tracker && trackedTaskId) {
-              tracker.recordEvent(trackedTaskId, {
-                ...(event && typeof event === "object" ? event : { content: String(event || "") }),
-                _sessionType: trackedSessionType,
-              });
-              if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
-                tracker.recordEvent(delegateTrackerSessionId, {
-                  ...(event && typeof event === "object" ? event : { content: String(event || "") }),
-                  _sessionType: "delegate",
+              const trackerEvents = buildWorkflowSessionTrackerEvents(event);
+              const eventsToRecord = trackerEvents.length > 0
+                ? trackerEvents
+                : [{
+                    ...(event && typeof event === "object" ? event : { content: String(event || "") }),
+                  }];
+              for (const trackerEvent of eventsToRecord) {
+                tracker.recordEvent(trackedTaskId, {
+                  ...trackerEvent,
+                  _sessionType: trackedSessionType,
                 });
+                if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
+                  tracker.recordEvent(delegateTrackerSessionId, {
+                    ...trackerEvent,
+                    _sessionType: "delegate",
+                  });
+                }
               }
             }
             if (!line || line === lastStreamLog) return;
@@ -3612,6 +3747,7 @@ registerNodeType("action.run_agent", {
               result = await withFirstEventGuard(() => harnessAgentService.continueSession(sessionId, continuePrompt, {
                 timeout: timeoutMs,
                 cwd,
+                ...(pinResolvedSdk ? { pinSdk: true } : {}),
                 ...(sdkOverride ? { sdk: sdkOverride } : {}),
                 ...(modelOverride ? { model: modelOverride } : {}),
                 ...(providerOverride ? { provider: providerOverride } : {}),
@@ -3686,6 +3822,7 @@ registerNodeType("action.run_agent", {
               ...(workflowParentSessionId ? { parentSessionId: workflowParentSessionId } : {}),
               ...(workflowRootSessionId ? { rootSessionId: workflowRootSessionId } : {}),
               metadata: launchExtra.metadata,
+              ...(pinResolvedSdk ? { pinSdk: true } : {}),
               ...(sdkOverride ? { sdk: sdkOverride } : {}),
               ...(modelOverride ? { model: modelOverride } : {}),
               ...(providerOverride ? { provider: providerOverride } : {}),
@@ -3699,9 +3836,14 @@ registerNodeType("action.run_agent", {
               onSlotAcquired: launchExtra.onSlotAcquired,
               env: agentGitEnv,
             };
-            const preferEphemeralLaunch = autoRecover === false
+            const preferEphemeralLaunch = (
+              effectiveMode === "plan"
+              || (
+                autoRecover === false
+                && typeof agentPool?.launchOrResumeThread !== "function"
+              )
+            )
               && !sessionId
-              && typeof agentPool?.launchOrResumeThread !== "function"
               && typeof agentPool?.launchEphemeralThread === "function";
             try {
               engine?._recordLedgerEvent?.({
@@ -9810,6 +9952,23 @@ registerNodeType("action.acquire_worktree", {
     if (!currentTaskSnapshot && typeof kanban?.getTask === "function") {
       currentTaskSnapshot = await kanban.getTask(taskId).catch(() => null);
     }
+      const shouldForceFreshTaskBranchOnRestart = () => {
+        if (String(ctx.data?._triggerSource || "").trim() !== "simulate.task.restart") return false;
+        if (!currentTaskSnapshot || typeof currentTaskSnapshot !== "object") return false;
+        if (taskHasPrReference(currentTaskSnapshot)) return false;
+        if (!baseBranch || baseBranch === branch) return false;
+        const canonicalBranchName = deriveTaskBranch({
+          id: taskId,
+          title: pickTaskString(
+            currentTaskSnapshot?.title,
+            ctx.data?.task?.title,
+            ctx.data?.taskDetail?.title,
+            ctx.data?.taskInfo?.title,
+            "",
+          ),
+        });
+        return branchMatchesTaskOwnership(branch, taskId, canonicalBranchName);
+      };
       const shouldRecreateStaleTaskBranch = () => {
         if (!currentTaskSnapshot || typeof currentTaskSnapshot !== "object") return false;
         if (taskHasPrReference(currentTaskSnapshot)) return false;
@@ -9979,17 +10138,23 @@ registerNodeType("action.acquire_worktree", {
         return true;
       };
       const invalidateStaleReusableTaskBranch = (candidatePath, phaseLabel) => {
-        if (!shouldRecreateStaleTaskBranch()) return false;
+        const forceFreshOnRestart = shouldForceFreshTaskBranchOnRestart();
+        if (!forceFreshOnRestart && !shouldRecreateStaleTaskBranch()) return false;
         if (!isManagedBosunWorktree(candidatePath, repoRoot)) {
           throw new Error(
-            `Attached worktree for ${branch} is stale and exceeds the task branch diff limit: ${candidatePath}`,
+            forceFreshOnRestart
+              ? `Attached worktree for ${branch} must be recreated for simulator restart: ${candidatePath}`
+              : `Attached worktree for ${branch} is stale and exceeds the task branch diff limit: ${candidatePath}`,
           );
         }
-        ctx.log(node.id, `Discarding stale managed task branch (${phaseLabel}): ${candidatePath}`.trim());
+        ctx.log(
+          node.id,
+          `${forceFreshOnRestart ? "Discarding restart-selected task branch" : "Discarding stale managed task branch"} (${phaseLabel}): ${candidatePath}`.trim(),
+        );
         recoveryState.recreated = true;
         recoveryState.phase = phaseLabel;
         recoveryState.worktreePath = candidatePath;
-        recoveryState.detectedIssues.add("stale_task_branch");
+        recoveryState.detectedIssues.add(forceFreshOnRestart ? "restart_requested" : "stale_task_branch");
         resetManagedWorktree(repoRoot, candidatePath, resolveWorktreeGitDir(candidatePath));
         return true;
       };
@@ -10329,7 +10494,8 @@ registerNodeType("action.acquire_worktree", {
       let createdFromExistingBranch = false;
       let branchExistsLocally = localBranchExists();
       const recreateStaleDetachedTaskBranchIfNeeded = () => {
-        if (!branchExistsLocally || !shouldRecreateStaleTaskBranch()) return false;
+        const forceFreshOnRestart = shouldForceFreshTaskBranchOnRestart();
+        if (!branchExistsLocally || (!forceFreshOnRestart && !shouldRecreateStaleTaskBranch())) return false;
         const recoveryBranch = buildTaskBranchRecoveryName(branch);
         execGitArgsSync(["branch", recoveryBranch, branch], {
           cwd: repoRoot,
@@ -10346,7 +10512,7 @@ registerNodeType("action.acquire_worktree", {
         branchExistsLocally = false;
         ctx.log(
           node.id,
-          `Recreating stale detached task branch from ${baseBranch}: ${branch} (backup: ${recoveryBranch})`,
+          `${forceFreshOnRestart ? "Recreating restart-selected detached task branch" : "Recreating stale detached task branch"} from ${baseBranch}: ${branch} (backup: ${recoveryBranch})`,
         );
         return true;
       };
@@ -12803,6 +12969,53 @@ registerNodeType("action.auto_commit_dirty", {
   async execute(node, ctx) {
     const worktreePath = cfgOrCtx(node, ctx, "worktreePath");
     const taskId = cfgOrCtx(node, ctx, "taskId") || ctx.data?.taskId || "unknown";
+    const nodeOutputs = ctx?.nodeOutputs;
+    const summarizeDirtyFiles = (porcelainText = "") =>
+      String(porcelainText || "")
+        .split(/\r?\n/)
+        .map((line) => String(line || "").trimEnd())
+        .filter(Boolean)
+        .slice(0, 20)
+        .map((line) => {
+          const match = line.match(/^..?[\s]+(.+)$/);
+          return match?.[1]?.trim() || line.trim();
+        });
+    const agentReportedNoChanges = (result) => {
+      if (!result || typeof result !== "object") return false;
+      const text = [result.summary, result.output, result.narrative]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join("\n");
+      if (!text) return false;
+      const reportsAlreadyImplemented =
+        isWorkflowAgentImplementationAlreadyPresent(text)
+        || /feature already implemented in this worktree/i.test(text)
+        || /task was already implemented/i.test(text);
+      const reportsNoAdditionalChanges =
+        /no additional code changes?(?: were)? required/i.test(text)
+        || /no additional code changes?(?: or commit)?(?: were)? required/i.test(text)
+        || /no new code changes?(?: were)? required/i.test(text)
+        || /no additional code changes? (?:were )?necessary/i.test(text)
+        || /no additional changes? (?:were )?necessary/i.test(text)
+        || /nothing new to commit/i.test(text)
+        || /no diff in [`'"][^`'"]+[`'"]/i.test(text);
+      const reportsNoRepoModification =
+        /no repositories modified/i.test(text)
+        || /repositories touched[\s\S]*?\bnone modified\b/i.test(text);
+      return (
+        (reportsAlreadyImplemented && reportsNoAdditionalChanges)
+        || (reportsNoAdditionalChanges && reportsNoRepoModification)
+      );
+    };
+    const noChangeEvidence = (() => {
+      for (const nodeId of ["run-agent-implement", "run-agent-tests", "run-agent-plan"]) {
+        const result = nodeOutputs?.get?.(nodeId);
+        if (agentReportedNoChanges(result)) {
+          return { nodeId, result };
+        }
+      }
+      return null;
+    })();
 
     if (!worktreePath) {
       ctx.log(node.id, "auto_commit_dirty: no worktreePath — skipping");
@@ -12826,6 +13039,21 @@ registerNodeType("action.auto_commit_dirty", {
     }
 
     const dirtyCount = porcelain.split("\n").filter(Boolean).length;
+    const dirtyFiles = summarizeDirtyFiles(porcelain);
+    if (noChangeEvidence) {
+      ctx.log(
+        node.id,
+        `Agent output from ${noChangeEvidence.nodeId} reported no code changes required; leaving ${dirtyCount} dirty file(s) uncommitted`,
+      );
+      return {
+        success: true,
+        committed: false,
+        reason: "agent_reported_no_changes",
+        dirtyCount,
+        dirtyFiles,
+        sourceNodeId: noChangeEvidence.nodeId,
+      };
+    }
     ctx.log(node.id, `Found ${dirtyCount} dirty file(s) — auto-committing`);
 
     // Stage everything

@@ -5254,25 +5254,76 @@ const RETRY_OUTPUT_PLACEHOLDERS = new Set([
 
 const EXPLICIT_COMPLETION_LABEL_RE = /^\s*(?:completion(?:\s+message)?|task complete|done|completed)\s*:/im;
 const EXPLICIT_COMPLETION_SIGNAL_RE = /^\s*task[_ ]complete\s*$/im;
+const SESSION_COMPLETE_SIGNAL_RE = /^\s*session\.(?:turn|stream)\.complete\s*:/im;
+const PLAIN_COMPLETION_PREFIX_RE = /^\s*(?:done|complete|completed|finished)\.?(?:\s|$)/i;
+const TERMINAL_NOOP_SUMMARY_RE = /^\s*(?:implemented and verified\.|confirmed\.\s+(?:the task work is already done|no new work remains|no additional work was needed|no additional code changes were required)|nothing new to do here\b)/im;
+const TERMINAL_NOOP_INDICATORS = [
+  /\balready implemented\b/i,
+  /\balready complete(?:d)?\b/i,
+  /\balready present\b/i,
+  /\bnothing left to change\b/i,
+  /\bnothing remains to implement\b/i,
+  /\bno further action (?:is needed|required)\b/i,
+  /\bno additional (?:changes|code changes|work) (?:were|was) (?:required|needed)\b/i,
+  /\bno new work remains\b/i,
+  /\bno new commit (?:created|required)\b/i,
+  /\bworkspace is clean\b/i,
+  /\bno uncommitted diff\b/i,
+  /\bgit status --short\b.*\bclean\b/i,
+];
 
 function hasExplicitCompletionSignal(result = {}) {
+  const hasLifecycleCompletionSignal = Array.isArray(result?.items)
+    && result.items.some((item) => {
+      const lifecycle = String(item?.meta?.lifecycle || item?.lifecycle || "").trim().toLowerCase();
+      return lifecycle === "session_turn_complete"
+        || lifecycle === "session_stream_complete"
+        || lifecycle === "session_completed";
+    });
   const outputText = [
     result?.output,
     result?.summary,
     result?.narrative,
     result?.message,
+    ...(Array.isArray(result?.stream) ? result.stream : []),
   ]
     .map((fragment) => String(fragment || ""))
     .filter(Boolean)
     .join("\n");
   const itemText = Array.isArray(result?.items)
     ? result.items
-      .map((item) => String(item?.text || item?.message || item?.content || ""))
+      .map((item) => {
+        if (!item || typeof item !== "object") return String(item || "");
+        const contentText = Array.isArray(item.content)
+          ? item.content.map((entry) => String(entry?.text || "")).filter(Boolean).join("\n")
+          : String(item.content || "");
+        return [
+          item.text,
+          item.message,
+          item.summary,
+          contentText,
+        ]
+          .map((fragment) => String(fragment || ""))
+          .filter(Boolean)
+          .join("\n");
+      })
       .join("\n")
     : "";
   const text = `${outputText}\n${itemText}`.trim();
-  if (!text) return false;
-  return EXPLICIT_COMPLETION_LABEL_RE.test(text) || EXPLICIT_COMPLETION_SIGNAL_RE.test(text);
+  const noopIndicatorCount = text
+    ? TERMINAL_NOOP_INDICATORS.reduce(
+      (count, pattern) => count + (pattern.test(text) ? 1 : 0),
+      0,
+    )
+    : 0;
+  if (!text) return hasLifecycleCompletionSignal;
+  return SESSION_COMPLETE_SIGNAL_RE.test(text)
+    || hasLifecycleCompletionSignal
+    || EXPLICIT_COMPLETION_LABEL_RE.test(text)
+    || EXPLICIT_COMPLETION_SIGNAL_RE.test(text)
+    || PLAIN_COMPLETION_PREFIX_RE.test(text)
+    || TERMINAL_NOOP_SUMMARY_RE.test(text)
+    || noopIndicatorCount >= 2;
 }
 
 const RETRY_RECONNECT_PATTERNS = [
@@ -5413,6 +5464,7 @@ export async function execWithRetry(prompt, options = {}) {
     metadata,
     onEvent,
     onAbortControllerReplaced,
+    pinSdk = false,
     slotOwnerKey,
     slotMeta,
     slotMaxParallel,
@@ -5525,6 +5577,7 @@ export async function execWithRetry(prompt, options = {}) {
       metadata,
       onEvent,
       abortController,
+      pinSdk,
       ignoreSdkCooldown: attempt > 1,
       slotOwnerKey,
       slotMeta,

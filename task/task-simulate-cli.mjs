@@ -308,8 +308,150 @@ function readSimulationState(statePath) {
   }
 }
 
+function normalizeRunStatus(status) {
+  return String(status || "").trim().toLowerCase();
+}
+
+function resolveRunTaskId(run = {}) {
+  return String(
+    run?.taskId
+    || run?.rootTaskId
+    || run?.detail?.taskId
+    || run?.detail?.rootTaskId
+    || run?.detail?.data?.taskId
+    || "",
+  ).trim();
+}
+
+function resolveRunWorkflowId(run = {}) {
+  return String(
+    run?.workflowId
+    || run?.detail?.workflowId
+    || run?.detail?.data?._workflowId
+    || "",
+  ).trim();
+}
+
+function resolveRunRootRunId(run = {}) {
+  return String(
+    run?.rootRunId
+    || run?.detail?.rootRunId
+    || run?.detail?.dagState?.rootRunId
+    || run?.detail?.data?._workflowRootRunId
+    || "",
+  ).trim();
+}
+
+function resolveRunId(run = {}) {
+  return String(run?.runId || run?.id || run?.detail?.runId || "").trim();
+}
+
+function resolveRunCheckpointCursor(run = {}) {
+  const value =
+    run?.latestCheckpoint?.eventCursor
+    ?? run?.detail?.latestCheckpoint?.eventCursor
+    ?? run?.eventCursor
+    ?? null;
+  return Number.isFinite(Number(value)) ? Number(value) : -1;
+}
+
+function countCompletedNodeStatuses(run = {}) {
+  const statuses =
+    run?.nodeStatuses && typeof run.nodeStatuses === "object"
+      ? run.nodeStatuses
+      : run?.detail?.nodeStatuses && typeof run.detail.nodeStatuses === "object"
+        ? run.detail.nodeStatuses
+        : {};
+  return Object.values(statuses).filter(
+    (status) => normalizeRunStatus(status) === "completed",
+  ).length;
+}
+
+function resolveRunTimestamp(value) {
+  if (Number.isFinite(Number(value))) return Number(value);
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function resolveResumeCandidateScore(run = {}, savedRunId = "") {
+  const status = normalizeRunStatus(run?.status || run?.detail?.status);
+  const statusRank =
+    status === "running"
+      ? 4
+      : status === "failed"
+        ? 3
+        : status === "paused"
+          ? 2
+          : status && status !== "completed" && status !== "cancelled"
+            ? 1
+            : 0;
+  return [
+    statusRank,
+    resolveRunCheckpointCursor(run),
+    countCompletedNodeStatuses(run),
+    resolveRunTimestamp(
+      run?.updatedAt
+      || run?.detail?.updatedAt
+      || run?.detail?.latestCheckpoint?.updatedAt
+      || run?.endedAt
+      || run?.startedAt,
+    ),
+    resolveRunTimestamp(run?.startedAt || run?.detail?.startedAt),
+    resolveRunId(run) === savedRunId ? 1 : 0,
+  ];
+}
+
+function compareResumeCandidateScores(left = [], right = []) {
+  const maxLength = Math.max(left.length, right.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const delta = Number(left[index] || 0) - Number(right[index] || 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
 function resolveResumeRunId(savedState, runtime = {}) {
-  return String(savedState?.runId || "").trim();
+  const savedRunId = String(savedState?.runId || "").trim();
+  if (!savedRunId) return "";
+  const taskId = String(savedState?.taskId || "").trim();
+  const workflowId = String(savedState?.workflowId || "").trim();
+  const engine = runtime?.engine;
+  if (typeof engine?.getRunHistory !== "function") return savedRunId;
+  let runHistory = [];
+  try {
+    runHistory = engine.getRunHistory(workflowId || null, 200);
+  } catch {
+    return savedRunId;
+  }
+  if (!Array.isArray(runHistory) || runHistory.length === 0) return savedRunId;
+
+  const savedRun =
+    runHistory.find((entry) => resolveRunId(entry) === savedRunId) || null;
+  const lineageRootRunId =
+    resolveRunRootRunId(savedRun) || resolveRunRootRunId(savedState) || savedRunId;
+  const matchingCandidates = runHistory.filter((entry) => {
+    const runId = resolveRunId(entry);
+    if (!runId) return false;
+    if (workflowId && resolveRunWorkflowId(entry) !== workflowId) return false;
+    if (taskId && resolveRunTaskId(entry) !== taskId) return false;
+    if (!lineageRootRunId) return true;
+    return (
+      runId === savedRunId
+      || resolveRunRootRunId(entry) === lineageRootRunId
+      || String(entry?.retryOf || entry?.detail?.retryOf || "").trim() === savedRunId
+      || String(entry?.parentRunId || entry?.detail?.parentRunId || "").trim() === savedRunId
+    );
+  });
+  if (matchingCandidates.length === 0) return savedRunId;
+  const bestCandidate = matchingCandidates.reduce((best, candidate) => {
+    if (!best) return candidate;
+    const bestScore = resolveResumeCandidateScore(best, savedRunId);
+    const candidateScore = resolveResumeCandidateScore(candidate, savedRunId);
+    return compareResumeCandidateScores(candidateScore, bestScore) > 0
+      ? candidate
+      : best;
+  }, null);
+  return resolveRunId(bestCandidate) || savedRunId;
 }
 
 function writeSimulationState(statePath, payload) {

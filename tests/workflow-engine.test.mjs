@@ -6560,6 +6560,225 @@ describe("WorkflowEngine - run history details", () => {
     }));
   });
 
+  it("keeps task-lifecycle retry localized when a live local task claim still exists", async () => {
+    const executedNodes = [];
+    registerNodeType("test.retry_resume_live_claim", {
+      describe: () => "Records retry execution with a live task claim",
+      schema: { type: "object", properties: {} },
+      async execute(node) {
+        executedNodes.push(node.id);
+        return { ok: true, nodeId: node.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "test.retry_resume_live_claim", label: "Claim Task", config: {} },
+        { id: "acquire-worktree", type: "test.retry_resume_live_claim", label: "Acquire Worktree", config: {} },
+        { id: "run-agent-plan", type: "test.retry_resume_live_claim", label: "Plan", config: {} },
+        { id: "run-agent-implement", type: "test.retry_resume_live_claim", label: "Implement", config: {} },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "claim-task" },
+        { id: "e2", source: "claim-task", target: "acquire-worktree" },
+        { id: "e3", source: "acquire-worktree", target: "run-agent-plan" },
+        { id: "e4", source: "run-agent-plan", target: "run-agent-implement" },
+      ],
+      {
+        id: "wf-retry-live-claim",
+        name: "Retry Live Claim Workflow",
+        metadata: { installedFrom: "template-task-lifecycle" },
+      },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-retry-live-claim";
+    const taskId = "task-live-claim-1";
+    const { initTaskClaims, claimTask } = await import("../task/task-claims.mjs");
+    await initTaskClaims({ repoRoot: tmpDir });
+    const claimed = await claimTask({
+      repoRoot: tmpDir,
+      taskId,
+      claimToken: "claim-live-token",
+      metadata: { pid: process.pid },
+    });
+    expect(claimed?.success).not.toBe(false);
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId,
+          _claimToken: "claim-live-token",
+          worktreePath: join(tmpDir, "live-worktree"),
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "acquire-worktree": NodeStatus.COMPLETED,
+          "run-agent-plan": NodeStatus.COMPLETED,
+          "run-agent-implement": NodeStatus.RUNNING,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": { success: true, taskId, claimToken: "claim-live-token" },
+          "acquire-worktree": { success: true, worktreePath: join(tmpDir, "live-worktree") },
+          "run-agent-plan": { success: true, nodeId: "run-agent-plan" },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
+
+    expect(executedNodes).toEqual(["run-agent-implement"]);
+    const resumedRun = engine.getRunDetail(retryRunId);
+    const [resumeRevision, replayRevision] = resumedRun.detail.dagState.revisions;
+    expect(resumeRevision?.preservedCompletedNodeIds).toEqual([
+      "trigger",
+      "claim-task",
+      "acquire-worktree",
+      "run-agent-plan",
+    ]);
+    expect(replayRevision?.focusNodeIds).toEqual(["run-agent-implement"]);
+  });
+
+  it("keeps task-lifecycle retry localized when the interrupted run still carries a claim token", async () => {
+    const executedNodes = [];
+    registerNodeType("test.retry_resume_persisted_claim", {
+      describe: () => "Records retry execution with a persisted claim token",
+      schema: { type: "object", properties: {} },
+      async execute(node) {
+        executedNodes.push(node.id);
+        return { ok: true, nodeId: node.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "test.retry_resume_persisted_claim", label: "Claim Task", config: {} },
+        { id: "acquire-worktree", type: "test.retry_resume_persisted_claim", label: "Acquire Worktree", config: {} },
+        { id: "run-agent-plan", type: "test.retry_resume_persisted_claim", label: "Plan", config: {} },
+        { id: "run-agent-implement", type: "test.retry_resume_persisted_claim", label: "Implement", config: {} },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "claim-task" },
+        { id: "e2", source: "claim-task", target: "acquire-worktree" },
+        { id: "e3", source: "acquire-worktree", target: "run-agent-plan" },
+        { id: "e4", source: "run-agent-plan", target: "run-agent-implement" },
+      ],
+      {
+        id: "wf-retry-persisted-claim",
+        name: "Retry Persisted Claim Workflow",
+        metadata: { installedFrom: "template-task-lifecycle" },
+      },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-retry-persisted-claim";
+    const taskId = "task-persisted-claim-1";
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId,
+          _claimToken: "claim-persisted-token",
+          _claimInstanceId: "wf-persisted-claim",
+          worktreePath: join(tmpDir, "persisted-claim-worktree"),
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "acquire-worktree": NodeStatus.COMPLETED,
+          "run-agent-plan": NodeStatus.COMPLETED,
+          "run-agent-implement": NodeStatus.RUNNING,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": {
+            success: true,
+            taskId,
+            claimToken: "claim-persisted-token",
+            instanceId: "wf-persisted-claim",
+          },
+          "acquire-worktree": { success: true, worktreePath: join(tmpDir, "persisted-claim-worktree") },
+          "run-agent-plan": { success: true, nodeId: "run-agent-plan" },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
+
+    expect(executedNodes).toEqual(["run-agent-implement"]);
+    const resumedRun = engine.getRunDetail(retryRunId);
+    const [resumeRevision, replayRevision] = resumedRun.detail.dagState.revisions;
+    expect(resumeRevision?.preservedCompletedNodeIds).toEqual([
+      "trigger",
+      "claim-task",
+      "acquire-worktree",
+      "run-agent-plan",
+    ]);
+    expect(replayRevision?.focusNodeIds).toEqual(["run-agent-implement"]);
+  });
+
   it("resumes interrupted runs with replan_from_failed when issue-advisor requests replanning", async () => {
     const wf = makeSimpleWorkflow(
       [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
@@ -9928,6 +10147,97 @@ describe("Session chaining - action.run_agent", () => {
     expect(result.blockedReason).toBe("implementation_done_commit_blocked");
     expect(result.implementationState).toBe("implementation_done_commit_blocked");
     expect(String(result.error || "")).toMatch(/no actual diff/i);
+  });
+
+  it("does not auto-commit dirty files when the agent reported no changes were required", async () => {
+    const handler = getNodeType("action.auto_commit_dirty");
+    expect(handler).toBeDefined();
+
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-auto-commit-noop-"));
+    try {
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit('git config --local user.email "bot@example.com"', { cwd: repoDir, stdio: "ignore" });
+      execGit('git config --local user.name "Bosun Bot"', { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "tracked.txt"), "base\n", "utf8");
+      execGit("git add tracked.txt", { cwd: repoDir, stdio: "ignore" });
+      execGit('git commit -m "base"', { cwd: repoDir, stdio: "ignore" });
+
+      writeFileSync(join(repoDir, "tracked.txt"), "generated drift\n", "utf8");
+      const headBefore = execGit("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+      const noChangeSummary = [
+        "Feature already implemented in this worktree.",
+        "No additional code changes or commit required.",
+        "Repositories touched:",
+        "- None modified.",
+      ].join("\n");
+      const ctx = new WorkflowContext({ worktreePath: repoDir, taskId: "task-123" });
+      ctx.setNodeOutput("run-agent-tests", {
+        success: true,
+        summary: noChangeSummary,
+        output: noChangeSummary,
+        narrative: noChangeSummary,
+      });
+
+      const result = await handler.execute({
+        id: "auto-commit-dirty",
+        type: "action.auto_commit_dirty",
+        config: {
+          worktreePath: repoDir,
+          taskId: "task-123",
+        },
+      }, ctx, engine);
+
+      expect(result).toEqual(expect.objectContaining({
+        success: true,
+        committed: false,
+        reason: "agent_reported_no_changes",
+        sourceNodeId: "run-agent-tests",
+        dirtyCount: 1,
+      }));
+      expect(result.dirtyFiles).toContain("tracked.txt");
+      expect(execGit("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim()).toBe(headBefore);
+      expect(execGit("git status --porcelain", { cwd: repoDir, encoding: "utf8" })).toContain("tracked.txt");
+    } finally {
+      await removeDirWithRetries(repoDir, { ignoreFinalEperm: true });
+    }
+  });
+
+  it("auto-commits dirty files when no agent no-change evidence exists", async () => {
+    const handler = getNodeType("action.auto_commit_dirty");
+    expect(handler).toBeDefined();
+
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-auto-commit-dirty-"));
+    try {
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit('git config --local user.email "bot@example.com"', { cwd: repoDir, stdio: "ignore" });
+      execGit('git config --local user.name "Bosun Bot"', { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "tracked.txt"), "base\n", "utf8");
+      execGit("git add tracked.txt", { cwd: repoDir, stdio: "ignore" });
+      execGit('git commit -m "base"', { cwd: repoDir, stdio: "ignore" });
+
+      const headBefore = execGit("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+      writeFileSync(join(repoDir, "tracked.txt"), "updated\n", "utf8");
+      const ctx = new WorkflowContext({ worktreePath: repoDir, taskId: "task-456" });
+
+      const result = await handler.execute({
+        id: "auto-commit-dirty",
+        type: "action.auto_commit_dirty",
+        config: {
+          worktreePath: repoDir,
+          taskId: "task-456",
+        },
+      }, ctx, engine);
+
+      expect(result).toEqual(expect.objectContaining({
+        success: true,
+        committed: true,
+        dirtyCount: 1,
+      }));
+      expect(execGit("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim()).not.toBe(headBefore);
+      expect(execGit("git status --porcelain", { cwd: repoDir, encoding: "utf8" }).trim()).toBe("");
+    } finally {
+      await removeDirWithRetries(repoDir, { ignoreFinalEperm: true });
+    }
   });
 
   it("does not treat successful planning notes mentioning timeout helpers as blocked_by_env", async () => {

@@ -62,6 +62,26 @@ describe("session-tracker", () => {
       expect(session.endedAt).toBeGreaterThan(0);
     });
 
+    it("does not classify planner handoffs mentioning optional pre-push hooks as commit-blocked", () => {
+      const status = _test.deriveTerminalSessionStatus({
+        messages: [{
+          role: "assistant",
+          content: [
+            "Editor handoff",
+            "",
+            "- Planned files:",
+            "  - `workflow/workflow-engine.mjs`",
+            "  - `tests/workflow-engine.test.mjs`",
+            "  - optional `.githooks/pre-push` only if a new test file is added",
+            "",
+            "No code changes were made in this planning phase.",
+          ].join("\n"),
+        }],
+      }, "completed");
+
+      expect(status).toBe("completed");
+    });
+
     it("replaces existing session", () => {
       tracker.startSession("task-1", "First");
       tracker.recordEvent("task-1", {

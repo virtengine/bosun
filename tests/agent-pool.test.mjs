@@ -2876,8 +2876,96 @@ describe("sdk cooldown heuristics", () => {
     expect(classified.shouldBreak).toBe(true);
     expect(classified.blockedReason).toBe("blocked_by_env");
   });
+
+  it("treats session turn and stream completion wrappers as explicit completion signals", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "session.turn.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+      stream: [
+        "session.stream.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+      ],
+      items: [
+        {
+          type: "event",
+          summary: "session.turn.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+        },
+      ],
+    })).toBe(true);
+  });
+
+  it("treats plain terminal summaries as explicit completion signals", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "Done.\n\nStatus\n- Resume-safe node completion checkpointing is implemented.\n- Focused workflow tests pass.",
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "Complete. No additional code changes were required.",
+    })).toBe(true);
+  });
+
+  it("treats lifecycle completion metadata as an explicit completion signal", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      items: [
+        {
+          type: "agent_message",
+          content: "Editor handoff",
+          meta: { lifecycle: "session_turn_complete" },
+        },
+      ],
+    })).toBe(true);
+  });
 });
 describe("execWithRetry", () => {
+  it("forwards pinSdk to launchOrResumeThread so resolved providers do not fan out to fallback SDKs", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+    setPoolSdk("openai-native");
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("unexpected-codex-fallback", "Done."),
+    );
+
+    const result = await execWithRetry("use resolved provider only", {
+      taskKey: "pin-sdk-forwarding-task",
+      cwd: process.cwd(),
+      timeoutMs: 2100,
+      maxRetries: 0,
+      maxContinues: 0,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+    expect(mockCodexStartThread).not.toHaveBeenCalled();
+    expect(mockCodexCtor).not.toHaveBeenCalled();
+  });
+
   it("continues successful task runs until an explicit completion signal is present", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
@@ -2923,6 +3011,140 @@ describe("execWithRetry", () => {
       timeoutMs: 500,
       maxRetries: 0,
       maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts completion events with no assistant text when items include a session.turn.complete handoff", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() => ({
+      id: "completion-event-thread",
+      runStreamed: async () => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "item.completed",
+              item: {
+                type: "event",
+                summary: "session.turn.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+              },
+            };
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: "",
+              },
+            };
+          },
+        },
+      }),
+    }));
+
+    const result = await execWithRetry("finish planning", {
+      taskKey: "completion-event-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(result.output).toBe("(Agent completed with no text output)");
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts a plain complete-prefixed terminal summary without forcing another continue", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "complete-summary-thread",
+        "Complete. No additional code changes were required.\n\nVerified:\n- Resume-safe node completion checkpointing remains implemented.\n- Focused workflow tests pass.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "complete-summary-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts terminal no-op confirmation summaries without forcing another continue", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "noop-confirm-thread",
+        "Confirmed. No new work remains on this task.\n\nResult\n- The feature is already implemented.\n- The worktree is clean.\n\nNo further action required.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "noop-confirm-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts already-complete verification summaries when multiple no-op indicators are present", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "already-complete-thread",
+        "Checked the resumed work: the intended changes are already present in the current branch, and the workspace is clean with no uncommitted diff.\n\nCommit status:\n- No new commit created, because there were no additional changes to commit.\n\nNet result:\n- Task implementation appears already completed on this branch.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "already-complete-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
       sdk: "codex",
       abortController: new AbortController(),
     });

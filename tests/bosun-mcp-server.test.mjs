@@ -195,6 +195,37 @@ describe("bosun MCP server", () => {
     }
   }, 30000);
 
+  it("refuses to overwrite an existing file via write_file unless overwrite_existing=true", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "bosun-mcp-write-file-"));
+    const targetPath = join(workspaceDir, "sample.mjs");
+    writeFileSync(targetPath, "export const original = true;\n", "utf8");
+
+    const mcp = await startMcpProcess();
+    try {
+      await mcp.initialize();
+
+      const rejected = await mcp.callTool("write_file", {
+        path: targetPath,
+        content: "// TEMP PLACEHOLDER\n",
+      });
+      expect(rejected.error?.message || "").toContain("refuses to overwrite existing file");
+      expect(readFileSync(targetPath, "utf8")).toBe("export const original = true;\n");
+
+      const allowed = await mcp.callTool("write_file", {
+        path: targetPath,
+        content: "export const rewritten = true;\n",
+        overwrite_existing: true,
+      });
+      const payload = JSON.parse(allowed.result.content[0].text);
+      expect(payload.success).toBe(true);
+      expect(payload.overwritten_existing).toBe(true);
+      expect(readFileSync(targetPath, "utf8")).toBe("export const rewritten = true;\n");
+    } finally {
+      await mcp.stop();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
   it.skipIf(skipLocallyForSpeed)("supports creating and reading sessions through MCP tools", async () => {
     const mcp = await startMcpProcess();
     try {
