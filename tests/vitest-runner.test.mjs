@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  ensureVitestEntry,
   findPackageRoot,
+  findVitestPackageSpec,
   findVitestEntry,
   isDirectExecution,
   resolveVitestArgs,
@@ -38,6 +40,16 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('"task/|task-*|workflow-task-lifecycle*|kanban-*|state-ledger-sqlite*|ve-orchestrator*|vk-api*|ve-kanban*"');
     expect(prePushHook).toContain('"lib/|logger*|log-tail*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*|hot-path-runtime*"');
   });
+
+  it("keeps a named-project fallback in the pre-push hook for older worktrees", () => {
+    const prePushHook = readFileSync(resolve(repoRoot, ".githooks", "pre-push"), "utf8");
+
+    expect(prePushHook).toContain("vitest_supports_named_projects()");
+    expect(prePushHook).toContain('serialized_runner_args+=(--project isolated)');
+    expect(prePushHook).toContain('regular_runner_args+=(--project fast)');
+    expect(prePushHook).toContain("falling back to default project execution");
+  });
+
   it("finds vitest from an ancestor node_modules directory", () => {
     const root = createFixture();
     const vitestEntry = resolve(root, "node_modules", "vitest", "vitest.mjs");
@@ -69,6 +81,112 @@ describe("vitest-runner", () => {
     );
 
     expect(findPackageRoot({ startDir: nestedWorktree })).toBe(root);
+  });
+
+  it("finds the declared vitest package spec from the nearest package root", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-790", "deep");
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        version: "1.0.0",
+        devDependencies: { vitest: "^4.0.18" },
+      }),
+    );
+
+    expect(findVitestPackageSpec({ startDir: nestedWorktree })).toBe("^4.0.18");
+  });
+
+  it("hydrates vitest into the nearest package root when it is missing", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-791", "deep");
+    const spawnCalls = [];
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        version: "1.0.0",
+        devDependencies: { vitest: "^4.0.18" },
+      }),
+    );
+
+    const vitestEntry = ensureVitestEntry({
+      startDir: nestedWorktree,
+      log: () => {},
+      spawn(command, args, options) {
+        spawnCalls.push({
+          command,
+          args,
+          cwd: options.cwd,
+          stdio: options.stdio,
+        });
+        mkdirSync(resolve(root, "node_modules", "vitest"), { recursive: true });
+        writeFileSync(resolve(root, "node_modules", "vitest", "vitest.mjs"), "export default {};\n");
+        return { status: 0 };
+      },
+    });
+
+    expect(vitestEntry).toBe(resolve(root, "node_modules", "vitest", "vitest.mjs"));
+    expect(spawnCalls).toEqual([
+      {
+        command: process.platform === "win32"
+          ? (process.env.ComSpec || process.env.COMSPEC || "cmd.exe")
+          : "npm",
+        args: process.platform === "win32"
+          ? [
+              "/d",
+              "/s",
+              "/c",
+              "npm",
+              "install",
+              "--no-save",
+              "--package-lock=false",
+              "--no-audit",
+              "--no-fund",
+              "--ignore-scripts",
+              "vitest@^4.0.18",
+            ]
+          : [
+              "install",
+              "--no-save",
+              "--package-lock=false",
+              "--no-audit",
+              "--no-fund",
+              "--ignore-scripts",
+              "vitest@^4.0.18",
+            ],
+        cwd: root,
+        stdio: "inherit",
+      },
+    ]);
+  });
+
+  it("throws when hydration completes but vitest is still unavailable", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-792", "deep");
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        version: "1.0.0",
+        devDependencies: { vitest: "^4.0.18" },
+      }),
+    );
+
+    expect(() => ensureVitestEntry({
+      startDir: nestedWorktree,
+      log: () => {},
+      spawn() {
+        return { status: 0 };
+      },
+    })).toThrow("hydrated vitest@^4.0.18");
   });
 
   it("resolves relative config paths from the package root when invoked in a nested worktree", () => {
@@ -243,8 +361,14 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('local -a runner_args=(run --config vitest.config.mjs)');
     expect(prePushHook).toContain('local -a serialized_runner_args=("${runner_args[@]}" --maxWorkers 1)');
     expect(prePushHook).toContain('local -a regular_runner_args=("${runner_args[@]}")');
+    expect(prePushHook).toContain('if vitest_supports_named_projects "fast" && vitest_supports_named_projects "isolated"; then');
+    expect(prePushHook).toContain('serialized_runner_args+=(--project isolated)');
+    expect(prePushHook).toContain('regular_runner_args+=(--project fast)');
     expect(prePushHook).toContain('node tools/vitest-runner.mjs "${serialized_runner_args[@]}"');
     expect(prePushHook).toContain('node tools/vitest-runner.mjs "${regular_runner_args[@]}"');
+    expect(prePushHook).toContain('local serialized_batch_size="${BOSUN_PREPUSH_SERIAL_BATCH_SIZE:-4}"');
+    expect(prePushHook).toContain('local batch_size="${BOSUN_PREPUSH_BATCH_SIZE:-50}"');
+    expect(prePushHook).toContain('echo "[hooks] auto-enabling Vitest batching for large targeted set"');
     expect(prePushHook).toContain('BOSUN_PREPUSH_RUN_PACKED_SMOKE');
     expect(prePushHook).toContain('BOSUN_PREPUSH_INCLUDE_HEAVY');
     expect(prePushHook).toContain('BOSUN_RUN_HEAVY_TESTS');

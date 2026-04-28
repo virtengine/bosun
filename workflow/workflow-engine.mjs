@@ -1574,6 +1574,29 @@ function resolvePersistedRunStringLimit(key = "") {
     : MAX_PERSISTED_RUN_STRING_LENGTH;
 }
 
+function shouldPreservePersistedFullInlineCommandOutput(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (typeof value.output !== "string") return false;
+  const budgetPolicy = String(
+    value.outputBudgetPolicy || value.outputContextEnvelope?.meta?.budgetPolicy || "",
+  ).trim().toLowerCase();
+  if (budgetPolicy !== "full-inline") return false;
+  const excerptStrategy = String(value.outputContextEnvelope?.meta?.excerptStrategy || "")
+    .trim()
+    .toLowerCase();
+  if (excerptStrategy && excerptStrategy !== "full") return false;
+  const originalChars = Number(
+    value.rawOutputChars || value.outputContextEnvelope?.meta?.originalChars || 0,
+  );
+  const compactedChars = Number(
+    value.compactedOutputChars || value.outputContextEnvelope?.meta?.compactedChars || 0,
+  );
+  if (originalChars > 0 && compactedChars > 0 && originalChars !== compactedChars) {
+    return false;
+  }
+  return true;
+}
+
 function buildPersistedValueSummary(value) {
   if (value == null) return value;
   if (Array.isArray(value)) return `[Array(${value.length})]`;
@@ -1764,7 +1787,12 @@ function summarizePersistedObject(value, { depth = 0, key = "" } = {}) {
       ? 40
       : MAX_PERSISTED_RUN_OBJECT_KEYS;
   const out = {};
+  const preserveFullInlineOutput = shouldPreservePersistedFullInlineCommandOutput(value);
   for (const [entryKey, entryValue] of entries.slice(0, limit)) {
+    if (preserveFullInlineOutput && entryKey === "output" && typeof entryValue === "string") {
+      out[entryKey] = String(entryValue);
+      continue;
+    }
     out[entryKey] = summarizePersistedWorkflowValue(entryValue, {
       depth: depth + 1,
       key: entryKey,
@@ -3680,12 +3708,39 @@ export class WorkflowEngine extends EventEmitter {
     return next;
   }
 
-  _resolveRetryResumeResetStartNodeId(def, data = {}) {
+  _resolveRetryResumeResetStartNodeId(def, data = {}, nodeOutputs = {}, nodeStatuses = {}) {
     const templateId = String(def?.metadata?.installedFrom || "").trim();
     if (templateId !== "template-task-lifecycle") return null;
+    const claimTaskOutput =
+      nodeOutputs?.["claim-task"] && typeof nodeOutputs["claim-task"] === "object"
+        ? nodeOutputs["claim-task"]
+        : {};
+    const claimOkOutput =
+      nodeOutputs?.["claim-ok"] && typeof nodeOutputs["claim-ok"] === "object"
+        ? nodeOutputs["claim-ok"]
+        : {};
+    const acquireWorktreeOutput =
+      nodeOutputs?.["acquire-worktree"] && typeof nodeOutputs["acquire-worktree"] === "object"
+        ? nodeOutputs["acquire-worktree"]
+        : {};
+    const claimTaskFailedBeforeWorktree =
+      nodeStatuses?.["claim-task"] === NodeStatus.COMPLETED &&
+      (
+        claimOkOutput?.result === false ||
+        claimOkOutput?.value === false ||
+        nodeStatuses?.["release-slot-claim-failed"] === NodeStatus.COMPLETED ||
+        nodeStatuses?.["log-claim-failed"] === NodeStatus.COMPLETED
+      );
+    if (claimTaskFailedBeforeWorktree) {
+      return Array.isArray(def?.nodes) && def.nodes.some((node) => String(node?.id || "").trim() === "claim-task")
+        ? "claim-task"
+        : null;
+    }
     const hadClaimOrWorktreeState = Boolean(
       String(data?.claimToken || data?._claimToken || "").trim()
-      || String(data?.worktreePath || "").trim(),
+      || String(data?.worktreePath || "").trim()
+      || String(claimTaskOutput.claimToken || claimTaskOutput.id || claimTaskOutput.taskId || "").trim()
+      || String(acquireWorktreeOutput.worktreePath || "").trim(),
     );
     if (!hadClaimOrWorktreeState) return null;
     return Array.isArray(def?.nodes) && def.nodes.some((node) => String(node?.id || "").trim() === "claim-task")
@@ -4764,7 +4819,12 @@ export class WorkflowEngine extends EventEmitter {
     const nodeStatuses = detail.nodeStatuses || {};
     const nodeOutputs = detail.nodeOutputs || {};
     const adjacency = this._buildAdjacency(def);
-    const resumeResetStartNodeId = this._resolveRetryResumeResetStartNodeId(def, originalData);
+    const resumeResetStartNodeId = this._resolveRetryResumeResetStartNodeId(
+      def,
+      originalData,
+      nodeOutputs,
+      nodeStatuses,
+    );
     const resumeResetNodeIds = resumeResetStartNodeId
       ? this._collectSubgraph(resumeResetStartNodeId, adjacency)
       : new Set();
@@ -6832,6 +6892,7 @@ export class WorkflowEngine extends EventEmitter {
       startedAt: ctx.startedAt,
       status: WorkflowStatus.RUNNING,
     });
+    this._persistActiveRunState(retryRunId, workflowId, def.name, ctx);
     this.emit("run:start", { runId: retryRunId, workflowId, name: def.name, restoredFrom: snapshotId });
     this._emitWorkflowStatus({
       runId: retryRunId,
@@ -6848,10 +6909,12 @@ export class WorkflowEngine extends EventEmitter {
       await this._executeDag(def, entryNodes, adjacency, ctx, opts);
       const finalStatus = ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED;
       this._persistRun(retryRunId, workflowId, ctx);
+      this._clearActiveRunState(retryRunId);
       this._activeRuns.delete(retryRunId);
       return { runId: retryRunId, snapshotId, workflowId, ctx, status: finalStatus };
     } catch (err) {
       this._persistRun(retryRunId, workflowId, ctx);
+      this._clearActiveRunState(retryRunId);
       this._activeRuns.delete(retryRunId);
       throw err;
     }
@@ -8434,6 +8497,34 @@ export class WorkflowEngine extends EventEmitter {
     }
   }
 
+  _shouldPreserveForeignActiveRunDetail(detail) {
+    if (!detail || typeof detail !== "object") return true;
+    const terminalStatus = String(detail?.data?._workflowTerminalStatus || "")
+      .trim()
+      .toLowerCase();
+    if (
+      terminalStatus === WorkflowStatus.COMPLETED
+      || terminalStatus === WorkflowStatus.FAILED
+      || terminalStatus === WorkflowStatus.CANCELLED
+      || terminalStatus === WorkflowStatus.PAUSED
+    ) {
+      return false;
+    }
+    if (detail?.endedAt != null) return false;
+    const counts = this._countNodeStatuses(detail?.nodeStatuses || {});
+    if (counts.activeNodeCount > 0) return true;
+    const startedAt = Number.isFinite(Number(detail?.startedAt))
+      ? Number(detail.startedAt)
+      : null;
+    const activityRef = Math.max(
+      this._getLastLogAt(detail?.logs || []) || 0,
+      this._getLastProgressAt(detail?.nodeStatusEvents || [], startedAt) || 0,
+      startedAt || 0,
+    );
+    if (activityRef <= 0) return true;
+    return Math.max(0, Date.now() - activityRef) < this._getRunStuckThresholdMs();
+  }
+
   _getPersistedForeignActiveRunIndexEntries(options = {}) {
     const omitRunId = String(options?.omitRunId || "").trim();
     const includeRunId = String(options?.includeRunId || "").trim();
@@ -8450,6 +8541,7 @@ export class WorkflowEngine extends EventEmitter {
       const runId = String(candidate?.runId || "").trim();
       if (!runId || runId === omitRunId || managedRunIds.has(runId)) continue;
       const detail = this._readPersistedRunDetail(runId);
+      if (detail && !this._shouldPreserveForeignActiveRunDetail(detail)) continue;
       const taskIdentity = this._resolveRunTaskIdentity(candidate, detail);
       const taskId = normalizeWorkflowIdentityText(
         taskIdentity?.taskId || candidate?.taskId || "",

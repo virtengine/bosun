@@ -294,6 +294,32 @@ describe("workflow-templates", () => {
     expect(replenishNode?.config?.repoMapFileLimit).toBe(8);
   });
 
+  it("task lifecycle planning phase uses plan mode", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeTruthy();
+
+    const planNode = template.nodes.find((node) => node.id === "run-agent-plan");
+    const testsNode = template.nodes.find((node) => node.id === "run-agent-tests");
+    const implementNode = template.nodes.find((node) => node.id === "run-agent-implement");
+
+    expect(planNode?.config?.mode).toBe("plan");
+    expect(testsNode?.config?.mode || "agent").toBe("agent");
+    expect(implementNode?.config?.mode || "agent").toBe("agent");
+  });
+
+  it("task lifecycle tests and implement phases start from a fresh session on reruns", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeTruthy();
+
+    const testsNode = template.nodes.find((node) => node.id === "run-agent-tests");
+    const implementNode = template.nodes.find((node) => node.id === "run-agent-implement");
+
+    expect(testsNode?.type).toBe("action.run_agent");
+    expect(testsNode?.config?.continueOnSession).toBe(false);
+    expect(implementNode?.type).toBe("action.run_agent");
+    expect(implementNode?.config?.continueOnSession).toBe(false);
+  });
+
   it("recover blocked worktrees summary uses a precomputed count variable", async () => {
     const { RECOVER_BLOCKED_WORKTREES_TEMPLATE: template } = await import("../workflow-templates/reliability.mjs");
     expect(template).toBeTruthy();

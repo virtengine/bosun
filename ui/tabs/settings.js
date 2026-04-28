@@ -1103,14 +1103,41 @@ function normalizeHarnessExecutorModelForEditor(entry = {}, index = 0, fallbackA
   const label = String(value.label || value.name || "").trim();
   const apiStyle = String(value.apiStyle || value.transport?.apiStyle || fallbackApiStyle || "provider-default").trim() || "provider-default";
   const apiVersion = String(value.apiVersion || "").trim();
+  const numberOrEmpty = (rawValue) => (Number.isFinite(Number(rawValue)) && Number(rawValue) > 0 ? Number(rawValue) : "");
+  const booleanOrNull = (rawValue) => (typeof rawValue === "boolean" ? rawValue : null);
   return {
     _id: value._id || `harness-model-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
     id,
     label,
+    apiModel: String(value.apiModel || value.api_model || value.model || id).trim() || id,
     apiStyle,
     apiVersion,
+    contextWindow: numberOrEmpty(value.contextWindow || value.contextLength),
+    maxInputTokens: numberOrEmpty(value.maxInputTokens),
+    maxOutputTokens: numberOrEmpty(value.maxOutputTokens),
+    toolCalling: booleanOrNull(value.toolCalling),
+    vision: booleanOrNull(value.vision),
+    supportsAttachments: booleanOrNull(value.supportsAttachments),
+    reasoning: booleanOrNull(value.reasoning),
+    streaming: booleanOrNull(value.streaming),
+    catalogSource: String(value.catalogSource || "").trim(),
+    custom: value.custom === true,
+    overrides: value.overrides && typeof value.overrides === "object" ? { ...value.overrides } : {},
     enabled: value.enabled !== false,
   };
+}
+
+function formatModelCapabilityBadges(model = {}) {
+  const badges = [];
+  if (model.toolCalling === true) badges.push("Tools");
+  if (model.vision === true || model.supportsAttachments === true) badges.push("Vision");
+  if (model.reasoning === true || model.reasoningEffort) badges.push("Reasoning");
+  if (model.streaming === true) badges.push("Streaming");
+  const contextWindow = Number(model.contextWindow || model.contextLength || 0);
+  if (Number.isFinite(contextWindow) && contextWindow > 0) badges.push(`${Math.round(contextWindow / 1000)}k ctx`);
+  if (model.catalogSource) badges.push(model.catalogSource);
+  if (model.custom) badges.push("Custom");
+  return badges;
 }
 
 function extractHarnessExecutorModelsForEditor(entry = {}, fallbackApiStyle = "provider-default") {
@@ -1562,8 +1589,19 @@ function HarnessExecutorsEditor() {
           .map((model) => ({
             id: String(model.id || "").trim(),
             ...(String(model.label || "").trim() ? { label: String(model.label || "").trim() } : {}),
+            ...(String(model.apiModel || "").trim() && String(model.apiModel || "").trim() !== String(model.id || "").trim() ? { apiModel: String(model.apiModel || "").trim() } : {}),
             ...(String(model.apiStyle || "").trim() ? { apiStyle: String(model.apiStyle || "").trim() } : {}),
             ...(String(model.apiVersion || "").trim() ? { apiVersion: String(model.apiVersion || "").trim() } : {}),
+            ...(Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0 ? { contextWindow: Number(model.contextWindow) } : {}),
+            ...(Number.isFinite(Number(model.maxInputTokens)) && Number(model.maxInputTokens) > 0 ? { maxInputTokens: Number(model.maxInputTokens) } : {}),
+            ...(Number.isFinite(Number(model.maxOutputTokens)) && Number(model.maxOutputTokens) > 0 ? { maxOutputTokens: Number(model.maxOutputTokens) } : {}),
+            ...(typeof model.toolCalling === "boolean" ? { toolCalling: model.toolCalling } : {}),
+            ...(typeof model.vision === "boolean" ? { vision: model.vision } : {}),
+            ...(typeof model.supportsAttachments === "boolean" ? { supportsAttachments: model.supportsAttachments } : {}),
+            ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
+            ...(typeof model.streaming === "boolean" ? { streaming: model.streaming } : {}),
+            ...(String(model.catalogSource || "").trim() ? { catalogSource: String(model.catalogSource || "").trim() } : {}),
+            ...(model.custom === true ? { custom: true } : {}),
             ...(model.enabled === false ? { enabled: false } : {}),
           }))
           .filter((model) => model.id),
@@ -1880,9 +1918,9 @@ function HarnessExecutorsEditor() {
                         if (ex._id !== entry._id) return ex;
                         const existingIds = new Set((ex.modelEntries || []).map((m) => m.id).filter(Boolean));
                         const toAdd = providerInfo.modelCatalog.models
-                          .map((m) => String(m?.id || m || "").trim())
-                          .filter((id) => id && !existingIds.has(id))
-                          .map((id, i) => normalizeHarnessExecutorModelForEditor({ id }, (ex.modelEntries?.length || 0) + i, fallbackApiStyle));
+                          .map((m) => (m && typeof m === "object" ? m : { id: m }))
+                          .filter((model) => String(model?.id || "").trim() && !existingIds.has(String(model.id || "").trim()))
+                          .map((model, i) => normalizeHarnessExecutorModelForEditor(model, (ex.modelEntries?.length || 0) + i, fallbackApiStyle));
                         return { ...ex, modelEntries: [...(ex.modelEntries || []), ...toAdd] };
                       });
                       setExecutors(nextExecutors);
@@ -1890,7 +1928,7 @@ function HarnessExecutorsEditor() {
                       haptic("light");
                     }}>Load from provider<//>
                   `}
-                  ${supportsAzureDeployment && html`
+                  ${supportsEndpoint && html`
                     <${Button} variant="outlined" size="small" onClick=${async () => {
                       try {
                         const res = await apiFetch("/api/harness/discover-models", {
@@ -1901,22 +1939,26 @@ function HarnessExecutorsEditor() {
                             apiKeyEnv: entry.authBindings?.apiKeyEnv || "",
                           }),
                         }).catch(() => null);
-                        const discovered = Array.isArray(res?.models) ? res.models : [];
+                        const discovered = Array.isArray(res?.modelEntries) && res.modelEntries.length > 0
+                          ? res.modelEntries
+                          : Array.isArray(res?.models)
+                            ? res.models.map((id) => ({ id }))
+                            : [];
                         if (!discovered.length) { haptic("heavy"); return; }
                         const fallbackApiStyle = entry.apiStyle || "provider-default";
                         const nextExecutors = executors.map((ex) => {
                           if (ex._id !== entry._id) return ex;
                           const existingIds = new Set((ex.modelEntries || []).map((m) => m.id).filter(Boolean));
                           const toAdd = discovered
-                            .filter((id) => id && !existingIds.has(id))
-                            .map((id, i) => normalizeHarnessExecutorModelForEditor({ id }, (ex.modelEntries?.length || 0) + i, fallbackApiStyle));
+                            .filter((model) => String(model?.id || model || "").trim() && !existingIds.has(String(model?.id || model || "").trim()))
+                            .map((model, i) => normalizeHarnessExecutorModelForEditor(model, (ex.modelEntries?.length || 0) + i, fallbackApiStyle));
                           return { ...ex, modelEntries: [...(ex.modelEntries || []), ...toAdd] };
                         });
                         setExecutors(nextExecutors);
                         markDirty(nextExecutors, primaryExecutor, routingMode);
                         haptic("light");
                       } catch { haptic("heavy"); }
-                    }}>Discover from deployment<//>
+                    }}>Discover models<//>
                   `}
                   <${Button} variant="outlined" size="small" onClick=${() => addExecutorModel(entry._id)}>Add model<//>
                 </div>
@@ -1925,7 +1967,7 @@ function HarnessExecutorsEditor() {
                 ? html`<div class="meta-text">No explicit model list. Use "Load from provider" to populate from the known model catalog, or add manually. Bosun will fall back to the provider catalog.</div>`
                 : html`
                     ${(entry.modelEntries || []).map((model, modelIndex) => html`
-                      <div key=${model._id} style="display:grid;grid-template-columns:minmax(160px,1.5fr) minmax(120px,1fr) ${supportsAzureDeployment ? "minmax(150px,1fr)" : ""} minmax(160px,1fr) auto;gap:8px;align-items:end;margin-bottom:8px">
+                      <div key=${model._id} style="display:grid;grid-template-columns:minmax(160px,1.5fr) minmax(120px,1fr) ${supportsAzureDeployment ? "minmax(150px,1fr)" : ""} minmax(160px,1fr) minmax(170px,1fr) auto;gap:8px;align-items:end;margin-bottom:8px">
                         <div>
                           <div class="setting-row-label">Model ID</div>
                           <${TextField} size="small" variant="outlined" value=${model.id} onInput=${(e) => updateExecutorModel(entry._id, model._id, "id", e.target.value)} placeholder=${modelIndex === 0 ? "gpt-5.4" : "model id"} fullWidth />
@@ -1950,9 +1992,22 @@ function HarnessExecutorsEditor() {
                               `
                             : html`<${TextField} size="small" variant="outlined" value=${"Provider native transport"} disabled fullWidth />`}
                         </div>
+                        <div>
+                          <div class="setting-row-label">Capability Defaults</div>
+                          <div style="display:flex;gap:4px;flex-wrap:wrap;min-height:32px;align-items:center">
+                            ${formatModelCapabilityBadges(model).map((badge) => html`<${Chip} size="small" variant="outlined" label=${badge} />`)}
+                            ${formatModelCapabilityBadges(model).length === 0 && html`<span class="meta-text">Auto</span>`}
+                          </div>
+                        </div>
                         <div style="display:flex;align-items:center;gap:8px">
                           <${Toggle} checked=${model.enabled !== false} onChange=${(value) => updateExecutorModel(entry._id, model._id, "enabled", value)} label="Enabled" />
                           <${Button} variant="text" color="error" size="small" onClick=${() => removeExecutorModel(entry._id, model._id)}>Remove<//>
+                        </div>
+                        <div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:-2px">
+                          <${TextField} size="small" variant="outlined" label="API model" value=${model.apiModel || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "apiModel", e.target.value)} placeholder=${model.id} fullWidth />
+                          <${TextField} type="number" size="small" variant="outlined" label="Context" value=${model.contextWindow || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "contextWindow", e.target.value)} fullWidth />
+                          <${TextField} type="number" size="small" variant="outlined" label="Input cap" value=${model.maxInputTokens || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "maxInputTokens", e.target.value)} fullWidth />
+                          <${TextField} type="number" size="small" variant="outlined" label="Output cap" value=${model.maxOutputTokens || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "maxOutputTokens", e.target.value)} fullWidth />
                         </div>
                       </div>
                     `)}

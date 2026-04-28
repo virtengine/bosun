@@ -29,6 +29,7 @@ import { fixGitConfigCorruption } from "../../workspace/worktree-manager.mjs";
 import { registerNodeType as registerWorkflowEngineNodeType } from "../workflow-engine.mjs";
 
 const TAG = "[workflow-nodes]";
+const DEFAULT_GIT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 const PORTABLE_WORKTREE_COUNT_COMMAND = "node -e \"const cp=require('node:child_process');const wt=cp.execSync('git worktree list --porcelain',{encoding:'utf8'});const count=(wt.match(/^worktree /gm)||[]).length;process.stdout.write(String(count)+'\\\\n');\"";
 const PORTABLE_PRUNE_AND_COUNT_WORKTREES_COMMAND = "node -e \"const cp=require('node:child_process');cp.execSync('git worktree prune',{stdio:'ignore'});const wt=cp.execSync('git worktree list --porcelain',{encoding:'utf8'});const count=(wt.match(/^worktree /gm)||[]).length;process.stdout.write(String(count)+'\\\\n');\"";
 const WORKFLOW_AGENT_HEARTBEAT_MS = (() => {
@@ -219,6 +220,9 @@ function execGitArgsSync(args, options = {}) {
       ...options,
       env: buildGitExecutionEnv(env, gitBinary),
     };
+    if (execOptions.maxBuffer == null) {
+      execOptions.maxBuffer = DEFAULT_GIT_EXEC_MAX_BUFFER;
+    }
     try {
       return execFileSync(gitBinary, gitArgs, execOptions);
     } catch (error) {
@@ -252,6 +256,20 @@ function trimLogText(value, max = 180) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function trimLogTextPreservingTail(value, max = 180, tailChars = 80) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const safeMax = Number.isFinite(Number(max)) ? Math.max(8, Math.trunc(Number(max))) : 180;
+  if (text.length <= safeMax) return text;
+  const ellipsis = " ... ";
+  const safeTail = Number.isFinite(Number(tailChars))
+    ? Math.max(0, Math.trunc(Number(tailChars)))
+    : 80;
+  const tail = Math.min(safeTail, Math.max(0, safeMax - ellipsis.length - 1));
+  const head = Math.max(1, safeMax - ellipsis.length - tail);
+  return `${text.slice(0, head)}${ellipsis}${text.slice(-tail)}`;
 }
 
 function normalizeLineEndings(value) {
@@ -1271,8 +1289,9 @@ function buildTaskContextBlock(task) {
   return lines.join("\n");
 }
 
-function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
+function buildWorkflowAgentToolContract(rootDir, agentProfileId = "", options = {}) {
   const profileId = String(agentProfileId || "").trim();
+  const effectiveMode = String(options.effectiveMode || "agent").trim().toLowerCase() || "agent";
   const effective = profileId
     ? getEffectiveTools(rootDir, profileId)
     : getEffectiveTools(rootDir, "__default__");
@@ -1301,6 +1320,9 @@ function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
   return [
     "## Tool Capability Contract",
     "Use enabled tools by default before claiming work is blocked.",
+    effectiveMode === "plan"
+      ? "Planning mode is read-only. Do not call edit/write tools, do not run git-mutating commands, and do not leave uncommitted changes behind in this phase."
+      : null,
     "For large files, prefer targeted read/view calls with explicit line ranges and batch multiple focused reads instead of whole-file reads.",
     "If shell filtering blocks a compound command, retry as separate single-purpose commands rather than treating the session as blocked.",
     "Before declaring verification blocked, inspect focused git status/diff output for the target paths and run the narrowest relevant test command you can prove.",
@@ -1310,7 +1332,7 @@ function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
     JSON.stringify(manifest, null, 2),
     "```",
     "When uncertain about arguments, call get_admin_help via executeToolCall.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1368,4 +1390,5 @@ export {
   summarizeAssistantUsage,
   summarizePathListingBlock,
   trimLogText,
+  trimLogTextPreservingTail,
 };

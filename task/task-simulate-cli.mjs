@@ -6,7 +6,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { loadConfig } from "../config/config.mjs";
 import {
@@ -61,6 +61,15 @@ const TASK_SIMULATION_TEMPLATE_FORCE_UPDATE_IDS = [
   "template-recover-blocked-task",
   "template-recover-blocked-worktrees",
 ];
+const BOSUN_LOCAL_OPS_BRANCH = "bosun/codex-self-improvement-loop-commits";
+const SIMULATOR_RUNTIME_DRIFT_FILES = Object.freeze([
+  "workflow/workflow-engine.mjs",
+  "workflow/workflow-nodes/actions.mjs",
+  "workflow/workflow-nodes.mjs",
+  "workflow-templates/task-lifecycle.mjs",
+  "task/task-claims.mjs",
+  "task/task-store.mjs",
+]);
 
 function readCurrentGitBranch(repoRoot) {
   try {
@@ -74,6 +83,10 @@ function readCurrentGitBranch(repoRoot) {
   } catch {
     return "";
   }
+}
+
+function isBosunLocalOpsBranch(branchName) {
+  return String(branchName || "").trim().toLowerCase() === BOSUN_LOCAL_OPS_BRANCH;
 }
 
 export function resolveTaskSimulationDefaultTargetBranch(
@@ -98,6 +111,7 @@ export function resolveTaskSimulationDefaultTargetBranch(
     && normalizedCurrent !== "main"
     && normalizedCurrent !== "master"
     && !normalizedCurrent.startsWith("task/")
+    && !isBosunLocalOpsBranch(normalizedCurrent)
     && (
       !configuredBranch
       || normalizedConfigured === "origin/main"
@@ -112,6 +126,10 @@ export function resolveTaskSimulationDefaultTargetBranch(
 
 function shouldOverrideSimulationTaskBaseBranch(task, defaultTargetBranch) {
   const normalizedDefault = String(defaultTargetBranch || "").trim().toLowerCase();
+  const taskBaseBranch = String(task?.baseBranch || task?.base_branch || "").trim().toLowerCase();
+  if (isBosunLocalOpsBranch(taskBaseBranch)) {
+    return true;
+  }
   if (
     !normalizedDefault
     || normalizedDefault === "origin/main"
@@ -119,7 +137,6 @@ function shouldOverrideSimulationTaskBaseBranch(task, defaultTargetBranch) {
   ) {
     return false;
   }
-  const taskBaseBranch = String(task?.baseBranch || task?.base_branch || "").trim().toLowerCase();
   return !taskBaseBranch || taskBaseBranch === "origin/main" || taskBaseBranch === "main";
 }
 
@@ -142,6 +159,19 @@ function hasFlag(args, ...flags) {
 
 function cloneJson(value) {
   return value == null ? value ?? null : JSON.parse(JSON.stringify(value));
+}
+
+function safeReadFileHash(filePath = "") {
+  if (!filePath || !existsSync(filePath)) return null;
+  try {
+    return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function normalizePathForJson(filePath = "") {
+  return String(filePath || "").replace(/\\/g, "/");
 }
 
 class TaskSimulationProcessExitError extends Error {
@@ -218,7 +248,8 @@ function showHelp(stdout = console.log) {
   OPTIONS
     --json                   Emit structured JSON output
     --mode <mode>            Retry mode for 'resume': from_failed (default),
-                             from_scratch, or replan_from_failed
+                             from_scratch, replan_from_failed, or replan_subgraph
+    --diagnose               Include simulator diagnostics in JSON output
 
   EXAMPLES
     bosun simulate task
@@ -239,6 +270,35 @@ function resolveSimulationLockPath(repoRoot, options = {}) {
   return resolve(repoRoot, ".bosun", ".cache", "task-simulator.pid");
 }
 
+function buildRuntimeDriftDiagnostics(runtime = {}) {
+  const repoRoot = runtime.repoRoot ? resolve(runtime.repoRoot) : process.cwd();
+  const workspaceMirrorRoot = runtime.workspaceMirrorRoot || resolve(repoRoot, ".bosun", "workspaces");
+  const files = SIMULATOR_RUNTIME_DRIFT_FILES.map((relativePath) => {
+    const sourcePath = resolve(repoRoot, relativePath);
+    const mirrorPath = resolve(workspaceMirrorRoot, relativePath);
+    const sourceHash = safeReadFileHash(sourcePath);
+    const mirrorHash = safeReadFileHash(mirrorPath);
+    return {
+      relativePath,
+      sourcePath: normalizePathForJson(sourcePath),
+      mirrorPath: normalizePathForJson(mirrorPath),
+      sourceExists: Boolean(sourceHash),
+      mirrorExists: Boolean(mirrorHash),
+      sourceHash,
+      mirrorHash,
+      differs: Boolean(sourceHash && mirrorHash && sourceHash !== mirrorHash),
+    };
+  });
+  return {
+    repoRoot: normalizePathForJson(repoRoot),
+    workflowDir: normalizePathForJson(runtime.workflowDir || resolve(repoRoot, ".bosun", "workflows")),
+    runsDir: normalizePathForJson(runtime.runsDir || resolve(repoRoot, ".bosun", "workflow-runs")),
+    workspaceMirrorRoot: normalizePathForJson(workspaceMirrorRoot),
+    driftFiles: files,
+    hasMirrorDrift: files.some((entry) => entry.differs),
+  };
+}
+
 function readSimulationState(statePath) {
   if (!existsSync(statePath)) return null;
   try {
@@ -249,23 +309,7 @@ function readSimulationState(statePath) {
 }
 
 function resolveResumeRunId(savedState, runtime = {}) {
-  const fallbackRunId = String(savedState?.runId || "").trim();
-  const taskId = String(savedState?.taskId || "").trim();
-  if (!fallbackRunId || !taskId || typeof runtime.engine?.getRunHistory !== "function") {
-    return fallbackRunId;
-  }
-  try {
-    const history = runtime.engine.getRunHistory(savedState?.workflowId || runtime.workflowId) || [];
-    const candidate = history.find((run) => {
-      const runId = String(run?.runId || "").trim();
-      const runTaskId = String(run?.taskId || run?.rootTaskId || "").trim();
-      const status = String(run?.status || "").trim().toLowerCase();
-      return runId && runId !== fallbackRunId && runTaskId === taskId && status !== "completed";
-    });
-    return String(candidate?.runId || "").trim() || fallbackRunId;
-  } catch {
-    return fallbackRunId;
-  }
+  return String(savedState?.runId || "").trim();
 }
 
 function writeSimulationState(statePath, payload) {
@@ -598,6 +642,8 @@ export async function createTaskSimulationRuntime(options = {}) {
     engine,
     repoRoot,
     storePath,
+    workflowDir,
+    runsDir,
     workflowId,
     defaultTargetBranch,
     statePath: resolveSimulationStatePath(repoRoot, options),
@@ -611,6 +657,7 @@ function buildSimulationReport({
   workflowId,
   workflowDefinition = null,
   ctx,
+  runtime = {},
   task = null,
   explicitTaskId = "",
   restarted = false,
@@ -650,6 +697,30 @@ function buildSimulationReport({
           : String(ctx?.data?._workflowTerminalStatus || "completed")
             .trim()
             .toLowerCase() || "completed";
+  const nodeReports = nodes.map((node) => ({
+    id: node?.id || null,
+    label: node?.label || node?.id || null,
+    type: node?.type || null,
+    status: ctx?.getNodeStatus?.(node?.id) || "pending",
+    input: cloneJson(ctx?.getNodeInput?.(node?.id) ?? null),
+    output: cloneJson(ctx?.getNodeOutput?.(node?.id) ?? null),
+    timing: cloneJson(ctx?.getNodeTiming?.(node?.id) ?? null),
+  }));
+  const agentLineage = nodeReports
+    .filter((node) => String(node?.type || "") === "action.run_agent" || String(node?.id || "").startsWith("run-agent-"))
+    .map((node) => ({
+      id: node.id,
+      status: node.status,
+      lineageRunId: node.output?.lineageRunId || node.output?.runId || node.input?.lineageRunId || null,
+      sessionId: node.output?.sessionId || node.output?.session?.id || node.input?.sessionId || null,
+      blockedReason: node.output?.blockedReason || node.output?.reason || null,
+      implementationState: node.output?.implementationState || null,
+    }));
+  const completedNodeIds = nodeReports
+    .filter((node) => node.status === "completed")
+    .map((node) => node.id)
+    .filter(Boolean);
+  const runtimeDiagnostics = buildRuntimeDriftDiagnostics(runtime);
   return {
     templateId: TASK_SIMULATION_TEMPLATE_ID,
     workflowId: workflowId || null,
@@ -678,15 +749,19 @@ function buildSimulationReport({
       ? engineConsole.map((entry) => cloneJson(entry))
       : [],
     data: cloneJson(ctx?.data || {}),
-    nodes: nodes.map((node) => ({
-      id: node?.id || null,
-      label: node?.label || node?.id || null,
-      type: node?.type || null,
-      status: ctx?.getNodeStatus?.(node?.id) || "pending",
-      input: cloneJson(ctx?.getNodeInput?.(node?.id) ?? null),
-      output: cloneJson(ctx?.getNodeOutput?.(node?.id) ?? null),
-      timing: cloneJson(ctx?.getNodeTiming?.(node?.id) ?? null),
-    })),
+    diagnostics: {
+      mode: resumed ? "resume" : restarted ? "restart" : explicitTaskId ? "explicit-task" : "next-runnable-task",
+      retryMode: resumed ? resumeMode || "from_failed" : null,
+      originalRunId: originalRunId || null,
+      completedNodeIds,
+      agentLineage,
+      runtime: runtimeDiagnostics,
+      replayRisk: {
+        reusedCompletedAgentNodes: resumed && agentLineage.some((entry) => entry.status === "completed" && entry.lineageRunId && entry.lineageRunId !== ctx?.id),
+        mirrorDrift: runtimeDiagnostics.hasMirrorDrift,
+      },
+    },
+    nodes: nodeReports,
   };
 }
 
@@ -850,6 +925,7 @@ export async function executeTaskSimulationCommand(args, options = {}) {
           ? runtime.engine.get(runtime.workflowId)
           : null,
       ctx,
+      runtime,
       task: kanbanTask,
       explicitTaskId,
       restarted,

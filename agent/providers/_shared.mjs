@@ -48,14 +48,33 @@ function normalizeModelHint(model, defaults = {}) {
   const id = toTrimmedString(value.id || value.model || value.name);
   if (!id) return null;
   const aliases = uniqueTokens([id, ...(Array.isArray(value.aliases) ? value.aliases : [])]);
+  const numberOrNull = (...values) => {
+    for (const rawValue of values) {
+      const parsed = Number(rawValue);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    return null;
+  };
+  const booleanOrNull = (rawValue) => typeof rawValue === "boolean" ? rawValue : null;
   return {
     id,
     label: toTrimmedString(value.label || value.name || id) || id,
     family: toTrimmedString(value.family || defaults.family) || normalizeModelFamily(id),
+    apiModel: toTrimmedString(value.apiModel || value.api_model || value.model || id) || id,
+    apiStyle: toTrimmedString(value.apiStyle || value.transport?.apiStyle || defaults.apiStyle) || null,
+    apiVersion: toTrimmedString(value.apiVersion || defaults.apiVersion) || null,
     local: value.local === true || defaults.local === true,
     default: value.default === true || id === toTrimmedString(defaults.defaultModel),
-    reasoningEffort: toTrimmedString(value.reasoningEffort || value.reasoning || defaults.reasoningEffort) || null,
-    contextWindow: Number.isFinite(Number(value.contextWindow)) ? Number(value.contextWindow) : null,
+    reasoningEffort: toTrimmedString(value.reasoningEffort || (typeof value.reasoning === "string" ? value.reasoning : "") || defaults.reasoningEffort) || null,
+    contextWindow: numberOrNull(value.contextWindow, value.contextLength, value.context_window, defaults.contextWindow),
+    contextLength: numberOrNull(value.contextLength, value.contextWindow, value.context_window, defaults.contextLength),
+    maxInputTokens: numberOrNull(value.maxInputTokens, value.inputTokens, value.input_token_limit, defaults.maxInputTokens),
+    maxOutputTokens: numberOrNull(value.maxOutputTokens, value.outputTokens, value.defaultMaxTokens, value.default_max_tokens, defaults.maxOutputTokens),
+    toolCalling: booleanOrNull(value.toolCalling ?? value.capabilities?.toolCalling),
+    vision: booleanOrNull(value.vision ?? value.capabilities?.vision),
+    supportsAttachments: booleanOrNull(value.supportsAttachments ?? value.capabilities?.supportsAttachments),
+    reasoning: booleanOrNull(value.reasoning ?? value.canReason ?? value.capabilities?.reasoning),
+    streaming: booleanOrNull(value.streaming ?? value.capabilities?.streaming),
     aliases,
     metadata: value.metadata && typeof value.metadata === "object" ? cloneJson(value.metadata) : {},
   };

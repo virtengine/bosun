@@ -892,6 +892,42 @@ const WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS = [
   /git commit/i,
 ];
 
+const WORKFLOW_AGENT_COMMIT_FOLLOWUP_FAILURE_PATTERNS = [
+  /push attempt failed/i,
+  /push failed/i,
+  /failed (?:to )?push/i,
+  /pr update not completed/i,
+  /spawnsync git etimedout/i,
+  /git etimedout/i,
+  /\betimedout\b/i,
+];
+
+const WORKFLOW_AGENT_IMPLEMENTED_WORK_PATTERNS = [
+  /completed implementation/i,
+  /implemented and committed/i,
+  /committed changes/i,
+  /commit created:/i,
+  /commit [`'"]?[0-9a-f]{7,40}[`'"]? (?:created|made|written)/i,
+  /created commit [`'"]?[0-9a-f]{7,40}[`'"]?/i,
+  /implementation (?:is )?complete/i,
+];
+
+function hasWorkflowAgentCreatedCommitText(text = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return WORKFLOW_AGENT_IMPLEMENTED_WORK_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isWorkflowAgentCommitBlockedText(text = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  if (WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  return WORKFLOW_AGENT_IMPLEMENTED_WORK_PATTERNS.some((pattern) => pattern.test(normalized))
+    && WORKFLOW_AGENT_COMMIT_FOLLOWUP_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function parseWorkflowAgentTimeoutMs(value, fallback = null) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
@@ -959,6 +995,53 @@ function collectWorkflowAgentResultFragments(result = {}) {
     );
   }
   return fragments.filter((fragment) => String(fragment || "").trim());
+}
+
+function collectWorkflowAgentDigestFragments(digest = {}) {
+  const fragments = [];
+  if (digest?.summary) fragments.push(String(digest.summary));
+  if (digest?.narrative) fragments.push(String(digest.narrative));
+  if (Array.isArray(digest?.stream)) {
+    fragments.push(
+      ...digest.stream.map((entry) => {
+        if (!entry || typeof entry !== "object") return String(entry || "");
+        return String(
+          entry.summary
+          || entry.content
+          || entry.text
+          || entry.message
+          || entry.delta
+          || entry.type
+          || "",
+        );
+      }),
+    );
+  }
+  if (Array.isArray(digest?.items)) {
+    fragments.push(
+      ...digest.items.map((entry) => String(entry?.summary || entry?.content || entry?.type || "")),
+    );
+  }
+  return fragments.filter((fragment) => String(fragment || "").trim());
+}
+
+function normalizeWorkflowAgentImplementationCommitBlock(result = {}, digest = {}) {
+  if (!result || typeof result !== "object") return result;
+  if (result?.success === true) return result;
+  if (String(result?.implementationState || "").trim() === "implementation_done_commit_blocked") {
+    return result;
+  }
+  const text = [
+    ...collectWorkflowAgentResultFragments(result),
+    ...collectWorkflowAgentDigestFragments(digest),
+  ].join("\n");
+  if (!isWorkflowAgentCommitBlockedText(text) && !hasWorkflowAgentCreatedCommitText(text)) return result;
+  return {
+    ...result,
+    blockedReason: "implementation_done_commit_blocked",
+    implementationState: "implementation_done_commit_blocked",
+    error: String(result?.error || "").trim() || text || "implementation_done_commit_blocked",
+  };
 }
 
 function isWorkflowAgentDelegationInspectionStall(text = "") {
@@ -1768,7 +1851,7 @@ function summarizeWorkflowTeamState(state) {
 function classifyWorkflowAgentBlockedStatus(result = {}) {
   const fragments = collectWorkflowAgentResultFragments(result);
   const text = fragments.join("\n");
-  if (WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) {
+  if (isWorkflowAgentCommitBlockedText(text)) {
     return "implementation_done_commit_blocked";
   }
   if (WORKFLOW_AGENT_REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) {
@@ -1912,7 +1995,7 @@ function classifyPushBlockedReason(errorText = "", hasMergeConflict = false) {
   if (hasMergeConflict) return "blocked_by_repo";
   const normalized = String(errorText || "").replace(/\s+/g, " ").trim();
   if (!normalized) return "implementation_done_commit_blocked";
-  if (WORKFLOW_AGENT_COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  if (isWorkflowAgentCommitBlockedText(normalized)) {
     return "implementation_done_commit_blocked";
   }
   if (WORKFLOW_AGENT_REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
@@ -2433,7 +2516,8 @@ registerNodeType("action.run_agent", {
       continueOnSession: { type: "boolean", default: true, description: "Try continuing existing session before starting fresh" },
       continuePrompt: { type: "string", description: "Prompt used when continuing an existing session" },
       sessionRetries: { type: "number", default: 2, description: "Additional session-aware retries for execWithRetry" },
-      maxContinues: { type: "number", default: 2, description: "Max idle-continue attempts for execWithRetry" },
+      maxContinues: { type: "number", default: 24, description: "Max continuation attempts for execWithRetry" },
+      requireCompletionSignal: { type: "boolean", default: true, description: "Require explicit completion signal before run_agent returns success" },
       maxRetainedEvents: { type: "number", default: WORKFLOW_AGENT_EVENT_PREVIEW_LIMIT, description: "Maximum agent events retained in run output" },
       candidateCount: { type: "number", default: 1, description: "Run N isolated agent candidates and select the best (N>1 enables selector mode)" },
       candidateSelector: {
@@ -3189,16 +3273,19 @@ registerNodeType("action.run_agent", {
           options.continueOnSession ?? (node.config?.continueOnSession !== false);
         const continuePrompt = ctx.resolve(
           node.config?.continuePrompt ||
-            "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end.",
+            "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end. Return only when fully done and include an explicit completion signal line such as 'Completion:', 'Completion message:', 'Task complete:', 'DONE:', 'COMPLETED:', or 'task_complete'.",
         );
         const parsedSessionRetries = Number(node.config?.sessionRetries);
         const parsedMaxContinues = Number(node.config?.maxContinues);
+        const requireCompletionSignal =
+          options.requireCompletionSignal
+          ?? parseBooleanSetting(node.config?.requireCompletionSignal, true);
         const sessionRetries = Number.isFinite(parsedSessionRetries)
-          ? Math.max(0, Math.min(10, Math.floor(parsedSessionRetries)))
+          ? Math.max(0, Math.floor(parsedSessionRetries))
           : 2;
         const maxContinues = Number.isFinite(parsedMaxContinues)
-          ? Math.max(0, Math.min(10, Math.floor(parsedMaxContinues)))
-          : 2;
+          ? Math.max(0, Math.floor(parsedMaxContinues))
+          : 24;
         const resolvedSdkFromContext = String(ctx.data?.resolvedSdk || "").trim().toLowerCase() || undefined;
         const sdkOverride = sdk === "auto" ? resolvedSdkFromContext : sdk;
         const resolvedModelOverride = node.config?.model
@@ -3592,6 +3679,7 @@ registerNodeType("action.run_agent", {
               timeoutMs,
               maxRetries: sessionRetries,
               maxContinues,
+              requireCompletionSignal,
               sessionType: trackedSessionType,
               ...(managedSessionId ? { sessionId: managedSessionId } : {}),
               ...(managedSessionScope ? { sessionScope: managedSessionScope } : {}),
@@ -3741,6 +3829,9 @@ registerNodeType("action.run_agent", {
           stream: normalizedStream,
           items: normalizedItems,
         });
+        if (node.id === "run-agent-implement") {
+          result = normalizeWorkflowAgentImplementationCommitBlock(result, digest);
+        }
         success = result?.success === true;
         ctx.log(node.id, `${passLabel || "Agent"} completed: success=${success} streamEvents=${streamEventCount}`);
 
@@ -3925,22 +4016,25 @@ registerNodeType("action.run_agent", {
         }
 
         if (!success) {
+          const finalResult = node.id === "run-agent-implement"
+            ? normalizeWorkflowAgentImplementationCommitBlock(result, digest)
+            : result;
           return {
             ...finalizedSession,
             success: false,
             error:
-              result?.error ||
+              finalResult?.error ||
               `Agent execution failed in node "${node.label || node.id}"`,
-            output: result?.output,
-            blockedReason: result?.blockedReason || null,
-            implementationState: result?.implementationState || null,
-            sdk: result?.sdk,
-            items: result?.items,
+            output: finalResult?.output,
+            blockedReason: finalResult?.blockedReason || null,
+            implementationState: finalResult?.implementationState || null,
+            sdk: finalResult?.sdk,
+            items: finalResult?.items,
             threadId,
             sessionId: threadId,
-            attempts: result?.attempts,
-            continues: result?.continues,
-            resumed: result?.resumed,
+            attempts: finalResult?.attempts,
+            continues: finalResult?.continues,
+            resumed: finalResult?.resumed,
             summary: digest.summary,
             narrative: digest.narrative,
             thoughts: digest.thoughts,
@@ -9716,11 +9810,11 @@ registerNodeType("action.acquire_worktree", {
     if (!currentTaskSnapshot && typeof kanban?.getTask === "function") {
       currentTaskSnapshot = await kanban.getTask(taskId).catch(() => null);
     }
-    const shouldRecreateDetachedTaskBranch = () => {
-      if (!currentTaskSnapshot || typeof currentTaskSnapshot !== "object") return false;
-      if (taskHasPrReference(currentTaskSnapshot)) return false;
-      if (!baseBranch || baseBranch === branch) return false;
-      const canonicalBranchName = deriveTaskBranch({
+      const shouldRecreateStaleTaskBranch = () => {
+        if (!currentTaskSnapshot || typeof currentTaskSnapshot !== "object") return false;
+        if (taskHasPrReference(currentTaskSnapshot)) return false;
+        if (!baseBranch || baseBranch === branch) return false;
+        const canonicalBranchName = deriveTaskBranch({
         id: taskId,
         title: pickTaskString(
           currentTaskSnapshot?.title,
@@ -9731,21 +9825,21 @@ registerNodeType("action.acquire_worktree", {
         ),
       });
       if (!branchMatchesTaskOwnership(branch, taskId, canonicalBranchName)) return false;
-      try {
-        const gitOpts = {
-          cwd: repoRoot,
-          encoding: "utf8",
-          timeout: 5000,
-          stdio: ["ignore", "pipe", "pipe"],
-        };
-        const baseHead = execGitArgsSync(["rev-parse", "--verify", baseBranch], gitOpts).trim();
-        const mergeBase = execGitArgsSync(["merge-base", baseBranch, branch], gitOpts).trim();
-        if (!baseHead || !mergeBase || baseHead === mergeBase) return false;
-        const changedFiles = execGitArgsSync(["diff", "--name-only", `${baseBranch}..${branch}`], {
-          ...gitOpts,
-          timeout: 10000,
-        })
-          .split(/\r?\n/)
+        try {
+          const gitOpts = {
+            cwd: repoRoot,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          };
+          execGitArgsSync(["rev-parse", "--verify", baseBranch], gitOpts).trim();
+          const mergeBase = execGitArgsSync(["merge-base", baseBranch, branch], gitOpts).trim();
+          if (!mergeBase) return false;
+          const changedFiles = execGitArgsSync(["diff", "--name-only", `${baseBranch}..${branch}`], {
+            ...gitOpts,
+            timeout: 10000,
+          })
+            .split(/\r?\n/)
           .map((line) => line.trim())
           .filter(Boolean);
         return changedFiles.length >= STALE_TASK_BRANCH_RECREATE_DIFF_THRESHOLD;
@@ -9884,6 +9978,21 @@ registerNodeType("action.acquire_worktree", {
         resetManagedWorktree(repoRoot, candidatePath, state.gitDir);
         return true;
       };
+      const invalidateStaleReusableTaskBranch = (candidatePath, phaseLabel) => {
+        if (!shouldRecreateStaleTaskBranch()) return false;
+        if (!isManagedBosunWorktree(candidatePath, repoRoot)) {
+          throw new Error(
+            `Attached worktree for ${branch} is stale and exceeds the task branch diff limit: ${candidatePath}`,
+          );
+        }
+        ctx.log(node.id, `Discarding stale managed task branch (${phaseLabel}): ${candidatePath}`.trim());
+        recoveryState.recreated = true;
+        recoveryState.phase = phaseLabel;
+        recoveryState.worktreePath = candidatePath;
+        recoveryState.detectedIssues.add("stale_task_branch");
+        resetManagedWorktree(repoRoot, candidatePath, resolveWorktreeGitDir(candidatePath));
+        return true;
+      };
 
       const blockUnmanagedAttachedWorktree = async (attachedPath) => {
         const errorMessage = `Task branch ${branch} is already attached to unmanaged worktree: ${attachedPath}`;
@@ -9938,6 +10047,9 @@ registerNodeType("action.acquire_worktree", {
             return null;
           }
         } catch {
+          return null;
+        }
+        if (invalidateStaleReusableTaskBranch(candidatePath, `${phaseLabel}-stale-branch`)) {
           return null;
         }
         fixGitConfigCorruption(repoRoot);
@@ -10031,10 +10143,11 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             /* rebase failures are non-fatal only if the worktree remains reusable */
           }
-          return ensureWorktreeContainsBaseBranch(targetWorktreePath);
+          return ensureWorktreeContainsBaseBranch(targetWorktreePath)
+            || invalidateStaleReusableTaskBranch(targetWorktreePath, "post-pull-stale-branch");
         }
         if (!baseBranch || baseBranch === branch) {
-          return false;
+          return invalidateStaleReusableTaskBranch(targetWorktreePath, "post-pull-stale-branch");
         }
         try {
           execGitArgsSync(["rev-parse", "--verify", baseBranch], {
@@ -10065,7 +10178,8 @@ registerNodeType("action.acquire_worktree", {
             // Best-effort cleanup for a failed local-base rebase.
           }
         }
-        return ensureWorktreeContainsBaseBranch(targetWorktreePath);
+        return ensureWorktreeContainsBaseBranch(targetWorktreePath)
+          || invalidateStaleReusableTaskBranch(targetWorktreePath, "post-pull-stale-branch");
       };
 
       // Ensure remote-tracking base refs are fresh when the repo actually has that remote.
@@ -10214,11 +10328,8 @@ registerNodeType("action.acquire_worktree", {
       // Create fresh worktree
       let createdFromExistingBranch = false;
       let branchExistsLocally = localBranchExists();
-      const attachedPath =
-        branchExistsLocally && !existsSync(worktreePath)
-          ? await findAttachedWorktreeForBranch()
-          : "";
-      if (branchExistsLocally && !attachedPath && !existsSync(worktreePath) && shouldRecreateDetachedTaskBranch()) {
+      const recreateStaleDetachedTaskBranchIfNeeded = () => {
+        if (!branchExistsLocally || !shouldRecreateStaleTaskBranch()) return false;
         const recoveryBranch = buildTaskBranchRecoveryName(branch);
         execGitArgsSync(["branch", recoveryBranch, branch], {
           cwd: repoRoot,
@@ -10237,6 +10348,14 @@ registerNodeType("action.acquire_worktree", {
           node.id,
           `Recreating stale detached task branch from ${baseBranch}: ${branch} (backup: ${recoveryBranch})`,
         );
+        return true;
+      };
+      const attachedPath =
+        branchExistsLocally && !existsSync(worktreePath)
+          ? await findAttachedWorktreeForBranch()
+          : "";
+      if (branchExistsLocally && !attachedPath && !existsSync(worktreePath)) {
+        recreateStaleDetachedTaskBranchIfNeeded();
       }
       if (attachedPath && existsSync(attachedPath)) {
         if (!isManagedBosunWorktree(attachedPath, repoRoot)) {
@@ -10277,6 +10396,7 @@ registerNodeType("action.acquire_worktree", {
             if (existsSync(worktreePath)) {
               allocateRecoveryWorktreePath("attached-branch");
             }
+            recreateStaleDetachedTaskBranchIfNeeded();
             execGitArgsSync(
               branchExistsLocally
                 ? ["worktree", "add", worktreePath, branch]
@@ -10342,6 +10462,7 @@ registerNodeType("action.acquire_worktree", {
               if (existsSync(worktreePath)) {
                 allocateRecoveryWorktreePath("attached-branch");
               }
+              recreateStaleDetachedTaskBranchIfNeeded();
               createWorktreeAtPath();
               recreatedAttachedWorktree = true;
             } else {

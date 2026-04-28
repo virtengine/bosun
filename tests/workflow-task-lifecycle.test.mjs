@@ -2857,6 +2857,83 @@ describe("action.resolve_executor", () => {
     expect(safeDirectories.map((value) => resolve(value))).toContain(resolve("/tmp/opencode-repo"));
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
+  it("defaults action.run_agent to always-on completion-signal autopilot", () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler?.schema?.properties?.maxContinues?.default).toBe(24);
+    expect(handler?.schema?.properties?.requireCompletionSignal?.default).toBe(true);
+  });
+
+  it("forwards autopilot defaults into harness execWithRetry options", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Completion: task is complete.",
+      sdk: "copilot",
+      items: [],
+      threadId: "autopilot-thread-1",
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Implement the task",
+      failOnError: true,
+    }, "run-agent-autopilot-defaults");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(execWithRetry.mock.calls[0][1]).toEqual(expect.objectContaining({
+      maxContinues: 24,
+      requireCompletionSignal: true,
+    }));
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("uses completion-aware default continuation prompt when resuming an existing session", async () => {
+    const handler = getNodeType("action.run_agent");
+    const continueSession = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Completion: resumed session finished all required work.",
+      sdk: "copilot",
+      items: [],
+      threadId: "existing-session-1",
+    });
+    const ctx = makeCtx({
+      sessionId: "existing-session-1",
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          continueSession,
+          execWithRetry: vi.fn(),
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Continue implementing",
+      autoRecover: true,
+      continueOnSession: true,
+      failOnError: true,
+    }, "run-agent-autopilot-continue");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(continueSession).toHaveBeenCalledTimes(1);
+    expect(continueSession.mock.calls[0][1]).toContain("explicit completion signal line");
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
   it("persists workflow topology for task-backed action.run_agent executions", async () => {
     const handler = getNodeType("action.run_agent");
     const taskStoreMod = await import("../task/task-store.mjs");
@@ -3362,11 +3439,227 @@ describe("action.acquire_worktree", () => {
       .filter(Boolean)
       .filter((line) => line.startsWith(`${branch}-recovery-`));
     expect(backupBranches.length).toBe(1);
-    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:shell-codex-sdk-import.mjs`, {
+    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:stale-000.txt`, {
       cwd: repoDir,
       encoding: "utf8",
     });
-    expect(backupBranchFile).toContain("export { Codex }");
+    expect(backupBranchFile).toContain("stale 0");
+  });
+
+  it("recreates large stale task branches when an attached managed worktree is invalidated", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "blocked-stale-attached-1";
+    const branch = "task/blockedstaleattached1-stale-ref";
+    const localBaseBranch = "bosun/codex-self-improvement-loop-commits";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale attached ref",
+        status: "blocked",
+      },
+    }));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+
+    for (let index = 0; index < 205; index += 1) {
+      const name = `attached-stale-${String(index).padStart(3, "0")}.txt`;
+      writeFileSync(join(first.worktreePath, name), `stale ${index}\n`);
+    }
+    gitExec("git add . && git commit -m stale-task-history", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    const firstGitDir = resolve(
+      first.worktreePath,
+      gitExec("git rev-parse --git-dir", {
+        cwd: first.worktreePath,
+        encoding: "utf8",
+      }).trim(),
+    );
+    mkdirSync(join(firstGitDir, "rebase-merge"), { recursive: true });
+    writeFileSync(join(firstGitDir, "rebase-merge", "head-name"), `refs/heads/${branch}\n`);
+
+    gitExec(`git checkout -b ${localBaseBranch}`, {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m local-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const secondNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: localBaseBranch,
+      defaultTargetBranch: localBaseBranch,
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(secondNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale attached ref",
+        status: "inprogress",
+        prNumber: null,
+        prUrl: null,
+      },
+    }));
+    expect(second.success).toBe(true);
+    expect(second.created).toBe(true);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    expect(existsSync(join(second.worktreePath, "attached-stale-000.txt"))).toBe(false);
+
+    const recreatedBranchFile = gitExec(`git show ${branch}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(recreatedBranchFile).toContain("export async function loadCodex() {}");
+    const baseAncestor = gitExec(
+      `git merge-base --is-ancestor ${localBaseBranch} ${branch}`,
+      { cwd: repoDir, encoding: "utf8" },
+    );
+    expect(baseAncestor).toBe("");
+
+    const backupBranches = gitExec("git branch --format=\"%(refname:short)\"", {
+      cwd: repoDir,
+      encoding: "utf8",
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => line.startsWith(`${branch}-recovery-`));
+    expect(backupBranches.length).toBe(1);
+    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:attached-stale-000.txt`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(backupBranchFile).toContain("stale 0");
+  });
+
+  it("recreates large stale task branches even when the attached managed worktree still looks healthy", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "blocked-stale-reused-1";
+    const branch = "task/blockedstalereused1-stale-ref";
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export { Codex } from \"@openai/codex-sdk\";\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m add-stale-import", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const initialNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const first = await nt.execute(initialNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale reused ref",
+        status: "blocked",
+      },
+    }));
+    expect(first.success).toBe(true);
+    expect(first.created).toBe(true);
+
+    for (let index = 0; index < 205; index += 1) {
+      const name = `healthy-stale-${String(index).padStart(3, "0")}.txt`;
+      writeFileSync(join(first.worktreePath, name), `stale ${index}\n`);
+    }
+    gitExec("git add . && git commit -m stale-task-history", {
+      cwd: first.worktreePath,
+      stdio: "ignore",
+    });
+
+    gitExec("git checkout main", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repoDir, "shell-codex-sdk-import.mjs"), "export async function loadCodex() {}\n");
+    gitExec("git add shell-codex-sdk-import.mjs && git commit -m main-base-fix", {
+      cwd: repoDir,
+      stdio: "ignore",
+    });
+
+    const secondNode = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "main",
+      defaultTargetBranch: "main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const second = await nt.execute(secondNode, makeCtx({
+      task: {
+        id: taskId,
+        title: "Blocked stale reused ref",
+        status: "inprogress",
+        prNumber: null,
+        prUrl: null,
+      },
+    }));
+    expect(second.success).toBe(true);
+    expect(typeof second.worktreePath).toBe("string");
+    expect(second.worktreePath.length).toBeGreaterThan(0);
+    expect(readFileSync(join(second.worktreePath, "shell-codex-sdk-import.mjs"), "utf8")).toContain(
+      "export async function loadCodex() {}",
+    );
+    expect(existsSync(join(second.worktreePath, "healthy-stale-000.txt"))).toBe(false);
+
+    const recreatedBranchFile = gitExec(`git show ${branch}:shell-codex-sdk-import.mjs`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(recreatedBranchFile).toContain("export async function loadCodex() {}");
+    const baseAncestor = gitExec(
+      `git merge-base --is-ancestor main ${branch}`,
+      { cwd: repoDir, encoding: "utf8" },
+    );
+    expect(baseAncestor).toBe("");
+
+    const backupBranches = gitExec("git branch --format=\"%(refname:short)\"", {
+      cwd: repoDir,
+      encoding: "utf8",
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => line.startsWith(`${branch}-recovery-`));
+    expect(backupBranches.length).toBe(1);
+    const backupBranchFile = gitExec(`git show ${backupBranches[0]}:healthy-stale-000.txt`, {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(backupBranchFile).toContain("stale 0");
   });
 
   it("persists acquired worktree branch metadata back to the task store projection", async () => {

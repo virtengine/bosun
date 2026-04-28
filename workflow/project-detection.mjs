@@ -619,6 +619,28 @@ export function resolveAutoCommand(value, commandType, rootDir) {
   return detected.commands?.[commandType] || "";
 }
 
+export function resolveManagedWorktreeCommand(
+  command,
+  { repoRoot = "", executionDir = "" } = {},
+) {
+  const trimmedCommand = String(command || "").trim();
+  if (!trimmedCommand || !repoRoot || !executionDir) return trimmedCommand;
+
+  const normalizedRepoRoot = resolve(repoRoot);
+  const normalizedExecutionDir = resolve(executionDir);
+  if (normalizedRepoRoot === normalizedExecutionDir) return trimmedCommand;
+  if (!/[\\/]\.bosun[\\/]worktrees[\\/]/i.test(normalizedExecutionDir)) return trimmedCommand;
+
+  const runnerMatch = trimmedCommand.match(
+    /^(node(?:\.exe)?)\s+tools[\\/]vitest-runner\.mjs(?=\s|$)(.*)$/i,
+  );
+  if (!runnerMatch) return trimmedCommand;
+
+  const sourceRunnerPath = resolve(normalizedRepoRoot, "tools", "vitest-runner.mjs");
+  if (!existsSync(sourceRunnerPath)) return trimmedCommand;
+  return `${runnerMatch[1]} "${sourceRunnerPath}"${runnerMatch[2] || ""}`;
+}
+
 function emptyCommands() {
   return { test: "", build: "", lint: "", syntaxCheck: "", typeCheck: "", qualityGate: "" };
 }

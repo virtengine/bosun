@@ -23451,6 +23451,7 @@
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "mode": "plan",
             "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
@@ -23477,6 +23478,7 @@
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "continueOnSession": false,
             "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
@@ -23503,6 +23505,7 @@
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "continueOnSession": false,
             "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
@@ -47966,6 +47969,7 @@
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "mode": "plan",
             "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
@@ -47992,6 +47996,7 @@
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "continueOnSession": false,
             "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"
@@ -48018,6 +48023,7 @@
             "maxContinues": "{{maxContinues}}",
             "resolveMode": "library",
             "failOnError": false,
+            "continueOnSession": false,
             "delegateTaskWorkflow": false,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
             "delegationWatchdogMaxRecoveries": "{{delegationWatchdogMaxRecoveries}}"

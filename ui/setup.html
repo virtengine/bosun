@@ -1058,6 +1058,11 @@
               value,
               label: String(entry.label || value),
               recommended: Boolean(entry.recommended),
+              toolCalling: entry.toolCalling === true,
+              vision: entry.vision === true || entry.supportsAttachments === true,
+              reasoning: entry.reasoning === true || Boolean(entry.reasoningEffort),
+              contextWindow: Number.isFinite(Number(entry.contextWindow || entry.contextLength)) ? Number(entry.contextWindow || entry.contextLength) : null,
+              catalogSource: String(entry.catalogSource || "").trim(),
             };
           })
           .filter(Boolean)
@@ -1125,7 +1130,14 @@
               onchange=${(e) => toggleModel(entry.value, e.target.checked)}
               style="width:auto;padding:0;margin:0;accent-color:var(--accent)"
             />
-            <span>${entry.label}${entry.recommended ? " (recommended)" : ""}</span>
+            <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span>${entry.label}${entry.recommended ? " (recommended)" : ""}</span>
+              ${entry.toolCalling && html`<span class="pill">tools</span>`}
+              ${entry.vision && html`<span class="pill">vision</span>`}
+              ${entry.reasoning && html`<span class="pill">reasoning</span>`}
+              ${entry.contextWindow && html`<span class="pill">${Math.round(entry.contextWindow / 1000)}k ctx</span>`}
+              ${entry.catalogSource && html`<span class="pill">${entry.catalogSource}</span>`}
+            </span>
           </label>
         `)}
         ${normalizedOptions.length === 0 && html`

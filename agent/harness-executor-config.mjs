@@ -48,6 +48,24 @@ function parseBooleanLike(value, fallback = true) {
   return fallback;
 }
 
+function parseOptionalBoolean(value) {
+  if (typeof value === "boolean") return value;
+  const normalized = toTrimmedString(value).toLowerCase();
+  if (!normalized) return null;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return null;
+}
+
+function parsePositiveNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function cloneObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
+}
+
 function normalizeApiStyle(value, fallback = "provider-default") {
   const normalized = toTrimmedString(value).toLowerCase();
   if (["responses", "chat-completions", "provider-default"].includes(normalized)) {
@@ -66,7 +84,8 @@ function normalizeRoutingMode(value, fallback = "default-only") {
 }
 
 function resolveProviderId(rawProviderId = "") {
-  return normalizeProviderDefinitionId(rawProviderId, "") || "";
+  const raw = toTrimmedString(rawProviderId);
+  return normalizeProviderDefinitionId(raw, "") || sanitizeId(raw, "");
 }
 
 function defaultApiStyleForProvider(providerId = "") {
@@ -101,15 +120,28 @@ function normalizeHarnessModelEntry(rawEntry = {}, index = 0, options = {}) {
   const contextWindow = Number.isFinite(Number(value.contextWindow))
     ? Number(value.contextWindow)
     : null;
-  return {
+  const normalized = {
     id,
     label,
     enabled: parseBooleanLike(value.enabled, true),
+    apiModel: toTrimmedString(value.apiModel || value.api_model || value.model || id) || id,
     apiStyle,
     apiVersion: toTrimmedString(value.apiVersion || "") || null,
     reasoningEffort,
-    contextWindow,
+    contextWindow: contextWindow || parsePositiveNumber(value.contextLength || value.context_window || value.maxContextTokens),
+    contextLength: parsePositiveNumber(value.contextLength || value.contextWindow || value.context_window || value.maxContextTokens),
+    maxInputTokens: parsePositiveNumber(value.maxInputTokens || value.inputTokens || value.input_token_limit),
+    maxOutputTokens: parsePositiveNumber(value.maxOutputTokens || value.outputTokens || value.defaultMaxTokens || value.default_max_tokens),
+    toolCalling: parseOptionalBoolean(value.toolCalling ?? value.capabilities?.toolCalling),
+    vision: parseOptionalBoolean(value.vision ?? value.capabilities?.vision),
+    supportsAttachments: parseOptionalBoolean(value.supportsAttachments ?? value.capabilities?.supportsAttachments),
+    reasoning: parseOptionalBoolean(value.reasoning ?? value.capabilities?.reasoning),
+    streaming: parseOptionalBoolean(value.streaming ?? value.capabilities?.streaming),
+    catalogSource: toTrimmedString(value.catalogSource || "") || null,
+    custom: value.custom === true,
+    overrides: cloneObject(value.overrides),
   };
+  return Object.fromEntries(Object.entries(normalized).filter(([, entryValue]) => entryValue !== null && entryValue !== undefined));
 }
 
 function normalizeHarnessModelEntries(rawModels = [], options = {}) {
@@ -195,7 +227,8 @@ export function normalizeHarnessExecutor(rawExecutor = {}, index = 0) {
       || rawExecutor.driver
       || rawExecutor.type,
   );
-  const driver = providerId ? getBuiltInProviderDriver(providerId) : null;
+  const providerType = resolveProviderId(rawExecutor.providerType || rawExecutor.baseProvider || rawExecutor.adapterProvider || "");
+  const driver = providerId ? getBuiltInProviderDriver(providerType || providerId) : null;
   const fallbackName = driver?.name || providerId || `Harness Executor ${index + 1}`;
   const name = toTrimmedString(rawExecutor.name || rawExecutor.label || rawExecutor.title) || fallbackName;
   const id = sanitizeId(rawExecutor.id || rawExecutor.slug || name || providerId || `executor-${index + 1}`);
@@ -226,6 +259,7 @@ export function normalizeHarnessExecutor(rawExecutor = {}, index = 0) {
     id,
     name,
     providerId,
+    providerType: providerType || null,
     enabled,
     available: rawExecutor.available !== false,
     source: toTrimmedString(rawExecutor.source || (rawExecutor.derived ? "derived" : "configured")) || "configured",

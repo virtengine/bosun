@@ -16,13 +16,51 @@
  *     the live agent path.
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-
 const TAG = "[mcp-client]";
 
+let mcpSdkPromise = null;
+let mcpSdkLoader = defaultLoadMcpSdk;
+
 // ── Utilities ────────────────────────────────────────────────────────────────
+
+function toErrMsg(err) {
+  return err?.message || err;
+}
+
+function normalizeMcpSdkLoadError(err) {
+  return new Error(
+    `MCP SDK unavailable: ${toErrMsg(err)}. Run npm install to restore @modelcontextprotocol/sdk.`,
+  );
+}
+
+async function defaultLoadMcpSdk() {
+  if (!mcpSdkPromise) {
+    mcpSdkPromise = Promise.all([
+      import("@modelcontextprotocol/sdk/client/index.js"),
+      import("@modelcontextprotocol/sdk/client/stdio.js"),
+      import("@modelcontextprotocol/sdk/client/sse.js"),
+    ])
+      .then(([clientModule, stdioModule, sseModule]) => ({
+        Client: clientModule.Client,
+        StdioClientTransport: stdioModule.StdioClientTransport,
+        SSEClientTransport: sseModule.SSEClientTransport,
+      }))
+      .catch((err) => {
+        mcpSdkPromise = null;
+        throw normalizeMcpSdkLoadError(err);
+      });
+  }
+  return mcpSdkPromise;
+}
+
+async function loadMcpSdk() {
+  return mcpSdkLoader();
+}
+
+export function __setMcpSdkLoaderForTests(loader = null) {
+  mcpSdkLoader = loader || defaultLoadMcpSdk;
+  mcpSdkPromise = null;
+}
 
 function toStr(v) {
   return String(v ?? "").trim();
@@ -129,6 +167,11 @@ class McpServerClient {
 
     this._connecting = true;
     try {
+      const {
+        Client,
+        StdioClientTransport,
+        SSEClientTransport,
+      } = await loadMcpSdk();
       if (this.transportType === "url" && this.url) {
         this._transport = new SSEClientTransport(new URL(this.url));
       } else if (this.command) {
@@ -145,7 +188,7 @@ class McpServerClient {
       await this._client.connect(this._transport);
       this._connected = true;
     } catch (err) {
-      console.warn(`${TAG} failed to connect to MCP server "${this.id}": ${err?.message || err}`);
+      console.warn(`${TAG} failed to connect to MCP server "${this.id}": ${toErrMsg(err)}`);
       this._connected = false;
       throw err;
     } finally {
@@ -170,7 +213,11 @@ class McpServerClient {
   }
 
   async executeTool(toolName, args) {
-    await this._ensureConnected();
+    try {
+      await this._ensureConnected();
+    } catch (err) {
+      return { error: `MCP tool execution failed: ${toErrMsg(err)}` };
+    }
     if (!this._client) {
       return { error: `MCP client for "${this.id}" is not connected.` };
     }
@@ -178,8 +225,8 @@ class McpServerClient {
       const result = await this._client.callTool({ name: toolName, arguments: args || {} });
       return normalizeMcpToolResult(result);
     } catch (err) {
-      console.warn(`${TAG} executeTool "${toolName}" on "${this.id}" failed: ${err?.message || err}`);
-      return { error: `MCP tool execution failed: ${err?.message || err}` };
+      console.warn(`${TAG} executeTool "${toolName}" on "${this.id}" failed: ${toErrMsg(err)}`);
+      return { error: `MCP tool execution failed: ${toErrMsg(err)}` };
     }
   }
 

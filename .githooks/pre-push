@@ -428,6 +428,14 @@ fi
 
 echo "[hooks] running ${#SORTED_TARGET_TESTS[@]}/${TOTAL_TESTS} targeted tests…"
 
+vitest_supports_named_projects() {
+  local config_path="vitest.config.mjs"
+  local project_name="$1"
+  [ -n "$project_name" ] || return 1
+  [ -f "$config_path" ] || return 1
+  rg -q "name:\s*['\"]${project_name}['\"]" "$config_path" 2>/dev/null
+}
+
 run_vitest_batches() {
   local -a tests=("$@")
   [ "${#tests[@]}" -eq 0 ] && return 0
@@ -435,10 +443,18 @@ run_vitest_batches() {
   local -a runner_args=(run --config vitest.config.mjs)
   local -a serialized_runner_args=("${runner_args[@]}" --maxWorkers 1)
   local -a regular_runner_args=("${runner_args[@]}")
+  if vitest_supports_named_projects "fast" && vitest_supports_named_projects "isolated"; then
+    serialized_runner_args+=(--project isolated)
+    regular_runner_args+=(--project fast)
+  else
+    echo "[hooks] vitest config has no named fast/isolated projects; falling back to default project execution"
+  fi
   local -a standalone_serialized_tests=()
   local -a serialized_tests=()
   local -a regular_tests=()
   local batching_enabled="${BOSUN_PREPUSH_ENABLE_BATCHING:-0}"
+  local serialized_batch_size="${BOSUN_PREPUSH_SERIAL_BATCH_SIZE:-4}"
+  local batch_size="${BOSUN_PREPUSH_BATCH_SIZE:-50}"
   local test_file
   for test_file in "${tests[@]}"; do
     case "$test_file" in
@@ -453,6 +469,13 @@ run_vitest_batches() {
         ;;
       esac
   done
+
+  if [ "$batching_enabled" != "1" ]; then
+    if [ "${#serialized_tests[@]}" -gt "$serialized_batch_size" ] || [ "${#regular_tests[@]}" -gt "$batch_size" ]; then
+      echo "[hooks] auto-enabling Vitest batching for large targeted set"
+      batching_enabled=1
+    fi
+  fi
 
   if [ "$batching_enabled" != "1" ]; then
     if [ "${#serialized_tests[@]}" -gt 0 ]; then
@@ -474,7 +497,6 @@ run_vitest_batches() {
   fi
 
   if [ "${#serialized_tests[@]}" -gt 0 ]; then
-    local serialized_batch_size="${BOSUN_PREPUSH_SERIAL_BATCH_SIZE:-4}"
     if [ "${#serialized_tests[@]}" -le "$serialized_batch_size" ]; then
       echo "[hooks] serialized vitest batch: ${#serialized_tests[@]} file(s)"
       node tools/vitest-runner.mjs "${serialized_runner_args[@]}" "${serialized_tests[@]}" || return $?
@@ -501,7 +523,6 @@ run_vitest_batches() {
 
   [ "${#regular_tests[@]}" -eq 0 ] && return 0
 
-  local batch_size="${BOSUN_PREPUSH_BATCH_SIZE:-50}"
   if [ "${#regular_tests[@]}" -le "$batch_size" ]; then
     node tools/vitest-runner.mjs "${regular_runner_args[@]}" "${regular_tests[@]}"
     return $?

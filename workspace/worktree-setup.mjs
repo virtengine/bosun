@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { scaffoldAgentHookFiles, normalizeHookTargets } from "../agent/hook-profiles.mjs";
 import { CONFIG_FILES } from "../config/config-file-names.mjs";
 import { ensureRepoConfigs } from "../config/repo-config.mjs";
@@ -120,10 +120,63 @@ function buildExpectedSetupFiles(hookSettings) {
   return expectedFiles;
 }
 
+function normalizeRuntimeSetupFileContent(relativePath, content) {
+  const text = String(content ?? "");
+  const normalizedPath = String(relativePath || "").replace(/\\/g, "/");
+  if (!normalizedPath.startsWith(".githooks/")) return Buffer.from(text, "utf8");
+  return Buffer.from(text.replace(/\r\n?/g, "\n"), "utf8");
+}
+
+function readExpectedRuntimeSetupFileContent(filePath, relativePath) {
+  return normalizeRuntimeSetupFileContent(relativePath, readFileSync(filePath, "utf8"));
+}
+
+export function syncExpectedWorktreeRuntimeFiles(repoRoot, worktreePath, expectedFiles = []) {
+  const resolvedRepoRoot = resolve(repoRoot || process.cwd());
+  const resolvedWorktreePath = resolve(worktreePath || resolvedRepoRoot);
+  const relativePaths = Array.from(
+    new Set(
+      (Array.isArray(expectedFiles) ? expectedFiles : [])
+        .map((entry) => String(entry || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const syncedFiles = [];
+  const unchangedFiles = [];
+  const missingSourceFiles = [];
+
+  for (const relativePath of relativePaths) {
+    const sourcePath = resolve(resolvedRepoRoot, relativePath);
+    if (!existsSync(sourcePath)) {
+      missingSourceFiles.push(relativePath);
+      continue;
+    }
+    const targetPath = resolve(resolvedWorktreePath, relativePath);
+    const sourceContent = readExpectedRuntimeSetupFileContent(sourcePath, relativePath);
+    if (existsSync(targetPath)) {
+      const targetContent = readFileSync(targetPath);
+      if (Buffer.compare(sourceContent, targetContent) === 0) {
+        unchangedFiles.push(relativePath);
+        continue;
+      }
+    }
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, sourceContent);
+    syncedFiles.push(relativePath);
+  }
+
+  return {
+    syncedFiles,
+    unchangedFiles,
+    missingSourceFiles,
+  };
+}
+
 export function ensureWorktreeRuntimeSetup(repoRoot, worktreePath) {
   const resolvedRepoRoot = resolve(repoRoot || process.cwd());
   const resolvedWorktreePath = resolve(worktreePath || resolvedRepoRoot);
   const hookSettings = resolveWorktreeHookProfileSettings(resolvedRepoRoot);
+  const expectedFiles = buildExpectedSetupFiles(hookSettings);
   const repoConfigResult = ensureRepoConfigs(resolvedWorktreePath);
   const gitHooks = ensureGitHooksPath(resolvedWorktreePath);
   const hookResult = scaffoldAgentHookFiles(resolvedWorktreePath, {
@@ -133,12 +186,18 @@ export function ensureWorktreeRuntimeSetup(repoRoot, worktreePath) {
     overwriteExisting: hookSettings.overwriteExisting,
     commands: hookSettings.commands,
   });
+  const runtimeSync = syncExpectedWorktreeRuntimeFiles(
+    resolvedRepoRoot,
+    resolvedWorktreePath,
+    expectedFiles,
+  );
 
   return {
     repoConfigResult,
     gitHooks,
     hookResult,
     hookSettings,
+    runtimeSync,
   };
 }
 
@@ -151,6 +210,17 @@ export function inspectWorktreeRuntimeSetup(repoRoot, worktreePath = repoRoot) {
   const missingFiles = expectedFiles.filter((relativePath) =>
     !existsSync(resolve(resolvedWorktreePath, relativePath)),
   );
+  const staleFiles = expectedFiles.filter((relativePath) => {
+    const sourcePath = resolve(resolvedRepoRoot, relativePath);
+    const targetPath = resolve(resolvedWorktreePath, relativePath);
+    if (!existsSync(sourcePath) || !existsSync(targetPath)) {
+      return false;
+    }
+    return Buffer.compare(
+      readExpectedRuntimeSetupFileContent(sourcePath, relativePath),
+      readFileSync(targetPath),
+    ) !== 0;
+  });
   const issues = [];
 
   if (!hooksPath) {
@@ -165,6 +235,9 @@ export function inspectWorktreeRuntimeSetup(repoRoot, worktreePath = repoRoot) {
   if (missingFiles.length > 0) {
     issues.push(`missing worktree setup files: ${missingFiles.join(", ")}`);
   }
+  if (staleFiles.length > 0) {
+    issues.push(`stale worktree setup files: ${staleFiles.join(", ")}`);
+  }
 
   return {
     ok: issues.length === 0,
@@ -172,6 +245,7 @@ export function inspectWorktreeRuntimeSetup(repoRoot, worktreePath = repoRoot) {
     hooksPath,
     expectedFiles,
     missingFiles,
+    staleFiles,
     hookSettings,
   };
 }

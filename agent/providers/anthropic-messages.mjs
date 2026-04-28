@@ -53,9 +53,9 @@ export const ANTHROPIC_MESSAGES_PROVIDER = createProviderDriver({
     catalogSource: "static+runtime",
     supportsCustomModel: true,
     known: [
-      { id: "claude-opus-4.1", default: true, aliases: ["claude-opus"] },
-      { id: "claude-sonnet-4", aliases: ["claude-sonnet"] },
-      { id: "claude-haiku-4", aliases: ["claude-haiku"] },
+      { id: "claude-opus-4.1", default: true, aliases: ["claude-opus"], contextWindow: 200000, maxOutputTokens: 32000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
+      { id: "claude-sonnet-4", aliases: ["claude-sonnet"], contextWindow: 200000, maxOutputTokens: 64000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
+      { id: "claude-haiku-4", aliases: ["claude-haiku"], contextWindow: 200000, maxOutputTokens: 32000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
     ],
   },
 });

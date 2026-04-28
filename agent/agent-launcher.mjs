@@ -5252,6 +5252,29 @@ const RETRY_OUTPUT_PLACEHOLDERS = new Set([
   "model response continued",
 ]);
 
+const EXPLICIT_COMPLETION_LABEL_RE = /^\s*(?:completion(?:\s+message)?|task complete|done|completed)\s*:/im;
+const EXPLICIT_COMPLETION_SIGNAL_RE = /^\s*task[_ ]complete\s*$/im;
+
+function hasExplicitCompletionSignal(result = {}) {
+  const outputText = [
+    result?.output,
+    result?.summary,
+    result?.narrative,
+    result?.message,
+  ]
+    .map((fragment) => String(fragment || ""))
+    .filter(Boolean)
+    .join("\n");
+  const itemText = Array.isArray(result?.items)
+    ? result.items
+      .map((item) => String(item?.text || item?.message || item?.content || ""))
+      .join("\n")
+    : "";
+  const text = `${outputText}\n${itemText}`.trim();
+  if (!text) return false;
+  return EXPLICIT_COMPLETION_LABEL_RE.test(text) || EXPLICIT_COMPLETION_SIGNAL_RE.test(text);
+}
+
 const RETRY_RECONNECT_PATTERNS = [
   /session\.idle/i,
   /no events received/i,
@@ -5357,7 +5380,8 @@ function classifyRetryCircuitBreak(result = {}, state = {}) {
  * @param {string}  [options.cwd]         Working directory.
  * @param {number}  [options.timeoutMs]   Per-attempt timeout.
  * @param {number}  [options.maxRetries]  Max follow-up attempts (default: 2).
- * @param {number}  [options.maxContinues] Max idle-continue attempts (default: 3).
+ * @param {number}  [options.maxContinues] Max continuation attempts (default: 24).
+ * @param {boolean} [options.requireCompletionSignal] Require explicit completion signal before returning success (default: true).
  * @param {Function} [options.shouldRetry] Custom predicate: (result) => boolean.
  * @param {Function} [options.buildRetryPrompt] Custom retry prompt builder: (result, attempt) => string.
  * @param {Function} [options.buildContinuePrompt] Custom continue prompt builder: (result, attempt) => string.
@@ -5373,7 +5397,8 @@ export async function execWithRetry(prompt, options = {}) {
     cwd = REPO_ROOT,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     maxRetries = 2,
-    maxContinues = 3,
+    maxContinues = 24,
+    requireCompletionSignal = true,
     shouldRetry,
     buildRetryPrompt,
     buildContinuePrompt,
@@ -5411,18 +5436,29 @@ export async function execWithRetry(prompt, options = {}) {
   let attempt = 0;
   const failureFingerprints = new Map();
   let consecutiveNoOutputFailures = 0;
+  const enforceCompletionSignal =
+    requireCompletionSignal !== false
+    && String(sessionType || "task").toLowerCase() !== "ephemeral";
 
   while (attempt < totalAttempts + continuesUsed) {
     attempt++;
     const isIdleContinue =
       lastResult?.error === "idle_continue" ||
       lastResult?._idleContinue === true;
+    const isCompletionSignalContinue =
+      lastResult?.error === "completion_signal_missing" ||
+      lastResult?._awaitingCompletionSignal === true;
+    const isContinuationAttempt = isIdleContinue || isCompletionSignalContinue;
 
     const currentPrompt =
       attempt === 1
         ? prompt
-        : isIdleContinue && typeof buildContinuePrompt === "function"
+        : isContinuationAttempt && typeof buildContinuePrompt === "function"
           ? buildContinuePrompt(lastResult, attempt)
+          : isCompletionSignalContinue
+            ? `# CONTINUE WORK — TASK IS NOT COMPLETE\n\nContinue from your current session state and finish the remaining work.\n\nReturn ONLY when all required work is done and include an explicit completion signal line such as one of:\n- Completion: <summary>\n- Completion message: <summary>\n- Task complete: <summary>\n- DONE: <summary>\n- COMPLETED: <summary>\n- task_complete\n\nDo not stop after partial progress.`
+            : isIdleContinue
+              ? "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end."
           : typeof buildRetryPrompt === "function"
             ? buildRetryPrompt(lastResult, attempt)
             : `# ERROR RECOVERY — Attempt ${attempt}/${totalAttempts}\n\nYour previous attempt failed with:\n\`\`\`\n${lastResult?.error || lastResult?.output || "(unknown error)"}\n\`\`\`\n\nPlease diagnose the issue, fix it, and try again. Here was the original task:\n\n${prompt}`;
@@ -5559,6 +5595,32 @@ export async function execWithRetry(prompt, options = {}) {
         );
         continue;
       }
+
+      if (enforceCompletionSignal && !hasExplicitCompletionSignal(lastResult)) {
+        if (continuesUsed < maxContinues) {
+          continuesUsed++;
+          console.log(
+            `${TAG} attempt ${attempt} succeeded but missing explicit completion signal for "${taskKey}" (continue ${continuesUsed}/${maxContinues})`,
+          );
+          lastResult = {
+            ...lastResult,
+            success: false,
+            error: "completion_signal_missing",
+            _awaitingCompletionSignal: true,
+          };
+          continue;
+        }
+
+        return {
+          ...lastResult,
+          success: false,
+          error: "Missing explicit completion signal after continuation budget exhausted",
+          blockedReason: "incomplete_no_completion_signal",
+          attempts: attempt,
+          continues: continuesUsed,
+        };
+      }
+
       return { ...lastResult, attempts: attempt, continues: continuesUsed };
     }
 
@@ -5746,6 +5808,7 @@ export const __testables = {
   shouldApplySdkCooldown,
   shouldFallbackForSdkError,
   hasMeaningfulRetryResult,
+  hasExplicitCompletionSignal,
   normalizeRetryFailureFingerprint,
   classifyRetryCircuitBreak,
 };

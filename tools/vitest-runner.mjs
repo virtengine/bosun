@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -32,6 +32,88 @@ export function findPackageRoot({ startDir = process.cwd() } = {}) {
     currentDir = getParentDir(currentDir);
   }
   return null;
+}
+
+function resolveNpmInvocation(
+  { platform = process.platform, comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe" } = {},
+) {
+  if (platform === "win32") {
+    return {
+      command: comspec,
+      argsPrefix: ["/d", "/s", "/c", "npm"],
+    };
+  }
+  return {
+    command: "npm",
+    argsPrefix: [],
+  };
+}
+
+export function findVitestPackageSpec(
+  { startDir = process.cwd(), packageRoot = findPackageRoot({ startDir }) } = {},
+) {
+  if (!packageRoot) return null;
+  const packageJsonPath = resolve(packageRoot, "package.json");
+  if (!existsSync(packageJsonPath)) return null;
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+  return packageJson.devDependencies?.vitest || packageJson.dependencies?.vitest || null;
+}
+
+export function ensureVitestEntry(
+  {
+    startDir = process.cwd(),
+    packageRoot = findPackageRoot({ startDir }),
+    spawn = spawnSync,
+    log = console.log,
+    installStdio = "inherit",
+  } = {},
+) {
+  const existingVitestEntry = findVitestEntry({ startDir });
+  if (existingVitestEntry) return existingVitestEntry;
+  if (!packageRoot) return null;
+  const vitestPackageSpec = findVitestPackageSpec({ startDir, packageRoot });
+  if (!vitestPackageSpec) return null;
+
+  log(
+    `[vitest] missing local vitest under ${packageRoot}; hydrating vitest@${vitestPackageSpec} without mutating package manifests`,
+  );
+
+  const npmInvocation = resolveNpmInvocation();
+  const result = spawn(
+    npmInvocation.command,
+    [
+      ...npmInvocation.argsPrefix,
+      "install",
+      "--no-save",
+      "--package-lock=false",
+      "--no-audit",
+      "--no-fund",
+      "--ignore-scripts",
+      `vitest@${vitestPackageSpec}`,
+    ],
+    {
+      cwd: packageRoot,
+      env: process.env,
+      stdio: installStdio,
+    },
+  );
+
+  if (typeof result?.status === "number" && result.status !== 0) {
+    throw new Error(
+      `[vitest] failed to hydrate vitest@${vitestPackageSpec} in ${packageRoot} (exit ${result.status})`,
+    );
+  }
+  if (result?.error) {
+    throw result.error;
+  }
+
+  const hydratedVitestEntry = findVitestEntry({ startDir });
+  if (!hydratedVitestEntry) {
+    throw new Error(
+      `[vitest] hydrated vitest@${vitestPackageSpec} in ${packageRoot}, but it is still unavailable from ${startDir}`,
+    );
+  }
+  return hydratedVitestEntry;
 }
 
 function resolveWindowsEsbuildBinary({ startDir = process.cwd() } = {}) {
@@ -271,7 +353,7 @@ export function runVitest(args = process.argv.slice(2), { startDir = process.cwd
     return 0;
   }
 
-  const vitestEntry = findVitestEntry({ startDir });
+  const vitestEntry = ensureVitestEntry({ startDir });
   if (!vitestEntry) {
     console.error(
       `Unable to locate vitest from ${startDir}. Run npm install in this repository root first.`,

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
@@ -155,6 +155,13 @@ describe("task-claims", () => {
           taskId: "task-stale",
           instanceId: "instance-1",
         });
+        const registry = await freshClaims._test.loadClaimsRegistry();
+        registry.claims["task-stale"].metadata = {
+          ...(registry.claims["task-stale"].metadata || {}),
+          host: hostname(),
+          pid: 999999,
+        };
+        await freshClaims._test.saveClaimsRegistry(registry);
 
         listActiveInstances.mockReturnValueOnce([{ instance_id: "instance-2" }]);
         const result = await freshClaims.claimTask({
@@ -561,6 +568,20 @@ describe("task-claims", () => {
       expect(await _test.loadClaimsRegistry()).not.toHaveProperty(["claims", "task-stale"]);
     });
 
+    it("keeps same-host live-pid claims when presence temporarily omits the owner", async () => {
+      const { listActiveInstances } = vi.mocked(await import("../infra/presence.mjs"));
+      const { _test } = await import("../task/task-claims.mjs");
+
+      await claimTask({ taskId: "task-live", instanceId: "instance-live" });
+
+      listActiveInstances.mockReturnValue([{ instance_id: "instance-other" }]);
+      const claims = await listClaims();
+
+      expect(claims).toHaveLength(1);
+      expect(claims[0].task_id).toBe("task-live");
+      expect(await _test.loadClaimsRegistry()).toHaveProperty(["claims", "task-live"]);
+    });
+
     it("includes expired claims when requested", async () => {
       const { _test } = await import("../task/task-claims.mjs");
 
@@ -581,6 +602,83 @@ describe("task-claims", () => {
       const claims = await listClaims({ includeExpired: true });
 
       expect(claims).toHaveLength(2);
+    });
+  });
+
+  describe("registry locking", () => {
+    afterEach(() => {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    });
+
+    it("does not let listClaims sweep overwrite a concurrent claim", async () => {
+      vi.resetModules();
+
+      let releaseFirstRename;
+      const firstRenameBlocked = new Promise((resolveFirstRenameBlocked) => {
+        releaseFirstRename = resolveFirstRenameBlocked;
+      });
+      let signalFirstRenameStarted;
+      const firstRenameStarted = new Promise((resolveFirstRenameStarted) => {
+        signalFirstRenameStarted = resolveFirstRenameStarted;
+      });
+      let renameCount = 0;
+
+      vi.doMock("node:fs/promises", async () => {
+        const actual = await vi.importActual("node:fs/promises");
+        return {
+          ...actual,
+          rename: vi.fn(async (...args) => {
+            renameCount += 1;
+            if (renameCount === 1) {
+              signalFirstRenameStarted();
+              await firstRenameBlocked;
+            }
+            return actual.rename(...args);
+          }),
+        };
+      });
+
+      const freshClaims = await import("../task/task-claims.mjs");
+      await freshClaims.initTaskClaims({ repoRoot: tempRoot });
+
+      const claimsPath = resolve(tempRoot, ".cache", "bosun", "task-claims.json");
+      await writeFile(
+        claimsPath,
+        JSON.stringify(
+          {
+            version: 1,
+            claims: {
+              "task-expired": {
+                task_id: "task-expired",
+                instance_id: "instance-expired",
+                claim_token: "token-expired",
+                claimed_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+                expires_at: new Date(Date.now() - 60 * 1000).toISOString(),
+                ttl_minutes: 60,
+              },
+            },
+            updated_at: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      const listPromise = freshClaims.listClaims();
+      await firstRenameStarted;
+
+      const claimPromise = freshClaims.claimTask({
+        taskId: "task-live",
+        instanceId: "instance-live",
+      });
+
+      releaseFirstRename();
+      await Promise.all([listPromise, claimPromise]);
+
+      const registry = await freshClaims._test.loadClaimsRegistry();
+      expect(registry).toHaveProperty(["claims", "task-live"]);
     });
   });
 

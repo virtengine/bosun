@@ -118,7 +118,7 @@ function git(args, cwd) {
 }
 
 describe("task simulate CLI", () => {
-  it("prefers the current local source branch when config still defaults to origin/main", () => {
+  it("keeps origin/main when the current branch is the Bosun local ops branch", () => {
     const repoRoot = makeTempDir();
     git(["init"], repoRoot);
     git(["config", "user.email", "test@example.com"], repoRoot);
@@ -139,10 +139,34 @@ describe("task simulate CLI", () => {
       repoRoot,
     );
 
-    expect(resolved).toBe("bosun/codex-self-improvement-loop-commits");
+    expect(resolved).toBe("origin/main");
   });
 
-  it("writes the current local source branch into the installed task workflow", async () => {
+  it("still prefers a generic non-main feature branch when config still defaults to origin/main", () => {
+    const repoRoot = makeTempDir();
+    git(["init"], repoRoot);
+    git(["config", "user.email", "test@example.com"], repoRoot);
+    git(["config", "user.name", "Test"], repoRoot);
+    writeFileSync(resolve(repoRoot, "README.md"), "init\n", "utf8");
+    git(["add", "README.md"], repoRoot);
+    git(["commit", "-m", "init"], repoRoot);
+    git(["branch", "-M", "main"], repoRoot);
+    git(["checkout", "-b", "feature/local-sim-base"], repoRoot);
+
+    const resolved = resolveTaskSimulationDefaultTargetBranch(
+      {
+        branchRouting: {
+          defaultBranch: "origin/main",
+          scopeMap: {},
+        },
+      },
+      repoRoot,
+    );
+
+    expect(resolved).toBe("feature/local-sim-base");
+  });
+
+  it("writes origin/main into the installed task workflow when the current branch is the Bosun local ops branch", async () => {
     const repoRoot = makeTempDir();
     git(["init"], repoRoot);
     git(["config", "user.email", "test@example.com"], repoRoot);
@@ -173,9 +197,9 @@ describe("task simulate CLI", () => {
     });
 
     try {
-      expect(runtime.defaultTargetBranch).toBe("bosun/codex-self-improvement-loop-commits");
+      expect(runtime.defaultTargetBranch).toBe("origin/main");
       const workflow = runtime.engine.get(runtime.workflowId);
-      expect(workflow?.variables?.defaultTargetBranch).toBe("bosun/codex-self-improvement-loop-commits");
+      expect(workflow?.variables?.defaultTargetBranch).toBe("origin/main");
     } finally {
       await runtime.close?.();
     }
@@ -236,6 +260,59 @@ describe("task simulate CLI", () => {
     expect(payload.nodes.some((node) => node.id === "run-agent-plan")).toBe(true);
     const saved = JSON.parse(readFileSync(runtime.statePath, "utf8"));
     expect(saved.taskId).toBe(task.id);
+  });
+
+  it("rewrites stored Bosun local ops task bases back to origin/main during simulation", async () => {
+    const repoRoot = makeTempDir();
+    const task = {
+      id: "task-ops-base",
+      title: "Fix prompt routing",
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    };
+    const ctx = buildContext({
+      runId: "run-ops-base",
+      taskId: task.id,
+      taskTitle: task.title,
+      triggerOutput: {
+        triggered: true,
+        reason: "direct_task",
+        taskId: task.id,
+        task,
+      },
+      nodeStatuses: {
+        trigger: "completed",
+        "run-agent-plan": "completed",
+      },
+    });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      ctx,
+    });
+    runtime.defaultTargetBranch = "origin/main";
+    const stdout = [];
+
+    const result = await executeTaskSimulationCommand(
+      ["simulate", "task", task.id, "--json"],
+      {
+        runtime,
+        stdout: (line) => stdout.push(line),
+        forceJsonOutput: true,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runtime.engine.execute).toHaveBeenCalledWith(runtime.workflowId, expect.objectContaining({
+      taskId: task.id,
+      taskTitle: task.title,
+      task: expect.objectContaining({
+        id: task.id,
+        baseBranch: "origin/main",
+        base_branch: "origin/main",
+      }),
+    }));
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.taskId).toBe(task.id);
   });
 
   it("runs without an explicit task id and persists the selected next task", async () => {
@@ -526,7 +603,7 @@ describe("task simulate CLI", () => {
     expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-mode-1", { mode: "replan_from_failed" });
   });
 
-  it("resume prefers the latest same-task non-completed run over the stale cached run id", async () => {
+  it("resume keeps the cached run id even when a newer same-task non-completed run exists", async () => {
     const repoRoot = makeTempDir();
     const task = { id: "task-newer", title: "Use latest interrupted run" };
     const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
@@ -538,7 +615,7 @@ describe("task simulate CLI", () => {
         taskTitle: task.title,
         runId: "run-stale-completed",
         workflowId: "workflow-task-lifecycle",
-        savedAt: new Date().toISOString(),
+        savedAt: "2026-04-26T15:00:00.000Z",
       }),
       "utf8",
     );
@@ -549,14 +626,14 @@ describe("task simulate CLI", () => {
       retryCtx,
       ctx: retryCtx,
       runHistory: [
-        { runId: "run-latest-running", taskId: task.id, status: "running" },
-        { runId: "run-stale-completed", taskId: task.id, status: "completed" },
+        { runId: "run-latest-running", taskId: task.id, status: "running", startedAt: "2026-04-26T15:05:00.000Z" },
+        { runId: "run-stale-completed", taskId: task.id, status: "completed", endedAt: "2026-04-26T14:59:00.000Z" },
       ],
     });
 
     await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
 
-    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-latest-running", { mode: "from_failed" });
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-stale-completed", { mode: "from_failed" });
   });
 
   it("resume updates the state file with the new retry run ID", async () => {
@@ -612,6 +689,56 @@ describe("task simulate CLI", () => {
     const text = stdout.join("\n");
     expect(text).toContain("task resume");
     expect(text).toContain("--mode");
+    expect(text).toContain("replan_subgraph");
+    expect(text).toContain("--diagnose");
+  });
+
+  it("includes diagnostics for runtime paths, completed nodes, and agent lineage in JSON output", async () => {
+    const repoRoot = makeTempDir();
+    mkdirSync(resolve(repoRoot, "workflow", "workflow-nodes"), { recursive: true });
+    mkdirSync(resolve(repoRoot, "workflow-templates"), { recursive: true });
+    mkdirSync(resolve(repoRoot, "task"), { recursive: true });
+    writeFileSync(resolve(repoRoot, "workflow", "workflow-engine.mjs"), "source-engine\n", "utf8");
+    writeFileSync(resolve(repoRoot, "workflow", "workflow-nodes", "actions.mjs"), "source-actions\n", "utf8");
+    const task = { id: "task-diagnostics", title: "Diagnose simulator" };
+    const ctx = buildContext({
+      runId: "run-diagnostics",
+      taskId: task.id,
+      taskTitle: task.title,
+      nodeStatuses: {
+        trigger: "completed",
+        "run-agent-plan": "completed",
+      },
+    });
+    ctx.getNodeOutput = (nodeId) => {
+      if (nodeId === "trigger") return { triggered: true, taskId: task.id, task };
+      if (nodeId === "run-agent-plan") return { lineageRunId: "run-diagnostics", sessionId: "session-1" };
+      return null;
+    };
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      ctx,
+    });
+    const stdout = [];
+
+    await executeTaskSimulationCommand(
+      ["simulate", "task", task.id, "--json", "--diagnose"],
+      { runtime, stdout: (line) => stdout.push(line), forceJsonOutput: true },
+    );
+
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.diagnostics).toEqual(expect.objectContaining({
+      mode: "explicit-task",
+      completedNodeIds: expect.arrayContaining(["trigger", "run-agent-plan"]),
+    }));
+    expect(payload.diagnostics.agentLineage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "run-agent-plan", lineageRunId: "run-diagnostics" }),
+    ]));
+    expect(payload.diagnostics.runtime).toEqual(expect.objectContaining({
+      repoRoot: expect.stringContaining("bosun-task-simulate-"),
+      hasMirrorDrift: false,
+    }));
   });
 
 });

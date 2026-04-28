@@ -1234,6 +1234,7 @@ describe("voice-tools", () => {
           "npm.cmd",
           ["test"],
           expect.objectContaining({
+            maxBuffer: 16 * 1024 * 1024,
             shell: true,
             timeout: 300000,
           }),
@@ -1242,6 +1243,184 @@ describe("voice-tools", () => {
         if (originalPlatform) {
           Object.defineProperty(process, "platform", originalPlatform);
         }
+      }
+    });
+
+    it("run_workspace_command explains shell-metacharacter rejections with one-command guidance", async () => {
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "npm test && npm run build" },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/shell metacharacters are not allowed/i);
+      expect(result.result).toMatch(/one command per tool call/i);
+      expect(result.result).toMatch(/&&/);
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+    });
+
+    it("run_workspace_command explains empty git diff output as a clean diff", async () => {
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "", ""],
+        stdout: "",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "git diff -- workflow/workflow-engine.mjs tests/workflow-engine.test.mjs" },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/command completed with no output/i);
+      expect(result.result).toMatch(/no diff/i);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        expect.stringMatching(/git(?:\.exe)?$/i),
+        ["diff", "--", "workflow/workflow-engine.mjs", "tests/workflow-engine.test.mjs"],
+        expect.objectContaining({
+          shell: false,
+        }),
+      );
+    });
+
+    it("run_workspace_command treats empty vitest output as a success artifact when the command exits cleanly", async () => {
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "", ""],
+        stdout: "",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "node tools/vitest-runner.mjs run tests/workflow-engine.test.mjs" },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/completed successfully with no output/i);
+      expect(result.result).toMatch(/usable pass\/fail artifact/i);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        "node",
+        [
+          expect.stringMatching(/tools[\\/]vitest-runner\.mjs$/i),
+          "run",
+          "tests/workflow-engine.test.mjs",
+        ],
+        expect.objectContaining({
+          shell: false,
+        }),
+      );
+    });
+
+    it("run_workspace_command preserves a usable success artifact when long test output is truncated", async () => {
+      const stdout = [
+        "RUN  v3.2.4 C:/repo",
+        ...Array.from({ length: 500 }, (_, index) => `progress line ${index}`),
+        "Test Files 12 passed",
+        "Tests 200 passed",
+        "Duration 45.21s",
+      ].join("\n");
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, stdout, ""],
+        stdout,
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "npm test" },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/completed successfully/i);
+      expect(result.result).toMatch(/exceeded the inline limit/i);
+      expect(result.result).toMatch(/usable pass\/fail artifact/i);
+      expect(result.result).toContain("Tests 200 passed");
+      expect(result.result).toContain("Duration 45.21s");
+      expect(result.result).toContain("...");
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        expect.stringMatching(/npm(?:\.cmd)?$/i),
+        ["test"],
+        expect.objectContaining({
+          shell: true,
+        }),
+      );
+    });
+
+    it("run_workspace_command rewrites managed-worktree vitest runs to the source checkout runner", async () => {
+      const managedWorktree = resolve(
+        process.cwd(),
+        ".bosun",
+        "worktrees",
+        `voice-tools-vitest-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      );
+      mkdirSync(managedWorktree, { recursive: true });
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "ok", ""],
+        stdout: "ok",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      try {
+        const result = await executeToolCall(
+          "run_workspace_command",
+          { command: "node tools/vitest-runner.mjs run tests/workflow-engine.test.mjs" },
+          {
+            cwd: managedWorktree,
+            sessionId: "delegate-session-1",
+            surface: "bosun-builtin",
+            sessionType: "tool-bridge-delegate",
+          },
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.result.trim()).toBe("ok");
+        expect(mockSpawnSync).toHaveBeenCalledWith(
+          "node",
+          [
+            resolve(process.cwd(), "tools", "vitest-runner.mjs"),
+            "run",
+            "tests/workflow-engine.test.mjs",
+          ],
+          expect.objectContaining({
+            cwd: managedWorktree,
+            maxBuffer: 16 * 1024 * 1024,
+            shell: false,
+          }),
+        );
+      } finally {
+        await rm(managedWorktree, { recursive: true, force: true });
       }
     });
 
@@ -1267,13 +1446,14 @@ describe("voice-tools", () => {
 
       expect(result.error).toBeUndefined();
       expect(result.result.trim()).toBe("built");
-      expect(mockSpawnSync).toHaveBeenCalledWith(
-        expect.stringMatching(/npm(?:\.cmd)?$/i),
-        ["run", "build"],
-        expect.objectContaining({
-          timeout: 300000,
-        }),
-      );
+        expect(mockSpawnSync).toHaveBeenCalledWith(
+          expect.stringMatching(/npm(?:\.cmd)?$/i),
+          ["run", "build"],
+          expect.objectContaining({
+            maxBuffer: 16 * 1024 * 1024,
+            timeout: 300000,
+          }),
+        );
     });
 
     it("run_workspace_command preserves quoted conventional commit messages for delegated sessions", async () => {

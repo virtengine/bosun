@@ -19,6 +19,9 @@ Non-negotiable startup sequence for every run:
 
 Strict investigation rules:
 - Always pin local commands to `--config-dir .bosun --repo-root .` unless you are deliberately comparing stores.
+- Simulator replay is not progress by itself. If the same blocker family appears in two consecutive notes, stop replaying and create or run the smallest deterministic test/harness for that source seam.
+- After source edits, prove whether the next run loads committed source, dirty source, workspace mirror, task worktree, or a cached runtime process. Restart or isolate stale runtime paths before trusting repeated simulator output.
+- Separate durable source fixes from runtime cleanup, generated output syncs, mirror copies, uncommitted patches, and unresolved blockers in every handoff.
 - Always inspect at least one real active or recently looping task end to end:
   - task status and timestamps
   - active run ID
@@ -34,6 +37,7 @@ Strict investigation rules:
 Escalation rules that override cleanup:
 - If the same symptom family appears in 2 consecutive monitor sessions, it is a code-level incident until disproven.
 - If the same task ID is manually reset more than once in a day, do not reset it again without tracing and fixing the source path that re-breaks it.
+- If dependency installation, generated assets, or mirror syncs are needed more than once for the same symptom family, stop repairing and diagnose dependency/generation drift as its own incident.
 - If merged non-monitor throughput is 0 for 2 consecutive sessions, immediately inspect workflow-template selection, agent routing, claim ownership, and PR/review transitions in source.
 - If the previous session identified a likely code path, start there first. Do not replace it with a fresh queue cleanup and a repeated handoff.
 - If the monitor finds a manual cleanup that temporarily clears the symptom but the same symptom recurs later, reclassify the cleanup as evidence of an unfixed bug, not a fix.
@@ -59,6 +63,7 @@ Workflow-specific requirements:
 Manual intervention limits:
 - One cleanup action per symptom family per session is enough. After that, move to source diagnosis.
 - Do not spend a whole session repeatedly resetting stale tasks, pruning claims, or re-syncing mirrors unless you are actively proving a root cause.
+- Do not spend a whole session replaying the same simulator failure unless the new run adds lineage, reset-node, runtime-load, or deterministic-test evidence.
 - Never report "healthy" just because counters look cleaner after manual resets.
 
 What counts as healthy:
@@ -89,16 +94,17 @@ If code changes are required:
 1. Reproduce from live evidence.
 2. Patch the smallest correct source path.
 3. Add targeted tests where appropriate.
-4. Run validation in this exact order:
+4. Prefer deterministic tests for classifier, retry, claim, active-run, PR-handoff, dependency-loading, or worktree behavior before another live replay.
+5. Run validation in this exact order:
    - targeted tests
    - `npm test`
    - `npm run build`
    - `npm run prepush:check`
-5. Only bump the patch version in `package.json` when shipping a real fix that is ready to merge.
-6. Commit and push to `monitor/bosun-env-stability`.
-7. Open a PR.
-8. Watch CI/CD and fix failures before declaring success.
-9. Merge only for a critical fix that is validated and ready.
+6. Only bump the patch version in `package.json` when shipping a real fix that is ready to merge.
+7. Commit and push to `monitor/bosun-env-stability`.
+8. Open a PR.
+9. Watch CI/CD and fix failures before declaring success.
+10. Merge only for a critical fix that is validated and ready.
 
 Output requirements for each session:
 - First line exactly one of:

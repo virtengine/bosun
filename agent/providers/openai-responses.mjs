@@ -55,10 +55,10 @@ export const OPENAI_RESPONSES_PROVIDER = createProviderDriver({
     catalogSource: "static+runtime",
     supportsCustomModel: true,
     known: [
-      { id: "gpt-5.4", default: true, aliases: ["gpt5.4", "gpt-5"] },
-      { id: "gpt-5.4-mini", aliases: ["gpt5.4-mini", "gpt-5-mini"] },
-      { id: "o4-mini", aliases: ["o4", "omni-4-mini"] },
-      { id: "o3", aliases: ["o3-reasoning"] },
+      { id: "gpt-5.4", default: true, aliases: ["gpt5.4", "gpt-5"], apiStyle: "responses", contextWindow: 400000, maxOutputTokens: 128000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
+      { id: "gpt-5.4-mini", aliases: ["gpt5.4-mini", "gpt-5-mini"], apiStyle: "responses", contextWindow: 400000, maxOutputTokens: 128000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
+      { id: "o4-mini", aliases: ["o4", "omni-4-mini"], apiStyle: "responses", contextWindow: 200000, maxOutputTokens: 100000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
+      { id: "o3", aliases: ["o3-reasoning"], apiStyle: "responses", contextWindow: 200000, maxOutputTokens: 100000, toolCalling: true, vision: true, supportsAttachments: true, reasoning: true, streaming: true },
     ],
   },
 });

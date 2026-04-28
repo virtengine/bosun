@@ -505,13 +505,17 @@ export function normalizePlannerTaskForCreation(task, index) {
     mergeBackPolicy,
   };
 }
-export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5) {
+export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5, options = {}) {
   const parsed = parsePlannerJsonFromText(output);
   if (!parsed || !Array.isArray(parsed.tasks)) return [];
 
+  const exactCount = Number(options?.exactCount);
   const max = Number.isFinite(Number(maxTasks))
     ? Math.max(1, Math.min(100, Math.trunc(Number(maxTasks))))
     : 5;
+  if (Number.isFinite(exactCount) && exactCount > 0 && parsed.tasks.length !== Math.trunc(exactCount)) {
+    return [];
+  }
   const dedup = new Set();
   const tasks = [];
   for (let i = 0; i < parsed.tasks.length && tasks.length < max; i += 1) {
@@ -521,6 +525,9 @@ export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5) {
     if (dedup.has(key)) continue;
     dedup.add(key);
     tasks.push(normalized);
+  }
+  if (Number.isFinite(exactCount) && exactCount > 0 && tasks.length !== Math.trunc(exactCount)) {
+    return [];
   }
   return tasks;
 }
@@ -1252,6 +1259,17 @@ registerNodeType("agent.run_planner", {
       ? basePrompt.includes("Planner feedback context:") || basePrompt.includes(plannerFeedback)
       : false;
     const effectivePlannerFeedback = basePromptHasPlannerFeedback ? "" : plannerFeedback;
+    const normalizedPlannerFeedback = String(effectivePlannerFeedback || "").trim();
+    const resumeFromWriteTestsFirst = /resume\s+from\s+write\s+tests\s+first/i.test(normalizedPlannerFeedback);
+    const resumedPlanRequirements = resumeFromWriteTestsFirst
+      ? [
+        "Resume execution from the pending Write Tests First checkpoint.",
+        "Do not regenerate completed stages that occurred before Write Tests First.",
+        `Return exactly ${count} tasks in a single JSON object: {\"tasks\":[...]}.`,
+        "The first task must write or expand tests before any implementation work.",
+        "Each task must include title, description, files, tests, and api_contracts.",
+      ].join("\n")
+      : "";
     const promptHasRepoMap = hasRepoMapContext(basePrompt);
     const resolvedRepoMap = node.config?.repoMap || ctx.data?.repoMap || null;
     const hasResolvedRepoMap = Boolean(
@@ -1343,10 +1361,11 @@ registerNodeType("agent.run_planner", {
     const outputEnforcement =
       `\n\n## CRITICAL OUTPUT REQUIREMENT\n` +
       `Generate exactly ${count} new tasks.\n` +
-      ((context || effectivePlannerFeedback || repoTopologyContext || skillbookPromptContext)
+      ((context || normalizedPlannerFeedback || resumedPlanRequirements || repoTopologyContext || skillbookPromptContext)
         ? `${[
           context,
-          effectivePlannerFeedback ? `Planner feedback context:\n${effectivePlannerFeedback}` : "",
+          normalizedPlannerFeedback ? `Planner feedback context:\n${normalizedPlannerFeedback}` : "",
+          resumedPlanRequirements ? `Resume requirements:\n${resumedPlanRequirements}` : "",
           repoTopologyContext,
           skillbookPromptContext,
         ].filter(Boolean).join("\n\n")}\n\n`

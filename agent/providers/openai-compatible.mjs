@@ -56,8 +56,8 @@ export const OPENAI_COMPATIBLE_PROVIDER = createProviderDriver({
     catalogSource: "runtime",
     supportsCustomModel: true,
     known: [
-      { id: "gpt-4o-compatible", aliases: ["compatible-default"] },
-      { id: "qwen2.5-coder:latest", local: true },
+      { id: "gpt-4o-compatible", aliases: ["compatible-default"], apiStyle: "chat-completions", contextWindow: 128000, maxOutputTokens: 16384, toolCalling: true, vision: true, supportsAttachments: true, streaming: true },
+      { id: "qwen2.5-coder:latest", local: true, apiStyle: "chat-completions", contextWindow: 32768, maxOutputTokens: 8192, toolCalling: true, vision: false, streaming: true },
     ],
   },
 });

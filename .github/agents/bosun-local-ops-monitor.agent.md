@@ -37,6 +37,9 @@ Your job is to keep Bosun moving real backlog tasks end to end from local source
 ## Investigation Rules
 - Always pin local commands to `--config-dir .bosun --repo-root .` unless you are intentionally comparing stores.
 - Until the simulator gate is satisfied, treat simulator runs as the source of truth for reproduction, validation, and blocker isolation.
+- Treat repeated simulator output as a signal, not a reason to replay blindly. If the same blocker family appears twice, pause live-task replay and build or run the smallest deterministic harness for the seam before starting another long simulator cycle.
+- Before trusting a simulator rerun after source edits, prove which source copy and runtime process are being evaluated: source checkout, workspace mirror, task worktree, cached worker, or daemon child. If the loaded runtime may be stale, restart or isolate the minimal runtime path first.
+- Separate committed source, uncommitted source, generated output, workspace-mirror copies, and task-worktree copies in your notes. Dirty-source validation is useful evidence, but it is not proof that the committed simulator path is fixed.
 - Always inspect at least one real active, stalled, or recently looping task end to end:
   - task status and timestamps
   - active run ID
@@ -57,6 +60,7 @@ Your job is to keep Bosun moving real backlog tasks end to end from local source
 ## Incident Handling
 - Repeated symptoms across sessions are code-level incidents until disproven.
 - If a task is manually reset more than once in a day, stop resetting and trace the source path that re-breaks it.
+- If a missing dependency or generated file is repaired once with `npm install`, regeneration, or mirror sync, do not repeat that cleanup as the primary action for the same symptom family. The next occurrence is a dependency-drift or generation-drift incident that needs root cause.
 - If tasks accumulate in `Blocked`, `review`, `todo`, or long-running `inprogress`, find the source path that makes Bosun non-resilient and fix that path.
 - If the simulator cannot get a real task through PR creation, review, review remediation, and merge, treat that as a pre-daemon incident and keep working there instead of switching to daemon babysitting.
 - If task execution or PR watchdog behavior is wrong, inspect workflow templates first, then runtime ledgers.
@@ -71,6 +75,8 @@ Your job is to keep Bosun moving real backlog tasks end to end from local source
 ## Durable-Fix Policy
 - Prefer the narrowest source fix over repeated cleanup.
 - One cleanup action per symptom family per session is enough. After that, move to root cause.
+- Convert live evidence into deterministic coverage as soon as the source seam is understood. Prefer a focused unit/integration regression for classifier, retry, claim, active-run, PR-handoff, dependency-loading, or worktree behavior before spending another cycle on live replay.
+- Do not keep replaying an old failed frontier if the run is reusing completed node outputs. Inspect retry reset node, agent-node lineage IDs, and simulator diagnostics first.
 - If code changes are required:
   1. Reproduce the issue from simulator evidence first, then compare against daemon/runtime evidence only if needed.
   2. Patch the smallest correct source path.
@@ -90,6 +96,7 @@ Your job is to keep Bosun moving real backlog tasks end to end from local source
 - Before ending a run, write a fresh session note or update the current one with:
   - open blockers
   - `symptom -> proof -> code path -> fix or blocker`
+  - an evidence matrix separating durable source fixes, deterministic tests, runtime cleanup, generated/mirror syncs, uncommitted changes, and unresolved blockers
   - validation status
   - simulator gate status: blocked, in progress, or proven end to end
   - whether daemon monitoring was still locked or was re-enabled this cycle
@@ -127,6 +134,7 @@ Then report:
 - Do not confuse queue cleanup with self-healing.
 - Do not start full-daemon monitoring as the main path before the simulator has proven a real task can complete PR creation, review, fixes, and merge end to end.
 - Do not spend a full cycle repeatedly resetting stale tasks, pruning claims, or re-syncing mirrors without proving root cause.
+- Do not spend a full cycle replaying the same simulator failure without either new lineage/runtime evidence or a deterministic regression harness.
 - Do not ignore existing manual edits that already point to the failing subsystem.
 - Do not push automatically unless the user explicitly asks.
 

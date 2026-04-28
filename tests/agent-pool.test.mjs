@@ -2878,6 +2878,88 @@ describe("sdk cooldown heuristics", () => {
   });
 });
 describe("execWithRetry", () => {
+  it("continues successful task runs until an explicit completion signal is present", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread("completion-thread", "Implemented parser changes and updated tests."),
+    );
+    mockCodexResumeThread.mockImplementation(() =>
+      makeCodexMockThread("completion-thread", "Completion: parser changes are finished and validated."),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "completion-signal-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(result.continues).toBe(1);
+    expect(mockCodexResumeThread).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts first-pass success when output includes an explicit completion label", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread("completion-label-thread", "COMPLETED: final validation passed and task is done."),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "completion-label-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("preserves legacy behavior when requireCompletionSignal is disabled", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread("legacy-thread", "Implemented parser changes and validated tests."),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "legacy-no-completion-signal-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      requireCompletionSignal: false,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
   it("retries after timeout without treating the next attempt as externally aborted", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
     process.env.COPILOT_SDK_DISABLED = "1";

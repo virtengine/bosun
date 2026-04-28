@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { buildProviderKernelSettings, createProviderKernel } from "../agent/provider-kernel.mjs";
+import { getProviderModelCatalog } from "../agent/provider-model-catalog.mjs";
 import { createProviderRegistry } from "../agent/provider-registry.mjs";
 import anthropicNativeAdapter from "../shell/anthropic-native-adapter.mjs";
 import geminiNativeAdapter from "../shell/gemini-native-adapter.mjs";
@@ -192,6 +193,97 @@ describe("provider kernel cutover", () => {
       BOSUN_PROVIDER_OPENROUTER_MODEL: "openai/gpt-5",
       BOSUN_PROVIDER_OPENROUTER_BASE_URL: "https://openrouter.example/v1",
     });
+  });
+
+  it("normalizes model capability metadata for selector defaults", () => {
+    const catalog = getProviderModelCatalog("openai-responses", {
+      configuredModels: [
+        {
+          id: "gpt-custom-capable",
+          apiModel: "gpt-custom-api",
+          apiStyle: "responses",
+          contextWindow: 128000,
+          maxOutputTokens: 16000,
+          toolCalling: true,
+          vision: true,
+          reasoning: true,
+        },
+      ],
+      defaultModel: "gpt-custom-capable",
+      env: {},
+      settings: {},
+    });
+
+    expect(catalog.defaultModel).toBe("gpt-custom-capable");
+    expect(catalog.models[0]).toMatchObject({
+      id: "gpt-custom-capable",
+      apiModel: "gpt-custom-api",
+      apiStyle: "responses",
+      contextWindow: 128000,
+      contextLength: 128000,
+      maxInputTokens: 128000,
+      maxOutputTokens: 16000,
+      toolCalling: true,
+      vision: true,
+      supportsAttachments: false,
+      reasoning: true,
+      streaming: true,
+      catalogSource: "configured",
+    });
+  });
+
+  it("applies model catalog transport and capability defaults to provider runtime", () => {
+    const kernel = createProviderKernel({
+      adapters: {
+        "openai-native": {
+          name: "openai-native",
+          provider: "OPENAI_NATIVE",
+          exec: vi.fn(),
+        },
+      },
+      config: {
+        agentRuntime: "harness",
+        harness: {
+          executors: [
+            {
+              id: "custom-openai",
+              name: "Custom OpenAI",
+              providerId: "openai-compatible",
+              defaultModel: "router-model",
+              baseUrl: "https://router.example/v1",
+              models: [
+                {
+                  id: "router-model",
+                  apiModel: "provider/model",
+                  apiStyle: "chat-completions",
+                  contextWindow: 64000,
+                  maxOutputTokens: 8000,
+                  toolCalling: false,
+                  vision: true,
+                },
+              ],
+            },
+          ],
+          primaryExecutor: "custom-openai",
+        },
+      },
+      env: {},
+    });
+
+    const runtime = kernel.resolveRuntime("custom-openai", "openai-native");
+
+    expect(runtime.providerConfig).toEqual(expect.objectContaining({
+      model: "provider/model",
+      displayModel: "router-model",
+      baseUrl: "https://router.example/v1",
+      contextWindow: 64000,
+      maxOutputTokens: 8000,
+      transport: expect.objectContaining({ apiStyle: "chat-completions" }),
+      capabilities: expect.objectContaining({
+        toolCalling: false,
+        vision: true,
+      }),
+    }));
   });
 
   it("prefers the native adapter for harness-managed OpenAI-family providers", async () => {

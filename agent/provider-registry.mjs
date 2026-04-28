@@ -271,6 +271,7 @@ function buildProviderEntry(providerId, definition, adapter, fields, options) {
     adapter,
     executor: fields.executor,
     configuredModels,
+    providerDefinition: definition,
     defaultModel: fields.defaultModel || definition?.defaultModel,
     local: getProviderCapabilities(providerId).local === true,
     settings: options.settings || options.env || process.env,
@@ -311,10 +312,21 @@ function buildProviderEntry(providerId, definition, adapter, fields, options) {
 
 function resolveDefinitionFromEntry(entry = {}) {
   const direct = entry.providerId || entry.id || entry.adapterId || entry.executor || entry.provider;
+  const providerType = entry.providerType || entry.baseProvider || entry.adapterProvider || "";
   const normalizedProviderId = normalizeProviderDefinitionId(direct, "");
-  const definition = getBuiltinProviderDefinition(normalizedProviderId || entry.adapterId || entry.executor);
+  const normalizedProviderType = normalizeProviderDefinitionId(providerType, "");
+  const fallbackProviderType = !normalizedProviderId && (entry.baseUrl || entry.endpoint || entry.apiStyle)
+    ? "openai-compatible"
+    : "";
+  const definition = getBuiltinProviderDefinition(
+    normalizedProviderType
+    || normalizedProviderId
+    || fallbackProviderType
+    || entry.adapterId
+    || entry.executor,
+  );
   return {
-    providerId: definition?.id || normalizeProviderCapabilityId(direct),
+    providerId: definition?.id || normalizedProviderId || normalizeProviderCapabilityId(direct),
     definition,
   };
 }
@@ -336,9 +348,11 @@ function buildConfiguredProviders(options = {}) {
     const adapter = adapters[adapterId] || adapters[definition?.adapterId] || adapters["codex-sdk"] || {};
     const enabled = resolveProviderEnabled(providerId, entry?.enabled !== false, options);
     const available = enabled && !resolveDisabled(definition || { id: providerId, adapterId }, env);
-    const configuredModels = Array.isArray(entry?.models)
-      ? entry.models.filter(Boolean)
-      : [];
+    const configuredModels = Array.isArray(entry?.modelEntries) && entry.modelEntries.length > 0
+      ? entry.modelEntries.filter(Boolean)
+      : Array.isArray(entry?.models)
+        ? entry.models.filter(Boolean)
+        : [];
     const name = String(entry?.name || "").trim()
       || definition?.name
       || adapter.displayName

@@ -1926,9 +1926,9 @@ describe("WorkflowEngine - run history details", () => {
     }));
   });
 
-  it("preserves full-inline push command output beyond the generic string cap", async () => {
-    const longOutput = "push-output-line\n".repeat(400);
-    expect(longOutput.length).toBeGreaterThan(4000);
+  it("preserves full-inline push command output beyond the persisted command-output cap", async () => {
+    const longOutput = "push-output-line\n".repeat(9000);
+    expect(longOutput.length).toBeGreaterThan(128000);
 
     registerNodeType("test.push_branch_long_output", {
       describe: () => "Returns long push-style output",
@@ -2597,6 +2597,98 @@ describe("WorkflowEngine - run history details", () => {
     }
   });
 
+  it("persists restored snapshot runs in active-runs while live and clears them on completion", async () => {
+    let releaseRun;
+    const blocker = new Promise((resolve) => { releaseRun = resolve; });
+    let nodeEntered;
+    const nodeStarted = new Promise((resolve) => { nodeEntered = resolve; });
+
+    registerNodeType("test.restore_long_running", {
+      describe: () => "Long running node for restore active-run visibility",
+      schema: { type: "object", properties: {} },
+      async execute(node, ctx) {
+        ctx.log(node.id, "restored long running node entered");
+        nodeEntered();
+        await blocker;
+        return { ok: true };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "wait", type: "test.restore_long_running", label: "Wait", config: {} },
+      ],
+      [{ id: "e1", source: "trigger", target: "wait" }],
+      {
+        id: "wf-restore-active",
+        name: "Restore Active Run Visibility Workflow",
+      },
+    );
+
+    engine.save(wf);
+    const snapshotsDir = join(tmpDir, "runs", "snapshots");
+    mkdirSync(snapshotsDir, { recursive: true });
+    const snapshotId = "snapshot-restore-active";
+    writeFileSync(
+      join(snapshotsDir, `${snapshotId}.json`),
+      JSON.stringify({
+        snapshotId,
+        workflowId: wf.id,
+        createdAt: Date.now(),
+        nodeStatuses: {},
+        nodeOutputs: {},
+        nodeTimings: {},
+        nodeInputs: {},
+        retryAttempts: {},
+        variables: {
+          taskId: "task-restore-1",
+          taskTitle: "Restore Task",
+          task: {
+            id: "task-restore-1",
+            title: "Restore Task",
+          },
+          sessionId: "session-restore-1",
+        },
+        errors: [],
+        replayTrajectory: {
+          runId: "run-before-restore",
+          restoredFrom: null,
+          steps: [],
+        },
+        stepSummaries: [],
+      }, null, 2),
+      "utf8",
+    );
+
+    const runPromise = engine.restoreFromSnapshot(snapshotId);
+    await nodeStarted;
+
+    const activeRunsPath = join(tmpDir, "runs", "_active-runs.json");
+    let activeRunEntry = null;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (existsSync(activeRunsPath)) {
+        const entries = JSON.parse(readFileSync(activeRunsPath, "utf8"));
+        activeRunEntry = entries.find((entry) => entry.taskId === "task-restore-1") || null;
+        if (activeRunEntry) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(activeRunEntry).toMatchObject({
+      workflowId: wf.id,
+      workflowName: "Restore Active Run Visibility Workflow",
+      taskId: "task-restore-1",
+      taskTitle: "Restore Task",
+      sessionId: "session-restore-1",
+    });
+
+    releaseRun();
+    await runPromise;
+
+    expect(JSON.parse(readFileSync(activeRunsPath, "utf8"))).toEqual([]);
+  });
+
 
   it("skips checkpoint writes once a run is no longer active", async () => {
     const runId = "run-inactive-checkpoint";
@@ -2812,6 +2904,121 @@ describe("WorkflowEngine - run history details", () => {
     }
   });
 
+  it("drops stale foreign task-claimed active-runs entries once their detail stops looking live", async () => {
+    const sharedTmpDir = mkdtempSync(join(tmpdir(), "wf-engine-cross-process-stale-"));
+    const workflowDir = join(sharedTmpDir, "workflows");
+    const runsDir = join(sharedTmpDir, "runs");
+    const claimsDir = join(sharedTmpDir, ".cache", "bosun");
+    mkdirSync(runsDir, { recursive: true });
+    mkdirSync(claimsDir, { recursive: true });
+
+    const probeEngine = new WorkflowEngine({
+      workflowDir,
+      runsDir,
+    });
+
+    try {
+      const staleStartedAt = Date.now() - (6 * 60 * 1000);
+      writeFileSync(
+        join(runsDir, "run-stale.json"),
+        JSON.stringify({
+          id: "run-stale",
+          startedAt: staleStartedAt,
+          endedAt: null,
+          data: {
+            _workflowId: "template-task-lifecycle",
+            _workflowName: "Task Lifecycle",
+            taskId: "task-stale",
+            taskTitle: "Stale Task",
+          },
+          nodeStatuses: {
+            trigger: NodeStatus.COMPLETED,
+            "run-agent-tests": NodeStatus.COMPLETED,
+          },
+          nodeStatusEvents: [
+            { nodeId: "trigger", status: NodeStatus.COMPLETED, timestamp: staleStartedAt + 1_000 },
+            { nodeId: "run-agent-tests", status: NodeStatus.COMPLETED, timestamp: staleStartedAt + 2_000 },
+          ],
+          logs: [],
+          errors: [],
+        }, null, 2),
+        "utf8",
+      );
+      writeFileSync(
+        join(runsDir, "_active-runs.json"),
+        JSON.stringify([
+          {
+            runId: "run-stale",
+            workflowId: "template-task-lifecycle",
+            workflowName: "Task Lifecycle",
+            startedAt: staleStartedAt,
+            taskId: "task-stale",
+            taskIds: ["task-stale"],
+            taskTitle: "Stale Task",
+          },
+        ], null, 2),
+        "utf8",
+      );
+      writeFileSync(
+        join(claimsDir, "task-claims.json"),
+        JSON.stringify({
+          version: 1,
+          claims: {
+            "task-stale": {
+              task_id: "task-stale",
+              instance_id: "wf-stale",
+              claim_token: "claim-stale",
+              metadata: {
+                host: hostname(),
+                pid: process.pid,
+              },
+            },
+          },
+          updated_at: new Date().toISOString(),
+        }, null, 2),
+        "utf8",
+      );
+
+      const probeCtx = new WorkflowContext({
+        taskId: "task-probe",
+        taskTitle: "Probe Task",
+        task: { id: "task-probe", title: "Probe Task" },
+      });
+      probeCtx.id = "run-probe";
+      probeCtx.startedAt = Date.now() - 500;
+      probeEngine._activeRuns.set("run-probe", {
+        ctx: probeCtx,
+        workflowId: "template-task-lifecycle",
+        workflowName: "Task Lifecycle",
+        status: WorkflowStatus.RUNNING,
+      });
+      probeEngine._persistActiveRunState(
+        "run-probe",
+        "template-task-lifecycle",
+        "Task Lifecycle",
+        probeCtx,
+      );
+
+      const duringProbe = JSON.parse(readFileSync(join(runsDir, "_active-runs.json"), "utf8"));
+      expect(duringProbe).toEqual([
+        expect.objectContaining({
+          runId: "run-probe",
+          taskId: "task-probe",
+          taskIds: ["task-probe"],
+          taskTitle: "Probe Task",
+        }),
+      ]);
+
+      probeEngine._clearActiveRunState("run-probe");
+      probeEngine._activeRuns.delete("run-probe");
+
+      const afterProbe = JSON.parse(readFileSync(join(runsDir, "_active-runs.json"), "utf8"));
+      expect(afterProbe).toEqual([]);
+    } finally {
+      await removeDirWithRetries(sharedTmpDir, { ignoreFinalEperm: true });
+    }
+  });
+
   it("links persisted active runs into task topology at run start", async () => {
     const taskStore = await import("../task/task-store.mjs");
     const originalStorePath = taskStore.getStorePath();
@@ -2983,6 +3190,99 @@ describe("WorkflowEngine - run history details", () => {
           runId: "run-summary-latest",
           workflowName: "Backend Agent",
           status: WorkflowStatus.RUNNING,
+        }),
+      ]));
+    } finally {
+      await taskStore.waitForStoreWrites();
+      await taskStore._resetForTests();
+      taskStore.configureTaskStore({ storePath: originalStorePath });
+      await removeDirWithRetries(taskStoreDir, { ignoreFinalEperm: true });
+    }
+  });
+
+  it("does not let a newer same-task probe clobber an active running latest run linkage", async () => {
+    const taskStore = await import("../task/task-store.mjs");
+    const originalStorePath = taskStore.getStorePath();
+    const taskStoreDir = mkdtempSync(join(tmpdir(), "wf-engine-run-probe-store-"));
+    const storePath = join(taskStoreDir, "kanban-state.json");
+
+    try {
+      taskStore.configureTaskStore({ storePath });
+      await taskStore._resetForTests();
+      taskStore.addTask({ id: "task-run-probe-link", title: "Run Probe Link", status: "inprogress" });
+
+      engine = makeTmpEngine({ kanban: {} });
+      const liveCtx = new WorkflowContext({
+        taskId: "task-run-probe-link",
+        taskTitle: "Run Probe Link",
+        task: {
+          id: "task-run-probe-link",
+          title: "Run Probe Link",
+        },
+        _workflowTaskId: "task-run-probe-link",
+        _workflowSessionId: "workflow-session-live",
+        _workflowRootSessionId: "workflow-root-session-live",
+        _workflowRootRunId: "workflow-root-run-live",
+      });
+      liveCtx.id = "run-probe-live";
+      liveCtx.startedAt = Date.now() - 10_000;
+
+      engine._persistActiveRunState("run-probe-live", "template-task-lifecycle", "Task Lifecycle", liveCtx);
+      await taskStore.waitForStoreWrites();
+
+      const probeCtx = new WorkflowContext({
+        taskId: "task-run-probe-link",
+        taskTitle: "Run Probe Link",
+        task: {
+          id: "task-run-probe-link",
+          title: "Run Probe Link",
+        },
+        _workflowTaskId: "task-run-probe-link",
+        _workflowSessionId: "workflow-session-probe",
+        _workflowRootSessionId: "workflow-root-session-probe",
+        _workflowRootRunId: "workflow-root-run-probe",
+      });
+      probeCtx.id = "run-probe-claim-failed";
+      probeCtx.startedAt = Date.now();
+
+      engine._syncTaskProjectionFromRunStart("run-probe-claim-failed", "template-task-lifecycle", "Task Lifecycle", probeCtx);
+      await taskStore.waitForStoreWrites();
+
+      let storedTask = taskStore.getTask("task-run-probe-link");
+      expect(storedTask?.latestRunId).toBe("run-probe-live");
+
+      engine._syncTaskProjectionFromRunSummary({
+        runId: "run-probe-claim-failed",
+        workflowId: "template-task-lifecycle",
+        workflowName: "Task Lifecycle",
+        status: WorkflowStatus.COMPLETED,
+        taskId: "task-run-probe-link",
+        startedAt: probeCtx.startedAt,
+        endedAt: probeCtx.startedAt + 1000,
+        sessionId: "workflow-session-probe",
+        delegationTopology: {
+          runId: "run-probe-claim-failed",
+          rootRunId: "workflow-root-run-probe",
+          taskId: "task-run-probe-link",
+          rootTaskId: "task-run-probe-link",
+          sessionId: "workflow-session-probe",
+          rootSessionId: "workflow-root-session-probe",
+        },
+      });
+      await taskStore.waitForStoreWrites();
+
+      storedTask = taskStore.getTask("task-run-probe-link");
+      expect(storedTask?.latestRunId).toBe("run-probe-live");
+      expect(storedTask?.workflowRuns).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          runId: "run-probe-live",
+          workflowName: "Task Lifecycle",
+          status: WorkflowStatus.RUNNING,
+        }),
+        expect.objectContaining({
+          runId: "run-probe-claim-failed",
+          workflowName: "Task Lifecycle",
+          status: WorkflowStatus.COMPLETED,
         }),
       ]));
     } finally {
@@ -5735,6 +6035,205 @@ describe("WorkflowEngine - run history details", () => {
       "detect-commits",
     ]));
     expect(resumedRun?.detail?.data?._workflowSessionId).toBeUndefined();
+  });
+
+  it("restarts task-lifecycle retries from claim-task when task resources only survive in node outputs", async () => {
+    const executedNodes = [];
+    registerNodeType("test.retry_resume_task_resource_outputs", {
+      describe: () => "Records task-resource retry execution from preserved outputs",
+      schema: { type: "object", properties: {} },
+      async execute(node, ctx) {
+        executedNodes.push(node.id);
+        if (node.id === "claim-task") {
+          return { success: true, claimToken: "claim-new-from-output" };
+        }
+        if (node.id === "acquire-worktree") {
+          const worktreePath = join(tmpDir, "retried-worktree-from-output");
+          ctx.data.worktreePath = worktreePath;
+          return { success: true, worktreePath };
+        }
+        return { ok: true, nodeId: node.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "test.retry_resume_task_resource_outputs", label: "Claim Task", config: {} },
+        { id: "acquire-worktree", type: "test.retry_resume_task_resource_outputs", label: "Acquire Worktree", config: {} },
+        { id: "detect-commits", type: "test.retry_resume_task_resource_outputs", label: "Detect Commits", config: {} },
+      ],
+      [
+        { id: "t-claim", source: "trigger", target: "claim-task" },
+        { id: "claim-acquire", source: "claim-task", target: "acquire-worktree" },
+        { id: "acquire-detect", source: "acquire-worktree", target: "detect-commits" },
+      ],
+      {
+        id: "wf-retry-reset-task-resource-outputs",
+        name: "Retry Reset Task Resource Outputs",
+        metadata: { installedFrom: "template-task-lifecycle" },
+      },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-retry-reset-task-resource-outputs";
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          _workflowSessionId: "workflow-session-old-output-only",
+          taskId: "task-resource-reset-output-only-1",
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "acquire-worktree": NodeStatus.COMPLETED,
+          "detect-commits": NodeStatus.FAILED,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": { success: true, taskId: "task-resource-reset-output-only-1" },
+          "acquire-worktree": { success: true, worktreePath: join(tmpDir, "stale-worktree-from-output") },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
+
+    expect(executedNodes).toEqual(["claim-task", "acquire-worktree", "detect-commits"]);
+    const resumedRun = engine.getRunDetail(retryRunId);
+    const [resumeRevision, replayRevision] = resumedRun.detail.dagState.revisions;
+    expect(resumeRevision?.preservedCompletedNodeIds).toEqual(["trigger"]);
+    expect(replayRevision?.focusNodeIds).toEqual(expect.arrayContaining([
+      "claim-task",
+      "acquire-worktree",
+      "detect-commits",
+    ]));
+    expect(resumedRun?.detail?.data?._workflowSessionId).toBeUndefined();
+  });
+
+  it("restarts task-lifecycle retries from claim-task when the prior retry ended on the claim-failed branch with compacted claim output", async () => {
+    const executedNodes = [];
+    registerNodeType("test.retry_resume_claim_failed", {
+      describe: () => "Records retries that should restart at claim-task after claim failure",
+      schema: { type: "object", properties: {} },
+      async execute(node) {
+        executedNodes.push(node.id);
+        if (node.id === "claim-task") {
+          return { success: true, claimToken: "claim-after-failure" };
+        }
+        return { ok: true, nodeId: node.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "test.retry_resume_claim_failed", label: "Claim Task", config: {} },
+        { id: "resume-node", type: "test.retry_resume_claim_failed", label: "Resume Node", config: {} },
+      ],
+      [
+        { id: "t-claim", source: "trigger", target: "claim-task" },
+        { id: "claim-resume", source: "claim-task", target: "resume-node" },
+      ],
+      {
+        id: "wf-retry-reset-claim-failed",
+        name: "Retry Reset Claim Failed",
+        metadata: { installedFrom: "template-task-lifecycle" },
+      },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-retry-reset-claim-failed";
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId: "task-claim-failed-reset-1",
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "claim-ok": NodeStatus.COMPLETED,
+          "release-slot-claim-failed": NodeStatus.COMPLETED,
+          "log-claim-failed": NodeStatus.COMPLETED,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": "[Object keys=18]",
+          "claim-ok": { result: false, value: false },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
+
+    expect(executedNodes).toEqual(["claim-task", "resume-node"]);
+    const resumedRun = engine.getRunDetail(retryRunId);
+    const [resumeRevision, replayRevision] = resumedRun.detail.dagState.revisions;
+    expect(resumeRevision?.preservedCompletedNodeIds).toEqual([
+      "trigger",
+      "claim-ok",
+      "release-slot-claim-failed",
+      "log-claim-failed",
+    ]);
+    expect(replayRevision?.focusNodeIds).toEqual(["claim-task"]);
   });
 
   it("retries a stalled non-task delegation run exactly once during interrupted-run recovery", async () => {
@@ -8614,6 +9113,89 @@ describe("Session chaining - action.run_agent", () => {
     }
   });
 
+  it("does not treat a broken managed worktree as the repo root during agent preflight", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-engine-broken-worktree-root-"));
+    const worktreePath = join(repoDir, ".bosun", "worktrees", "task-broken-repo-root");
+    const missingGitDir = join(repoDir, ".git", "worktrees", "task-broken-repo-root");
+    mkdirSync(worktreePath, { recursive: true });
+    execSync("git init", {
+      cwd: repoDir,
+      encoding: "utf8",
+      stdio: "ignore",
+      env: makeIsolatedGitEnv(),
+    });
+    writeFileSync(
+      join(worktreePath, ".git"),
+      `gitdir: ${missingGitDir.replace(/\\/g, "/")}\n`,
+      "utf8",
+    );
+
+    try {
+      const launchEphemeralThread = vi.fn().mockResolvedValue({
+        success: true,
+        output: "should not launch",
+        items: [],
+        sdk: "openai-native",
+        threadId: "thread-should-not-run",
+      });
+      const mockEngine = {
+        services: {
+          agentPool: {
+            launchEphemeralThread,
+          },
+        },
+      };
+      const ctx = new WorkflowContext({
+        repoRoot: worktreePath,
+        worktreePath,
+        branch: "task/broken-repo-root",
+        baseBranch: "origin/main",
+        defaultTargetBranch: "origin/main",
+        taskId: "TASK-BROKEN-REPO-ROOT",
+        task: {
+          id: "TASK-BROKEN-REPO-ROOT",
+          title: "Recover broken repo-root worktree",
+          branchName: "task/broken-repo-root",
+          baseBranch: "origin/main",
+        },
+      });
+
+      const result = await handler.execute({
+        id: "run-agent-tests",
+        type: "action.run_agent",
+        config: {
+          prompt: "Run tests",
+          autoRecover: false,
+          failOnError: false,
+        },
+      }, ctx, mockEngine);
+
+      expect(launchEphemeralThread).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        success: false,
+        blockedReason: "worktree_failure",
+        needsReacquire: true,
+        removed: true,
+        retryable: false,
+      });
+      expect(String(result.error || "")).toMatch(/git worktree metadata corrupt/i);
+      expect(result.worktreeFailure).toMatchObject({
+        repoRoot: repoDir,
+        worktreePath,
+        branch: "task/broken-repo-root",
+        baseBranch: "origin/main",
+        defaultTargetBranch: "origin/main",
+        phase: "run_agent_preflight",
+      });
+      expect(existsSync(worktreePath)).toBe(false);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("marks action.run_agent as waiting until a shared agent slot is acquired", async () => {
     const handler = getNodeType("action.run_agent");
     expect(handler).toBeDefined();
@@ -9013,6 +9595,341 @@ describe("Session chaining - action.run_agent", () => {
     expect(String(result.error || "")).toMatch(/delegated session produced no output/i);
   });
 
+  it("upgrades delegated-session completion-signal exhaustion to blocked_by_env", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const blockedSummary = "session.turn.complete: blocked: delegated session(s) still running, no verifiable completion output yet";
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: false,
+      error: "Missing explicit completion signal after continuation budget exhausted",
+      blockedReason: "incomplete_no_completion_signal",
+      summary: blockedSummary,
+      narrative: blockedSummary,
+      sdk: "openai-native",
+      threadId: "thread-missing-completion-summary",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "a-missing-completion-summary",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("blocked_by_env");
+    expect(String(result.error || "")).toMatch(/missing explicit completion signal/i);
+  });
+
+  it("upgrades multi-delegated zero-transcript completion-signal exhaustion to blocked_by_env", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const blockedSummary = "session.turn.complete: blocked: multiple delegated coding sessions (`delegate-live-1`, `delegate-live-2`) remain active with zero transcript output, and direct workspace edits are unavailable in the current session.";
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: false,
+      error: "Missing explicit completion signal after continuation budget exhausted",
+      blockedReason: "incomplete_no_completion_signal",
+      summary: blockedSummary,
+      narrative: blockedSummary,
+      sdk: "openai-native",
+      threadId: "thread-multi-delegate-missing-completion",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "a-multi-delegate-missing-completion",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("blocked_by_env");
+    expect(String(result.error || "")).toMatch(/missing explicit completion signal/i);
+  });
+
+  it("treats implemented push-timeout summaries as implementation_done_commit_blocked", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const blockedSummary = [
+      "Completed implementation for task `1eca450a-9a99-4b86-9f0c-41ad5699b248`.",
+      "",
+      "Result",
+      "- Added planner provenance metadata attachment for replenishment-created backlog items.",
+      "- Verified focused tests and build.",
+      "- Committed changes.",
+      "",
+      "Push / PR",
+      "- Push attempt failed due to timeout:",
+      "  - `spawnSync git ETIMEDOUT`",
+      "- PR update not completed.",
+      "",
+      "Remaining follow-up",
+      "- Push branch",
+      "- Create/update PR",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: "",
+      summary: blockedSummary,
+      narrative: blockedSummary,
+      sdk: "openai-native",
+      threadId: "thread-push-timeout-summary",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "a-push-timeout-summary",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(String(result.error || "")).toMatch(/push attempt failed due to timeout/i);
+  });
+
+  it("treats failed implement sessions with git push timeouts as implementation_done_commit_blocked", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const implementedSummary = [
+      "Completed implementation for task `TASK-123`.",
+      "",
+      "Result",
+      "- Verified focused tests and build.",
+      "- Committed changes.",
+    ].join("\n");
+    const pushTimeoutError = [
+      "Push / PR",
+      "- Push attempt failed due to timeout:",
+      "  - `spawnSync git ETIMEDOUT`",
+      "- PR update not completed.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: false,
+      output: "",
+      summary: implementedSummary,
+      narrative: "Remaining follow-up\n- Push branch\n- Create/update PR",
+      error: pushTimeoutError,
+      sdk: "openai-native",
+      threadId: "thread-failed-push-timeout",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-implement",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(String(result.error || "")).toMatch(/spawnsync git etimedout/i);
+  });
+
+  it("promotes live commit-created push timeout failures before implement gating", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const liveSummary = [
+      "Implementation completed for task `TASK-123`.",
+      "Focused tests and build passed.",
+      "Commit `c23628cd25` created.",
+      "Push failed with `spawnSync git ETIMEDOUT`.",
+      "PR update not completed.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: false,
+      output: "",
+      summary: liveSummary,
+      narrative: liveSummary,
+      error: "blocked_by_env",
+      sdk: "openai-native",
+      threadId: "thread-live-push-timeout",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-implement",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+  });
+
+  it("promotes implemented-and-committed failures without explicit push wording", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const summary = "Implemented and committed. Summary: - Persisted resume-safe node completion checkpoints.";
+    const output = [
+      "Implemented and committed.",
+      "",
+      "Summary:",
+      "- Persisted resume-safe node completion checkpoints in `workflow/workflow-engine.mjs`.",
+      "- Added focused coverage in `tests/workflow-engine.test.mjs`.",
+      "",
+      "Verification:",
+      "- `npm install` completed.",
+      "- `npm test` started successfully but timed out before completion.",
+      "- `npm run build` completed successfully.",
+      "",
+      "Git:",
+      "- Commit created: `feat(workflow): persist node completion checkpoints for resume-safe execution`",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: false,
+      output,
+      summary,
+      narrative: output,
+      error: "blocked_by_env",
+      sdk: "openai-native",
+      threadId: "thread-implemented-and-committed",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-implement",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+  });
+
+  it("promotes no-diff implement retries when tests already proved the task commit exists", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const testsSummary = [
+      "COMPLETED: task was already implemented in commit `9588592a feat(workflow): persist node completion checkpoints for resume`.",
+      "Focused workflow tests pass.",
+      "Build succeeds.",
+    ].join("\n");
+    ctx.setNodeOutput("run-agent-tests", {
+      success: true,
+      summary: testsSummary,
+      narrative: testsSummary,
+    });
+
+    const noDiffSummary = [
+      "Blocked status remains unchanged.",
+      "I re-checked the worktree state reflected in the latest tool results, and it still shows:",
+      "- only unrelated change:",
+      "  - `M ui/vendor/preact-signals-core.js`",
+      "- no actual diff in:",
+      "  - `workflow/workflow-engine.mjs`",
+      "  - `tests/workflow-engine.test.mjs`",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: false,
+      output: "",
+      summary: noDiffSummary,
+      narrative: noDiffSummary,
+      error: "Missing explicit completion signal after continuation budget exhausted",
+      blockedReason: "incomplete_no_completion_signal",
+      sdk: "openai-native",
+      threadId: "thread-no-diff-implement",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-implement",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(String(result.error || "")).toMatch(/no actual diff/i);
+  });
+
   it("does not treat successful planning notes mentioning timeout helpers as blocked_by_env", async () => {
     const handler = getNodeType("action.run_agent");
     expect(handler).toBeDefined();
@@ -9055,6 +9972,50 @@ describe("Session chaining - action.run_agent", () => {
     expect(result.success).toBe(true);
     expect(result.blockedReason).toBeNull();
     expect(String(result.output || "")).toMatch(/timeout helpers/i);
+  });
+
+  it("does not treat architect handoff planning disclaimers as blocked_by_env", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const planningOutput = [
+      "I’m in architect/planning mode and cannot truthfully claim implementation is complete, because this phase explicitly forbids code changes. The remaining work is still for the editor to execute in:",
+      "",
+      "- `workflow/workflow-engine.mjs`",
+      "- `tests/workflow-engine.test.mjs`",
+      "",
+      "Task complete: architect handoff finalized; implementation remains pending for editor phase.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: planningOutput,
+      summary: "I’m in architect/planning mode and cannot truthfully claim implementation is complete, because this phase explicitly forbids code changes. The remaining work is still for the editor to execute in: - `workflow/workflow-engine.mjs` - `tests/workflow-engine.test.mjs`",
+      narrative: "Architect handoff: no code changes made; implementation remains pending for editor phase.",
+      sdk: "openai-native",
+      threadId: "thread-plan-architect-handoff",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "a-plan-architect-handoff",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.blockedReason).toBeNull();
+    expect(String(result.output || "")).toMatch(/architect handoff finalized/i);
   });
 
   it("treats digest-only delegated no-output blockers as blocked_by_env", async () => {
@@ -10329,6 +11290,44 @@ Status:
     expect(sentPrompt).toContain("Apply the approved plan");
   });
 
+  it("adds a read-only tool contract for planning-mode workflow agent runs", async () => {
+    const handler = getNodeType("action.run_agent");
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: "done",
+      sdk: "codex",
+      items: [],
+      threadId: "thread-plan-readonly",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const node = {
+      id: "run-agent-plan-readonly",
+      type: "action.run_agent",
+      config: {
+        prompt: "Draft the implementation plan",
+        autoRecover: false,
+        mode: "plan",
+      },
+    };
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    const sentPrompt = String(launchEphemeralThread.mock.calls[0][0] || "");
+    expect(sentPrompt).toContain("You are the architect phase.");
+    expect(sentPrompt).toContain("Planning mode is read-only.");
+    expect(sentPrompt).toContain("Do not call edit/write tools");
+    expect(sentPrompt).toContain("do not run git-mutating commands");
+  });
+
   it("throws when agent execution returns success=false when failOnError=true", async () => {
     const handler = getNodeType("action.run_agent");
     const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
@@ -10425,6 +11424,56 @@ Status:
     expect(launchEphemeralThread.mock.calls[0][3]).not.toHaveProperty("resumeThreadId");
   });
 
+  it("passes a workflow-step-aware completion continue prompt into execWithRetry", async () => {
+    const handler = getNodeType("action.run_agent");
+    const ctx = new WorkflowContext({
+      worktreePath: "/tmp/test",
+    });
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Completion: tests phase complete",
+      threadId: "thread-tests-step-1",
+      sdk: "copilot",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+    const node = {
+      id: "run-agent-tests",
+      label: "Agent Tests",
+      type: "action.run_agent",
+      config: {
+        prompt: "Write tests first",
+      },
+    };
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    const options = execWithRetry.mock.calls[0][1];
+    expect(typeof options.buildContinuePrompt).toBe("function");
+
+    const completionPrompt = options.buildContinuePrompt({
+      error: "completion_signal_missing",
+      _awaitingCompletionSignal: true,
+    }, 2);
+    expect(completionPrompt).toContain("WORKFLOW STEP NOT COMPLETE");
+    expect(completionPrompt).toContain("current workflow step: Agent Tests");
+    expect(completionPrompt).toContain("downstream workflow steps remain");
+    expect(completionPrompt).not.toContain("TASK IS NOT COMPLETE");
+
+    const idlePrompt = options.buildContinuePrompt({
+      error: "idle_continue",
+      _idleContinue: true,
+    }, 2);
+    expect(idlePrompt).toContain("finish the assigned work for this workflow step");
+  });
+
   it("skips continuing a stored session from a different run_agent node", async () => {
     const handler = getNodeType("action.run_agent");
     const ctx = new WorkflowContext({
@@ -10473,6 +11522,58 @@ Status:
     expect(execWithRetry.mock.calls[0][1].taskKey).not.toBe("thread-tests-1");
     expect(execWithRetry.mock.calls[0][1].taskKey).toContain(":run-agent-implement");
     expect(ctx.data._agentSessionNodeId).toBe("run-agent-implement");
+  });
+
+  it("treats continueOnSession=false as a fresh same-node run instead of reusing a stored thread", async () => {
+    const handler = getNodeType("action.run_agent");
+    const ctx = new WorkflowContext({
+      worktreePath: "/tmp/test",
+      sessionId: "thread-implement-stale",
+      _agentSessionNodeId: "run-agent-implement",
+      _workflowId: "template-task-lifecycle",
+    });
+    const continueSession = vi.fn().mockResolvedValue({
+      success: true,
+      output: "should-not-be-used",
+      threadId: "thread-implement-stale",
+      sdk: "copilot",
+    });
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "implemented",
+      threadId: "thread-implement-fresh",
+      sdk: "copilot",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread: vi.fn().mockResolvedValue({
+            success: true,
+            output: "fallback",
+            sdk: "copilot",
+            threadId: "thread-fallback",
+          }),
+          continueSession,
+          execWithRetry,
+        },
+      },
+    };
+    const node = {
+      id: "run-agent-implement",
+      type: "action.run_agent",
+      config: { prompt: "Implement work", continueOnSession: false },
+    };
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.threadId).toBe("thread-implement-fresh");
+    expect(continueSession).not.toHaveBeenCalled();
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(execWithRetry.mock.calls[0][1].sessionId).not.toBe("thread-implement-stale");
+    expect(execWithRetry.mock.calls[0][1].taskKey).not.toBe("thread-implement-stale");
+    expect(execWithRetry.mock.calls[0][1].sessionId).toContain("run-agent-implement");
+    expect(execWithRetry.mock.calls[0][1].taskKey).toContain(":run-agent-implement");
   });
 
   it("runs multi-candidate selector mode when candidateCount > 1 and restores selected branch", async () => {

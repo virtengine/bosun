@@ -72,6 +72,9 @@ const FS_RETRY_DELAY_MS = 40;
 const FS_RETRY_MAX = 4;
 const CLAIMS_REPLACE_RETRY_DELAY_MS = 100;
 const CLAIMS_REPLACE_RETRY_MAX = 20;
+const CLAIMS_LOCK_FILENAME = "task-claims.lock";
+const CLAIMS_LOCK_RETRY_DELAY_MS = 25;
+const CLAIMS_LOCK_TIMEOUT_MS = 15_000;
 
 // Shared state configuration from environment
 const SHARED_STATE_ENABLED = process.env.SHARED_STATE_ENABLED !== "false"; // default true
@@ -94,6 +97,7 @@ const state = {
   repoRoot: null,
   claimsPath: null,
   auditPath: null,
+  lockPath: null,
 };
 
 function normalizeRepoRoot(repoRoot) {
@@ -114,6 +118,111 @@ async function ensureRepoContext(repoRoot) {
 // concurrent async operations from clobbering each other's writes.
 let _registryLockChain = Promise.resolve();
 
+function parseRegistryLock(raw) {
+  try {
+    const parsed = JSON.parse(String(raw || ""));
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return {
+      pid: Number(parsed.pid),
+      lockToken: String(parsed.lockToken || "").trim(),
+      startedAt: String(parsed.startedAt || "").trim() || null,
+      argv: Array.isArray(parsed.argv) ? parsed.argv.map((entry) => String(entry || "")) : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readRegistryLock() {
+  if (!state.lockPath || !existsSync(state.lockPath)) {
+    return null;
+  }
+  try {
+    const raw = await readFile(state.lockPath, "utf8");
+    return parseRegistryLock(raw);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function releaseRegistryFileLock(lockToken) {
+  if (!state.lockPath) {
+    return;
+  }
+  let current = null;
+  try {
+    current = await readRegistryLock();
+  } catch {
+    current = null;
+  }
+  if (current?.lockToken !== lockToken) {
+    return;
+  }
+  try {
+    await unlink(state.lockPath);
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+}
+
+async function acquireRegistryFileLock() {
+  ensureInitialized();
+  const lockToken = crypto.randomUUID();
+  const deadline = Date.now() + CLAIMS_LOCK_TIMEOUT_MS;
+  const payload = JSON.stringify(
+    {
+      pid: process.pid,
+      lockToken,
+      startedAt: new Date().toISOString(),
+      argv: [...process.argv],
+    },
+    null,
+    2,
+  );
+
+  while (Date.now() <= deadline) {
+    try {
+      await writeFile(state.lockPath, payload, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return {
+        async release() {
+          await releaseRegistryFileLock(lockToken);
+        },
+      };
+    } catch (err) {
+      if (err?.code !== "EEXIST") {
+        throw err;
+      }
+      const existing = await readRegistryLock();
+      if (!isProcessAlive(existing?.pid)) {
+        try {
+          await unlink(state.lockPath);
+        } catch (unlinkErr) {
+          if (unlinkErr?.code !== "ENOENT") {
+            throw unlinkErr;
+          }
+        }
+        continue;
+      }
+      await sleep(CLAIMS_LOCK_RETRY_DELAY_MS);
+    }
+  }
+
+  const existing = await readRegistryLock();
+  throw new Error(
+    `[task-claims] Timed out waiting for claims lock ${state.lockPath} (owner PID ${existing?.pid || "unknown"}).`,
+  );
+}
+
 /**
  * Execute `fn` while holding an exclusive in-process lock on the claims
  * registry.  All callers that do load→modify→save MUST use this to prevent
@@ -125,7 +234,15 @@ let _registryLockChain = Promise.resolve();
  * @returns {Promise<T>}
  */
 function withRegistryLock(fn) {
-  const next = _registryLockChain.then(fn, fn);
+  const runWithLock = async () => {
+    const fileLock = await acquireRegistryFileLock();
+    try {
+      return await fn();
+    } finally {
+      await fileLock.release();
+    }
+  };
+  const next = _registryLockChain.then(runWithLock, runWithLock);
   // Swallow rejections in the chain itself so a failure in one call
   // doesn't permanently poison all subsequent callers.
   _registryLockChain = next.catch(() => {});
@@ -165,6 +282,7 @@ export async function initTaskClaims(opts = {}) {
   await mkdir(cacheDir, { recursive: true });
   state.claimsPath = resolve(cacheDir, CLAIMS_FILENAME);
   state.auditPath = resolve(cacheDir, AUDIT_FILENAME);
+  state.lockPath = resolve(cacheDir, CLAIMS_LOCK_FILENAME);
   state.initialized = true;
 
   // Ensure presence is initialized and register ourselves so that
@@ -474,6 +592,24 @@ function shouldTreatClaimAsStale(claim, ownerStaleTtlMs) {
     return { stale: false, reason: null };
   }
 
+  const claimHost = String(claim?.metadata?.host || "").trim();
+  const claimPid = Number(claim?.metadata?.pid);
+  const localHost = os.hostname();
+  const sameHost =
+    claimHost &&
+    localHost &&
+    claimHost.toLowerCase() === String(localHost).toLowerCase();
+  if (
+    sameHost &&
+    Number.isFinite(claimPid) &&
+    claimPid > 0
+  ) {
+    if (isProcessAlive(claimPid)) {
+      return { stale: false, reason: null };
+    }
+    return { stale: true, reason: "owner_stale" };
+  }
+
   const activeInstances = listActiveInstances({ ttlMs: ownerStaleTtlMs });
   if (Array.isArray(activeInstances) && activeInstances.length > 0) {
     const ownerActive = activeInstances.some(
@@ -484,13 +620,8 @@ function shouldTreatClaimAsStale(claim, ownerStaleTtlMs) {
     }
   }
 
-  const claimHost = String(claim?.metadata?.host || "").trim();
-  const claimPid = Number(claim?.metadata?.pid);
-  const localHost = os.hostname();
   if (
-    claimHost &&
-    localHost &&
-    claimHost.toLowerCase() === String(localHost).toLowerCase() &&
+    sameHost &&
     Number.isFinite(claimPid) &&
     claimPid > 0 &&
     !isProcessAlive(claimPid)
@@ -1179,6 +1310,10 @@ export async function getClaim(taskId, opts = {}) {
 export async function listClaims(opts = {}) {
   await ensureRepoContext(opts.repoRoot);
   ensureInitialized();
+  return withRegistryLock(() => _listClaimsInner(opts));
+}
+
+async function _listClaimsInner(opts = {}) {
   const {
     instanceId,
     includeExpired = false,
@@ -1264,6 +1399,9 @@ export const _test = {
   isClaimExpired,
   loadClaimsRegistry,
   saveClaimsRegistry,
+  withRegistryLock,
+  acquireRegistryFileLock,
+  readRegistryLock,
   generateClaimToken,
   retryFsOperation,
   isRetriableFsError,

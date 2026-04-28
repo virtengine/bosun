@@ -8,7 +8,7 @@
 //   • /undo, /clear, /status slash commands (no API call)
 //   • shell/session-store.mjs JSONL persistence + replay
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -20,11 +20,22 @@ import {
   BudgetExceededError,
   sanitizeHistoryEntriesForRequest,
 } from "../shell/openai-native-adapter.mjs";
+import {
+  McpClientManager,
+  resolveMcpTools,
+  resetGlobalMcpClientManager,
+  __setMcpSdkLoaderForTests,
+} from "../shell/mcp-client.mjs";
 import { createToolExecutor } from "../shell/tool-executor.mjs";
 import {
   createSessionStore,
   replayEvents,
 } from "../shell/session-store.mjs";
+
+afterEach(() => {
+  __setMcpSdkLoaderForTests();
+  resetGlobalMcpClientManager();
+});
 
 describe("shouldEnablePromptCaching", () => {
   it("respects explicit providerConfig.promptCaching=true", () => {
@@ -90,6 +101,40 @@ describe("BudgetExceededError", () => {
     expect(err.costUsd).toBe(1.23);
     expect(err.limitUsd).toBe(1);
     expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe("MCP tool fallbacks", () => {
+  it("keeps base tools when the MCP SDK cannot be loaded", async () => {
+    __setMcpSdkLoaderForTests(async () => {
+      throw new Error("Cannot find package '@modelcontextprotocol/sdk'");
+    });
+
+    const baseTools = [{ type: "function", name: "builtin_demo", parameters: { type: "object" } }];
+    const resolved = await resolveMcpTools(baseTools, [{
+      id: "demo",
+      transport: "stdio",
+      command: "node",
+    }]);
+
+    expect(resolved).toEqual(baseTools);
+  });
+
+  it("returns an MCP execution error instead of throwing when the SDK is missing", async () => {
+    __setMcpSdkLoaderForTests(async () => {
+      throw new Error("Cannot find package '@modelcontextprotocol/sdk'");
+    });
+
+    const manager = new McpClientManager();
+    manager.addServers({
+      id: "demo",
+      transport: "stdio",
+      command: "node",
+    });
+
+    await expect(manager.executeTool("mcp__demo__echo", { value: 1 })).resolves.toEqual({
+      error: expect.stringContaining("@modelcontextprotocol/sdk"),
+    });
   });
 });
 

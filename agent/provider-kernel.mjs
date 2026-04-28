@@ -261,17 +261,40 @@ function findProviderModelEntry(providerEntry = null, modelId = "") {
 
 function applyModelTransportOverrides(providerConfig = null, providerEntry = null, modelId = "") {
   if (!providerConfig || typeof providerConfig !== "object") return providerConfig;
-  const modelEntry = findProviderModelEntry(providerEntry, modelId);
+  const modelEntry = findProviderModelEntry(providerEntry, modelId || providerConfig.model);
+  if (!modelEntry) return providerConfig;
   const apiStyle = String(modelEntry?.apiStyle || "").trim();
-  if (!apiStyle) return providerConfig;
+  const transport = apiStyle
+    ? {
+        ...(providerConfig.transport && typeof providerConfig.transport === "object"
+          ? providerConfig.transport
+          : {}),
+        apiStyle,
+      }
+    : providerConfig.transport;
+  const capabilities = {
+    ...(providerConfig.capabilities && typeof providerConfig.capabilities === "object"
+      ? providerConfig.capabilities
+      : {}),
+  };
+  for (const [key, value] of Object.entries({
+    toolCalling: modelEntry.toolCalling,
+    vision: modelEntry.vision,
+    supportsAttachments: modelEntry.supportsAttachments,
+    reasoning: modelEntry.reasoning,
+    streaming: modelEntry.streaming,
+  })) {
+    if (typeof value === "boolean") capabilities[key] = value;
+  }
   return {
     ...providerConfig,
-    transport: {
-      ...(providerConfig.transport && typeof providerConfig.transport === "object"
-        ? providerConfig.transport
-        : {}),
-      apiStyle,
-    },
+    model: String(modelEntry.apiModel || modelEntry.id || providerConfig.model || "").trim() || providerConfig.model,
+    displayModel: String(modelEntry.id || modelId || providerConfig.model || "").trim() || null,
+    ...(transport ? { transport } : {}),
+    capabilities,
+    ...(Number.isFinite(Number(modelEntry.maxInputTokens)) ? { maxInputTokens: Number(modelEntry.maxInputTokens) } : {}),
+    ...(Number.isFinite(Number(modelEntry.maxOutputTokens)) ? { maxOutputTokens: Number(modelEntry.maxOutputTokens) } : {}),
+    ...(Number.isFinite(Number(modelEntry.contextWindow || modelEntry.contextLength)) ? { contextWindow: Number(modelEntry.contextWindow || modelEntry.contextLength) } : {}),
   };
 }
 

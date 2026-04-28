@@ -896,6 +896,8 @@ function shouldPromoteLatestWorkflowRun(task, run, workflowRuns = []) {
   if (!currentLatestRunId || currentLatestRunId === incomingRunId) return true;
   const currentLatest = workflowRuns.find((entry) => String(entry?.runId || "").trim() === currentLatestRunId) || null;
   if (!currentLatest) return true;
+  const currentStatus = String(currentLatest?.status || "").trim().toLowerCase();
+  if (currentStatus === "running") return false;
   const incomingStartedAt = Math.max(
     parseWorkflowRunLinkTime(run?.startedAt),
     parseWorkflowRunLinkTime(run?.endedAt),

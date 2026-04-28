@@ -27,6 +27,64 @@ function ensureObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+function normalizeDiscoveredModelEntry(entry, providerId = "", source = "runtime") {
+  const value = entry && typeof entry === "object" ? entry : { id: entry };
+  const id = toTrimmedString(value.id || value.model || value.name);
+  if (!id) return null;
+  const contextWindow = Number(value.contextWindow ?? value.contextLength ?? value.context_window ?? value.maxContextTokens);
+  const maxOutputTokens = Number(value.maxOutputTokens ?? value.outputTokens ?? value.defaultMaxTokens ?? value.default_max_tokens);
+  return Object.fromEntries(Object.entries({
+    id,
+    label: toTrimmedString(value.label || value.name || id) || id,
+    providerId: toTrimmedString(value.providerId || providerId) || providerId,
+    apiModel: toTrimmedString(value.apiModel || value.api_model || value.model || id) || id,
+    apiStyle: toTrimmedString(value.apiStyle || value.transport?.apiStyle || "") || null,
+    apiVersion: toTrimmedString(value.apiVersion || "") || null,
+    contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+    contextLength: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+    maxOutputTokens: Number.isFinite(maxOutputTokens) && maxOutputTokens > 0 ? maxOutputTokens : null,
+    toolCalling: typeof value.toolCalling === "boolean" ? value.toolCalling : null,
+    vision: typeof value.vision === "boolean" ? value.vision : null,
+    supportsAttachments: typeof value.supportsAttachments === "boolean" ? value.supportsAttachments : null,
+    reasoning: typeof value.reasoning === "boolean" ? value.reasoning : null,
+    streaming: typeof value.streaming === "boolean" ? value.streaming : null,
+    catalogSource: source,
+    custom: value.custom === true,
+  }).filter(([, fieldValue]) => fieldValue !== null && fieldValue !== undefined));
+}
+
+async function discoverOpenAiCompatibleModels(endpoint = "", apiKeyEnv = "") {
+  const baseUrl = toTrimmedString(endpoint).replace(/\/+$/, "");
+  if (!baseUrl) return [];
+  const apiKey = apiKeyEnv ? toTrimmedString(process.env[apiKeyEnv]) : "";
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  for (const suffix of ["/v1/models", "/models"]) {
+    try {
+      const response = await fetch(`${baseUrl}${suffix}`, {
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) continue;
+      const data = await response.json().catch(() => null);
+      const rawModels = Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data?.models)
+          ? data.models
+          : Array.isArray(data)
+            ? data
+            : [];
+      const models = rawModels
+        .map((entry) => normalizeDiscoveredModelEntry(entry, "openai-compatible", "openai-compatible-models-api"))
+        .filter(Boolean);
+      if (models.length > 0) return models;
+    } catch {
+      // Try the next common endpoint shape before falling back to static catalog.
+    }
+  }
+  return [];
+}
+
 function collectEnabledHarnessProviderIds(executors = []) {
   const enabled = new Set();
   for (const entry of Array.isArray(executors) ? executors : []) {
@@ -198,15 +256,24 @@ export async function tryHandleHarnessProviderRoutes(context = {}) {
             if (azRes.ok) {
               const azData = await azRes.json().catch(() => null);
               const deployments = Array.isArray(azData?.value) ? azData.value : [];
-              const models = [
+              const modelIds = [
                 ...new Set(
                   deployments
                     .map((d) => toTrimmedString(d?.model || d?.id || d?.name || ""))
                     .filter(Boolean),
                 ),
               ];
-              if (models.length > 0) {
-                jsonResponse(res, 200, { ok: true, models, source: "azure-deployment-api" });
+              const modelEntries = modelIds
+                .map((id) => normalizeDiscoveredModelEntry({ id, apiVersion: body?.apiVersion }, providerId, "azure-deployment-api"))
+                .filter(Boolean);
+              if (modelEntries.length > 0) {
+                jsonResponse(res, 200, {
+                  ok: true,
+                  models: modelEntries.map((entry) => entry.id),
+                  modelEntries,
+                  catalog: { providerId, models: modelEntries, defaultModel: modelEntries[0]?.id || null },
+                  source: "azure-deployment-api",
+                });
                 return true;
               }
             }
@@ -216,13 +283,40 @@ export async function tryHandleHarnessProviderRoutes(context = {}) {
         }
       }
 
+      if (["openai-compatible", "ollama"].includes(providerId) && endpoint) {
+        const discovered = await discoverOpenAiCompatibleModels(endpoint, apiKeyEnv);
+        if (discovered.length > 0) {
+          jsonResponse(res, 200, {
+            ok: true,
+            models: discovered.map((entry) => entry.id),
+            modelEntries: discovered,
+            catalog: { providerId, models: discovered, defaultModel: discovered[0]?.id || null },
+            source: "openai-compatible-models-api",
+          });
+          return true;
+        }
+      }
+
       // Fall back to static provider catalog.
       const { rawValues } = buildResolvedSettingsState();
       const catalog = getProviderModelCatalog(providerId, { env: process.env, settings: rawValues });
-      const models = (Array.isArray(catalog?.models) ? catalog.models : [])
-        .map((m) => toTrimmedString(m?.id || m || ""))
+      const modelEntries = (Array.isArray(catalog?.models) ? catalog.models : [])
+        .map((entry) => normalizeDiscoveredModelEntry(entry, providerId, catalog?.catalogSource || "static-catalog"))
         .filter(Boolean);
-      jsonResponse(res, 200, { ok: true, models, source: "static-catalog" });
+      const models = modelEntries
+        .map((m) => toTrimmedString(m?.id || ""))
+        .filter(Boolean);
+      jsonResponse(res, 200, {
+        ok: true,
+        models,
+        modelEntries,
+        catalog: {
+          providerId,
+          defaultModel: catalog?.defaultModel || modelEntries[0]?.id || null,
+          models: modelEntries,
+        },
+        source: "static-catalog",
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }

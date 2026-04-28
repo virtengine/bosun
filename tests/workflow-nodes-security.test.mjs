@@ -13,9 +13,10 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { getNodeType } from "../workflow/workflow-nodes.mjs";
 import { getApprovalRequest, resolveApprovalRequest } from "../workflow/approval-queue.mjs";
 import { WorkflowContext } from "../workflow/workflow-engine.mjs";
@@ -572,6 +573,58 @@ describe("action.run_command env interpolation", () => {
       const result = await nodeType.execute(node, makeCtx({ worktreePath: repoRoot }));
       expect(result.success).toBe(true);
       expect(String(result.output)).toContain("quality gate ok");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("supplies synthetic pre-push stdin when invoking the repo hook directly", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-hook-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git remote add origin https://example.com/virtengine/bosun.git", { cwd: repoRoot, stdio: "pipe" });
+
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cat > .hook-input.txt",
+        "printf '%s\\n' \"$@\" > .hook-args.txt",
+        "echo hook ok",
+        "",
+      ].join("\n"));
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      execSync("git add .githooks/pre-push tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "change\n");
+      execSync("git add tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m change", { cwd: repoRoot, stdio: "pipe" });
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "bash .githooks/pre-push",
+        cwd: repoRoot,
+      }, "quality-gate-hook");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath: repoRoot,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("hook ok");
+
+      const hookInput = readFileSync(join(repoRoot, ".hook-input.txt"), "utf8").trim();
+      const [localRef, localSha, remoteRef, remoteSha] = hookInput.split(/\s+/);
+      expect(localRef).toBe("refs/heads/task/test");
+      expect(localSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(remoteRef).toBe("refs/heads/task/test");
+      expect(remoteSha).toBe("0000000000000000000000000000000000000000");
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }

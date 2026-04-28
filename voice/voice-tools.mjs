@@ -18,6 +18,8 @@ import { createToolOrchestrator } from "../agent/tool-orchestrator.mjs";
 import { getVisionSessionState } from "./vision-session-state.mjs";
 import { TOOL_DEFS } from "./voice-tool-definitions.mjs";
 import { injectToolResultContext } from "../workspace/context-injector.mjs";
+import * as projectDetection from "../workflow/project-detection.mjs";
+const { resolveManagedWorktreeCommand } = projectDetection;
 
 // ── Voice response shaping (inspired by claude-phone VOICE_CONTEXT pattern) ──
 
@@ -113,6 +115,66 @@ function tokenizeWorkspaceCommand(rawCmd) {
   }
 
   return { error: null, tokens };
+}
+
+function isWorkspaceVerificationCommand(commandName, cmdArgs = []) {
+  const normalizedCommand = String(commandName || "").trim().toLowerCase();
+  const normalizedArgs = (Array.isArray(cmdArgs) ? cmdArgs : []).map((arg) =>
+    String(arg || "").trim().toLowerCase()
+  );
+  const firstArg = normalizedArgs[0] || "";
+  const secondArg = normalizedArgs[1] || "";
+  return (
+    (normalizedCommand === "npm"
+      && (
+        firstArg === "test"
+        || (firstArg === "run" && (secondArg === "test" || secondArg === "build" || secondArg === "check"))
+      ))
+    || (normalizedCommand === "node"
+      && normalizedArgs.some((arg) =>
+        arg.includes("vitest")
+        || arg.includes("syntax-check")
+      ))
+  );
+}
+
+function describeWorkspaceCommandNoOutput(commandName, cmdArgs = []) {
+  const normalizedCommand = String(commandName || "").trim().toLowerCase();
+  const normalizedArgs = (Array.isArray(cmdArgs) ? cmdArgs : []).map((arg) =>
+    String(arg || "").trim().toLowerCase()
+  );
+  const firstArg = normalizedArgs[0] || "";
+  if (normalizedCommand === "git" && firstArg === "status") {
+    return "Command completed with no output. For `git status`, this usually means the workspace is clean.";
+  }
+  if (normalizedCommand === "git" && firstArg === "diff") {
+    return "Command completed with no output. For `git diff`, this usually means there is no diff for the requested paths.";
+  }
+  if (isWorkspaceVerificationCommand(commandName, cmdArgs)) {
+    return "Command completed successfully with no output. Exit status 0 is still a usable pass/fail artifact for this test or build command.";
+  }
+  return "Command completed with no output. Run one command per tool call and use a direct test or build command when you need a pass/fail artifact.";
+}
+
+function describeWorkspaceCommandTruncatedOutput(commandName, cmdArgs = [], output = "") {
+  const trimmed = String(output || "").trim();
+  if (!trimmed) return describeWorkspaceCommandNoOutput(commandName, cmdArgs);
+  if (!isWorkspaceVerificationCommand(commandName, cmdArgs)) {
+    return `${trimmed.slice(0, 3000)}\n… (truncated)`;
+  }
+  const headChars = 1800;
+  const tailChars = 900;
+  const head = trimmed.slice(0, headChars).trimEnd();
+  const tail = trimmed.slice(-tailChars).trimStart();
+  const excerpts = [];
+  if (head) excerpts.push(head);
+  if (tail && tail !== head) excerpts.push(`...\n${tail}`);
+  return [
+    "Command completed successfully, but the output exceeded the inline limit.",
+    "Exit status 0 is still a usable pass/fail artifact for this test or build command.",
+    "",
+    excerpts.join("\n"),
+  ].join("\n").trim();
 }
 
 /**
@@ -908,6 +970,25 @@ function resolveWorkspaceCommandTimeoutMs(commandName, args = []) {
     return 120_000;
   }
   return 20_000;
+}
+
+function resolveWorkspaceCommandMaxBuffer(commandName, args = []) {
+  const normalizedArgs = args.map((arg) => String(arg || "").toLowerCase());
+  if (commandName === "npm") {
+    const firstArg = normalizedArgs[0] || "";
+    const secondArg = normalizedArgs[1] || "";
+    if (
+      firstArg === "test"
+      || (firstArg === "run" && (secondArg === "test" || secondArg === "build" || secondArg === "check"))
+    ) {
+      return 16 * 1024 * 1024;
+    }
+    return 4 * 1024 * 1024;
+  }
+  if (commandName === "node" && normalizedArgs.some((arg) => arg.includes("vitest"))) {
+    return 16 * 1024 * 1024;
+  }
+  return 4 * 1024 * 1024;
 }
 
 // ── Tool Definitions (OpenAI function-calling format) ────────────────────────
@@ -2779,11 +2860,16 @@ const TOOL_HANDLERS = {
     try {
       const { spawnSync } = await import("node:child_process");
       const cwd = await resolveToolCwd(context);
-      const hasShellMeta = /[|&;<>\x60$]/.test(rawCmd);
+      const repoRoot = resolveAgentRepoRoot();
+      const effectiveCmd = resolveManagedWorktreeCommand(rawCmd, {
+        repoRoot,
+        executionDir: cwd,
+      });
+      const hasShellMeta = /[|&;<>\x60$]/.test(effectiveCmd);
       if (hasShellMeta) {
-        return "{RESPONSE}: Shell metacharacters are not allowed in direct workspace commands.";
+        return "{RESPONSE}: Shell metacharacters are not allowed in direct workspace commands. Run one command per tool call without &&, |, ;, >, $, or backticks.";
       }
-      const { error: tokenError, tokens } = tokenizeWorkspaceCommand(rawCmd);
+      const { error: tokenError, tokens } = tokenizeWorkspaceCommand(effectiveCmd);
       if (tokenError) {
         return `{RESPONSE}: ${tokenError}`;
       }
@@ -2815,9 +2901,11 @@ const TOOL_HANDLERS = {
       const executable = resolveWorkspaceCommandExecutable(safeCmd);
       const useShell = shouldUseWorkspaceCommandShell(safeCmd);
       const timeoutMs = resolveWorkspaceCommandTimeoutMs(safeCmd, cmdArgs);
+      const maxBuffer = resolveWorkspaceCommandMaxBuffer(safeCmd, cmdArgs);
       const res = spawnSync(executable, cmdArgs, {
         encoding: "utf8",
         timeout: timeoutMs,
+        maxBuffer,
         cwd,
         shell: useShell,
         stdio: ["ignore", "pipe", "pipe"],
@@ -2830,8 +2918,10 @@ const TOOL_HANDLERS = {
         throw err;
       }
       const trimmed = String(res.stdout || "").trim();
-      if (!trimmed) return "Command completed with no output.";
-      return trimmed.length > 3000 ? trimmed.slice(0, 3000) + "\n… (truncated)" : trimmed;
+      if (!trimmed) return describeWorkspaceCommandNoOutput(safeCmd, cmdArgs);
+      return trimmed.length > 3000
+        ? describeWorkspaceCommandTruncatedOutput(safeCmd, cmdArgs, trimmed)
+        : trimmed;
     } catch (err) {
       const stderr = String(err?.stderr || "").trim();
       const stdout = String(err?.stdout || "").trim();
