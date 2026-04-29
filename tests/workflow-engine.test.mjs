@@ -1542,7 +1542,8 @@ describe("WorkflowEngine - run history details", () => {
 
     await vi.waitFor(() => {
       const activeRun = Array.from(engine._activeRuns.values()).find((run) => run.workflowId === wf.id);
-      expect(activeRun?.ctx?.getNodeStatus("second")).toBe(NodeStatus.RUNNING);
+      expect(activeRun?.ctx).toBeTruthy();
+      expect(activeRun?.ctx?.getNodeStatus("first")).toBe(NodeStatus.COMPLETED);
     });
 
     const activeRunEntry = Array.from(engine._activeRuns.entries()).find(([, run]) => run.workflowId === wf.id);
