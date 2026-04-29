@@ -1515,12 +1515,12 @@ describe("WorkflowEngine - run history details", () => {
 
     const checkpointNodeType = `test.checkpoint.${Date.now()}`;
     registerNodeType(checkpointNodeType, {
-      async execute(_node, ctx) {
-        executionOrder.push(ctx.currentNodeId);
-        if (ctx.currentNodeId === "second") {
+      async execute(node, ctx) {
+        executionOrder.push(node.id);
+        if (node.id === "second") {
           await deferred;
         }
-        return { nodeId: ctx.currentNodeId, run: ctx.id };
+        return { nodeId: node.id, run: ctx.id };
       },
     });
 
@@ -1541,9 +1541,10 @@ describe("WorkflowEngine - run history details", () => {
     const runPromise = engine.execute(wf.id, {});
 
     await vi.waitFor(() => {
-      const activeRun = Array.from(engine._activeRuns.values()).find((run) => run.workflowId === wf.id);
-      expect(activeRun?.ctx).toBeTruthy();
-      expect(activeRun?.ctx?.getNodeStatus("first")).toBe(NodeStatus.COMPLETED);
+      const activeRunEntry = Array.from(engine._activeRuns.entries()).find(([, run]) => run.workflowId === wf.id);
+      expect(activeRunEntry).toBeTruthy();
+      const activeRun = activeRunEntry?.[1];
+      expect(activeRun?.ctx?.getNodeStatus("second")).toBe(NodeStatus.RUNNING);
     });
 
     const activeRunEntry = Array.from(engine._activeRuns.entries()).find(([, run]) => run.workflowId === wf.id);
@@ -1611,13 +1612,13 @@ describe("WorkflowEngine - run history details", () => {
 
     const resumeOrder = [];
     const executeDagSpy = vi.spyOn(engine, "_executeDag");
-    executeDagSpy.mockImplementation(async function(definition, startNodeId, context, options) {
+    executeDagSpy.mockImplementation(async function(definition, entryNodes, adjacency, context, options) {
       const originalStatus = context.setNodeStatus.bind(context);
       context.setNodeStatus = (nodeId, status) => {
         if (status === NodeStatus.RUNNING) resumeOrder.push(nodeId);
         return originalStatus(nodeId, status);
       };
-      return WorkflowEngine.prototype._executeDag.call(this, definition, startNodeId, context, options);
+      return WorkflowEngine.prototype._executeDag.call(this, definition, entryNodes, adjacency, context, options);
     });
 
     const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
