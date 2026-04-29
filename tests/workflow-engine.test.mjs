@@ -1506,6 +1506,134 @@ describe("WorkflowEngine - run history details", () => {
   });
 
 
+  it("persists completed node checkpoints and resumes from the next pending node", async () => {
+    const executionOrder = [];
+    const gate = {};
+    const deferred = new Promise((resolve) => {
+      gate.resolve = resolve;
+    });
+
+    const checkpointNodeType = `test.checkpoint.${Date.now()}`;
+    registerNodeType(checkpointNodeType, {
+      async execute(node, ctx) {
+        executionOrder.push(node.id);
+        if (node.id === "second") {
+          await deferred;
+        }
+        return { nodeId: node.id, run: ctx.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "first", type: checkpointNodeType, label: "First", config: {} },
+        { id: "second", type: checkpointNodeType, label: "Second", config: {} },
+        { id: "third", type: checkpointNodeType, label: "Third", config: {} },
+      ],
+      [
+        { source: "first", target: "second" },
+        { source: "second", target: "third" },
+      ],
+      { id: "wf-resume-safe-checkpoints", name: "Resume Safe Checkpoints" },
+    );
+    engine.save(wf);
+
+    const runPromise = engine.execute(wf.id, {});
+
+    await vi.waitFor(() => {
+      const activeRunEntry = Array.from(engine._activeRuns.entries()).find(([, run]) => run.workflowId === wf.id);
+      expect(activeRunEntry).toBeTruthy();
+      const activeRun = activeRunEntry?.[1];
+      expect(activeRun?.ctx?.getNodeStatus("second")).toBe(NodeStatus.RUNNING);
+    });
+
+    const activeRunEntry = Array.from(engine._activeRuns.entries()).find(([, run]) => run.workflowId === wf.id);
+    expect(activeRunEntry).toBeTruthy();
+    const [runId] = activeRunEntry;
+    const detailPath = join(tmpDir, "runs", `${runId}.json`);
+
+    await vi.waitFor(() => {
+      const detail = JSON.parse(readFileSync(detailPath, "utf8"));
+      expect(detail.nodeStatuses.first).toBe(NodeStatus.COMPLETED);
+      expect(detail.nodeOutputs.first).toEqual({ nodeId: "first", run: runId });
+      expect(detail.nodeStatuses.second).toBe(NodeStatus.RUNNING);
+    });
+
+    gate.resolve();
+    const completedCtx = await runPromise;
+    expect(completedCtx.getNodeStatus("third")).toBe(NodeStatus.COMPLETED);
+    expect(executionOrder).toEqual(["first", "second", "third"]);
+
+    const interruptedRunId = "run-resume-safe-checkpoints";
+    writeFileSync(
+      join(tmpDir, "runs", "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(tmpDir, "runs", `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+        },
+        nodeStatuses: {
+          first: NodeStatus.COMPLETED,
+          second: NodeStatus.PENDING,
+          third: NodeStatus.PENDING,
+        },
+        nodeOutputs: {
+          first: { nodeId: "first", run: interruptedRunId },
+        },
+        nodeStatusEvents: [
+          { nodeId: "first", status: NodeStatus.COMPLETED, timestamp: 1001 },
+        ],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(tmpDir, "runs", "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const resumeOrder = [];
+    const executeDagSpy = vi.spyOn(engine, "_executeDag");
+    executeDagSpy.mockImplementation(async function(definition, entryNodes, adjacency, context, options) {
+      const originalStatus = context.setNodeStatus.bind(context);
+      context.setNodeStatus = (nodeId, status) => {
+        if (status === NodeStatus.RUNNING) resumeOrder.push(nodeId);
+        return originalStatus(nodeId, status);
+      };
+      return WorkflowEngine.prototype._executeDag.call(this, definition, entryNodes, adjacency, context, options);
+    });
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
+
+    expect(retryRunId).toBeTruthy();
+    expect(resumeOrder).toEqual(["second", "third"]);
+    expect(resumeOrder).not.toContain("first");
+
+    const resumedRun = engine.getRunDetail(retryRunId);
+    expect(resumedRun?.detail?.nodeStatuses?.first).toBe(NodeStatus.COMPLETED);
+    expect(resumedRun?.detail?.nodeOutputs?.first).toEqual({ nodeId: "first", run: interruptedRunId });
+    expect(resumedRun?.detail?.nodeStatuses?.second).toBe(NodeStatus.COMPLETED);
+    expect(resumedRun?.detail?.nodeStatuses?.third).toBe(NodeStatus.COMPLETED);
+  });
+
   it("skips checkpoint writes once a run is no longer active", async () => {
     const runId = "run-inactive-checkpoint";
     const runsDir = join(tmpDir, "runs");
