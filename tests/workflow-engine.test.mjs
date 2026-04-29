@@ -1547,6 +1547,7 @@ describe("WorkflowEngine - run history details", () => {
     });
 
     const activeRunEntry = Array.from(engine._activeRuns.entries()).find(([, run]) => run.workflowId === wf.id);
+    expect(activeRunEntry).toBeTruthy();
     const [runId] = activeRunEntry;
     const detailPath = join(tmpDir, "runs", `${runId}.json`);
 
