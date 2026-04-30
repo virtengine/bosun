@@ -199,14 +199,31 @@ function writePausedCreateTasksRun(runId, workflow, { taskId = "task-create-guar
   writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
 }
 
+async function removeDirWithRetries(dirPath) {
+  if (!dirPath) return;
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      rmSync(dirPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== "EPERM") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+  if (lastError?.code === "EPERM") return;
+  throw lastError;
+}
+
 describe("WorkflowEngine - Create Tasks retry guard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     resetWorkflowEngine();
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    await removeDirWithRetries(tmpDir);
     tmpDir = null;
     engine = null;
   });
