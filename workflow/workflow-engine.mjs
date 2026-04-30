@@ -5117,6 +5117,211 @@ export class WorkflowEngine extends EventEmitter {
 
   // ── Run Retry ───────────────────────────────────────────────────────────
 
+  _resolveNextPendingDagNode(detail = {}, def = null) {
+    const pendingStatuses = new Set([NodeStatus.PENDING, NodeStatus.WAITING]);
+    const dagNodes =
+      detail?.dagState?.nodes && typeof detail.dagState.nodes === "object"
+        ? Object.values(detail.dagState.nodes)
+        : [];
+    const nextFromDag = dagNodes.find((node) =>
+      pendingStatuses.has(String(node?.status || "").trim().toLowerCase()),
+    );
+    if (nextFromDag) {
+      const nodeId = String(nextFromDag.nodeId || "").trim();
+      const nodeDef = Array.isArray(def?.nodes)
+        ? def.nodes.find((entry) => String(entry?.id || "").trim() === nodeId) || null
+        : null;
+      return {
+        nodeId,
+        label: String(nextFromDag.label || nodeDef?.label || nodeId || "").trim() || null,
+        type: String(nextFromDag.type || nodeDef?.type || "").trim() || null,
+        config: nodeDef?.config && typeof nodeDef.config === "object" ? nodeDef.config : {},
+      };
+    }
+
+    if (!Array.isArray(def?.nodes)) return null;
+    const nodeStatuses =
+      detail?.nodeStatuses && typeof detail.nodeStatuses === "object"
+        ? detail.nodeStatuses
+        : {};
+    for (const node of def.nodes) {
+      const nodeId = String(node?.id || "").trim();
+      if (!nodeId) continue;
+      const status = String(nodeStatuses[nodeId] || NodeStatus.PENDING).trim().toLowerCase();
+      if (!pendingStatuses.has(status)) continue;
+      return {
+        nodeId,
+        label: String(node?.label || nodeId).trim() || null,
+        type: String(node?.type || "").trim() || null,
+        config: node?.config && typeof node.config === "object" ? node.config : {},
+      };
+    }
+    return null;
+  }
+
+  _resolvePendingCreateTasksGuard(runOrDetail, def = null) {
+    const run =
+      runOrDetail?.detail && typeof runOrDetail.detail === "object"
+        ? runOrDetail
+        : null;
+    const detail = run?.detail || runOrDetail || {};
+    const runStatus = String(run?.status || detail?.status || "").trim().toLowerCase();
+    if (runStatus !== WorkflowStatus.PAUSED) return null;
+
+    const nextPending = this._resolveNextPendingDagNode(detail, def);
+    if (!nextPending || String(nextPending.type || "").trim() !== "action.materialize_planner_tasks") {
+      return null;
+    }
+
+    const dedupEnabled = nextPending.config?.dedup !== false;
+    const hasListTasks = typeof this.services?.kanban?.listTasks === "function";
+    const safeResume = dedupEnabled && hasListTasks;
+    const blockers = [];
+    if (!dedupEnabled) blockers.push("dedup is disabled on the Create Tasks node");
+    if (!hasListTasks) blockers.push("the Kanban adapter cannot list existing tasks for idempotent recovery");
+    const nextNodeLabel = nextPending.label || nextPending.nodeId || "Create Tasks";
+    const summary =
+      `Run is paused with ${nextNodeLabel} as the next pending node, and task creation may already be partially applied.`;
+
+    return {
+      code: "create_tasks_pending",
+      nextNodeId: nextPending.nodeId,
+      nextNodeLabel,
+      nextNodeType: nextPending.type,
+      safeResume,
+      dedupEnabled,
+      hasListTasks,
+      blockers,
+      summary,
+      manualRetryMessage:
+        `${summary} Manual retry is blocked to avoid duplicate task creation. ` +
+        `${safeResume
+          ? "Use interrupted-run resume so existing tasks can be prefetched and skipped."
+          : "Interrupted-run resume is also blocked until idempotent recovery is available."}`,
+      resumeBlockedMessage:
+        `${summary} Interrupted-run resume is blocked because ${blockers.join(" and ") || "idempotent recovery is not available"}.`,
+      resumeAllowedMessage:
+        `${summary} Interrupted-run resume is allowed because dedup is enabled and existing tasks can be prefetched before re-running Create Tasks.`,
+    };
+  }
+
+  resolveOperatorRetry(runId, requestedMode = "from_failed") {
+    const run = this.getRunDetail(runId);
+    if (!run) {
+      throw new Error(`${TAG} Run "${runId}" not found — cannot resolve retry request`);
+    }
+
+    const mode = ["from_scratch", "replan_from_failed", "replan_subgraph"].includes(
+      String(requestedMode || "").trim().toLowerCase(),
+    )
+      ? String(requestedMode || "").trim().toLowerCase()
+      : "from_failed";
+    const retryOptions = this.getRetryOptions(runId);
+    const selectedOption = Array.isArray(retryOptions?.options)
+      ? retryOptions.options.find((entry) => String(entry?.mode || "").trim().toLowerCase() === mode) || null
+      : null;
+    const guardedState =
+      retryOptions?.guardedState && typeof retryOptions.guardedState === "object"
+        ? retryOptions.guardedState
+        : null;
+    const createTasksResume =
+      String(run?.status || "").trim().toLowerCase() === WorkflowStatus.PAUSED &&
+      mode === "from_failed" &&
+      guardedState?.code === "create_tasks_pending" &&
+      guardedState?.safeResume === true;
+    const operatorAction = createTasksResume ? "resume" : "retry";
+    const decisionReason = createTasksResume
+      ? String(
+          selectedOption?.reason ||
+          retryOptions?.recommendedReason ||
+          "operator.resume_requested",
+        ).trim()
+      : null;
+    const retryArgs = {
+      mode,
+      ...(createTasksResume ? { operatorAction, _decisionReason: decisionReason } : {}),
+    };
+    const blocked = selectedOption?.available === false;
+    const blockedMessage = String(
+      selectedOption?.description ||
+      retryOptions?.summary ||
+      "",
+    ).trim() || null;
+
+    return {
+      runId: run.runId,
+      status: run.status,
+      mode,
+      operatorAction,
+      decisionReason,
+      blocked,
+      blockedMessage,
+      guardedState,
+      selectedOption,
+      retryOptions,
+      retryArgs,
+    };
+  }
+
+  _rehydrateTaskLifecycleRetryState(ctx, data = {}, nodeOutputs = {}) {
+    if (!ctx?.data || typeof ctx.data !== "object") return;
+    const claimTaskOutput =
+      nodeOutputs?.["claim-task"] && typeof nodeOutputs["claim-task"] === "object"
+        ? nodeOutputs["claim-task"]
+        : {};
+    const acquireWorktreeOutput =
+      nodeOutputs?.["acquire-worktree"] && typeof nodeOutputs["acquire-worktree"] === "object"
+        ? nodeOutputs["acquire-worktree"]
+        : {};
+    const persistedClaimToken = String(
+      ctx.data?._claimToken
+      || data?._claimToken
+      || data?.claimToken
+      || claimTaskOutput?.claimToken
+      || "",
+    ).trim();
+    if (persistedClaimToken) {
+      ctx.data._claimToken = persistedClaimToken;
+    }
+    const persistedClaimInstanceId = String(
+      ctx.data?._claimInstanceId
+      || data?._claimInstanceId
+      || data?.claimInstanceId
+      || claimTaskOutput?.instanceId
+      || "",
+    ).trim();
+    if (persistedClaimInstanceId) {
+      ctx.data._claimInstanceId = persistedClaimInstanceId;
+    }
+    const persistedWorktreePath = String(
+      ctx.data?.worktreePath
+      || data?.worktreePath
+      || acquireWorktreeOutput?.worktreePath
+      || data?.task?.worktreePath
+      || "",
+    ).trim();
+    if (persistedWorktreePath) {
+      ctx.data.worktreePath = persistedWorktreePath;
+      if (ctx.data.task && typeof ctx.data.task === "object" && !String(ctx.data.task.worktreePath || "").trim()) {
+        ctx.data.task.worktreePath = persistedWorktreePath;
+      }
+    }
+    if (ctx.data._worktreeCreated == null) {
+      if (typeof data?._worktreeCreated === "boolean") {
+        ctx.data._worktreeCreated = data._worktreeCreated;
+      } else if (typeof acquireWorktreeOutput?.created === "boolean") {
+        ctx.data._worktreeCreated = acquireWorktreeOutput.created;
+      }
+    }
+    if (ctx.data._worktreeManaged == null) {
+      if (typeof data?._worktreeManaged === "boolean") {
+        ctx.data._worktreeManaged = data._worktreeManaged;
+      } else if (persistedWorktreePath) {
+        ctx.data._worktreeManaged = true;
+      }
+    }
+  }
+
   /**
    * Retry a previously completed (failed) run.
    *
@@ -5157,13 +5362,14 @@ export class WorkflowEngine extends EventEmitter {
     }
     const createTasksGuard = this._resolvePendingCreateTasksGuard(originalRun, def);
     const isInterruptedResume = retryOpts._resumeInterrupted === true;
+    const operatorAction = String(retryOpts.operatorAction || "").trim().toLowerCase();
     const isResumeLikeRetry =
       (mode === "from_failed" && !isInterruptedResume)
       || mode === "replan_from_failed"
       || mode === "replan_subgraph";
     const blocksManualRestart = mode === "from_scratch" && createTasksGuard?.safeResume;
     if (createTasksGuard && (isResumeLikeRetry || blocksManualRestart)) {
-      if (isInterruptedResume) {
+      if (isInterruptedResume || operatorAction === "resume") {
         if (!createTasksGuard.safeResume) {
           throw new Error(`${TAG} ${createTasksGuard.resumeBlockedMessage}`);
         }
@@ -9937,6 +10143,14 @@ export class WorkflowEngine extends EventEmitter {
         }
       }
 
+      const indexedRunCountsByTaskId = new Map();
+      for (const run of allRuns) {
+        const detail = runDetailCache.get(run.runId);
+        const taskId = this._resolveRunTaskIdentity(run, detail)?.taskId || "";
+        if (!taskId) continue;
+        indexedRunCountsByTaskId.set(taskId, (indexedRunCountsByTaskId.get(taskId) || 0) + 1);
+      }
+
       // Mark older duplicate runs as not-resumable before entering the loop.
       // This must consider the full paused+resumable set so historical siblings
       // outside the current startup cohort are still retired when a newer run wins.
@@ -9945,6 +10159,7 @@ export class WorkflowEngine extends EventEmitter {
         const ident = identityCache.get(run.runId) ?? getIdentity(run.runId);
         const tid = this._resolveRunTaskIdentity(run, ident)?.taskId || "";
         if (!tid) continue;
+        if ((indexedRunCountsByTaskId.get(tid) || 0) <= 1) continue;
         const latest = latestByTaskId.get(tid);
         if (latest && latest.runId !== run.runId) {
           this._markRunUnresumable(run.runId, "duplicate_task_run");
@@ -10012,8 +10227,13 @@ export class WorkflowEngine extends EventEmitter {
         }
         const _tid = this._resolveRunTaskIdentity(run, _ident)?.taskId || "";
         if (_tid) {
+          if ((indexedRunCountsByTaskId.get(_tid) || 0) <= 1) {
+            // keep the only paused/resumable run for the task even if stale
+            // ledger/index rows mention older siblings
+          } else {
           const latest = latestByTaskId.get(_tid);
           if (latest && latest.runId !== run.runId) continue;
+          }
         }
 
         try {
@@ -10082,7 +10302,7 @@ export class WorkflowEngine extends EventEmitter {
             : (watchdogDecision || this._chooseRetryModeFromDetail(detail, {
                 fallbackMode: "from_scratch",
               }));
-          const detailedRun = this.getRunDetail(run.runId) || run;
+          const detailedRun = this.getRunDetail(run.runId, { decorate: false }) || { ...run, detail };
           const createTasksGuard = this._resolvePendingCreateTasksGuard(detailedRun, def);
           if (createTasksGuard && !createTasksGuard.safeResume) {
             console.warn(`${TAG} Skipping run ${run.runId}: ${createTasksGuard.resumeBlockedMessage}`);
