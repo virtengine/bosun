@@ -10145,8 +10145,8 @@ export class WorkflowEngine extends EventEmitter {
 
       const indexedRunCountsByTaskId = new Map();
       for (const run of allRuns) {
-        const detail = runDetailCache.get(run.runId);
-        const taskId = this._resolveRunTaskIdentity(run, detail)?.taskId || "";
+        const ident = identityCache.get(run.runId) ?? getIdentity(run.runId);
+        const taskId = this._resolveRunTaskIdentity(run, ident)?.taskId || "";
         if (!taskId) continue;
         indexedRunCountsByTaskId.set(taskId, (indexedRunCountsByTaskId.get(taskId) || 0) + 1);
       }
@@ -10159,7 +10159,6 @@ export class WorkflowEngine extends EventEmitter {
         const ident = identityCache.get(run.runId) ?? getIdentity(run.runId);
         const tid = this._resolveRunTaskIdentity(run, ident)?.taskId || "";
         if (!tid) continue;
-        if ((indexedRunCountsByTaskId.get(tid) || 0) <= 1) continue;
         const latest = latestByTaskId.get(tid);
         if (latest && latest.runId !== run.runId) {
           this._markRunUnresumable(run.runId, "duplicate_task_run");
@@ -10227,13 +10226,8 @@ export class WorkflowEngine extends EventEmitter {
         }
         const _tid = this._resolveRunTaskIdentity(run, _ident)?.taskId || "";
         if (_tid) {
-          if ((indexedRunCountsByTaskId.get(_tid) || 0) <= 1) {
-            // keep the only paused/resumable run for the task even if stale
-            // ledger/index rows mention older siblings
-          } else {
           const latest = latestByTaskId.get(_tid);
           if (latest && latest.runId !== run.runId) continue;
-          }
         }
 
         try {
