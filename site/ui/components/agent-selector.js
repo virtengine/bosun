@@ -14,14 +14,14 @@ import {
 } from "preact/hooks";
 import { signal, computed, effect } from "@preact/signals";
 import htm from "htm";
-import { apiFetch } from "../modules/api.js";
-import { haptic } from "../modules/telegram.js";
-import { resolveIcon } from "../modules/icon-utils.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { haptic } from "../../../ui/modules/telegram.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   aliveAgentCount,
   staleAgentCount,
   totalErrorCount,
-} from "../modules/agent-events.js";
+} from "../../../ui/modules/agent-events.js";
 import {
   ToggleButton,
   ToggleButtonGroup,

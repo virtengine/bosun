@@ -195,9 +195,12 @@ body.kanban-dragging .kanban-card {
   background: var(--bg-card);
   border-radius: var(--radius-lg, 12px);
   padding: 14px;
-  /* Use the Telegram stable viewport height, not raw 100vh which Telegram
-     overrides — prevents columns being too short or clipped on the web app */
-  max-height: calc(var(--viewport-stable-height, 100vh) - 180px);
+  overflow: hidden;
+  /* Use the stable viewport height so each column keeps its own scroll area
+     without feeling too tall on desktop or cramped on mobile. */
+  height: clamp(360px, calc(var(--viewport-stable-height, 100vh) - 220px), 760px);
+  max-height: clamp(360px, calc(var(--viewport-stable-height, 100vh) - 220px), 760px);
+  min-height: 360px;
   position: relative;
   border: 1px solid var(--border);
   /* Limit layout recalculations to within the column — columns don't affect
@@ -289,13 +292,29 @@ body.kanban-dragging .kanban-card {
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
-  flex: 1;
-  padding: 4px;
+  overflow-x: hidden;
+  flex: 1 1 auto;
+  padding: 4px 4px 0;
   min-height: 0;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
-  /* Contain scroll within the column — prevents touch scroll spilling up to
-     main-content or the page when the user reaches the top/bottom of a column. */
   overscroll-behavior-y: contain;
+}
+
+.kanban-column-footer {
+  position: sticky;
+  bottom: 0;
+  flex-shrink: 0;
+  z-index: 2;
+  margin: 0 -14px -14px;
+  padding: 6px 14px 12px;
+  background: linear-gradient(to top, var(--bg-card) 72%, rgba(0, 0, 0, 0));
+  border-radius: 0 0 var(--radius-lg, 12px) var(--radius-lg, 12px);
+}
+
+.kanban-cards > * {
+  flex-shrink: 0;
 }
 
 .kanban-card {
@@ -306,8 +325,9 @@ body.kanban-dragging .kanban-card {
   cursor: pointer;
   transition: border-color 0.15s, opacity 0.15s, transform 0.15s;
   touch-action: pan-y;
+  min-height: 72px;
+  flex-shrink: 0;
 }
-
 .kanban-card:hover {
   border-color: var(--border-strong);
   transform: translateY(-1px);
@@ -481,9 +501,9 @@ body.kanban-dragging .kanban-card {
 }
 
 .kanban-scroll-fade {
-  height: 16px;
+  height: 10px;
   flex-shrink: 0;
-  background: linear-gradient(to top, var(--bg-card), transparent);
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.08), transparent);
   border-radius: 0 0 var(--radius-lg, 12px) var(--radius-lg, 12px);
   pointer-events: none;
   margin: 0 -12px -12px;
@@ -503,7 +523,8 @@ body.kanban-dragging .kanban-card {
 
   .kanban-column {
     min-width: 280px;
-    max-height: none;
+    height: clamp(420px, calc(var(--viewport-stable-height, 100vh) - 210px), 840px);
+    max-height: clamp(420px, calc(var(--viewport-stable-height, 100vh) - 210px), 840px);
   }
 }
 
@@ -520,6 +541,8 @@ body.kanban-dragging .kanban-card {
     flex: 0 0 85%;
     min-width: 260px;
     max-width: 85%;
+    height: clamp(380px, calc(var(--viewport-stable-height, 100vh) - 190px), 680px);
+    max-height: clamp(380px, calc(var(--viewport-stable-height, 100vh) - 190px), 680px);
     scroll-snap-align: start;
     scroll-snap-stop: always;
   }
@@ -536,153 +559,43 @@ body.kanban-dragging .kanban-card {
   .kanban-column {
     min-width: 86vw;
     max-width: 86vw;
+    height: clamp(360px, calc(var(--viewport-stable-height, 100vh) - 170px), 620px);
+    max-height: clamp(360px, calc(var(--viewport-stable-height, 100vh) - 170px), 620px);
     scroll-snap-align: start;
     padding: 12px;
   }
 
   .kanban-cards {
-    padding: 2px;
-  }
-}
-
-/* View toggle */
-.view-toggle {
-  display: flex;
-  gap: 4px;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md, 8px);
-  padding: 3px;
-}
-
-.view-toggle-btn {
-  padding: 6px 12px;
-  border: none;
-  background: none;
-  border-radius: var(--radius-sm, 6px);
-  color: var(--text-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.15s;
-  font-family: inherit;
-}
-
-.view-toggle-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.view-toggle-btn.active {
-  background: var(--accent);
-  color: var(--accent-text);
-}
-
-/* ═══════════════════════════════════════════════
- *  Desktop Premium Density Overrides
- * ═══════════════════════════════════════════════ */
-@media (min-width: 1400px) {
-  .kanban-board {
-    gap: 12px;
-    padding: 8px 0 12px;
-  }
-
-  .kanban-column {
-    padding: 10px;
-    border-radius: var(--radius-md);
-  }
-
-  .kanban-card {
-    padding: 10px;
-    border-radius: var(--radius-sm);
-  }
-
-  .kanban-card-title {
-    font-size: 13px;
-  }
-
-  .kanban-card-desc,
-  .kanban-card-meta {
-    font-size: 11px;
-  }
-
-  .kanban-column-header {
-    font-size: 12px;
-    padding: 6px 4px;
-    margin-bottom: 6px;
-  }
-}
-
-/* ═══════════════════════════════════════════════
- *  Performance hints
- * ═══════════════════════════════════════════════ */
-
-/* Promote the horizontal scroll container to its own compositor layer so that
-   scrolling the board doesn't trigger main-thread layout. */
-.kanban-board {
-  will-change: scroll-position;
-}
-
-/* ═══════════════════════════════════════════════
- *  Board View: Full-height bounded layout
- *
- *  Problem: .main-content is overflow-y:auto (a block element).
- *  .kanban-container has flex:1/min-height:0 but those only work when
- *  the *parent* is a flex container.  Without this, columns grow to
- *  their natural content height and the outer page scrolls vertically
- *  instead of each column scrolling its own cards.
- *
- *  Fix: TasksTab adds "tasks-board-view" to <body> when board view is
- *  active.  CSS then converts main-content into a bounded flex column,
- *  so the kanban-container fills the remaining height and columns can
- *  scroll internally.
- * ═══════════════════════════════════════════════ */
-
-body.tasks-board-view .main-content {
-  overflow: hidden;
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1 1 auto;
+  padding: 4px;
   min-height: 0;
-  /* Remove vertical padding — kanban-board manages its own bottom clearance */
-  padding-top: 0;
-  padding-bottom: 0;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  overscroll-behavior-y: contain;
 }
 
-/* Toolbar stays fixed-height; no longer needs position:sticky since the
-   container no longer scrolls. */
-body.tasks-board-view .sticky-search {
+.kanban-cards > * {
   flex-shrink: 0;
-  position: relative;
-  z-index: 10;
 }
 
-/* Status summary row stays fixed-height */
-body.tasks-board-view .snapshot-bar {
+.kanban-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, opacity 0.15s, transform 0.15s;
+  touch-action: pan-y;
+  min-height: 72px;
   flex-shrink: 0;
-  margin-bottom: 0;
 }
-
-/* kanban-container fills all remaining vertical space.
-   It already carries flex:1 and min-height:0 — the parent flex
-   context added above is what makes those take effect. */
-body.tasks-board-view .kanban-container {
-  flex: 1;
-  min-height: 0;
-}
-
-/* On mobile, add clearance at the bottom of the board for the fixed nav bar
-   so the last card row isn't hidden behind it. */
-@media (max-width: 768px) {
-  body.tasks-board-view .kanban-board {
-    padding-bottom: calc(var(--nav-height, 56px) + var(--safe-bottom, 0px) + 12px);
-  }
-}
-
-/* ─── Reduced motion: disable decorative transitions on kanban cards ─── */
-@media (prefers-reduced-motion: reduce) {
-  .kanban-card {
-    transition: border-color 0.05s;
-  }
-  .kanban-card:hover {
+.kanban-card:hover {
     transform: none;
   }
   .kanban-card:active {
@@ -694,6 +607,9 @@ body.tasks-board-view .kanban-container {
 }
 
 .kanban-column-head {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
   border-radius: calc(var(--radius-md, 8px) - 2px);
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.01)),
@@ -707,12 +623,39 @@ body.tasks-board-view .kanban-container {
 }
 
 .kanban-load-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
   text-align: center;
   font-size: 12px;
   color: var(--text-secondary);
-  opacity: 0.8;
-  padding: 8px 6px 12px;
+  opacity: 0.94;
+  padding: 8px 10px;
   letter-spacing: 0.01em;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+  backdrop-filter: blur(10px);
+}
+
+.kanban-load-more:hover,
+.kanban-load-more:focus-visible {
+  color: var(--text-primary);
+}
+
+.kanban-load-more:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.kanban-load-more-icon {
+  font-size: 15px;
+  line-height: 1;
 }
 
 
@@ -727,3 +670,5 @@ body.tasks-board-view .kanban-container {
 .kanban-card .MuiTypography-root {
   color: var(--text-primary);
 }
+
+

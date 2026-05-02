@@ -5247,6 +5247,294 @@ describeUiServer("ui-server mini app", () => {
     }
   }, 20000);
 
+  it("returns guarded retry options for paused Create Tasks runs through the workflow retry API", async () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), "bosun-ui-workflow-retry-options-"));
+    process.env.TELEGRAM_UI_TUNNEL = "disabled";
+    process.env.BOSUN_HOME = isolatedDir;
+    process.env.BOSUN_DIR = isolatedDir;
+    process.env.CODEX_MONITOR_HOME = isolatedDir;
+    process.env.CODEX_MONITOR_DIR = isolatedDir;
+
+    const mod = await import("../server/ui-server.mjs");
+    const workflowEngineModule = await import("../workflow/workflow-engine.mjs");
+    let server = null;
+    const fakeEngine = {
+      getRunHistory: vi.fn(() => []),
+      getRunDetail: vi.fn(() => ({
+        runId: "run-create-tasks-options",
+        workflowId: "wf-guarded",
+        workflowName: "Guarded Workflow",
+        status: "paused",
+        detail: { data: { _workflowId: "wf-guarded", _workflowName: "Guarded Workflow" } },
+      })),
+      getRetryOptions: vi.fn(() => ({
+        runId: "run-create-tasks-options",
+        status: "paused",
+        recommendedMode: "from_failed",
+        recommendedReason: "create_tasks_pending.resume_only",
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeLabel: "Create Tasks",
+          safeResume: true,
+        },
+        options: [
+          {
+            mode: "from_failed",
+            label: "Resume from next pending step",
+            description: "Manual retry is blocked; use interrupted-run resume.",
+            recommended: true,
+            available: true,
+          },
+        ],
+      })),
+      getTaskTraceEvents: vi.fn(() => []),
+      registerTaskTraceHook: vi.fn(),
+      load: vi.fn(),
+    };
+    mod._testInjectWorkflowEngine({ WorkflowEngine: class MockWorkflowEngine {} }, fakeEngine);
+
+    try {
+      server = await mod.startTelegramUiServer({
+        port: await getFreePort(),
+        host: "127.0.0.1",
+        skipInstanceLock: true,
+        skipAutoOpen: true,
+      });
+      const port = server.address().port;
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/workflows/runs/run-create-tasks-options/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(payload).toMatchObject({
+        ok: true,
+        runId: "run-create-tasks-options",
+        status: "paused",
+        recommendedMode: "from_failed",
+        recommendedReason: "create_tasks_pending.resume_only",
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeLabel: "Create Tasks",
+          safeResume: true,
+        },
+      });
+      expect(payload.options).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          mode: "from_failed",
+          label: "Resume from next pending step",
+          recommended: true,
+        }),
+      ]));
+    } finally {
+      if (server) {
+        await new Promise((resolve) => server.close(resolve));
+      }
+      mod._testInjectWorkflowEngine(workflowEngineModule, null);
+      await removeDirWithRetries(isolatedDir);
+    }
+  }, 20000);
+
+  it("routes paused Create Tasks retry requests through guarded operator resume metadata", async () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), "bosun-ui-workflow-retry-resume-"));
+    process.env.TELEGRAM_UI_TUNNEL = "disabled";
+    process.env.BOSUN_HOME = isolatedDir;
+    process.env.BOSUN_DIR = isolatedDir;
+    process.env.CODEX_MONITOR_HOME = isolatedDir;
+    process.env.CODEX_MONITOR_DIR = isolatedDir;
+
+    const mod = await import("../server/ui-server.mjs");
+    const workflowEngineModule = await import("../workflow/workflow-engine.mjs");
+    let server = null;
+    const fakeEngine = {
+      getRunHistory: vi.fn(() => []),
+      getRunDetail: vi.fn(() => ({
+        runId: "run-create-tasks-resume",
+        workflowId: "wf-guarded",
+        workflowName: "Guarded Workflow",
+        status: "paused",
+        detail: { data: { _workflowId: "wf-guarded", _workflowName: "Guarded Workflow" } },
+      })),
+      getRetryOptions: vi.fn(() => ({
+        runId: "run-create-tasks-resume",
+        status: "paused",
+        recommendedMode: "from_failed",
+        recommendedReason: "create_tasks_pending.resume_only",
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeLabel: "Create Tasks",
+          safeResume: true,
+        },
+      })),
+      resolveOperatorRetry: vi.fn(() => ({
+        mode: "from_failed",
+        operatorAction: "resume",
+        decisionReason: "create_tasks_pending.resume_only",
+        blocked: false,
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeLabel: "Create Tasks",
+          safeResume: true,
+        },
+        retryArgs: {
+          mode: "from_failed",
+          _resumeInterrupted: true,
+          _decisionReason: "create_tasks_pending.resume_only",
+        },
+      })),
+      retryRun: vi.fn(async () => ({
+        retryRunId: "retry-run-create-tasks",
+        originalRunId: "run-create-tasks-resume",
+        mode: "from_failed",
+        ctx: { errors: [] },
+      })),
+      getTaskTraceEvents: vi.fn(() => []),
+      registerTaskTraceHook: vi.fn(),
+      load: vi.fn(),
+    };
+    mod._testInjectWorkflowEngine({ WorkflowEngine: class MockWorkflowEngine {} }, fakeEngine);
+
+    try {
+      server = await mod.startTelegramUiServer({
+        port: await getFreePort(),
+        host: "127.0.0.1",
+        skipInstanceLock: true,
+        skipAutoOpen: true,
+      });
+      const port = server.address().port;
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/workflows/runs/run-create-tasks-resume/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "from_failed" }),
+      });
+      const payload = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(payload).toMatchObject({
+        ok: true,
+        retryRunId: "retry-run-create-tasks",
+        originalRunId: "run-create-tasks-resume",
+        mode: "from_failed",
+        status: "completed",
+        operatorAction: "resume",
+        decisionReason: "create_tasks_pending.resume_only",
+        guardedState: {
+          code: "create_tasks_pending",
+          safeResume: true,
+        },
+      });
+      expect(fakeEngine.resolveOperatorRetry).toHaveBeenCalledWith("run-create-tasks-resume", "from_failed");
+      expect(fakeEngine.retryRun).toHaveBeenCalledWith("run-create-tasks-resume", {
+        mode: "from_failed",
+        _resumeInterrupted: true,
+        _decisionReason: "create_tasks_pending.resume_only",
+      });
+    } finally {
+      if (server) {
+        await new Promise((resolve) => server.close(resolve));
+      }
+      mod._testInjectWorkflowEngine(workflowEngineModule, null);
+      await removeDirWithRetries(isolatedDir);
+    }
+  }, 20000);
+
+  it("blocks unsafe paused Create Tasks retry requests with explicit operator guidance", async () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), "bosun-ui-workflow-retry-blocked-"));
+    process.env.TELEGRAM_UI_TUNNEL = "disabled";
+    process.env.BOSUN_HOME = isolatedDir;
+    process.env.BOSUN_DIR = isolatedDir;
+    process.env.CODEX_MONITOR_HOME = isolatedDir;
+    process.env.CODEX_MONITOR_DIR = isolatedDir;
+
+    const mod = await import("../server/ui-server.mjs");
+    const workflowEngineModule = await import("../workflow/workflow-engine.mjs");
+    let server = null;
+    const fakeEngine = {
+      getRunHistory: vi.fn(() => []),
+      getRunDetail: vi.fn(() => ({
+        runId: "run-create-tasks-blocked",
+        workflowId: "wf-guarded",
+        workflowName: "Guarded Workflow",
+        status: "paused",
+        detail: { data: { _workflowId: "wf-guarded", _workflowName: "Guarded Workflow" } },
+      })),
+      getRetryOptions: vi.fn(() => ({
+        runId: "run-create-tasks-blocked",
+        status: "paused",
+        recommendedMode: "from_scratch",
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeLabel: "Create Tasks",
+          safeResume: false,
+        },
+      })),
+      resolveOperatorRetry: vi.fn(() => ({
+        mode: "from_failed",
+        operatorAction: "retry",
+        blocked: true,
+        blockedMessage: "Run is paused with Create Tasks as the next pending node. Manual retry is blocked to avoid duplicate task creation.",
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeLabel: "Create Tasks",
+          safeResume: false,
+        },
+      })),
+      retryRun: vi.fn(async () => ({
+        retryRunId: "retry-run-create-tasks-blocked",
+        originalRunId: "run-create-tasks-blocked",
+        mode: "from_failed",
+        ctx: { errors: [] },
+      })),
+      getTaskTraceEvents: vi.fn(() => []),
+      registerTaskTraceHook: vi.fn(),
+      load: vi.fn(),
+    };
+    mod._testInjectWorkflowEngine({ WorkflowEngine: class MockWorkflowEngine {} }, fakeEngine);
+
+    try {
+      server = await mod.startTelegramUiServer({
+        port: await getFreePort(),
+        host: "127.0.0.1",
+        skipInstanceLock: true,
+        skipAutoOpen: true,
+      });
+      const port = server.address().port;
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/workflows/runs/run-create-tasks-blocked/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "from_failed" }),
+      });
+      const payload = await response.json();
+
+      expect(response.status).toBe(409);
+      expect(payload).toMatchObject({
+        ok: false,
+        mode: "from_failed",
+        operatorAction: "retry",
+        guardedState: {
+          code: "create_tasks_pending",
+          safeResume: false,
+        },
+        retryOptions: {
+          recommendedMode: "from_scratch",
+        },
+      });
+      expect(String(payload.error || "")).toMatch(/Create Tasks.*duplicate task creation/i);
+      expect(fakeEngine.retryRun).not.toHaveBeenCalled();
+    } finally {
+      if (server) {
+        await new Promise((resolve) => server.close(resolve));
+      }
+      mod._testInjectWorkflowEngine(workflowEngineModule, null);
+      await removeDirWithRetries(isolatedDir);
+    }
+  }, 20000);
+
   it("reports epic dependency blockers from start guards", async () => {
     process.env.TELEGRAM_UI_TUNNEL = "disabled";
     process.env.EXECUTOR_MODE = "internal";

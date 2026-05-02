@@ -1,9 +1,9 @@
 import { h } from "preact";
 import { useState, useEffect, useCallback, useMemo } from "preact/hooks";
 import htm from "htm";
-import { apiFetch } from "../modules/api.js";
-import { resolveIcon } from "../modules/icon-utils.js";
-import { buildSessionApiPath } from "../modules/session-api.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { buildSessionApiPath } from "../../../ui/modules/session-api.js";
 import {
   Accordion,
   AccordionSummary,
@@ -22,8 +22,31 @@ import {
 const html = htm.bind(h);
 
 function buildDiffApiPath({ sessionId = "", taskId = "", workspace = "active" } = {}) {
-  if (taskId) return `/api/tasks/diff?taskId=${encodeURIComponent(String(taskId).trim())}`;
+  if (taskId) {
+    const params = new URLSearchParams({ taskId: String(taskId).trim() });
+    const normalizedWorkspace = String(workspace || "").trim();
+    if (normalizedWorkspace) params.set("workspace", normalizedWorkspace);
+    return `/api/tasks/diff?${params.toString()}`;
+  }
   return buildSessionApiPath(sessionId, "diff", { workspace }) || "";
+}
+
+function buildDiffRequest({ diffPath = "", taskSnapshot = null, taskId = "" } = {}) {
+  if (!diffPath) return null;
+  if (taskId && taskSnapshot && typeof taskSnapshot === "object") {
+    return {
+      path: diffPath,
+      options: {
+        method: "POST",
+        body: JSON.stringify({ task: taskSnapshot }),
+        _silent: true,
+      },
+    };
+  }
+  return {
+    path: diffPath,
+    options: { _silent: true },
+  };
 }
 
 const EXT_ICONS = {
@@ -336,7 +359,7 @@ function DiffFile({ file, defaultExpanded = false }) {
   `;
 }
 
-export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", activitySummary = null, title = "" }) {
+export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", activitySummary = null, title = "", taskSnapshot = null }) {
   const [diffData, setDiffData] = useState(null);
   const [sourceMeta, setSourceMeta] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -346,9 +369,13 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
     () => buildDiffApiPath({ sessionId, taskId, workspace }),
     [sessionId, taskId, workspace],
   );
+  const diffRequest = useMemo(
+    () => buildDiffRequest({ diffPath, taskSnapshot, taskId }),
+    [diffPath, taskSnapshot, taskId],
+  );
 
   const loadDiff = useCallback(() => {
-    if (!diffPath) {
+    if (!diffRequest?.path) {
       setDiffData(null);
       setSourceMeta(null);
       setLoading(false);
@@ -357,7 +384,7 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
     }
     setLoading(true);
     setError(null);
-    return apiFetch(diffPath, { _silent: true })
+    return apiFetch(diffRequest.path, diffRequest.options)
       .then((res) => {
         setDiffData(res?.diff || null);
         setSourceMeta(res?.source || null);
@@ -368,11 +395,11 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
       .finally(() => {
         setLoading(false);
       });
-  }, [diffPath]);
+  }, [diffRequest]);
 
   useEffect(() => {
     let active = true;
-    if (!diffPath) {
+    if (!diffRequest?.path) {
       setDiffData(null);
       setSourceMeta(null);
       setLoading(false);
@@ -383,7 +410,7 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
     }
     setLoading(true);
     setError(null);
-    apiFetch(diffPath, { _silent: true })
+    apiFetch(diffRequest.path, diffRequest.options)
       .then((res) => {
         if (!active) return;
         setDiffData(res?.diff || null);
@@ -398,7 +425,7 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
     return () => {
       active = false;
     };
-  }, [diffPath]);
+  }, [diffRequest]);
 
   if (!sessionId && !taskId) {
     return html`

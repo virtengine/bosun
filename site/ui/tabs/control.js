@@ -1,16 +1,24 @@
 /* ─────────────────────────────────────────────────────────────
  *  Tab: Control — executor, commands, routing, quick commands
  * ────────────────────────────────────────────────────────────── */
-import { h } from "preact";
+import { h as _h } from "preact";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import htm from "htm";
+
+/* Guard: recover when a React-style forwardRef object leaks into h(). */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function") {
+    if (typeof type.render === "function") return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
 
 const html = htm.bind(h);
 
 import { Typography, Box, Stack, Card as MuiCard, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge as MuiBadge, Avatar, LinearProgress, Grid, Slider, Select } from "@mui/material";
 
-import { haptic, showConfirm } from "../modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../modules/api.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
 import {
   executorData,
   configData,
@@ -18,19 +26,19 @@ import {
   showToast,
   runOptimistic,
   scheduleRefresh,
-} from "../modules/state.js";
-import { ICONS } from "../modules/icons.js";
-import { iconText as iconTextUtil } from "../modules/icon-utils.js";
-import { cloneValue, truncate } from "../modules/utils.js";
-import { SegmentedControl, Collapsible } from "../components/forms.js";
-import { Card, Badge, SkeletonCard } from "../components/shared.js";
-import { WorkspaceExecutorSettingsFields } from "../components/workspace-executor-settings.js";
+} from "../../../ui/modules/state.js";
+import { ICONS } from "../../../ui/modules/icons.js";
+import { iconText as iconTextUtil } from "../../../ui/modules/icon-utils.js";
+import { cloneValue, truncate } from "../../../ui/modules/utils.js";
+import { SegmentedControl, Collapsible } from "../../../ui/components/forms.js";
+import { Card, Badge, SkeletonCard } from "../../../ui/components/shared.js";
+import { WorkspaceExecutorSettingsFields } from "../../../ui/components/workspace-executor-settings.js";
 import {
   activeWorkspaceId,
   loadWorkspaces,
   setWorkspaceExecutors,
   workspaces as managedWorkspaces,
-} from "../components/workspace-switcher.js";
+} from "../../../ui/components/workspace-switcher.js";
 
 /* ─── Command registry for autocomplete ─── */
 const CMD_REGISTRY = [
@@ -1070,7 +1078,7 @@ export function ControlTab() {
               size="small"
               sx=${{ mt: 1 }}
               onClick=${() => {
-                import("../modules/router.js").then(({ navigateTo }) => navigateTo("settings"));
+                import("../../../ui/modules/router.js").then(({ navigateTo }) => navigateTo("settings"));
               }}
             >
               Open Settings
@@ -1122,7 +1130,7 @@ export function ControlTab() {
                 class="quick-commands-link"
                 onClick=${(e) => {
                   e.preventDefault();
-                  import("../modules/router.js").then(({ navigateTo }) => navigateTo("logs"));
+                  import("../../../ui/modules/router.js").then(({ navigateTo }) => navigateTo("logs"));
                 }}
               >Open Logs tab →</a>
             </div>

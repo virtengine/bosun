@@ -95,6 +95,78 @@ vi.mock("../workflow/workflow-templates.mjs", () => ({
   ),
 }));
 
+vi.mock("../workflow/workflow-engine.mjs", () => ({
+  getWorkflowEngine: vi.fn(() => ({
+    retryRun: vi.fn(async (runId, opts = {}) => ({
+      originalRunId: runId,
+      retryRunId: `retry-${runId}`,
+      mode: opts.mode || "from_failed",
+      ctx: { errors: [] },
+    })),
+    getRunDetail: vi.fn((runId) => (runId === "run-1"
+      ? { runId, workflowId: "wf-1", workflowName: "Workflow One", status: "failed" }
+      : (runId === "run-create-tasks-resume"
+        ? { runId, workflowId: "wf-1", workflowName: "Workflow One", status: "paused" }
+        : (runId === "run-create-tasks-blocked"
+          ? { runId, workflowId: "wf-1", workflowName: "Workflow One", status: "paused" }
+          : null)))),
+    getRetryOptions: vi.fn((runId) => (runId === "run-create-tasks-resume"
+      ? {
+          runId,
+          status: "paused",
+          recommendedMode: "from_failed",
+          recommendedReason: "create_tasks_pending.resume_only",
+          guardedState: {
+            code: "create_tasks_pending",
+            nextNodeLabel: "Create Tasks",
+            safeResume: true,
+          },
+        }
+      : (runId === "run-create-tasks-blocked"
+        ? {
+            runId,
+            status: "paused",
+            recommendedMode: "from_scratch",
+            guardedState: {
+              code: "create_tasks_pending",
+              nextNodeLabel: "Create Tasks",
+              safeResume: false,
+            },
+          }
+        : null))),
+    resolveOperatorRetry: vi.fn((runId, mode) => (runId === "run-create-tasks-resume"
+      ? {
+          mode,
+          operatorAction: "resume",
+          decisionReason: "create_tasks_pending.resume_only",
+          blocked: false,
+          guardedState: {
+            code: "create_tasks_pending",
+            nextNodeLabel: "Create Tasks",
+            safeResume: true,
+          },
+          retryArgs: {
+            mode,
+            _resumeInterrupted: true,
+            _decisionReason: "create_tasks_pending.resume_only",
+          },
+        }
+      : (runId === "run-create-tasks-blocked"
+        ? {
+            mode,
+            operatorAction: "retry",
+            blocked: true,
+            blockedMessage: "Run is paused with Create Tasks as the next pending node. Manual retry is blocked to avoid duplicate task creation.",
+            guardedState: {
+              code: "create_tasks_pending",
+              nextNodeLabel: "Create Tasks",
+              safeResume: false,
+            },
+          }
+        : null))),
+  })),
+}));
+
 vi.mock("../voice/voice-tools.mjs", () => ({
   executeToolCall: vi.fn(async (name, args) => ({
     result: `Tool ${name} executed with ${JSON.stringify(args)}`,
@@ -235,6 +307,34 @@ describe("voice-action-dispatcher", () => {
       expect(second.ok).toBe(false);
       expect(second.error).toMatch(/duplicate/i);
       expect(vi.mocked(executeToolCall)).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns resume context for guarded workflow retry actions", async () => {
+      const result = await dispatchVoiceAction({
+        action: "workflow.retry",
+        params: { runId: "run-create-tasks-resume", mode: "from_failed" },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.data).toMatchObject({
+        originalRunId: "run-create-tasks-resume",
+        retryRunId: "retry-run-create-tasks-resume",
+        mode: "from_failed",
+        operatorAction: "resume",
+        decisionReason: "create_tasks_pending.resume_only",
+        guardedState: {
+          code: "create_tasks_pending",
+          safeResume: true,
+        },
+      });
+    });
+
+    it("blocks unsafe guarded workflow retry actions with explicit guidance", async () => {
+      const result = await dispatchVoiceAction({
+        action: "workflow.retry",
+        params: { runId: "run-create-tasks-blocked", mode: "from_failed" },
+      });
+      expect(result.ok).toBe(false);
+      expect(String(result.error || "")).toMatch(/Create Tasks.*duplicate task creation/i);
     });
   });
 
@@ -673,5 +773,4 @@ describe("voice-action-dispatcher", () => {
     });
   });
 });
-
 

@@ -16,9 +16,9 @@ import {
   Select, FormControl, InputLabel,
 } from "@mui/material";
 
-import { haptic, showConfirm } from "../modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../modules/api.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
+import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   executorData,
   agentsData,
@@ -30,26 +30,26 @@ import {
   showToast,
   refreshTab,
   scheduleRefresh,
-} from "../modules/state.js";
-import { navigateTo, routeParams, setRouteParams } from "../modules/router.js";
+} from "../../../ui/modules/state.js";
+import { navigateTo, routeParams, setRouteParams } from "../../../ui/modules/router.js";
 import {
   activeWorkspaceId,
   loadWorkspaces,
   workspaces as managedWorkspaces,
-} from "../components/workspace-switcher.js";
-import { ICONS } from "../modules/icons.js";
-import { formatCompactCount } from "../modules/session-insights.js";
-import { formatRelative, truncate } from "../modules/utils.js";
-import { getSessionRuntimeState, resolveSessionWorkspaceHint } from "../modules/session-api.js";
+} from "../../../ui/components/workspace-switcher.js";
+import { ICONS } from "../../../ui/modules/icons.js";
+import { formatCompactCount } from "../../../ui/modules/session-insights.js";
+import { formatRelative, truncate } from "../../../ui/modules/utils.js";
+import { getSessionRuntimeState, resolveSessionWorkspaceHint } from "../../../ui/modules/session-api.js";
 import {
   Card,
   Badge,
   StatCard,
   SkeletonCard,
   EmptyState,
-} from "../components/shared.js";
-import { ProgressBar } from "../components/charts.js";
-import { Collapsible } from "../components/forms.js";
+} from "../../../ui/components/shared.js";
+import { ProgressBar } from "../../../ui/components/charts.js";
+import { Collapsible } from "../../../ui/components/forms.js";
 import {
   loadSessions,
   loadSessionMessages,
@@ -57,9 +57,9 @@ import {
   sessionsData,
   sessionMessages,
   sessionMessagesSessionId,
-} from "../components/session-list.js";
-import { ChatView } from "../components/chat-view.js";
-import { DiffViewer } from "../components/diff-viewer.js";
+} from "../../../ui/components/session-list.js";
+import { ChatView } from "../../../ui/components/chat-view.js";
+import { DiffViewer } from "../../../ui/components/diff-viewer.js";
 
 /* ─── Status indicator helpers ─── */
 function statusColor(s) {
@@ -492,12 +492,7 @@ function getFleetEntryStatusMeta(entry) {
       };
     }
     if (slotStatus === "error" || slotStatus === "failed" || slotStatus === "stalled") {
-      return {
-        key: slotStatus,
-        label: slotStatus === "error" ? "Error" : formatFleetStateLabel(slotStatus),
-        tone: "error",
-        isActive: false,
-      };
+      return { key: slotStatus, label: slotStatus === "error" ? "Error" : formatFleetStateLabel(slotStatus), tone: "error", isActive: false };
     }
     if (slotStatus === "done" || slotStatus === "completed") {
       return { key: slotStatus, label: "Completed", tone: "historic", isActive: false };
@@ -1720,7 +1715,7 @@ export function AgentsTab() {
     const sessions = sessionsData.value || [];
     if (current || sessions.length === 0) return;
     const activeSession =
-      sessions.find((s) => s.status === "active" || s.status === "running") ||
+      sessions.find((s) => isActiveSessionRecord(s)) ||
       sessions[0];
     if (activeSession?.id) {
       selectedSessionId.value = activeSession.id;
@@ -1730,7 +1725,7 @@ export function AgentsTab() {
   useEffect(() => {
     let active = true;
     const refreshTaskSessions = async () => {
-      if (!active) return;
+      if (!active || document.hidden) return;
       const sessions = await loadSessions({ type: "task", workspace: "all" });
       if (!active) return;
       if (Array.isArray(sessions)) {
@@ -1738,7 +1733,7 @@ export function AgentsTab() {
       }
     };
     void refreshTaskSessions();
-    const interval = setInterval(refreshTaskSessions, 5000);
+    const interval = setInterval(refreshTaskSessions, 15000);
     return () => {
       active = false;
       clearInterval(interval);
@@ -1782,6 +1777,7 @@ export function AgentsTab() {
   useEffect(() => {
     let cancelled = false;
     const loadAgentMonitor = async () => {
+      if (cancelled || document.hidden) return;
       try {
         const [statusPayload, livenessPayload, errorPayload, recentEventsPayload] = await Promise.all([
           apiFetch("/api/agents/events/status"),
@@ -1801,7 +1797,7 @@ export function AgentsTab() {
     void loadAgentMonitor();
     const interval = setInterval(() => {
       void loadAgentMonitor();
-    }, 5000);
+    }, 15000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -3205,7 +3201,7 @@ function FleetSessionsPanel({ slots, sessions = [], taskFallbackEntries = [], on
                         : "No sessions yet"}
                 </div>`
               : html`${visibleEntries.map((entry) => {
-                  const entryStatus = getFleetEntryStatus(entry);
+                  const entryStatus = getFleetEntryStatusMeta(entry);
                   const relativeTime = getFleetEntryRelativeTime(entry);
                   const sessionId = resolveFleetEntrySessionId(entry);
                   return html`
@@ -3232,8 +3228,8 @@ function FleetSessionsPanel({ slots, sessions = [], taskFallbackEntries = [], on
                       </div>
                       <div class="fleet-slot-item-meta fleet-slot-item-meta-secondary">
                         <span class="fleet-slot-meta-turns">Turns ${Number(entry.session?.turnCount || 0)}</span>
-                        <span class=${`fleet-slot-state-badge ${isFleetEntryActive(entry) ? "active" : "historic"}`}>
-                          ${entryStatus || "unknown"}
+                        <span class=${`fleet-slot-state-badge ${entryStatus.tone || "historic"}`}>
+                          ${entryStatus.label || "Unknown"}
                         </span>
                         ${sessionId
                           ? html`<button
@@ -3249,7 +3245,7 @@ function FleetSessionsPanel({ slots, sessions = [], taskFallbackEntries = [], on
                               }}
                             >
                               <span class="fleet-session-id-pill-text mono">${sessionId.slice(0, 8)}</span>
-                              <span class="fleet-session-id-pill-icon" aria-hidden="true">${copiedSessionId === sessionId ? "✓" : ICONS.copy}</span>
+                              <span class="fleet-session-id-pill-icon fleet-icon-clamp" aria-hidden="true">${copiedSessionId === sessionId ? "✓" : ICONS.copy}</span>
                             </button>`
                           : null}
                         ${entry.slot?.branch
@@ -3410,7 +3406,7 @@ export function FleetSessionsTab() {
   useEffect(() => {
     let active = true;
     const refreshTaskSessions = async () => {
-      if (!active) return;
+      if (!active || document.hidden) return;
       const sessions = await loadSessions({ type: "task", workspace: "all" });
       if (!active) return;
       if (Array.isArray(sessions)) {
@@ -3418,7 +3414,7 @@ export function FleetSessionsTab() {
       }
     };
     void refreshTaskSessions();
-    const interval = setInterval(refreshTaskSessions, 5000);
+    const interval = setInterval(refreshTaskSessions, 15000);
     return () => {
       active = false;
       clearInterval(interval);
@@ -3428,7 +3424,7 @@ export function FleetSessionsTab() {
   useEffect(() => {
     let active = true;
     const loadFallbackTasks = () => {
-      if (!active) return;
+      if (!active || document.hidden) return;
       apiFetch("/api/tasks?limit=1000", { _silent: true })
         .then((res) => {
           if (!active) return;
@@ -3444,7 +3440,7 @@ export function FleetSessionsTab() {
         });
     };
     loadFallbackTasks();
-    const interval = setInterval(loadFallbackTasks, 5000);
+    const interval = setInterval(loadFallbackTasks, 20000);
     return () => {
       active = false;
       clearInterval(interval);

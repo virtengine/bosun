@@ -13,9 +13,9 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic, showConfirm } from "../modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../modules/api.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
+import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
 import { signal } from "@preact/signals";
 import {
   tasksData,
@@ -41,8 +41,8 @@ import {
   sanitizeTaskText,
   isPlaceholderTaskDescription,
   KANBAN_PAGE_SIZE,
-} from "../modules/state.js";
-import { ICONS } from "../modules/icons.js";
+} from "../../../ui/modules/state.js";
+import { ICONS } from "../../../ui/modules/icons.js";
 import {
   cloneValue,
   formatRelative,
@@ -53,33 +53,33 @@ import {
   exportAsCSV,
   exportAsJSON,
   countChangedFields,
-} from "../modules/utils.js";
-import { navigateTo } from "../modules/router.js";
+} from "../../../ui/modules/utils.js";
+import { navigateTo } from "../../../ui/modules/router.js";
 import {
   loadSessions,
   loadSessionMessages,
   selectedSessionId,
-} from "../components/session-list.js";
+} from "../../../ui/components/session-list.js";
 import {
   Modal,
   SaveDiscardBar,
   Card,
   SkeletonCard,
   EmptyState
-} from "../components/shared.js";
-import { DiffViewer } from "../components/diff-viewer.js";
+} from "../../../ui/components/shared.js";
+import { DiffViewer } from "../../../ui/components/diff-viewer.js";
 import {
   SegmentedControl,
   SearchInput,
   Toggle as ImportedToggle,
-} from "../components/forms.js";
-import { KanbanBoard } from "../components/kanban-board.js";
-import { VoiceMicButton, VoiceMicButtonInline } from "../modules/voice.js";
+} from "../../../ui/components/forms.js";
+import { KanbanBoard } from "../../../ui/components/kanban-board.js";
+import { VoiceMicButton, VoiceMicButtonInline } from "../../../ui/modules/voice.js";
 import {
   workspaces as managedWorkspaces,
   activeWorkspaceId,
   loadWorkspaces,
-} from "../components/workspace-switcher.js";
+} from "../../../ui/components/workspace-switcher.js";
 import {
   Card as MuiCard, CardContent, Typography, Box, Stack, Chip, TextField, Select,
   MenuItem, Button, IconButton, Tabs, Tab, Tooltip, Divider,
@@ -1396,11 +1396,273 @@ export function buildTaskWorkflowRunStatusLine(run) {
   return parts.join(" · ") || "No status summary";
 }
 
+function getTaskAuditText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function getTaskAuditValue(record, keys = []) {
+  if (!record || typeof record !== "object") return "";
+  for (const key of keys) {
+    const value = record?.[key];
+    if (Array.isArray(value)) {
+      const normalized = value.map((entry) => getTaskAuditText(entry)).filter(Boolean);
+      if (normalized.length) return normalized.join(", ");
+      continue;
+    }
+    const text = getTaskAuditText(value);
+    if (text) return text;
+  }
+  return "";
+}
+
+function getTaskAuditNestedSummary(value) {
+  if (!value || typeof value !== "object") return "";
+  return getTaskAuditValue(value, [
+    "summary",
+    "message",
+    "description",
+    "title",
+    "path",
+    "reason",
+    "error",
+    "status",
+    "decision",
+    "recommendation",
+    "kind",
+    "type",
+    "action",
+    "actionType",
+    "targetId",
+    "toolName",
+    "command",
+    "cwd",
+  ]);
+}
+
+function getTaskAuditTimestamp(record = {}) {
+  return getTaskAuditValue(record, [
+    "timestamp",
+    "createdAt",
+    "updatedAt",
+    "startedAt",
+    "completedAt",
+    "promotedAt",
+    "expires_at",
+    "expiresAt",
+    "claimed_at",
+    "claimedAt",
+    "renewed_at",
+    "renewedAt",
+  ]);
+}
+
+function formatTaskAuditTimestamp(record = {}) {
+  const timestamp = getTaskAuditTimestamp(record);
+  return timestamp ? formatRelative(timestamp) : "";
+}
+
+function formatTaskAuditConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "";
+  if (numeric >= 0 && numeric <= 1) return `${Math.round(numeric * 100)}%`;
+  return String(numeric);
+}
+
+function summarizeTaskAuditClaim(claim = {}) {
+  const bits = [];
+  const owner = getTaskAuditValue(claim, ["instance_id", "instanceId", "owner", "ownerId"]);
+  const token = getTaskAuditValue(claim, ["claim_token", "claimToken"]);
+  const expiresAt = getTaskAuditValue(claim, ["expires_at", "expiresAt"]);
+  const reason = getTaskAuditValue(claim, ["resolution_reason", "resolutionReason"]);
+  if (owner) bits.push(`owner ${owner}`);
+  if (token) bits.push(`token ${truncate(token, 24)}`);
+  if (expiresAt) bits.push(`expires ${formatRelative(expiresAt)}`);
+  if (reason) bits.push(reason);
+  return bits.join(" · ") || "Claim snapshot recorded";
+}
+
+function summarizeTaskAuditClaimEvent(event = {}) {
+  const action = getTaskAuditValue(event, ["action", "eventType"]) || "claim event";
+  const owner = getTaskAuditValue(event, [
+    "instance_id",
+    "instanceId",
+    "owner",
+    "existing_instance",
+    "existingInstance",
+    "previous_instance",
+    "previousInstance",
+  ]);
+  const reason = getTaskAuditValue(event, [
+    "resolution_reason",
+    "resolutionReason",
+    "rollback_reason",
+    "rollbackReason",
+    "forfeit_reason",
+    "forfeitReason",
+  ]);
+  return [action, owner ? `instance ${owner}` : "", reason].filter(Boolean).join(" · ") || "Claim event";
+}
+
+function summarizeTaskAuditToolCall(call = {}) {
+  const toolName = getTaskAuditValue(call, ["toolName", "toolId"]) || "tool call";
+  const status = getTaskAuditValue(call, ["status"]);
+  const summary = getTaskAuditValue(call, ["summary"]) || getTaskAuditNestedSummary(call.response) || getTaskAuditNestedSummary(call.request);
+  return [toolName, status && status !== toolName ? status : "", summary && summary !== status ? summary : ""]
+    .filter(Boolean)
+    .join(" · ") || "Tool call";
+}
+
+function summarizeTaskAuditArtifact(artifact = {}) {
+  return getTaskAuditValue(artifact, ["summary", "path", "kind"]) || getTaskAuditNestedSummary(artifact.metadata) || "Artifact";
+}
+
+function summarizeTaskAuditOperatorAction(action = {}) {
+  const actionType = getTaskAuditValue(action, ["actionType", "action"]) || "operator action";
+  const targetId = getTaskAuditValue(action, ["targetId"]);
+  const status = getTaskAuditValue(action, ["status"]);
+  const summary = getTaskAuditNestedSummary(action.result) || getTaskAuditNestedSummary(action.metadata) || getTaskAuditNestedSummary(action.request);
+  return [actionType, targetId ? `target ${targetId}` : "", status, summary].filter(Boolean).join(" · ") || "Operator action";
+}
+
+function summarizeTaskAuditPromotedStrategy(entry = {}) {
+  const recommendation = getTaskAuditValue(entry, ["recommendation", "decision", "strategyId"]) || "strategy";
+  const status = getTaskAuditValue(entry, ["status"]);
+  const verification = getTaskAuditValue(entry, ["verificationStatus", "verification_status"]);
+  const rationale = getTaskAuditValue(entry, ["rationale"]) || getTaskAuditNestedSummary(entry.document) || getTaskAuditNestedSummary(entry.payload);
+  return [recommendation, status, verification, rationale].filter(Boolean).join(" · ") || "Promoted strategy";
+}
+
+function summarizeTaskAuditTraceEvent(event = {}) {
+  const eventType = getTaskAuditValue(event, ["eventType"]) || "trace event";
+  const summary = getTaskAuditValue(event, ["summary", "error"]) || getTaskAuditNestedSummary(event.meta) || getTaskAuditNestedSummary(event.payload);
+  return [eventType, summary].filter(Boolean).join(" · ") || "Trace event";
+}
+
+function summarizeTaskAuditSessionActivity(activity = {}) {
+  const summary = getTaskAuditValue(activity, ["lastSummary", "latestTaskTitle", "latestWorkflowName"]);
+  const eventType = getTaskAuditValue(activity, ["latestEventType"]);
+  const status = getTaskAuditValue(activity, ["latestStatus"]);
+  const error = getTaskAuditValue(activity, ["lastErrorText"]);
+  return [summary, eventType, status, error].filter(Boolean).join(" · ") || "Session activity";
+}
+
+function summarizeTaskAuditAgentActivity(activity = {}) {
+  const summary = getTaskAuditValue(activity, ["lastSummary", "latestTaskTitle", "latestWorkflowName"]);
+  const eventType = getTaskAuditValue(activity, ["latestEventType"]);
+  const status = getTaskAuditValue(activity, ["latestStatus"]);
+  const error = getTaskAuditValue(activity, ["lastErrorText"]);
+  return [summary, eventType, status, error].filter(Boolean).join(" · ") || "Agent activity";
+}
+
+function resolveTaskWorkflowRunDelegationTopology(run = {}) {
+  const candidates = [
+    run?.delegationTopology,
+    run?.meta?.delegationTopology,
+    run?.detail?.delegationTopology,
+    run?.detail?.data?._delegationTopology,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === "object") return candidate;
+  }
+  return null;
+}
+
+function collectTaskWorkflowRunSessionIds(run = {}) {
+  const topology = resolveTaskWorkflowRunDelegationTopology(run);
+  const values = [
+    run?.sessionId,
+    run?.primarySessionId,
+    run?.meta?.sessionId,
+    run?.meta?.primarySessionId,
+    topology?.sessionId,
+    topology?.rootSessionId,
+    topology?.parentSessionId,
+    ...(Array.isArray(run?.sessionIds) ? run.sessionIds : []),
+    ...(Array.isArray(topology?.sessionIds) ? topology.sessionIds : []),
+  ];
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function collectTaskDurableSessionIds(task = {}, workflowRuns = [], auditActivity = null) {
+  const values = [
+    task?.sessionId,
+    task?.primarySessionId,
+    task?.meta?.sessionId,
+    task?.meta?.primarySessionId,
+    ...(Array.isArray(task?.meta?.linkedSessionIds) ? task.meta.linkedSessionIds : []),
+    ...(Array.isArray(auditActivity?.sessionIds) ? auditActivity.sessionIds : []),
+    auditActivity?.sessionActivity?.sessionId,
+  ];
+  for (const run of workflowRuns || []) {
+    values.push(...collectTaskWorkflowRunSessionIds(run));
+  }
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function summarizeTaskDelegationTopology(topology = {}) {
+  if (!topology || typeof topology !== "object") return "";
+  const parts = [];
+  const depth = Number(topology.delegationDepth);
+  const rootTaskId = String(topology.rootTaskId || "").trim();
+  const parentTaskId = String(topology.parentTaskId || "").trim();
+  const rootSessionId = String(topology.rootSessionId || "").trim();
+  const sessionCount = Array.isArray(topology.sessionIds) ? topology.sessionIds.length : 0;
+  if (Number.isFinite(depth) && depth >= 0) parts.push(`depth ${depth}`);
+  if (rootTaskId) parts.push(`root task ${rootTaskId}`);
+  if (parentTaskId && parentTaskId !== rootTaskId) parts.push(`parent task ${parentTaskId}`);
+  if (rootSessionId) parts.push(`root session ${rootSessionId}`);
+  if (sessionCount > 0) parts.push(`${sessionCount} durable sessions`);
+  return parts.join(" · ") || "Delegation topology recorded";
+}
+
+function buildTaskDelegationTopologyRows(workflowRuns = []) {
+  return (workflowRuns || [])
+    .map((run) => {
+      const topology = resolveTaskWorkflowRunDelegationTopology(run);
+      if (!topology) return null;
+      return {
+        run,
+        topology,
+        durableSessionIds: collectTaskWorkflowRunSessionIds(run),
+        summary: summarizeTaskDelegationTopology(topology),
+      };
+    })
+    .filter(Boolean);
+}
+
+function resolveTaskAuditSourceLabel(taskAuditActivity = null) {
+  if (!taskAuditActivity || typeof taskAuditActivity !== "object") return "";
+  const summary =
+    taskAuditActivity.summary && typeof taskAuditActivity.summary === "object"
+      ? taskAuditActivity.summary
+      : {};
+  return getTaskAuditValue(summary, ["stateSource", "storage", "store", "source"]) || "state ledger / SQLite";
+}
+
 export async function openTaskWorkflowRun(run, deps = {}) {
   const navigate = deps.navigateTo || navigateTo;
   let openRuns = deps.openWorkflowRunsView;
   if (!openRuns) {
-    const wfMod = await import("./workflows.js");
+    const wfMod = await import("../../../ui/tabs/workflows.js");
     openRuns = wfMod.openWorkflowRunsView;
   }
   const workflowId = String(run?.workflowId || "").trim();
@@ -1425,6 +1687,75 @@ export async function openTaskWorkflowAgentHistory(run, deps = {}) {
   selectedStore.value = sessionId;
   await loadMessages(sessionId, { limit: 50 });
   return true;
+}
+
+export function pickTaskLinkedSessionId(task) {
+  if (!task || typeof task !== "object") return "";
+  for (const value of [
+    task.sessionId,
+    task.primarySessionId,
+    task.meta?.sessionId,
+    task.meta?.primarySessionId,
+  ]) {
+    const normalized = String(value || "").trim();
+    if (normalized) return normalized;
+  }
+  const rows = getTaskCollectionValues(task, [
+    "workflowRuns",
+    "workflowHistory",
+    "workflows",
+    "runs",
+  ]);
+  for (const entry of rows) {
+    const sessionId = pickTaskWorkflowSessionId(entry);
+    if (sessionId) return sessionId;
+  }
+  return "";
+}
+
+export async function openTaskLinkedSession(task, deps = {}) {
+  const sessionId = pickTaskLinkedSessionId(task);
+  if (!sessionId) return false;
+  return openTaskWorkflowAgentHistory({ primarySessionId: sessionId }, deps);
+}
+
+function getTaskWorktreePath(task) {
+  for (const value of [
+    task?.worktreePath,
+    task?.workspacePath,
+    task?.meta?.worktreePath,
+    task?.meta?.workspacePath,
+    task?.meta?.execution?.worktreePath,
+    task?.runtimeSnapshot?.slot?.worktreePath,
+  ]) {
+    const normalized = String(value || "").trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function buildVsCodeFolderUri(worktreePath, scheme = "vscode") {
+  const normalizedPath = String(worktreePath || "").trim().replace(/\\/g, "/");
+  if (!normalizedPath) return "";
+  return `${scheme}://file/${encodeURI(normalizedPath)}`;
+}
+
+export function buildTaskWorkspaceLaunchers(task) {
+  const worktreePath = getTaskWorktreePath(task);
+  if (!worktreePath) return [];
+  const launchers = [
+    {
+      id: "vscode",
+      label: "VS Code",
+      href: buildVsCodeFolderUri(worktreePath, "vscode"),
+    },
+    {
+      id: "vscode-insiders",
+      label: "VS Code Insiders",
+      href: buildVsCodeFolderUri(worktreePath, "vscode-insiders"),
+    },
+  ];
+  return launchers.filter((entry) => entry.href);
 }
 
 function buildTaskRelatedLinks(task) {
@@ -2895,6 +3226,24 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
   );
   const activeWsId = activeWorkspaceId.value || "";
   const canDispatch = Boolean(onStart && task?.id);
+  const [workspaceLauncherAnchor, setWorkspaceLauncherAnchor] = useState(null);
+  const linkedSessionId = useMemo(() => pickTaskLinkedSessionId(task), [
+    task?.id,
+    task?.sessionId,
+    task?.primarySessionId,
+    task?.meta,
+    task?.workflowRuns,
+    task?.workflowHistory,
+    task?.workflows,
+    task?.runs,
+  ]);
+  const taskWorkspaceLaunchers = useMemo(() => buildTaskWorkspaceLaunchers(task), [
+    task?.id,
+    task?.worktreePath,
+    task?.workspacePath,
+    task?.meta,
+    task?.runtimeSnapshot,
+  ]);
 
   const historyEntries = useMemo(() => buildTaskHistoryEntries(task), [
     task?.id,
@@ -3000,6 +3349,35 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
     || taskAuditSessionActivity
     || taskAuditAgentActivity,
   );
+  const taskAuditEventCount = Number(taskAuditSummary.eventCount || taskAuditEvents.length || 0);
+  const taskAuditClaimEventCount = Number(taskAuditSummary.claimEventCount || taskAuditClaimEvents.length || 0);
+  const taskAuditRunCount = Number(taskAuditSummary.runCount || taskAuditWorkflowRuns.length || 0);
+  const taskAuditToolCallCount = Number(taskAuditSummary.toolCallCount || taskAuditToolCalls.length || 0);
+  const taskAuditArtifactCount = Number(taskAuditSummary.artifactCount || taskAuditArtifacts.length || 0);
+  const taskAuditOperatorActionCount = Number(taskAuditSummary.operatorActionCount || taskAuditOperatorActions.length || 0);
+  const taskAuditPromotedStrategyCount = Number(taskAuditSummary.promotedStrategyCount || taskAuditPromotedStrategies.length || 0);
+  const taskAuditTraceCount = Number(taskAuditSummary.taskTraceCount || taskAuditTraceEvents.length || 0);
+  const taskAuditSourceLabel = useMemo(() => resolveTaskAuditSourceLabel(taskAuditActivity), [
+    taskAuditActivity,
+  ]);
+  const taskDurableSessionIds = useMemo(() => collectTaskDurableSessionIds(task, workflowRuns, taskAuditActivity), [
+    task?.id,
+    task?.sessionId,
+    task?.primarySessionId,
+    task?.meta,
+    workflowRuns,
+    taskAuditActivity,
+  ]);
+  const taskPrimaryDurableSessionId =
+    taskAuditSessionActivity?.sessionId || linkedSessionId || taskDurableSessionIds[0] || "";
+  const taskDelegationTopologyRows = useMemo(() => buildTaskDelegationTopologyRows(workflowRuns), [
+    workflowRuns,
+  ]);
+  const maxTaskDelegationDepth = taskDelegationTopologyRows.reduce((maxDepth, entry) => {
+    const depth = Number(entry?.topology?.delegationDepth);
+    if (!Number.isFinite(depth)) return maxDepth;
+    return Math.max(maxDepth, depth);
+  }, 0);
   const plannerState = task?.meta?.plannerState?.latestReplan || null;
   const planningMode = String(replanProposal?.mode || plannerState?.mode || "replan").trim().toLowerCase() === "decompose"
     ? "decompose"
@@ -3190,6 +3568,16 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
       </div>
     `;
   }, [handleOpenWorkflowRun, handleOpenWorkflowAgentHistory]);
+  const handleOpenLinkedSession = useCallback(async () => {
+    try {
+      const opened = await openTaskLinkedSession(task);
+      if (!opened) {
+        showToast("No linked session recorded for this task", "warning");
+      }
+    } catch {
+      showToast("Unable to open linked session", "error");
+    }
+  }, [task]);
 
   const toggleNodeExpand = useCallback((stageIdx, nodeId) => {
     setExpandedNodes((prev) => ({ ...prev, [`${stageIdx}-${nodeId}`]: !prev[`${stageIdx}-${nodeId}`] }));
@@ -3207,6 +3595,32 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
     task?.prUrl,
     task?.meta,
   ]);
+  const primaryPrLink = useMemo(() => {
+    const withUrl = relatedLinks.find((entry) => entry?.kind === "PR" && entry?.url);
+    if (withUrl) return withUrl;
+    return relatedLinks.find((entry) => entry?.kind === "PR URL" && entry?.url) || null;
+  }, [relatedLinks]);
+  const handleOpenWorkspaceLauncherMenu = useCallback((event) => {
+    setWorkspaceLauncherAnchor(event.currentTarget);
+  }, []);
+  const handleCloseWorkspaceLauncherMenu = useCallback(() => {
+    setWorkspaceLauncherAnchor(null);
+  }, []);
+  const handleCopyWorktreePath = useCallback(async () => {
+    const worktreePath = getTaskWorktreePath(task);
+    if (!worktreePath) {
+      showToast("No worktree path recorded for this task", "warning");
+      return;
+    }
+    try {
+      await globalThis.navigator?.clipboard?.writeText?.(worktreePath);
+      showToast("Worktree path copied", "success");
+    } catch {
+      showToast("Unable to copy worktree path", "error");
+    } finally {
+      handleCloseWorkspaceLauncherMenu();
+    }
+  }, [handleCloseWorkspaceLauncherMenu, task]);
   const handleOpenReviewDiff = useCallback(() => {
     setActiveTab("diff");
   }, []);
@@ -4116,13 +4530,51 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
             </div>
           `}
         </div>
-        <div style="display:flex;gap:6px;align-items:center;padding-top:6px;flex-shrink:0;">
+        <div style="display:flex;gap:6px;align-items:center;padding-top:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;">
           <button class="task-status-btn" data-status=${status}>
             ${(status || "todo").toUpperCase()}
           </button>
           ${canDispatch && html`
             <${Button} variant="contained" size="small" onClick=${handleStart}>
               ${iconText(":play: Dispatch")}
+            <//>
+          `}
+          ${taskWorkspaceLaunchers.length > 0 && html`
+            <${Button}
+              variant="outlined"
+              size="small"
+              component="a"
+              href=${taskWorkspaceLaunchers[0].href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title=${getTaskWorktreePath(task)}
+            >
+              VS Code
+            <//>
+            <${IconButton}
+              size="small"
+              className="task-action-icon-btn"
+              onClick=${handleOpenWorkspaceLauncherMenu}
+              title="Open worktree in editor"
+            >
+              ${resolveIcon("chevronDown") || "▾"}
+            <//>
+          `}
+          ${primaryPrLink?.url && html`
+            <${Button}
+              variant="outlined"
+              size="small"
+              component="a"
+              href=${primaryPrLink.url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              ${primaryPrLink.value || "PR"}
+            <//>
+          `}
+          ${linkedSessionId && html`
+            <${Button} variant="outlined" size="small" onClick=${handleOpenLinkedSession}>
+              Session
             <//>
           `}
           <button class="task-action-icon-btn"
@@ -4132,6 +4584,27 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
           </button>
         </div>
       </div>
+      ${taskWorkspaceLaunchers.length > 0 && html`
+        <${MuiMenu}
+          anchorEl=${workspaceLauncherAnchor}
+          open=${Boolean(workspaceLauncherAnchor)}
+          onClose=${handleCloseWorkspaceLauncherMenu}
+        >
+          ${taskWorkspaceLaunchers.map((launcher) => html`
+            <${MenuItem}
+              key=${launcher.id}
+              component="a"
+              href=${launcher.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick=${handleCloseWorkspaceLauncherMenu}
+            >
+              ${launcher.label}
+            <//>
+          `)}
+          <${MenuItem} onClick=${handleCopyWorktreePath}>Copy Worktree Path<//>
+        <//>
+      `}
 
       ${/* ── Tab Bar (Jira style) ── */ ""}
       <div class="task-tab-bar">
@@ -4641,6 +5114,19 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
                 </div>
               </div>
               <div class="task-comment-item">
+                <div class="task-comment-meta">Durable Sessions</div>
+                <div class="task-comment-body">${taskDurableSessionIds.length
+                  ? `${taskDurableSessionIds.length} session IDs linked across the task, workflow runs, and state ledger.`
+                  : "No durable session lineage linked yet."}</div>
+                <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
+                  ${[
+                    taskPrimaryDurableSessionId ? `primary ${truncate(taskPrimaryDurableSessionId, 36)}` : "",
+                    taskAuditSessionIds.length ? `${taskAuditSessionIds.length} ledger sessions` : "",
+                    taskAuditSourceLabel ? `source ${taskAuditSourceLabel}` : "source state ledger / SQLite",
+                  ].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+              <div class="task-comment-item">
                 <div class="task-comment-meta">Planner / Proof</div>
                 <div class="task-comment-body">${workflowRuns.length
                   ? `${workflowRuns.reduce((total, run) => total + Number(run?.proofSummary?.plannerEventCount || run?.plannerTimeline?.length || 0), 0)} planner events · ${workflowRuns.reduce((total, run) => total + Number(run?.proofSummary?.evidenceCount || 0), 0)} evidence items`
@@ -4669,6 +5155,7 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
                     Number.isFinite(Number(taskTopology?.delegationDepth)) ? `Delegation depth ${Number(taskTopology.delegationDepth || 0)}` : "",
                     taskTopology?.latestRunId ? `run ${taskTopology.latestRunId}` : "",
                     taskTopology?.latestSessionId ? `session ${truncate(taskTopology.latestSessionId, 36)}` : "",
+                    taskDelegationTopologyRows.length ? `${taskDelegationTopologyRows.length} delegated run families` : "",
                   ].filter(Boolean).join(" · ")}
                 </div>
                 <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
@@ -4682,27 +5169,23 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
               <div class="task-comment-item">
                 <div class="task-comment-meta">Audit Trail</div>
                 <div class="task-comment-body">${hasTaskAuditContent
-                  ? `${taskAuditEvents.length} ledger events · ${Number(taskAuditSummary.toolCallCount || taskAuditToolCalls.length || 0)} tool calls · ${Number(taskAuditSummary.artifactCount || taskAuditArtifacts.length || 0)} artifacts`
-                  : "No sqlite audit trail linked yet."}</div>
+                  ? `${taskAuditEventCount} ledger events · ${taskAuditToolCallCount} tool calls · ${taskAuditArtifactCount} artifacts · ${taskAuditClaimEventCount} claim events`
+                  : "No state ledger / SQLite audit linked yet."}</div>
                 <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
-                  ${taskAuditClaim?.instance_id
-                    ? `Claimed by ${taskAuditClaim.instance_id}`
-                    : taskAuditClaimEvents.length
-                      ? `${taskAuditClaimEvents.length} claim events`
-                      : taskAuditPromotedStrategies.length
-                        ? `${taskAuditPromotedStrategies.length} promoted strategies`
-                        : taskAuditOperatorActions.length
-                          ? `${taskAuditOperatorActions.length} operator actions`
-                          : ""}
+                  ${[
+                    taskAuditRunCount ? `${taskAuditRunCount} audit-linked workflow runs` : "",
+                    taskAuditPromotedStrategyCount ? `${taskAuditPromotedStrategyCount} promoted strategies` : "",
+                    taskAuditOperatorActionCount ? `${taskAuditOperatorActionCount} operator actions` : "",
+                    taskAuditTraceCount ? `${taskAuditTraceCount} task trace events` : "",
+                    taskAuditSourceLabel ? `source ${taskAuditSourceLabel}` : "",
+                  ].filter(Boolean).join(" · ")}
                 </div>
                 <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
-                  ${taskAuditSessionIds[0]
-                    ? `session ${taskAuditSessionIds[0]}`
-                    : taskAuditAgentIds[0]
-                      ? `agent ${taskAuditAgentIds[0]}`
-                      : taskAuditWorkflowRuns[0]?.runId
-                        ? `run ${taskAuditWorkflowRuns[0].runId}`
-                        : ""}
+                  ${[
+                    taskAuditClaim ? summarizeTaskAuditClaim(taskAuditClaim) : "",
+                    taskAuditSessionActivity ? summarizeTaskAuditSessionActivity(taskAuditSessionActivity) : (taskAuditSessionIds.length ? `${taskAuditSessionIds.length} session IDs` : ""),
+                    taskAuditAgentActivity ? summarizeTaskAuditAgentActivity(taskAuditAgentActivity) : (taskAuditAgentIds.length ? `${taskAuditAgentIds.length} agent IDs` : ""),
+                  ].filter(Boolean).join(" · ")}
                 </div>
               </div>
               <div class="task-comment-item">
@@ -5614,7 +6097,11 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
             <div class="task-comment-meta">
               Compare the task branch or linked session against its recorded base so completed PRs stay reviewable from the task itself.
             </div>
-            <${DiffViewer} taskId=${task?.id || ""} title=${task?.title || "Task Diff"} />
+            <${DiffViewer}
+              taskId=${task?.id || ""}
+              title=${task?.title || "Task Diff"}
+              taskSnapshot=${task || null}
+            />
           </div>
         </div>
       `}
@@ -5743,35 +6230,39 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
         <div class="task-comments-block modal-form-span jira-panel">
           <div class="task-attachments-title">Audit Trail</div>
           <div class="tag-row" style=${{ marginBottom: "8px" }}>
-            ${taskAuditEvents.length > 0 ? html`<span class="tag-chip">${taskAuditEvents.length} audit events</span>` : null}
-            ${taskAuditClaimEvents.length > 0 ? html`<span class="tag-chip">${taskAuditClaimEvents.length} claim events</span>` : null}
-            ${taskAuditWorkflowRuns.length > 0 ? html`<span class="tag-chip">${taskAuditWorkflowRuns.length} ledger workflow runs</span>` : null}
-            ${taskAuditToolCalls.length > 0 ? html`<span class="tag-chip">${taskAuditToolCalls.length} tool calls</span>` : null}
-            ${taskAuditArtifacts.length > 0 ? html`<span class="tag-chip">${taskAuditArtifacts.length} artifacts</span>` : null}
-            ${taskAuditOperatorActions.length > 0 ? html`<span class="tag-chip">${taskAuditOperatorActions.length} operator actions</span>` : null}
-            ${taskAuditPromotedStrategies.length > 0 ? html`<span class="tag-chip">${taskAuditPromotedStrategies.length} promoted strategies</span>` : null}
+            ${taskAuditClaim ? html`<span class="tag-chip">active claim</span>` : null}
+            ${taskAuditEventCount > 0 ? html`<span class="tag-chip">${taskAuditEventCount} audit events</span>` : null}
+            ${taskAuditClaimEventCount > 0 ? html`<span class="tag-chip">${taskAuditClaimEventCount} claim events</span>` : null}
+            ${taskAuditRunCount > 0 ? html`<span class="tag-chip">${taskAuditRunCount} ledger workflow runs</span>` : null}
+            ${taskAuditToolCallCount > 0 ? html`<span class="tag-chip">${taskAuditToolCallCount} tool calls</span>` : null}
+            ${taskAuditArtifactCount > 0 ? html`<span class="tag-chip">${taskAuditArtifactCount} artifacts</span>` : null}
+            ${taskAuditOperatorActionCount > 0 ? html`<span class="tag-chip">${taskAuditOperatorActionCount} operator actions</span>` : null}
+            ${taskAuditPromotedStrategyCount > 0 ? html`<span class="tag-chip">${taskAuditPromotedStrategyCount} promoted strategies</span>` : null}
             ${taskAuditPromotedStrategyEvents.length > 0 ? html`<span class="tag-chip">${taskAuditPromotedStrategyEvents.length} strategy events</span>` : null}
-            ${taskAuditTraceEvents.length > 0 ? html`<span class="tag-chip">${taskAuditTraceEvents.length} task trace events</span>` : null}
+            ${taskAuditTraceCount > 0 ? html`<span class="tag-chip">${taskAuditTraceCount} task trace events</span>` : null}
           </div>
+          ${(taskAuditSessionIds.length > 0 || taskAuditAgentIds.length > 0) && html`
+            <div class="tag-row" style=${{ marginBottom: "8px" }}>
+              ${taskAuditSessionIds.slice(0, 6).map((entry, index) => html`<span class="tag-chip" key=${`audit-session-${index}`}>session ${truncate(entry, 28)}</span>`)}
+              ${taskAuditAgentIds.slice(0, 6).map((entry, index) => html`<span class="tag-chip" key=${`audit-agent-${index}`}>agent ${truncate(entry, 28)}</span>`)}
+            </div>
+          `}
           <div class="task-comments-list">
             ${taskAuditClaim || taskAuditClaimEvents.length > 0 ? html`
               <div class="task-comment-item">
                 <div class="task-comment-meta">Claim Ledger</div>
-                <div class="task-comment-body">${taskAuditClaim?.instance_id
-                  ? `Active owner ${taskAuditClaim.instance_id}${taskAuditClaim.expires_at ? ` · expires ${formatRelative(taskAuditClaim.expires_at)}` : ""}`
-                  : "No active task claim recorded."}</div>
+                <div class="task-comment-body">${taskAuditClaim ? summarizeTaskAuditClaim(taskAuditClaim) : "No active task claim recorded."}</div>
                 <div class="task-comment-meta">
                   ${taskAuditClaim?.claim_token
-                    ? `token ${taskAuditClaim.claim_token}`
+                    ? `token ${truncate(taskAuditClaim.claim_token, 24)}`
                     : taskAuditClaimEvents.length
-                      ? `${taskAuditClaimEvents.length} claim lifecycle events`
+                      ? `${taskAuditClaimEventCount} claim lifecycle events`
                       : ""}
                 </div>
                 ${taskAuditClaimEvents.slice(-3).reverse().map((entry, index) => html`
                   <div key=${`claim-event-${index}`} class="task-comment-meta" style=${{ marginTop: "4px" }}>
-                    ${(entry.action || "event").replace(/_/g, " ")}
-                    ${entry.instance_id ? ` · ${entry.instance_id}` : ""}
-                    ${entry.timestamp ? ` · ${formatRelative(entry.timestamp)}` : ""}
+                    ${summarizeTaskAuditClaimEvent(entry)}
+                    ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
                   </div>
                 `)}
               </div>
@@ -5785,13 +6276,13 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
                     : "No linked session activity recorded."}
                 </div>
                 <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
-                  ${taskAuditSessionActivity?.latestEventType
-                    ? `${taskAuditSessionActivity.latestEventType}${taskAuditSessionActivity.updatedAt ? ` · ${formatRelative(taskAuditSessionActivity.updatedAt)}` : ""}`
+                  ${taskAuditSessionActivity
+                    ? summarizeTaskAuditSessionActivity(taskAuditSessionActivity)
                     : ""}
                 </div>
                 <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
                   ${taskAuditAgentActivity?.agentId || taskAuditAgentIds[0]
-                    ? `Agent ${taskAuditAgentActivity?.agentId || taskAuditAgentIds[0]}${taskAuditAgentActivity?.latestEventType ? ` · ${taskAuditAgentActivity.latestEventType}` : ""}`
+                    ? summarizeTaskAuditAgentActivity(taskAuditAgentActivity || { agentId: taskAuditAgentIds[0] })
                     : ""}
                 </div>
                 ${(taskAuditSessionActivity?.lastSummary || taskAuditAgentActivity?.lastSummary) && html`
@@ -5799,6 +6290,34 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
                     ${taskAuditSessionActivity?.lastSummary || taskAuditAgentActivity?.lastSummary}
                   </div>
                 `}
+              </div>
+            ` : null}
+            ${taskDurableSessionIds.length > 0 ? html`
+              <div class="task-comment-item">
+                <div class="task-comment-meta">Durable Session Topology</div>
+                <div class="task-comment-body">
+                  <span><b>Primary Session:</b> <code>${taskPrimaryDurableSessionId || taskDurableSessionIds[0]}</code></span>
+                </div>
+                <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
+                  ${taskDurableSessionIds.length} durable session IDs · ${taskAuditSourceLabel || "state ledger / SQLite"}
+                </div>
+                <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
+                  ${taskDurableSessionIds.slice(0, 4).map((sessionId) => html`<code key=${sessionId} style="margin-right:4px;">${sessionId}</code>`)}
+                </div>
+              </div>
+            ` : null}
+            ${taskDelegationTopologyRows.length > 0 ? html`
+              <div class="task-comment-item">
+                <div class="task-comment-meta">Delegation Topology</div>
+                <div class="task-comment-body">${taskDelegationTopologyRows.length} delegated workflow run families linked to this task.</div>
+                <div class="task-comment-meta" style=${{ marginTop: "4px" }}>
+                  max depth ${maxTaskDelegationDepth} · ${taskDelegationTopologyRows.reduce((total, entry) => total + Number(entry?.durableSessionIds?.length || 0), 0)} run-linked sessions
+                </div>
+                ${taskDelegationTopologyRows.slice(0, 4).map((entry, index) => html`
+                  <div key=${`task-delegation-topology-${index}`} class="task-comment-meta" style=${{ marginTop: "4px" }}>
+                    ${entry.run.workflowName || entry.run.workflowId || entry.run.runId || "workflow"} · ${entry.summary}
+                  </div>
+                `)}
               </div>
             ` : null}
             ${taskAuditToolCalls.length > 0 ? html`
@@ -5914,6 +6433,221 @@ export function TaskDetailModal({ task, onClose, onStart, presentation = "modal"
               </div>
             `)}
           </div>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;" open>
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Recent Audit Events (${taskAuditEventCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditEvents.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No ledger timeline events recorded yet.</div></div>`
+                : taskAuditEvents.slice(0, 12).map((entry, index) => html`
+                    <div class="task-comment-item" key=${`audit-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${(entry.auditType || "audit").replace(/_/g, " ")}
+                        ${entry.timestamp ? ` · ${formatRelative(entry.timestamp)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${entry.summary || entry.eventType || entry.auditType || "Audit event"}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.runId ? `run ${entry.runId}` : "",
+                          entry.sessionId ? `session ${entry.sessionId}` : "",
+                          entry.agentId ? `agent ${entry.agentId}` : "",
+                          entry.workflowId ? `workflow ${entry.workflowId}` : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Task Claims (${taskAuditClaimEventCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditClaimEvents.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No claim events recorded for this task.</div></div>`
+                : taskAuditClaimEvents.slice(-8).reverse().map((entry, index) => html`
+                    <div class="task-comment-item" key=${`claim-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["action", "eventType"]) || "claim event"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditClaimEvent(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          getTaskAuditValue(entry, ["claim_token", "claimToken"]) ? `token ${truncate(getTaskAuditValue(entry, ["claim_token", "claimToken"]), 24)}` : "",
+                          getTaskAuditValue(entry, ["expires_at", "expiresAt"]) ? `expires ${formatRelative(getTaskAuditValue(entry, ["expires_at", "expiresAt"]))}` : "",
+                          getTaskAuditValue(entry, ["previous_instance", "previousInstance"]) ? `prev ${getTaskAuditValue(entry, ["previous_instance", "previousInstance"])}` : "",
+                          getTaskAuditValue(entry, ["rollback_to_instance", "rollbackToInstance"]) ? `rollback ${getTaskAuditValue(entry, ["rollback_to_instance", "rollbackToInstance"])}` : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Workflow Runs (${taskAuditRunCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditWorkflowRuns.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No ledger-linked workflow runs recorded for this task.</div></div>`
+                : taskAuditWorkflowRuns.slice(0, 8).map((run, index) => html`
+                    <div class="task-comment-item" key=${`audit-run-detail-${index}`}>
+                      <div class="task-comment-meta">${buildTaskWorkflowRunMetaLine(run)}</div>
+                      <div class="task-comment-body">${buildTaskWorkflowRunStatusLine(run)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          run.nodeId ? `node ${run.nodeId}` : "",
+                          pickTaskWorkflowSessionId(run) ? `session ${pickTaskWorkflowSessionId(run)}` : "",
+                          run.hasRunLink ? "open from Workflow Activity" : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Tool Calls (${taskAuditToolCallCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditToolCalls.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No tool calls recorded in the ledger.</div></div>`
+                : taskAuditToolCalls.slice(-8).reverse().map((entry, index) => html`
+                    <div class="task-comment-item" key=${`tool-call-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["toolName", "toolId"]) || "tool"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditToolCall(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.callId ? `call ${entry.callId}` : "",
+                          entry.nodeId ? `node ${entry.nodeId}` : "",
+                          entry.sessionId ? `session ${entry.sessionId}` : "",
+                          Number.isFinite(Number(entry.durationMs)) && Number(entry.durationMs) > 0 ? formatDuration(Number(entry.durationMs)) : "",
+                          entry.cwd ? truncate(entry.cwd, 64) : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Artifacts (${taskAuditArtifactCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditArtifacts.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No artifacts recorded in the ledger.</div></div>`
+                : taskAuditArtifacts.slice(-8).reverse().map((entry, index) => html`
+                    <div class="task-comment-item" key=${`artifact-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["kind"]) || "artifact"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditArtifact(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.artifactId ? `artifact ${entry.artifactId}` : "",
+                          entry.runId ? `run ${entry.runId}` : "",
+                          entry.nodeId ? `node ${entry.nodeId}` : "",
+                          entry.sessionId ? `session ${entry.sessionId}` : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Operator Actions (${taskAuditOperatorActionCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditOperatorActions.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No operator actions recorded for this task.</div></div>`
+                : taskAuditOperatorActions.slice(-8).reverse().map((entry, index) => html`
+                    <div class="task-comment-item" key=${`operator-action-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["actionType", "action"]) || "operator action"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditOperatorAction(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.actorId ? `actor ${entry.actorId}` : "",
+                          entry.scope ? `${entry.scope}${entry.scopeId ? `:${entry.scopeId}` : ""}` : "",
+                          entry.sessionId ? `session ${entry.sessionId}` : "",
+                          entry.actionId ? `action ${entry.actionId}` : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Promoted Strategies (${taskAuditPromotedStrategyCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditPromotedStrategies.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No promoted strategies recorded for this task.</div></div>`
+                : taskAuditPromotedStrategies.slice(0, 8).map((entry, index) => html`
+                    <div class="task-comment-item" key=${`strategy-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["recommendation", "decision", "strategyId"]) || "strategy"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditPromotedStrategy(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.strategyId ? `strategy ${entry.strategyId}` : "",
+                          entry.runId ? `run ${entry.runId}` : "",
+                          entry.workflowId ? `workflow ${entry.workflowId}` : "",
+                          formatTaskAuditConfidence(entry.confidence) ? `confidence ${formatTaskAuditConfidence(entry.confidence)}` : "",
+                          entry.knowledgeHash ? `knowledge ${truncate(entry.knowledgeHash, 24)}` : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Strategy Event History (${taskAuditPromotedStrategyEvents.length})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditPromotedStrategyEvents.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No promoted-strategy event history recorded yet.</div></div>`
+                : taskAuditPromotedStrategyEvents.slice(-8).reverse().map((entry, index) => html`
+                    <div class="task-comment-item" key=${`strategy-event-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["category", "decision", "recommendation", "strategyId"]) || "strategy event"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditPromotedStrategy(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.strategyId ? `strategy ${entry.strategyId}` : "",
+                          entry.scope ? `${entry.scope}${entry.scopeId ? `:${entry.scopeId}` : ""}` : "",
+                          entry.runId ? `run ${entry.runId}` : "",
+                          entry.sessionId ? `session ${entry.sessionId}` : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
+          <details style="background: var(--color-bg-secondary, #1a1f2e); border: 1px solid var(--color-border, #2a3040); border-radius: 8px; padding: 10px 12px; margin-top: 12px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 13px;">Trace Events (${taskAuditTraceCount})</summary>
+            <div class="task-comments-list" style=${{ marginTop: "8px" }}>
+              ${taskAuditTraceEvents.length === 0
+                ? html`<div class="task-comment-item"><div class="task-comment-body">No task trace events recorded in the ledger.</div></div>`
+                : taskAuditTraceEvents.slice(-8).reverse().map((entry, index) => html`
+                    <div class="task-comment-item" key=${`trace-detail-${index}`}>
+                      <div class="task-comment-meta">
+                        ${getTaskAuditValue(entry, ["eventType"]) || "trace event"}
+                        ${formatTaskAuditTimestamp(entry) ? ` · ${formatTaskAuditTimestamp(entry)}` : ""}
+                      </div>
+                      <div class="task-comment-body">${summarizeTaskAuditTraceEvent(entry)}</div>
+                      <div class="task-comment-meta">
+                        ${[
+                          entry.runId ? `run ${entry.runId}` : "",
+                          entry.workflowId ? `workflow ${entry.workflowId}` : "",
+                          entry.sessionId ? `session ${entry.sessionId}` : "",
+                          entry.agentId ? `agent ${entry.agentId}` : "",
+                          Number.isFinite(Number(entry.durationMs)) && Number(entry.durationMs) > 0 ? formatDuration(Number(entry.durationMs)) : "",
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  `)}
+            </div>
+          </details>
         </div>
       `}
 
@@ -8554,6 +9288,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
   const [budgetWindow, setBudgetWindow] = useState(initialValues?.budgetWindow || "");
   const [budgetCents, setBudgetCents] = useState(toText(initialValues?.budgetCents));
   const [budgetCurrency, setBudgetCurrency] = useState(initialValues?.budgetCurrency || "USD");
+  const [coordinationTeamId, setCoordinationTeamId] = useState(initialValues?.coordinationTeamId || "");
+  const [coordinationRole, setCoordinationRole] = useState(initialValues?.coordinationRole || "");
+  const [coordinationReportsTo, setCoordinationReportsTo] = useState(initialValues?.coordinationReportsTo || "");
+  const [coordinationLevel, setCoordinationLevel] = useState(initialValues?.coordinationLevel || "");
   const [dependenciesInput, setDependenciesInput] = useState((initialValues?.dependencies || []).join(", "));
   const [selectedSprintId, setSelectedSprintId] = useState(initialValues?.sprintId || "");
   const [sprintOrderInput, setSprintOrderInput] = useState(toText(initialValues?.sprintOrder));
@@ -8570,6 +9308,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
     || initialValues?.parentGoalId
     || initialValues?.budgetWindow
     || initialValues?.budgetCents
+    || initialValues?.coordinationTeamId
+    || initialValues?.coordinationRole
+    || initialValues?.coordinationReportsTo
+    || initialValues?.coordinationLevel
     || initialValues?.sprintId
     || initialValues?.dependencies?.length,
   ));
@@ -8586,6 +9328,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
     budgetWindow: initialValues?.budgetWindow || "",
     budgetCents: toText(initialValues?.budgetCents),
     budgetCurrency: initialValues?.budgetCurrency || "USD",
+    coordinationTeamId: initialValues?.coordinationTeamId || "",
+    coordinationRole: initialValues?.coordinationRole || "",
+    coordinationReportsTo: initialValues?.coordinationReportsTo || "",
+    coordinationLevel: initialValues?.coordinationLevel || "",
     sprintId: initialValues?.sprintId || "",
     sprintOrder: toText(initialValues?.sprintOrder),
     dependenciesInput: (initialValues?.dependencies || []).join(", "),
@@ -8664,13 +9410,17 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
       budgetWindow: budgetWindow || "",
       budgetCents: budgetCents || "",
       budgetCurrency: budgetCurrency || "",
+      coordinationTeamId: coordinationTeamId || "",
+      coordinationRole: coordinationRole || "",
+      coordinationReportsTo: coordinationReportsTo || "",
+      coordinationLevel: coordinationLevel || "",
       sprintId: selectedSprintId || "",
       sprintOrder: sprintOrderInput || "",
       dependenciesInput: dependenciesInput || "",
       tagsInput: tagsInput || "",
       draft: Boolean(draft),
     }),
-    [baseBranch, budgetCents, budgetCurrency, budgetWindow, dependenciesInput, description, draft, epicId, goalId, parentGoalId, priority, selectedSprintId, sprintOrderInput, storyPoints, tagsInput, taskType, title],
+    [baseBranch, budgetCents, budgetCurrency, budgetWindow, coordinationLevel, coordinationReportsTo, coordinationRole, coordinationTeamId, dependenciesInput, description, draft, epicId, goalId, parentGoalId, priority, selectedSprintId, sprintOrderInput, storyPoints, tagsInput, taskType, title],
   );
   const changeCount = useMemo(
     () => countChangedFields(initialSnapshotRef.current, unsavedSnapshot),
@@ -8697,6 +9447,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
     setBudgetWindow(base.budgetWindow || "");
     setBudgetCents(base.budgetCents || "");
     setBudgetCurrency(base.budgetCurrency || "USD");
+    setCoordinationTeamId(base.coordinationTeamId || "");
+    setCoordinationRole(base.coordinationRole || "");
+    setCoordinationReportsTo(base.coordinationReportsTo || "");
+    setCoordinationLevel(base.coordinationLevel || "");
     setSelectedSprintId(base.sprintId || "");
     setSprintOrderInput(base.sprintOrder || "");
     setDependenciesInput(base.dependenciesInput || "");
@@ -8751,6 +9505,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
           budgetWindow: budgetWindow || undefined,
           budgetCents: budgetCents === "" ? undefined : Number(budgetCents),
           budgetCurrency: (budgetCurrency || "USD").trim() || undefined,
+          coordinationTeamId: coordinationTeamId || undefined,
+          coordinationRole: coordinationRole || undefined,
+          coordinationReportsTo: coordinationReportsTo || undefined,
+          coordinationLevel: coordinationLevel || undefined,
           tags,
           draft,
           status: draft ? "draft" : "todo",
@@ -8809,6 +9567,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
         budgetWindow,
         budgetCents,
         budgetCurrency,
+        coordinationTeamId,
+        coordinationRole,
+        coordinationReportsTo,
+        coordinationLevel,
         sprintId: selectedSprintId,
         sprintOrder: sprintOrderInput,
         dependenciesInput,
@@ -8853,6 +9615,10 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
     budgetWindow,
     budgetCents,
     budgetCurrency,
+    coordinationTeamId,
+    coordinationRole,
+    coordinationReportsTo,
+    coordinationLevel,
     selectedSprintId,
     sprintOrderInput,
     dependenciesInput,
@@ -8865,7 +9631,7 @@ function CreateTaskModalInline({ onClose, initialValues = null, sprintOptions = 
   ]);
 
   const parsedTags = normalizeTagInput(tagsInput);
-  const hasAdvanced = baseBranch || draft || showAdvanced || epicId || goalId || parentGoalId || budgetWindow || budgetCents || selectedSprintId || dependenciesInput || storyPoints || taskType !== "task";
+  const hasAdvanced = baseBranch || draft || showAdvanced || epicId || goalId || parentGoalId || budgetWindow || budgetCents || coordinationTeamId || coordinationRole || coordinationReportsTo || coordinationLevel || selectedSprintId || dependenciesInput || storyPoints || taskType !== "task";
 
   const footerContent = html`
     <${Button}

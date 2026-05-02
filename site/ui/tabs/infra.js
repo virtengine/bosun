@@ -1,15 +1,23 @@
 /* ─────────────────────────────────────────────────────────────
  *  Tab: Infra — worktrees, shared workspaces, presence
  * ────────────────────────────────────────────────────────────── */
-import { h } from "preact";
+import { h as _h } from "preact";
 import { useState, useMemo } from "preact/hooks";
 import htm from "htm";
 
+/* Guard: recover when a React-style forwardRef object leaks into h(). */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function") {
+    if (typeof type.render === "function") return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
+
 const html = htm.bind(h);
 
-import { haptic, showConfirm } from "../modules/telegram.js";
-import { apiFetch } from "../modules/api.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   worktreeData,
   sharedWorkspaces,
@@ -19,24 +27,24 @@ import {
   refreshTab,
   runOptimistic,
   scheduleRefresh,
-} from "../modules/state.js";
-import { ICONS } from "../modules/icons.js";
-import { cloneValue, formatRelative, formatBytes, downloadFile } from "../modules/utils.js";
-import { buildWorktreeRecoveryViewModel } from "../modules/worktree-recovery.js";
+} from "../../../ui/modules/state.js";
+import { ICONS } from "../../../ui/modules/icons.js";
+import { cloneValue, formatRelative, formatBytes, downloadFile } from "../../../ui/modules/utils.js";
+import { buildWorktreeRecoveryViewModel } from "../../../ui/modules/worktree-recovery.js";
 import {
   Card as LegacyCard,
   Badge as LegacyBadge,
   StatCard,
   SkeletonCard,
   EmptyState,
-} from "../components/shared.js";
-import { ProgressBar } from "../components/charts.js";
-import { Collapsible } from "../components/forms.js";
+} from "../../../ui/components/shared.js";
+import { ProgressBar } from "../../../ui/components/charts.js";
+import { Collapsible } from "../../../ui/components/forms.js";
 import {
   workspaces as managedWorkspaces,
   activeWorkspaceId,
   loadWorkspaces as loadManagedWorkspaces,
-} from "../components/workspace-switcher.js";
+} from "../../../ui/components/workspace-switcher.js";
 import {
   Typography, Box, Stack, Card, CardContent, CardHeader, CardActions,
   Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment,

@@ -16,12 +16,12 @@ import {
   classifyTaskLifecycleAction,
   mergeTaskRecords,
   KANBAN_PAGE_SIZE,
-} from "../modules/state.js";
-import { apiFetch } from "../modules/api.js";
-import { haptic, showConfirm } from "../modules/telegram.js";
-import { formatRelative, truncate, cloneValue } from "../modules/utils.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
-import { getAgentDisplay } from "../modules/agent-display.js";
+} from "../../../ui/modules/state.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
+import { formatRelative, truncate, cloneValue } from "../../../ui/modules/utils.js";
+import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { getAgentDisplay } from "../../../ui/modules/agent-display.js";
 import { Card, CardContent, Chip, IconButton, TextField, InputAdornment, Typography, Box, Stack, Button, Menu, MenuItem, Paper, Tooltip, Badge } from "@mui/material";
 
 const html = htm.bind(h);

@@ -1,9 +1,9 @@
 import { h } from "preact";
 import { useState, useEffect, useCallback, useMemo, useRef } from "preact/hooks";
 import htm from "htm";
-import { apiFetch } from "../modules/api.js";
-import { resolveIcon } from "../modules/icon-utils.js";
-import { DiffViewer } from "./diff-viewer.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { DiffViewer } from "../../../ui/components/diff-viewer.js";
 import {
   Typography,
   Chip,
