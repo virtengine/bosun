@@ -28,7 +28,6 @@ import {
   runOptimistic,
   scheduleRefresh,
 } from "../../../ui/modules/state.js";
-import { ICONS } from "../../../ui/modules/icons.js";
 import { cloneValue, formatRelative, formatBytes, downloadFile } from "../../../ui/modules/utils.js";
 import { buildWorktreeRecoveryViewModel } from "../../../ui/modules/worktree-recovery.js";
 import {

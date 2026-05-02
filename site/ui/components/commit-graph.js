@@ -2,7 +2,6 @@ import { h } from "preact";
 import { useState, useEffect, useCallback, useMemo, useRef } from "preact/hooks";
 import htm from "htm";
 import { apiFetch } from "../../../ui/modules/api.js";
-
 import {
   Typography,
   Chip,

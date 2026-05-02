@@ -412,7 +412,7 @@ import {
   resolveSessionWorkspaceHint,
 } from "../../ui/modules/session-api.js";
 import { buildSessionInsights, formatCompactCount } from "../../ui/modules/session-insights.js";
-import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Avatar, Stack, Paper, CircularProgress, Button, Divider, Menu, MenuItem, Fab, Snackbar, Alert } from "../../ui/modules/mui.js";
+import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Stack, Paper, CircularProgress, Button, Alert } from "../../ui/modules/mui.js";
 
 /* ── Component imports ── */
 import { ToastContainer, Modal } from "../../ui/components/shared.js";

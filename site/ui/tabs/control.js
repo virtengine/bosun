@@ -15,7 +15,7 @@ function h(type, ...args) {
 
 const html = htm.bind(h);
 
-import { Typography, Box, Stack, Card as MuiCard, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge as MuiBadge, Avatar, LinearProgress, Grid, Slider, Select } from "@mui/material";
+import { Typography, Box, Stack, Card as MuiCard, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Avatar, LinearProgress, Grid, Slider, Select } from "@mui/material";
 
 import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
 import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
