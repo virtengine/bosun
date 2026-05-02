@@ -26533,11 +26533,14 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
         }
+        const runStatus = String(run.status || "").trim().toLowerCase();
         const retryOptions = typeof engine.getRetryOptions === "function"
           ? await engine.getRetryOptions(runId)
           : null;
+        const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
         const supportsRetrySurface =
-          run.status === "failed" ||
+          runStatus === "failed" ||
+          createTasksPendingGuard ||
           (retryOptions && Array.isArray(retryOptions.options) && retryOptions.options.length > 0);
         if (!supportsRetrySurface) {
           jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
@@ -26546,7 +26549,7 @@ if (path === "/api/agent-logs/context") {
         const body = await readJsonBody(req);
         const mode = body?.mode;
         if (!mode) {
-          if (retryOptions) {
+          if (retryOptions && (runStatus === "failed" || createTasksPendingGuard)) {
             jsonResponse(res, 200, {
               ok: true,
               ...retryOptions,
@@ -26568,13 +26571,35 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 400, { ok: false, error: `Invalid mode "${mode}". Use "from_failed", "from_scratch", "replan_from_failed", or "replan_subgraph".` });
           return;
         }
-        const retryArgs = { mode };
-        if (
+        if (runStatus !== "failed" && !createTasksPendingGuard) {
+          jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
+          return;
+        }
+        const safeInterruptedResume =
           mode === "from_failed" &&
           retryOptions?.guardedState?.code === "create_tasks_pending" &&
           retryOptions?.guardedState?.safeResume === true &&
-          retryOptions?.recommendedMode === "from_failed"
-        ) {
+          retryOptions?.recommendedMode === "from_failed";
+        const resolvedRetry =
+          !safeInterruptedResume && createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+            ? await engine.resolveOperatorRetry(runId, mode)
+            : null;
+        if (resolvedRetry?.blocked) {
+          jsonResponse(res, 409, {
+            ok: false,
+            error: resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.",
+            runId,
+            status: run.status,
+            mode: resolvedRetry.mode || mode,
+            operatorAction: resolvedRetry.operatorAction || null,
+            decisionReason: resolvedRetry.decisionReason || null,
+            guardedState: resolvedRetry.guardedState || retryOptions?.guardedState || null,
+            retryOptions,
+          });
+          return;
+        }
+        const retryArgs = resolvedRetry?.retryArgs || { mode };
+        if (safeInterruptedResume) {
           retryArgs._resumeInterrupted = true;
           if (retryOptions?.recommendedReason) {
             retryArgs._decisionReason = retryOptions.recommendedReason;
@@ -26588,6 +26613,10 @@ if (path === "/api/agent-logs/context") {
           originalRunId: result.originalRunId,
           mode: result.mode,
           status: retryStatus,
+          operatorAction:
+            resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+          decisionReason: resolvedRetry?.decisionReason || null,
+          guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
         });
         return;
       }

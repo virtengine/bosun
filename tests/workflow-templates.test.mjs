@@ -766,6 +766,16 @@ describe("workflow-templates", () => {
     expect(logSuccess?.config?.message).toContain("PR linked");
   });
 
+  it("task lifecycle implement phase keeps verification scoped when unrelated baseline reds appear", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+
+    const implementNode = template.nodes.find((node) => node.id === "run-agent-implement");
+    expect(implementNode?.config?.prompt).toContain("Start with the narrowest verification that proves the changed surface");
+    expect(implementNode?.config?.prompt).toContain("keep the task scoped to the touched surface instead of thrashing on unrelated reds");
+    expect(implementNode?.config?.prompt).toContain("say `commit blocked`");
+  });
+
   it("continuation loop template exposes configurable turn/stuck controls", () => {
     const template = getTemplate("template-continuation-loop");
     expect(template).toBeDefined();

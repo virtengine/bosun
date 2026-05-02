@@ -2439,13 +2439,29 @@ const TOOL_HANDLERS = {
       retryOptions?.guardedState?.code === "create_tasks_pending" &&
       retryOptions?.guardedState?.safeResume === true &&
       retryOptions?.recommendedMode === "from_failed";
-    if (mode === "from_failed" && currentStatus !== "failed" && !safeInterruptedResume) {
+    const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
+    if (mode === "from_failed" && currentStatus !== "failed" && !createTasksPendingGuard) {
       return {
         ok: false,
         error: `retry mode "from_failed" requires a failed run. Current status is "${currentRun?.status || "unknown"}".`,
       };
     }
-    const retryArgs = { mode };
+    const resolvedRetry =
+      !safeInterruptedResume && createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+        ? engine.resolveOperatorRetry(runId, mode)
+        : null;
+    if (resolvedRetry?.blocked) {
+      return {
+        ok: false,
+        error: resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.",
+        mode: resolvedRetry.mode || mode,
+        operatorAction: resolvedRetry.operatorAction || null,
+        decisionReason: resolvedRetry.decisionReason || null,
+        guardedState: resolvedRetry.guardedState || retryOptions?.guardedState || null,
+        retryOptions,
+      };
+    }
+    const retryArgs = resolvedRetry?.retryArgs || { mode };
     if (safeInterruptedResume) {
       retryArgs._resumeInterrupted = true;
       if (retryOptions?.recommendedReason) retryArgs._decisionReason = retryOptions.recommendedReason;
@@ -2457,6 +2473,10 @@ const TOOL_HANDLERS = {
       originalRunId: result?.originalRunId || runId,
       retryRunId: result?.retryRunId || null,
       status: result?.ctx?.errors?.length ? "failed" : "running_or_completed",
+      operatorAction:
+        resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+      decisionReason: resolvedRetry?.decisionReason || null,
+      guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
     };
   },
 
