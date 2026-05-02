@@ -152,6 +152,43 @@ describe("provider kernel cutover", () => {
     );
   });
 
+  it("respects configured provider defaults when the kernel builds its own registry", () => {
+    const kernel = createProviderKernel({
+      adapters: {
+        "opencode-sdk": {
+          name: "opencode-sdk",
+          provider: "OPENCODE",
+          exec: async () => ({ finalResponse: "ok" }),
+        },
+      },
+      config: {
+        providers: {
+          defaultProvider: "openai-compatible",
+          openaiCompatible: {
+            enabled: true,
+            defaultModel: "qwen2.5-coder:latest",
+            baseUrl: "http://127.0.0.1:11434/v1",
+          },
+        },
+      },
+      env: {},
+    });
+
+    const runtime = kernel.resolveRuntime("openai-compatible", "opencode-sdk");
+
+    expect(runtime.selection).toEqual(expect.objectContaining({
+      providerId: "openai-compatible",
+      adapterName: "opencode-sdk",
+      model: "gpt-4o-compatible",
+    }));
+    expect(runtime.providerConfig).toEqual(expect.objectContaining({
+      provider: "openai-compatible",
+      model: "qwen2.5-coder:latest",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      displayModel: "qwen2.5-coder:latest",
+    }));
+  });
+
   it("accepts UI-aligned provider config aliases when flattening harness settings", () => {
     const settings = buildProviderKernelSettings({
       providers: {

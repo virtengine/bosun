@@ -432,7 +432,7 @@ export function createProviderKernel(options = {}) {
     const effectiveProviderConfig = applyModelTransportOverrides(
       providerConfig,
       providerEntry,
-      resolvedSelection.model,
+      providerConfig?.displayModel || providerConfig?.model || providerOverrides.model || resolvedSelection.model,
     );
 
     return {
