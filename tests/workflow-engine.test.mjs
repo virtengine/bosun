@@ -6495,6 +6495,13 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
     id: "task-1001",
     title: "[m] fix(workflow): create tasks",
   });
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      title: "[m] fix(workflow): duplicate title",
+      reason: "duplicate_title",
+      existingTaskId: "existing-1",
+    }),
+  ]));
   expect(listTasks).toHaveBeenCalledTimes(1);
   expect(createTask).toHaveBeenCalledTimes(1);
   expect(createTask).toHaveBeenCalledWith("proj-123", expect.objectContaining({

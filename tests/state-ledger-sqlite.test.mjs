@@ -136,7 +136,7 @@ describe("state ledger sqlite workflow integration", () => {
     expect(existsSync(dbPath)).toBe(true);
 
     const info = getStateLedgerInfo({ anchorPath: runsDir });
-    expect(info.schemaVersion).toBe(6);
+    expect(info.schemaVersion).toBe(9);
     expect(info.tables).toEqual(
       expect.arrayContaining([
         "agent_activity",
@@ -152,6 +152,7 @@ describe("state ledger sqlite workflow integration", () => {
         "tool_calls",
         "workflow_events",
         "workflow_runs",
+        "workflow_snapshots",
       ]),
     );
 
