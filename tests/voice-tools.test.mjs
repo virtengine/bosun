@@ -94,8 +94,7 @@ vi.mock("../agent/session-manager.mjs", () => ({
   getBosunSessionManager: vi.fn(() => mockBosunSessionManager),
 }));
 
-vi.mock("../workflow/workflow-engine.mjs", () => ({
-  getWorkflowEngine: vi.fn(() => ({
+const mockWorkflowEngine = {
     save: vi.fn((def) => ({
       ...def,
       id: def?.id || "wf-saved",
@@ -145,8 +144,9 @@ vi.mock("../workflow/workflow-engine.mjs", () => ({
       triggerEvent: "manual",
       triggerSource: "manual",
     }]),
-    getRunDetail: vi.fn((runId) => (runId === "run-1"
-      ? {
+    getRunDetail: vi.fn((runId) => {
+      if (runId === "run-1") {
+        return {
           runId: "run-1",
           workflowId: "wf-1",
           workflowName: "Workflow One",
@@ -171,33 +171,85 @@ vi.mock("../workflow/workflow-engine.mjs", () => ({
             nodeStatuses: { n1: "completed", n2: "failed" },
             nodeStatusEvents: [{ nodeId: "n2", status: "failed" }],
           },
-        }
-      : (runId === "run-ok"
-        ? {
-            runId: "run-ok",
-            workflowId: "wf-1",
-            workflowName: "Workflow One",
-            status: "completed",
-            startedAt: 1000,
-            endedAt: 2000,
-            duration: 1000,
-            errorCount: 0,
-            logCount: 1,
-            detail: {
-              data: { _workflowId: "wf-1", _workflowName: "Workflow One" },
-              errors: [],
-              logs: [{ level: "info", msg: "completed" }],
-              nodeStatuses: { n1: "completed", n2: "completed" },
-              nodeStatusEvents: [{ nodeId: "n2", status: "completed" }],
-            },
-          }
-        : null))),
+        };
+      }
+      if (runId === "run-ok") {
+        return {
+          runId: "run-ok",
+          workflowId: "wf-1",
+          workflowName: "Workflow One",
+          status: "completed",
+          startedAt: 1000,
+          endedAt: 2000,
+          duration: 1000,
+          errorCount: 0,
+          logCount: 1,
+          detail: {
+            data: { _workflowId: "wf-1", _workflowName: "Workflow One" },
+            errors: [],
+            logs: [{ level: "info", msg: "completed" }],
+            nodeStatuses: { n1: "completed", n2: "completed" },
+            nodeStatusEvents: [{ nodeId: "n2", status: "completed" }],
+          },
+        };
+      }
+      if (runId === "run-paused") {
+        return {
+          runId: "run-paused",
+          workflowId: "wf-1",
+          workflowName: "Workflow One",
+          status: "paused",
+          startedAt: 1000,
+          endedAt: 2000,
+          duration: 1000,
+          errorCount: 0,
+          logCount: 1,
+          detail: {
+            data: { _workflowId: "wf-1", _workflowName: "Workflow One" },
+            errors: [],
+            logs: [{ level: "info", msg: "paused" }],
+            nodeStatuses: { n1: "completed", n2: "pending" },
+            nodeStatusEvents: [{ nodeId: "n2", status: "pending" }],
+          },
+        };
+      }
+      return null;
+    }),
+    getRetryOptions: vi.fn((runId) => {
+      if (runId !== "run-paused") return null;
+      return {
+        runId: "run-paused",
+        status: "paused",
+        recommendedMode: "from_failed",
+        recommendedReason: "create_tasks_pending.resume_only",
+        guardedState: {
+          code: "create_tasks_pending",
+          nextNodeId: "create-tasks",
+          nextNodeLabel: "Create Tasks",
+          safeResume: true,
+          blockers: [],
+          summary: "Run is paused with Create Tasks as the next pending node.",
+        },
+        options: [
+          {
+            mode: "from_failed",
+            label: "Resume from next pending step",
+            available: true,
+            recommended: true,
+            reason: "create_tasks_pending.resume_only",
+          },
+        ],
+      };
+    }),
     retryRun: vi.fn(async (runId, opts = {}) => ({
       originalRunId: runId,
       retryRunId: "run-2",
       ctx: { errors: [], mode: opts.mode || "from_failed" },
     })),
-  })),
+};
+
+vi.mock("../workflow/workflow-engine.mjs", () => ({
+  getWorkflowEngine: vi.fn(() => mockWorkflowEngine),
 }));
 
 vi.mock("../agent/agent-prompts.mjs", () => ({
@@ -1417,6 +1469,7 @@ describe("voice-tools", () => {
             cwd: managedWorktree,
             maxBuffer: 16 * 1024 * 1024,
             shell: false,
+            timeout: 300000,
           }),
         );
       } finally {
@@ -1487,6 +1540,45 @@ describe("voice-tools", () => {
           "--amend",
           "-m",
           "fix(workspace): restore per-agent rate limiting for persistent memory writes",
+        ],
+        expect.objectContaining({
+          shell: false,
+        }),
+      );
+    });
+
+    it("run_workspace_command allows git commit co-author trailers with angle brackets for delegated sessions", async () => {
+      mockSpawnSync.mockReturnValue({
+        pid: 1234,
+        output: [null, "committed", ""],
+        stdout: "committed",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+
+      const result = await executeToolCall(
+        "run_workspace_command",
+        {
+          command: "git commit -m \"feat(workflow): persist node completion checkpoints for resume-safe execution\" -m \"Co-authored-by: bosun-ve[bot] <262908237+bosun-ve[bot]@users.noreply.github.com>\"",
+        },
+        {
+          sessionId: "delegate-session-1",
+          surface: "bosun-builtin",
+          sessionType: "tool-bridge-delegate",
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result.trim()).toBe("committed");
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        expect.stringMatching(/git(?:\.exe)?$/i),
+        [
+          "commit",
+          "-m",
+          "feat(workflow): persist node completion checkpoints for resume-safe execution",
+          "-m",
+          "Co-authored-by: bosun-ve[bot] <262908237+bosun-ve[bot]@users.noreply.github.com>",
         ],
         expect.objectContaining({
           shell: false,
@@ -1639,6 +1731,26 @@ describe("voice-tools", () => {
       const parsed = JSON.parse(result.result);
       expect(parsed.ok).toBe(false);
       expect(String(parsed.error || "")).toMatch(/requires a failed run/i);
+    });
+
+    it("retry_workflow_run resumes paused guarded runs through interrupted-run retry", async () => {
+      const result = await executeToolCall(
+        "retry_workflow_run",
+        { runId: "run-paused", mode: "from_failed" },
+        withApprovedToolContext(),
+      );
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.originalRunId).toBe("run-paused");
+      expect(parsed.retryRunId).toBe("run-2");
+      const workflowEngineModule = await import("../workflow/workflow-engine.mjs");
+      const engine = workflowEngineModule.getWorkflowEngine();
+      expect(engine.retryRun).toHaveBeenCalledWith("run-paused", {
+        mode: "from_failed",
+        _resumeInterrupted: true,
+        _decisionReason: "create_tasks_pending.resume_only",
+      });
     });
 
     it("query_live_view infers query from nested context history when query is missing", async () => {

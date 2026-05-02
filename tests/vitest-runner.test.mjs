@@ -1,16 +1,23 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  buildVitestCacheOverrideConfigSource,
   ensureVitestEntry,
   findPackageRoot,
+  findVitestConfigPath,
   findVitestPackageSpec,
   findVitestEntry,
+  injectVitestConfigOverride,
   isDirectExecution,
+  resolveVitestCacheDir,
+  resolveVitestConfigLoader,
+  resolveVitestExperimentalCacheDir,
   resolveVitestArgs,
+  runVitest,
 } from "../tools/vitest-runner.mjs";
 import { buildVitestBatchArgs, buildVitestFullSuitePlan } from "../tools/vitest-full-suite.mjs";
 
@@ -201,16 +208,33 @@ describe("vitest-runner", () => {
     );
     writeFileSync(configPath, "export default {};\n");
 
-    const expected = ["run", "--config", configPath];
-    if (process.platform === "win32") {
-      expected.push("--configLoader", "runner");
-    }
+    const expected = ["run", "--config", configPath, "--configLoader", "runner"];
 
     expect(
       resolveVitestArgs(["run", "--config", "vitest.config.mjs"], {
         startDir: nestedWorktree,
       }),
     ).toEqual(expected);
+  });
+
+  it("prefers the native config loader when node_modules is a symlinked shared dependency root", () => {
+    const root = createFixture();
+    const sharedDeps = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-999", "deep");
+    const configPath = resolve(root, "vitest.config.mjs");
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    mkdirSync(resolve(sharedDeps, "vitest"), { recursive: true });
+    writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
+    writeFileSync(configPath, "export default {};\n");
+    symlinkSync(sharedDeps, resolve(root, "node_modules"));
+
+    expect(resolveVitestConfigLoader({ startDir: nestedWorktree })).toBe("native");
+    expect(
+      resolveVitestArgs(["run", "--config", "vitest.config.mjs"], {
+        startDir: nestedWorktree,
+      }),
+    ).toEqual(["run", "--config", configPath, "--configLoader", "native"]);
   });
 
   it("expands path-like glob arguments before forwarding them to Vitest", () => {
@@ -228,10 +252,9 @@ describe("vitest-runner", () => {
       "run",
       "tests/workspace-alpha.test.mjs",
       "tests/memory-write.test.mjs",
+      "--configLoader",
+      "runner",
     ];
-    if (process.platform === "win32") {
-      expected.push("--configLoader", "runner");
-    }
 
     expect(
       resolveVitestArgs(["run", "tests/workspace-*.test.mjs", "tests/*memory*.test.mjs"], {
@@ -430,36 +453,134 @@ describe("vitest-runner", () => {
     ).toBe(true);
   });
 
-  it("adds the runner config loader by default on Windows", () => {
-    const restore = Object.getOwnPropertyDescriptor(process, "platform");
-    Object.defineProperty(process, "platform", { value: "win32" });
-    try {
-      expect(resolveVitestArgs(["run"])).toEqual([
-        "run",
-        "--configLoader",
-        "runner",
-      ]);
-    } finally {
-      Object.defineProperty(process, "platform", restore);
-    }
+  it("adds the runner config loader by default", () => {
+    expect(resolveVitestArgs(["run"])).toEqual([
+      "run",
+      "--configLoader",
+      "runner",
+    ]);
+  });
+
+  it("routes the experimental cache to a writable package-local .cache dir by default", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-1000", "deep");
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0" }),
+    );
+
+    expect(
+      resolveVitestExperimentalCacheDir({
+        startDir: nestedWorktree,
+        env: {},
+      }),
+    ).toBe(resolve(root, ".cache", "vitest", "experimental-cache"));
+  });
+
+  it("routes the vite optimizer cache to a writable package-local .cache dir by default", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-1000", "deep");
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0" }),
+    );
+
+    expect(
+      resolveVitestCacheDir({
+        startDir: nestedWorktree,
+        env: {},
+      }),
+    ).toBe(resolve(root, ".cache", "vitest", "vite"));
+  });
+
+  it("lets runVitest inject a writable experimental cache into child env", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-1001");
+    const spawnCalls = [];
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0" }),
+    );
+
+    const exitCode = runVitest(["run"], {
+      startDir: nestedWorktree,
+      env: {},
+      ensureVitest: () => resolve(root, "node_modules", "vitest", "vitest.mjs"),
+      spawn(command, args, options) {
+        spawnCalls.push({ command, args, options });
+        return { status: 0 };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].options.env.VITEST_EXPERIMENTAL_CACHE).toBe(
+      resolve(root, ".cache", "vitest", "experimental-cache"),
+    );
+    expect(existsSync(spawnCalls[0].options.env.VITEST_EXPERIMENTAL_CACHE)).toBe(true);
+    const configIndex = spawnCalls[0].args.findIndex((arg) => arg === "--config");
+    expect(configIndex).toBeGreaterThan(-1);
+    const overridePath = spawnCalls[0].args[configIndex + 1];
+    expect(existsSync(overridePath)).toBe(true);
+    const overrideSource = readFileSync(overridePath, "utf8");
+    expect(overrideSource).toContain(resolve(root, ".cache", "vitest", "experimental-cache"));
+    expect(overrideSource).toContain(resolve(root, ".cache", "vitest", "vite"));
+    expect(overrideSource).toContain('fsModuleCachePath');
+  });
+
+  it("finds the default vitest config from the package root", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-1002");
+    const configPath = resolve(root, "vitest.config.mjs");
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
+    writeFileSync(configPath, "export default {};\n");
+
+    expect(findVitestConfigPath({ startDir: nestedWorktree })).toBe(configPath);
+  });
+
+  it("injects a generated config override ahead of the config loader", () => {
+    expect(
+      injectVitestConfigOverride(["run", "--configLoader", "runner"], "/tmp/bosun-vitest-override.mjs"),
+    ).toEqual([
+      "run",
+      "--config",
+      "/tmp/bosun-vitest-override.mjs",
+      "--configLoader",
+      "runner",
+    ]);
+  });
+
+  it("builds a config override that merges cacheDir and fsModuleCachePath", () => {
+    const source = buildVitestCacheOverrideConfigSource({
+      baseConfigPath: "/repo/vitest.config.mjs",
+      viteCacheDir: "/repo/.cache/vitest/vite",
+      experimentalCacheDir: "/repo/.cache/vitest/experimental-cache",
+    });
+
+    expect(source).toContain('await import("file:///repo/vitest.config.mjs")');
+    expect(source).toContain('cacheDir: "/repo/.cache/vitest/vite"');
+    expect(source).toContain('fsModuleCachePath: "/repo/.cache/vitest/experimental-cache"');
+    expect(source).toContain("mergeConfig");
   });
 
   it("preserves explicit config loader selection", () => {
-    const restore = Object.getOwnPropertyDescriptor(process, "platform");
-    Object.defineProperty(process, "platform", { value: "win32" });
-    try {
-      expect(resolveVitestArgs(["run", "--configLoader", "native"])).toEqual([
-        "run",
-        "--configLoader",
-        "native",
-      ]);
-      expect(resolveVitestArgs(["run", "--config-loader=runner"])).toEqual([
-        "run",
-        "--config-loader=runner",
-      ]);
-    } finally {
-      Object.defineProperty(process, "platform", restore);
-    }
+    expect(resolveVitestArgs(["run", "--configLoader", "native"])).toEqual([
+      "run",
+      "--configLoader",
+      "native",
+    ]);
+    expect(resolveVitestArgs(["run", "--config-loader=runner"])).toEqual([
+      "run",
+      "--config-loader=runner",
+    ]);
   });
 
   it("includes the Windows realpath shim for Vitest child processes", () => {

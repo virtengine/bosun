@@ -12,6 +12,7 @@ describe("container-runner", () => {
     it("exports all expected functions", async () => {
       const mod = await import("../infra/container-runner.mjs");
       const expected = [
+        "buildIsolatedArtifactRoot",
         "formatArtifactRetrieveCommand",
         "isContainerEnabled",
         "getContainerStatus",
@@ -183,6 +184,15 @@ describe("container-runner", () => {
       expect(
         mod.formatArtifactRetrieveCommand("/tmp/a\\b\"c'd.txt", "linux"),
       ).toBe(`cat '/tmp/a\\b"c'"'"'d.txt'`);
+    });
+
+    it("anchors default isolated artifacts under the resolved repo root", async () => {
+      const mod = await import("../infra/container-runner.mjs");
+      const root = process.cwd();
+      const staleCwd = "C:\\Users\\jON\\Documents\\source\\repos\\virtengine-gh\\bosun";
+      expect(mod.buildIsolatedArtifactRoot(staleCwd)).toBe(
+        await import("node:path").then((path) => path.resolve(root, ".bosun", "artifacts", "isolated-runs")),
+      );
     });
   });
 });

@@ -969,6 +969,16 @@ function resolveWorkspaceCommandTimeoutMs(commandName, args = []) {
     }
     return 120_000;
   }
+  if (
+    commandName === "node"
+    && normalizedArgs.some((arg) =>
+      arg.includes("vitest")
+      || arg.endsWith("tools/vitest-runner.mjs")
+      || arg.endsWith("tools\\vitest-runner.mjs")
+    )
+  ) {
+    return 300_000;
+  }
   return 20_000;
 }
 
@@ -2421,13 +2431,26 @@ const TOOL_HANDLERS = {
     const currentRun = engine?.getRunDetail ? engine.getRunDetail(runId) : null;
     if (!currentRun) return { ok: false, error: `Workflow run "${runId}" not found.` };
     const currentStatus = String(currentRun?.status || "").trim().toLowerCase();
-    if (mode === "from_failed" && currentStatus !== "failed") {
+    const retryOptions = typeof engine.getRetryOptions === "function"
+      ? engine.getRetryOptions(runId)
+      : null;
+    const safeInterruptedResume =
+      mode === "from_failed" &&
+      retryOptions?.guardedState?.code === "create_tasks_pending" &&
+      retryOptions?.guardedState?.safeResume === true &&
+      retryOptions?.recommendedMode === "from_failed";
+    if (mode === "from_failed" && currentStatus !== "failed" && !safeInterruptedResume) {
       return {
         ok: false,
         error: `retry mode "from_failed" requires a failed run. Current status is "${currentRun?.status || "unknown"}".`,
       };
     }
-    const result = await engine.retryRun(runId, { mode });
+    const retryArgs = { mode };
+    if (safeInterruptedResume) {
+      retryArgs._resumeInterrupted = true;
+      if (retryOptions?.recommendedReason) retryArgs._decisionReason = retryOptions.recommendedReason;
+    }
+    const result = await engine.retryRun(runId, retryArgs);
     return {
       ok: true,
       mode,
@@ -2865,10 +2888,6 @@ const TOOL_HANDLERS = {
         repoRoot,
         executionDir: cwd,
       });
-      const hasShellMeta = /[|&;<>\x60$]/.test(effectiveCmd);
-      if (hasShellMeta) {
-        return "{RESPONSE}: Shell metacharacters are not allowed in direct workspace commands. Run one command per tool call without &&, |, ;, >, $, or backticks.";
-      }
       const { error: tokenError, tokens } = tokenizeWorkspaceCommand(effectiveCmd);
       if (tokenError) {
         return `{RESPONSE}: ${tokenError}`;
@@ -2900,6 +2919,10 @@ const TOOL_HANDLERS = {
       const cmdArgs = tokens.slice(1);
       const executable = resolveWorkspaceCommandExecutable(safeCmd);
       const useShell = shouldUseWorkspaceCommandShell(safeCmd);
+      const hasShellMeta = /[|&;<>\x60$]/.test(effectiveCmd);
+      if (useShell && hasShellMeta) {
+        return "{RESPONSE}: Shell metacharacters are not allowed in direct workspace commands. Run one command per tool call without &&, |, ;, >, $, or backticks.";
+      }
       const timeoutMs = resolveWorkspaceCommandTimeoutMs(safeCmd, cmdArgs);
       const maxBuffer = resolveWorkspaceCommandMaxBuffer(safeCmd, cmdArgs);
       const res = spawnSync(executable, cmdArgs, {
@@ -2992,5 +3015,3 @@ export { TOOL_DEFS as VOICE_TOOLS };
 export async function warmCodebaseContext(context = {}) {
   await TOOL_HANDLERS.warm_codebase_context({}, context).catch(() => {});
 }
-
-

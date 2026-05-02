@@ -432,6 +432,30 @@ function deriveTaskBranch(task = {}) {
   if (taskId) return `task/${taskId}-${suffix}`;
   return `task/${suffix}`;
 }
+
+function normalizeMirroredRepoRoot(inputPath, fallbackRepoName = "") {
+  const rawPath = String(inputPath || "").trim();
+  if (!rawPath) return "";
+  const normalized = rawPath.replace(/\\/g, "/");
+  const marker = "/.bosun/workspaces/";
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex < 0) return rawPath;
+  const prefix = normalized.slice(0, markerIndex);
+  const tail = normalized.slice(markerIndex + marker.length).split("/").filter(Boolean);
+  const inferredRepoName = String(fallbackRepoName || tail[1] || tail[tail.length - 1] || "").trim();
+  if (!prefix || !inferredRepoName) return rawPath;
+  const prefixName = String(prefix.split("/").filter(Boolean).pop() || "").toLowerCase();
+  const candidate = prefixName === inferredRepoName.toLowerCase()
+    ? prefix
+    : resolve(prefix, inferredRepoName);
+  try {
+    if (existsSync(resolve(candidate, ".git"))) return candidate;
+  } catch {
+    // ignore invalid inferred path
+  }
+  return candidate;
+}
+
 function looksLikeFilesystemPath(value) {
   const text = String(value || "").trim();
   return /^[a-zA-Z]:[\\/]/.test(text) || text.startsWith("/") || text.startsWith("\\");
@@ -442,20 +466,8 @@ function resolveTaskRepositoryRoot(taskRepository, currentRepoRoot) {
   if (!repository || !repoRoot) return "";
   const repoName = repository.split("/").pop();
   if (!repoName) return "";
-  const normalizedRepoRoot = repoRoot.replace(/\\/g, "/");
-  const mirrorToken = "/.bosun/workspaces/";
-  if (normalizedRepoRoot.includes(mirrorToken)) {
-    const prefix = normalizedRepoRoot.slice(0, normalizedRepoRoot.indexOf(mirrorToken));
-    const prefixName = String(prefix.split("/").filter(Boolean).pop() || "").toLowerCase();
-    const inferredRepoRoot = prefixName === String(repoName).toLowerCase()
-      ? prefix
-      : resolve(prefix, repoName);
-    try {
-      if (existsSync(resolve(inferredRepoRoot, ".git"))) return inferredRepoRoot;
-    } catch {
-      // ignore invalid inferred path
-    }
-  }
+  const normalizedMirrorRoot = normalizeMirroredRepoRoot(repoRoot, repoName);
+  if (normalizedMirrorRoot && normalizedMirrorRoot !== repoRoot) return normalizedMirrorRoot;
   const candidates = [
     resolve(repoRoot, "..", repoName),
     resolve(repoRoot, ".bosun", "workspaces", String(process.env.BOSUN_WORKSPACE || "").trim(), repoName),
@@ -642,6 +654,7 @@ export {
 export {
   deriveTaskBranch,
   looksLikeFilesystemPath,
+  normalizeMirroredRepoRoot,
   pickTaskString,
   resolveTaskRepositoryRoot,
 };

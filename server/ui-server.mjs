@@ -1724,6 +1724,7 @@ class WorkflowEngineProxy {
   getRunForensics(runId)                 { return this._call("getRunForensics",       [runId]); }
   getNodeForensics(runId, nodeId)        { return this._call("getNodeForensics",      [runId, nodeId]); }
   getRetryOptions(runId)                 { return this._call("getRetryOptions",       [runId]); }
+  resolveOperatorRetry(runId, mode)      { return this._call("resolveOperatorRetry",  [runId, mode]); }
   retryRun(runId, opts)                  { return this._call("retryRun",             [runId, opts]); }
   restoreFromSnapshot(runId, opts)       { return this._call("restoreFromSnapshot",   [runId, opts]); }
   cancelRun(runId)                       { return this._call("cancelRun",            [runId]); }
@@ -26532,16 +26533,19 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
         }
-        if (run.status !== "failed") {
+        const retryOptions = typeof engine.getRetryOptions === "function"
+          ? await engine.getRetryOptions(runId)
+          : null;
+        const supportsRetrySurface =
+          run.status === "failed" ||
+          (retryOptions && Array.isArray(retryOptions.options) && retryOptions.options.length > 0);
+        if (!supportsRetrySurface) {
           jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
           return;
         }
         const body = await readJsonBody(req);
         const mode = body?.mode;
         if (!mode) {
-          const retryOptions = typeof engine.getRetryOptions === "function"
-            ? await engine.getRetryOptions(runId)
-            : null;
           if (retryOptions) {
             jsonResponse(res, 200, {
               ok: true,
@@ -26564,7 +26568,19 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 400, { ok: false, error: `Invalid mode "${mode}". Use "from_failed", "from_scratch", "replan_from_failed", or "replan_subgraph".` });
           return;
         }
-        const result = await engine.retryRun(runId, { mode });
+        const retryArgs = { mode };
+        if (
+          mode === "from_failed" &&
+          retryOptions?.guardedState?.code === "create_tasks_pending" &&
+          retryOptions?.guardedState?.safeResume === true &&
+          retryOptions?.recommendedMode === "from_failed"
+        ) {
+          retryArgs._resumeInterrupted = true;
+          if (retryOptions?.recommendedReason) {
+            retryArgs._decisionReason = retryOptions.recommendedReason;
+          }
+        }
+        const result = await engine.retryRun(runId, retryArgs);
         const retryStatus = result.ctx?.errors?.length > 0 ? "failed" : "completed";
         jsonResponse(res, 200, {
           ok: true,

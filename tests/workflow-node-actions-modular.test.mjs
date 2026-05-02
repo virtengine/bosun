@@ -394,7 +394,7 @@ describe("workflow modular actions", () => {
     expect(tracker.getSessionById("TASK-TOOL-SESSION-2:agent:run-parent-doom-loop:run-agent-tests:turn")?.status).toBe("blocked_by_env");
   });
 
-  it("keeps workflow agent sessions active during silent heartbeats", async () => {
+  it("marks workflow agent sessions no_output when only workflow heartbeats occur", async () => {
     vi.useFakeTimers();
     try {
       const nodeType = getNodeType("action.run_agent");
@@ -458,27 +458,116 @@ describe("workflow modular actions", () => {
       const taskSession = tracker.getSessionById("TASK-HEARTBEAT-1");
       const delegateSession = tracker.getSessionById("TASK-HEARTBEAT-1:agent:run-parent-heartbeat:run-agent:turn");
 
-      expect(taskSession?.status).toBe("active");
-      expect(delegateSession?.status).toBe("active");
-      expect(Date.now() - Number(taskSession?.lastActivityAt || 0)).toBeLessThan(180_000);
-      expect(Date.now() - Number(delegateSession?.lastActivityAt || 0)).toBeLessThan(180_000);
-
-      resolveLaunch?.({
-        success: true,
-        output: "workflow agent completed",
-        items: [],
-        sdk: "codex",
-        threadId: "workflow-thread-heartbeat",
-        resumed: false,
-      });
+      expect(taskSession?.status).toBe("no_output");
+      expect(delegateSession?.status).toBe("no_output");
+      expect(Number.isFinite(taskSession?.endedAt)).toBe(true);
+      expect(Number.isFinite(delegateSession?.endedAt)).toBe(true);
 
       const result = await executionPromise;
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
+      expect(String(result.error || "")).toMatch(/first_event_timeout/i);
       expect(launchOrResumeThread).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("records raw copilot stream events when formatted stream text is null", async () => {
+    const nodeType = getNodeType("action.run_agent");
+    const sessionManager = createHarnessSessionManager();
+    const launchOrResumeThread = vi.fn().mockImplementation(async (_prompt, _cwd, _timeout, options = {}) => {
+      await options.onEvent?.(null, {
+        type: "assistant.message",
+        timestamp: "2026-04-29T12:20:17.660Z",
+        data: {
+          content: "Tests passed; proceeding to the next step.",
+        },
+      });
+      return {
+        success: true,
+        output: "workflow agent completed",
+        items: [],
+        sdk: "copilot",
+        threadId: "workflow-thread-copilot-raw-events",
+        resumed: false,
+      };
+    });
+    const node = {
+      id: "run-agent-tests",
+      type: "action.run_agent",
+      config: {
+        prompt: "Write tests for the requested change.",
+        failOnError: false,
+        autoRecover: false,
+      },
+    };
+    const ctx = {
+      id: "run-parent-copilot-raw",
+      data: {
+        _workflowId: "wf-copilot-raw-events",
+        _workflowName: "Copilot Raw Events Workflow",
+        _workflowSessionId: "session-parent-copilot-raw",
+        _workflowRootSessionId: "session-root-copilot-raw",
+        taskId: "TASK-COPILOT-RAW",
+        taskTitle: "Capture raw Copilot stream events",
+        task: {
+          id: "TASK-COPILOT-RAW",
+          title: "Capture raw Copilot stream events",
+        },
+      },
+      resolve(value) {
+        return value;
+      },
+      log: vi.fn(),
+      setNodeStatus: vi.fn(),
+    };
+    const engine = {
+      services: {
+        sessionManager,
+        agentPool: {
+          launchEphemeralThread: vi.fn().mockResolvedValue({
+            success: true,
+            output: "fallback should not be used",
+            items: [],
+            sdk: "copilot",
+            threadId: "workflow-thread-fallback-copilot-raw",
+          }),
+          launchOrResumeThread,
+        },
+      },
+      list: () => [],
+      execute: vi.fn(),
+    };
+
+    const result = await nodeType.execute(node, ctx, engine);
+    const tracker = getSessionTracker();
+    const taskSession = tracker.getSessionById("TASK-COPILOT-RAW");
+    const delegateSession = tracker.getSessionById("TASK-COPILOT-RAW:agent:run-parent-copilot-raw:run-agent-tests:turn");
+
+    expect(result.success).toBe(true);
+    expect(launchOrResumeThread).toHaveBeenCalledOnce();
+    expect(launchOrResumeThread.mock.calls[0][3]).toEqual(
+      expect.objectContaining({
+        sendRawEvents: true,
+      }),
+    );
+    expect(taskSession?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "agent_message",
+          content: "Tests passed; proceeding to the next step.",
+        }),
+      ]),
+    );
+    expect(delegateSession?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "agent_message",
+          content: "Tests passed; proceeding to the next step.",
+        }),
+      ]),
+    );
   });
 
   it("returns a structured failure result when stale-session recovery still throws", async () => {

@@ -97,6 +97,9 @@ describe("workflow worker recovery regressions", () => {
   });
 
   it("returns retry payloads with retryRunId for worker-backed workflow actions", () => {
+    expect(workerSource).toContain('case "resolveOperatorRetry":');
+    expect(workerSource).toContain("return sanitise(await engine.resolveOperatorRetry?.(...args));");
+    expect(uiServerSource).toContain('resolveOperatorRetry(runId, mode)      { return this._call("resolveOperatorRetry",  [runId, mode]); }');
     expect(workerSource).toContain('case "retryRun": {');
     expect(workerSource).toContain("retryRunId: retryResult?.retryRunId || retryResult?.ctx?.id || null");
     expect(workerSource).toContain("originalRunId: retryResult?.originalRunId || null");

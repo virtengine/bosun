@@ -11,6 +11,8 @@
  *   - .bosun/logs/sessions/*.json                        (age-based prune)
  *   - .bosun/quarantine/**                               (TTL prune)
  *   - .bosun/audit/inventory.json                        (TTL prune; regenerates on next scan)
+ *   - .bosun/artifacts/{isolated-runs,heavy-runners}/    (TTL + keep-count prune)
+ *   - .bosun-monitor/session-*.md                        (TTL + keep-count prune)
  *
  * All operations are best-effort: failures are logged and never throw to the caller.
  * Defaults are conservative and fully overridable via env vars.
@@ -27,7 +29,7 @@ import {
   writeSync,
 } from "node:fs";
 import { readdir, rm, stat as fsStat, unlink } from "node:fs/promises";
-import { resolve, join, basename } from "node:path";
+import { resolve, join, basename, dirname } from "node:path";
 
 // ── Defaults (all tunable via env) ──────────────────────────────────────────
 const MB = 1024 * 1024;
@@ -63,6 +65,10 @@ export function getJanitorConfig() {
     sessionLogTtlMs: envInt("BOSUN_SESSION_LOG_TTL_DAYS", 14, { min: 1, max: 365 }) * DAY_MS,
     quarantineTtlMs: envInt("BOSUN_QUARANTINE_TTL_DAYS", 7, { min: 1, max: 365 }) * DAY_MS,
     auditInventoryTtlMs: envInt("BOSUN_AUDIT_INVENTORY_TTL_DAYS", 7, { min: 1, max: 365 }) * DAY_MS,
+    runnerArtifactTtlMs: envInt("BOSUN_RUNNER_ARTIFACT_TTL_DAYS", 14, { min: 1, max: 365 }) * DAY_MS,
+    runnerArtifactKeep: envInt("BOSUN_RUNNER_ARTIFACT_KEEP", 50, { min: 0, max: 10000 }),
+    monitorNoteTtlMs: envInt("BOSUN_MONITOR_NOTE_TTL_DAYS", 14, { min: 1, max: 365 }) * DAY_MS,
+    monitorNoteKeep: envInt("BOSUN_MONITOR_NOTE_KEEP", 25, { min: 0, max: 10000 }),
 
     // SQLite vacuum
     ledgerWalCheckpointEnabled: envBool("BOSUN_LEDGER_WAL_CHECKPOINT", true),
@@ -413,6 +419,102 @@ export async function pruneAuditInventory(auditDir, opts = {}) {
     warnJanitor(`failed to prune audit inventory.json: ${err.message}`);
     return { deleted: 0, freedBytes: 0 };
   }
+}
+
+async function pruneByAgeAndKeep(dir, opts = {}) {
+  const maxAgeMs = Number.isFinite(opts.maxAgeMs) ? opts.maxAgeMs : DAY_MS;
+  const keep = Number.isFinite(opts.keep) ? opts.keep : 0;
+  const recursive = opts.recursive === true;
+  const filter = typeof opts.filter === "function" ? opts.filter : () => true;
+  const baseDir = resolve(String(dir || process.cwd()));
+  const entries = await safeReaddir(baseDir);
+  const candidates = [];
+
+  for (const ent of entries) {
+    if (!filter(ent)) continue;
+    const full = join(baseDir, ent.name);
+    const st = safeStat(full);
+    if (!st) continue;
+    candidates.push({
+      path: full,
+      name: ent.name,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      isDirectory: ent.isDirectory?.(),
+    });
+  }
+
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const cutoff = Date.now() - maxAgeMs;
+  const toDelete = candidates.filter((item, index) => index >= keep && item.mtimeMs < cutoff);
+  let deleted = 0;
+  let freedBytes = 0;
+  for (const item of toDelete) {
+    try {
+      const size = item.isDirectory ? await dirSize(item.path) : item.size;
+      if (item.isDirectory) {
+        if (!recursive) continue;
+        await rm(item.path, { recursive: true, force: true });
+      } else {
+        await unlink(item.path);
+      }
+      deleted++;
+      freedBytes += size;
+    } catch (err) {
+      warnJanitor(`failed to prune ${item.name}: ${err.message}`);
+    }
+  }
+  return { deleted, kept: candidates.length - deleted, freedBytes };
+}
+
+export async function pruneRunnerArtifacts(bosunDir, opts = {}) {
+  const cfg = getJanitorConfig();
+  const maxAgeMs = Number.isFinite(opts.maxAgeMs) ? opts.maxAgeMs : cfg.runnerArtifactTtlMs;
+  const keep = Number.isFinite(opts.keep) ? opts.keep : cfg.runnerArtifactKeep;
+  const root = resolve(String(bosunDir || process.cwd()), "artifacts");
+  const targets = ["isolated-runs", "heavy-runners"];
+  const summary = { deleted: 0, kept: 0, freedBytes: 0, targets: {} };
+
+  for (const target of targets) {
+    const targetDir = join(root, target);
+    if (!safeStat(targetDir)) {
+      summary.targets[target] = { deleted: 0, kept: 0, freedBytes: 0 };
+      continue;
+    }
+    const result = await pruneByAgeAndKeep(targetDir, {
+      maxAgeMs,
+      keep,
+      recursive: true,
+      filter: (entry) => entry.isDirectory?.(),
+    });
+    summary.targets[target] = result;
+    summary.deleted += result.deleted;
+    summary.kept += result.kept;
+    summary.freedBytes += result.freedBytes;
+  }
+
+  if (summary.deleted > 0) {
+    logJanitor(`pruned ${summary.deleted} runner artifact director(y/ies) older than ${Math.round(maxAgeMs / DAY_MS)}d (${(summary.freedBytes / MB).toFixed(1)} MB)`);
+  }
+  return summary;
+}
+
+export async function pruneMonitorSessionNotes(repoRoot, opts = {}) {
+  const cfg = getJanitorConfig();
+  const maxAgeMs = Number.isFinite(opts.maxAgeMs) ? opts.maxAgeMs : cfg.monitorNoteTtlMs;
+  const keep = Number.isFinite(opts.keep) ? opts.keep : cfg.monitorNoteKeep;
+  const dir = resolve(String(repoRoot || process.cwd()), ".bosun-monitor");
+  if (!safeStat(dir)) return { deleted: 0, kept: 0, freedBytes: 0 };
+  const result = await pruneByAgeAndKeep(dir, {
+    maxAgeMs,
+    keep,
+    recursive: false,
+    filter: (entry) => entry.isFile?.() && /^session-.*\.md$/i.test(entry.name),
+  });
+  if (result.deleted > 0) {
+    logJanitor(`pruned ${result.deleted} monitor session note(s) older than ${Math.round(maxAgeMs / DAY_MS)}d (${(result.freedBytes / MB).toFixed(1)} MB)`);
+  }
+  return result;
 }
 
 // ── SQLite state-ledger compaction ──────────────────────────────────────────// Tables in the state-ledger that grow unboundedly with bosun activity. Each
@@ -880,6 +982,29 @@ export async function runStorageJanitor(opts = {}) {
       );
     } catch (err) {
       summary.auditInventory = { error: err.message };
+    }
+  }
+
+  if (!skip.has("runnerArtifacts")) {
+    try {
+      summary.runnerArtifacts = await pruneRunnerArtifacts(
+        bosunDir,
+        overrides.runnerArtifacts,
+      );
+    } catch (err) {
+      summary.runnerArtifacts = { error: err.message };
+    }
+  }
+
+  if (!skip.has("monitorSessionNotes")) {
+    try {
+      const repoRoot = opts.repoRoot || (basename(bosunDir) === ".bosun" ? dirname(bosunDir) : process.cwd());
+      summary.monitorSessionNotes = await pruneMonitorSessionNotes(
+        repoRoot,
+        overrides.monitorSessionNotes,
+      );
+    } catch (err) {
+      summary.monitorSessionNotes = { error: err.message };
     }
   }
 

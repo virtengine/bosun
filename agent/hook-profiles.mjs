@@ -9,17 +9,24 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_HOOK_SCHEMA = "https://json-schema.org/draft/2020-12/schema";
 const LEGACY_BRIDGE_SNIPPET = "scripts/bosun/agent-hook-bridge.mjs";
 const DEFAULT_BRIDGE_SCRIPT_PATH = resolve(__dirname, "agent-hook-bridge.mjs");
+const PORTABLE_BRIDGE_SCRIPT_PATH = "agent/agent-hook-bridge.mjs";
 
 function getHookNodeBinary() {
   const configured = String(process.env.BOSUN_HOOK_NODE_BIN || "").trim();
   return configured || "node";
 }
 
+/**
+ * Return the bridge script path for hook configs.
+ * Uses a repo-relative path by default so configs are portable across
+ * machines and operating systems.  An explicit BOSUN_HOOK_BRIDGE_PATH
+ * env-var override is honoured when set.
+ */
 function getHookBridgeScriptPath() {
   const configured = String(
     process.env.BOSUN_HOOK_BRIDGE_PATH || "",
   ).trim();
-  return configured || DEFAULT_BRIDGE_SCRIPT_PATH;
+  return configured || PORTABLE_BRIDGE_SCRIPT_PATH;
 }
 
 export const HOOK_PROFILES = Object.freeze([
@@ -154,7 +161,13 @@ function isPortableNodeCommandToken(token) {
 
 function isPortableBridgeScriptToken(token) {
   const raw = String(token || "");
-  return raw === DEFAULT_BRIDGE_SCRIPT_PATH || raw === LEGACY_BRIDGE_SNIPPET;
+  // A bridge token is portable if it's the well-known relative path.
+  // Any absolute path (including the legacy DEFAULT_BRIDGE_SCRIPT_PATH) is
+  // not portable because it embeds the machine-specific install location.
+  if (raw === PORTABLE_BRIDGE_SCRIPT_PATH) return true;
+  // Also accept the legacy snippet path (already relative).
+  if (raw === LEGACY_BRIDGE_SNIPPET) return true;
+  return false;
 }
 
 function isCopilotBridgeCommandPortable(commandTokens) {

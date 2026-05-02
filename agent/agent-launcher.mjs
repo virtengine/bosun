@@ -68,6 +68,7 @@ import { resolveCodexProfileRuntime, readCodexConfigRuntimeDefaults } from "../s
 import { buildTaskWritableRoots } from "../shell/codex-config.mjs";
 import {
   importCopilotSdkModuleWithCompat,
+  resolveCopilotSdkAuthOptions,
   resolveCopilotCliLaunchConfig,
 } from "../shell/copilot-shell.mjs";
 import openaiNativeAdapter from "../shell/openai-native-adapter.mjs";
@@ -1106,8 +1107,6 @@ function injectGitHubSessionEnv(baseEnv, token) {
   if (!resolved) return env;
   if (!env.GH_TOKEN) env.GH_TOKEN = resolved;
   if (!env.GITHUB_TOKEN) env.GITHUB_TOKEN = resolved;
-  if (!env.GITHUB_PAT) env.GITHUB_PAT = resolved;
-  if (!env.COPILOT_CLI_TOKEN) env.COPILOT_CLI_TOKEN = resolved;
   return env;
 }
 
@@ -1767,6 +1766,18 @@ function isDisabled(name) {
   return envFlagEnabled(process.env[adapter.envDisableKey]);
 }
 
+function getFallbackUnusableReason(name, env = process.env) {
+  if (name !== "codex") return "";
+  const prerequisite = hasSdkPrerequisites("codex", env);
+  if (prerequisite?.ok !== false) return "";
+  const providerName =
+    String(prerequisite?.provider || prerequisite?.providerId || "").trim() || "azure";
+  const envKey =
+    String(prerequisite?.envKey || "AZURE_OPENAI_API_KEY").trim()
+      || "AZURE_OPENAI_API_KEY";
+  return `missing ${envKey} for ${providerName}`;
+}
+
 /**
  * SDKs marked dead for the lifetime of this process. We populate this when an
  * SDK returns a deterministic 400-class auth/configuration error (e.g.
@@ -2022,11 +2033,12 @@ export function resolvePoolSdkName() {
 
   // 4. Fallback chain: first non-disabled SDK
   for (const name of getSdkFallbackOrder()) {
-    if (!isDisabled(name)) {
-      resolvedSdkName = name;
-      logResolution(name, "fallback chain");
-      return resolvedSdkName;
-    }
+    if (isDisabled(name)) continue;
+    const unusableReason = getFallbackUnusableReason(name);
+    if (unusableReason) continue;
+    resolvedSdkName = name;
+    logResolution(name, "fallback chain");
+    return resolvedSdkName;
   }
 
   // All disabled — default to codex anyway (will fail at load time)
@@ -2331,6 +2343,10 @@ async function launchCodexThread(prompt, cwd, timeoutMs, extra = {}) {
 
     const output =
       finalResponse.trim() || "(Agent completed with no text output)";
+    const explicitCompletionSignal = hasExplicitCompletionSignal({
+      output,
+      items: allItems,
+    });
     if (steerKey) unregisterActiveSession(steerKey);
     return {
       success: true,
@@ -2339,6 +2355,7 @@ async function launchCodexThread(prompt, cwd, timeoutMs, extra = {}) {
       error: null,
       sdk: "codex",
       threadId: thread.id || null,
+      _hasExplicitCompletionSignal: explicitCompletionSignal,
       hotPath: {
         exec: finalizedItems.hotPath,
       },
@@ -2491,18 +2508,11 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
     };
   }
 
-  // ── 2. Detect auth token ─────────────────────────────────────────────────
   const runtimeEnv =
     envOverrides && typeof envOverrides === "object"
       ? { ...process.env, ...envOverrides }
       : process.env;
   const runtimeSessionEnv = applyNodeWarningSuppressionEnv(runtimeEnv);
-  const token =
-    runtimeSessionEnv.COPILOT_CLI_TOKEN ||
-    runtimeSessionEnv.GITHUB_TOKEN ||
-    runtimeSessionEnv.GH_TOKEN ||
-    runtimeSessionEnv.GITHUB_PAT ||
-    undefined;
 
   // ── 3. Create & start ephemeral client (LOCAL mode) ──────────────────────
   // Use stdio transport (local) by default for full model/tool access.
@@ -2534,6 +2544,9 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
         // Remote mode: connect to existing server (limited model/tool access)
         clientOpts = { cliUrl, env: clientEnv };
       } else {
+        const localAuth = await resolveCopilotSdkAuthOptions({
+          env: runtimeSessionEnv,
+        });
         // Local mode (default): stdio for full capability
         // Write temp MCP config if resolved MCP servers are available
         let mcpConfigPath = null;
@@ -2556,9 +2569,12 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
           cliArgs: cliLaunch.cliArgs,
           useStdio: true,
         };
-        if (token) {
-          clientOpts.githubToken = token;
-          clientOpts.token = token;
+        if (localAuth?.githubToken) {
+          clientOpts.githubToken = localAuth.githubToken;
+          clientOpts.token = localAuth.token;
+        }
+        if (typeof localAuth?.useLoggedInUser === "boolean") {
+          clientOpts.useLoggedInUser = localAuth.useLoggedInUser;
         }
         if (cliLaunch.cliPath) clientOpts.cliPath = cliLaunch.cliPath;
       }
@@ -2810,6 +2826,10 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
       error: null,
       sdk: "copilot",
       threadId: copilotSessionId,
+      _hasExplicitCompletionSignal: hasExplicitCompletionSignal({
+        output,
+        items: allItems,
+      }),
     };
   } catch (err) {
     const errMsg = String(err?.message || err || "");
@@ -2838,6 +2858,10 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
         error: null,
         sdk: "copilot",
         threadId: resumeThreadId,
+        _hasExplicitCompletionSignal: hasExplicitCompletionSignal({
+          output: finalResponse.trim(),
+          items: allItems,
+        }),
       };
     }
 
@@ -3242,6 +3266,10 @@ async function launchClaudeThread(prompt, cwd, timeoutMs, extra = {}) {
       error: null,
       sdk: "claude",
       threadId: activeClaudeSessionId,
+      _hasExplicitCompletionSignal: hasExplicitCompletionSignal({
+        output,
+        items: allItems,
+      }),
     };
   } catch (err) {
     if (typeof _claudeMcpEnvCleanup === "function") _claudeMcpEnvCleanup();
@@ -3463,7 +3491,59 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
   let firstEventTimer = null;
   let firstEventTimeoutHit = false;
   let nativeEventCount = 0;
+  let nativeTerminalText = "";
+  const nativeTerminalItems = [];
+  const rememberNativeTerminalEvent = (event) => {
+    const lifecycle = String(event?.type || "").trim().toLowerCase();
+    const text = String(event?.text || event?.summary || event?.content || "").trim();
+    if (!text) return;
+    const syntheticItem = {
+      type: lifecycle === "assistant_message" ? "agent_message" : "event",
+      text,
+      summary: text ? `${lifecycle}: ${text}` : lifecycle,
+      meta: { lifecycle: lifecycle.replace(/\./g, "_") },
+    };
+    const isLifecycleTerminalEvent =
+      lifecycle === "session.stream.complete"
+      || lifecycle === "session.turn.complete"
+      || lifecycle === "session.completed";
+    const isTerminalAssistantHandoff =
+      lifecycle === "assistant_message"
+      && hasExplicitCompletionSignal({
+        output: text,
+        items: [syntheticItem],
+      });
+    if (!isLifecycleTerminalEvent && !isTerminalAssistantHandoff) {
+      return;
+    }
+    nativeTerminalText = text;
+    nativeTerminalItems.push(syntheticItem);
+  };
+  const recoverNativeTerminalResult = ({ output = "", items = [] } = {}) => {
+    const recoveredOutput = String(output || nativeTerminalText || "").trim();
+    if (!recoveredOutput) return null;
+    const recoveredItems = [
+      ...nativeTerminalItems,
+      ...(Array.isArray(items) ? items : []),
+    ];
+    if (!hasExplicitCompletionSignal({
+      output: recoveredOutput,
+      items: recoveredItems,
+    })) {
+      return null;
+    }
+    return {
+      success: true,
+      output: recoveredOutput || "(Agent completed with no text output)",
+      items: recoveredItems,
+      error: null,
+      sdk: "openai-native",
+      threadId: persistent ? logicalSessionId : null,
+      _hasExplicitCompletionSignal: true,
+    };
+  };
   const handleNativeEvent = (event) => {
+    rememberNativeTerminalEvent(event);
     if (isMeaningfulOpenaiNativeEvent(event)) {
       nativeEventCount += 1;
       if (firstEventTimer) {
@@ -3533,18 +3613,45 @@ async function launchOpenaiNativeThread(prompt, cwd, timeoutMs, extra = {}) {
       subagentMaxParallel: extra.subagentMaxParallel,
     });
     const finalResponse = String(
-      result?.finalResponse || result?.output || result?.text || "",
+      result?.finalResponse || result?.output || result?.text || nativeTerminalText || "",
     ).trim();
+    const resultItems = Array.isArray(result?.items) ? result.items : [];
+    const recoveredTerminalResult =
+      result?.success === false || result?.ok === false
+        ? recoverNativeTerminalResult({
+            output: finalResponse,
+            items: resultItems,
+          })
+        : null;
+    if (recoveredTerminalResult) {
+      console.warn(
+        `${TAG} openai-native produced an explicit terminal response before reporting failure; accepting the terminal response`,
+      );
+      return recoveredTerminalResult;
+    }
     const success = result?.success !== false && result?.ok !== false;
     return {
       success,
       output: success ? finalResponse : "",
-      items: Array.isArray(result?.items) ? result.items : [],
+      items: resultItems,
       error: success ? null : String(result?.error || finalResponse || "openai-native execution failed"),
       sdk: "openai-native",
       threadId: persistent ? logicalSessionId : null,
+      _hasExplicitCompletionSignal: success
+        ? hasExplicitCompletionSignal({
+            output: finalResponse,
+            items: resultItems,
+          })
+        : false,
     };
   } catch (err) {
+    const recoveredTerminalResult = recoverNativeTerminalResult();
+    if (recoveredTerminalResult) {
+      console.warn(
+        `${TAG} openai-native error after explicit terminal response; accepting the terminal response: ${err?.message || err}`,
+      );
+      return recoveredTerminalResult;
+    }
     const abortReason = controller.signal.aborted
       ? String(controller.signal.reason || "")
       : "";
@@ -3819,6 +3926,12 @@ async function launchOpencodeThread(prompt, cwd, timeoutMs, extra = {}) {
       error: success ? null : formatOpencodeError(finalResponse || result?.error),
       sdk: "opencode",
       threadId: persistent ? logicalSessionId : null,
+      _hasExplicitCompletionSignal: success
+        ? hasExplicitCompletionSignal({
+            output: finalResponse,
+            items: Array.isArray(result?.items) ? result.items : [],
+          })
+        : false,
     };
   } catch (err) {
     return {
@@ -3879,6 +3992,9 @@ export async function launchEphemeralThread(
     envOverrides: sessionEnv,
     slotLease,
   };
+  if (launchExtra.sdk && launchExtra.pinSdk === true) {
+    launchExtra.disableFallback = true;
+  }
 
   // ── Resolve MCP servers for this launch ──────────────────────────────────
   try {
@@ -4735,13 +4851,19 @@ async function resumeCodexThread(threadId, prompt, cwd, timeoutMs, extra = {}) {
       maxItemChars: streamSafety.maxItemChars,
     });
     const newThreadId = thread.id || threadId;
+    const output = finalResponse.trim() || "(resumed — no text output)";
+    const explicitCompletionSignal = hasExplicitCompletionSignal({
+      output,
+      items: allItems,
+    });
     return {
       success: true,
-      output: finalResponse.trim() || "(resumed — no text output)",
+      output,
       items: finalizedItems.items,
       error: null,
       sdk: "codex",
       threadId: newThreadId,
+      _hasExplicitCompletionSignal: explicitCompletionSignal,
       hotPath: {
         exec: finalizedItems.hotPath,
       },
@@ -5253,10 +5375,13 @@ const RETRY_OUTPUT_PLACEHOLDERS = new Set([
 ]);
 
 const EXPLICIT_COMPLETION_LABEL_RE = /^\s*(?:completion(?:\s+message)?|task complete|done|completed)\s*:/im;
-const EXPLICIT_COMPLETION_SIGNAL_RE = /^\s*task[_ ]complete\s*$/im;
+const EXPLICIT_COMPLETION_SIGNAL_RE = /task[_ ]complete\b/im;
 const SESSION_COMPLETE_SIGNAL_RE = /^\s*session\.(?:turn|stream)\.complete\s*:/im;
 const PLAIN_COMPLETION_PREFIX_RE = /^\s*(?:done|complete|completed|finished)\.?(?:\s|$)/i;
+const TERMINAL_BLOCKED_PREFIX_RE = /^\s*(?:blocked:|i(?:'|’)?m blocked\b|i am blocked\b)/im;
 const TERMINAL_NOOP_SUMMARY_RE = /^\s*(?:implemented and verified\.|confirmed\.\s+(?:the task work is already done|no new work remains|no additional work was needed|no additional code changes were required)|nothing new to do here\b)/im;
+const TERMINAL_REFUSAL_PREFIX_RE = /^\s*(?:i(?:'|’)?m sorry,?\s+but\s+i\s+can(?:'|’)t|i\s+can\s+help,\s+but\s+i\s+can(?:'|’)t)\b/im;
+const CONTINUATION_TRANSCRIPT_REFUSAL_RE = /(?:impersonate prior tool execution|continue a tool-use transcript|tool-call transcript|transcript dump|pasted transcript|pretend prior tool calls happened|silently continue a broken transcript|ask me again in a clean turn|normal workspace session|stable workspace session|live editable session|reliable command\/file mutation state|workspace mutation state)/i;
 const TERMINAL_NOOP_INDICATORS = [
   /\balready implemented\b/i,
   /\balready complete(?:d)?\b/i,
@@ -5272,14 +5397,25 @@ const TERMINAL_NOOP_INDICATORS = [
   /\bgit status --short\b.*\bclean\b/i,
 ];
 
-function hasExplicitCompletionSignal(result = {}) {
-  const hasLifecycleCompletionSignal = Array.isArray(result?.items)
-    && result.items.some((item) => {
-      const lifecycle = String(item?.meta?.lifecycle || item?.lifecycle || "").trim().toLowerCase();
-      return lifecycle === "session_turn_complete"
-        || lifecycle === "session_stream_complete"
-        || lifecycle === "session_completed";
-    });
+const STRUCTURED_COMPLETION_HANDOFF_PATTERNS = [
+  [/\bsummary\b/i, /\blikely touched files\b/i, /\bcompact editor handoff\b/i],
+  [/\bvalidation run\b/i, /\brepository touched\b/i],
+  [/\bonly completed the .* phase\b/i, /\bwhat i changed\b/i, /\bwhat it verifies\b/i],
+];
+
+const STRUCTURED_BLOCKED_HANDOFF_PATTERNS = [
+  [/\bblocked:/i, /\bcompletion notes\b/i],
+  [/\bstill blocked\b/i, /\bstate summary\b/i],
+  [/\bblocked:/i, /\brepositories touched\b/i],
+  [/\bblocked:/i, /\bworkspace remained clean\b/i],
+  [
+    /\bblocked:/i,
+    /\bworkspace remain(?:s|ed) clean\b/i,
+    /\b(?:no files were modified|no code changes were applied|no implementation was applied|have not applied any implementation changes)\b/i,
+  ],
+];
+
+function collectResultText(result = {}) {
   const outputText = [
     result?.output,
     result?.summary,
@@ -5309,7 +5445,19 @@ function hasExplicitCompletionSignal(result = {}) {
       })
       .join("\n")
     : "";
-  const text = `${outputText}\n${itemText}`.trim();
+  return `${outputText}\n${itemText}`.trim();
+}
+
+function hasExplicitCompletionSignal(result = {}) {
+  if (result?._hasExplicitCompletionSignal === true) return true;
+  const hasLifecycleCompletionSignal = Array.isArray(result?.items)
+    && result.items.some((item) => {
+      const lifecycle = String(item?.meta?.lifecycle || item?.lifecycle || "").trim().toLowerCase();
+      return lifecycle === "session_turn_complete"
+        || lifecycle === "session_stream_complete"
+        || lifecycle === "session_completed";
+    });
+  const text = collectResultText(result);
   const noopIndicatorCount = text
     ? TERMINAL_NOOP_INDICATORS.reduce(
       (count, pattern) => count + (pattern.test(text) ? 1 : 0),
@@ -5317,13 +5465,36 @@ function hasExplicitCompletionSignal(result = {}) {
     )
     : 0;
   if (!text) return hasLifecycleCompletionSignal;
+  const hasStructuredCompletionHandoff = STRUCTURED_COMPLETION_HANDOFF_PATTERNS.some((group) =>
+    group.every((pattern) => pattern.test(text)),
+  );
+  const hasStructuredBlockedHandoff = STRUCTURED_BLOCKED_HANDOFF_PATTERNS.some((group) =>
+    group.every((pattern) => pattern.test(text)),
+  );
   return SESSION_COMPLETE_SIGNAL_RE.test(text)
     || hasLifecycleCompletionSignal
     || EXPLICIT_COMPLETION_LABEL_RE.test(text)
     || EXPLICIT_COMPLETION_SIGNAL_RE.test(text)
+    || TERMINAL_BLOCKED_PREFIX_RE.test(text)
     || PLAIN_COMPLETION_PREFIX_RE.test(text)
+    || hasStructuredCompletionHandoff
+    || hasStructuredBlockedHandoff
     || TERMINAL_NOOP_SUMMARY_RE.test(text)
     || noopIndicatorCount >= 2;
+}
+
+function getContinuationRefusalMessage(result = {}) {
+  const text = collectResultText(result);
+  if (!text || !TERMINAL_REFUSAL_PREFIX_RE.test(text)) {
+    return "";
+  }
+  if (
+    CONTINUATION_TRANSCRIPT_REFUSAL_RE.test(text)
+    || /\bcan(?:'|’)t complete this task as requested\b/i.test(text)
+  ) {
+    return text.split(/\n\s*\n/, 1)[0]?.trim() || text;
+  }
+  return "";
 }
 
 const RETRY_RECONNECT_PATTERNS = [
@@ -5508,7 +5679,7 @@ export async function execWithRetry(prompt, options = {}) {
         : isContinuationAttempt && typeof buildContinuePrompt === "function"
           ? buildContinuePrompt(lastResult, attempt)
           : isCompletionSignalContinue
-            ? `# CONTINUE WORK — TASK IS NOT COMPLETE\n\nContinue from your current session state and finish the remaining work.\n\nReturn ONLY when all required work is done and include an explicit completion signal line such as one of:\n- Completion: <summary>\n- Completion message: <summary>\n- Task complete: <summary>\n- DONE: <summary>\n- COMPLETED: <summary>\n- task_complete\n\nDo not stop after partial progress.`
+            ? `# CONTINUE WORK — TASK IS NOT COMPLETE\n\nContinue from the current workspace state and your current session state to finish the remaining work. If any prior tool transcript is missing or compressed, re-open the relevant files or rerun focused checks instead of claiming you cannot continue.\n\nReturn ONLY when all required work is done and include an explicit completion signal line such as one of:\n- Completion: <summary>\n- Completion message: <summary>\n- Task complete: <summary>\n- DONE: <summary>\n- COMPLETED: <summary>\n- task_complete\n\nDo not stop after partial progress.`
             : isIdleContinue
               ? "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end."
           : typeof buildRetryPrompt === "function"
@@ -5649,7 +5820,31 @@ export async function execWithRetry(prompt, options = {}) {
         continue;
       }
 
-      if (enforceCompletionSignal && !hasExplicitCompletionSignal(lastResult)) {
+      const continuationRefusalMessage =
+        isContinuationAttempt || continuesUsed > 0 || attempt > 1
+          ? getContinuationRefusalMessage(lastResult)
+          : "";
+      if (continuationRefusalMessage) {
+        forceNewThread(taskKey, `continuation_refusal_attempt_${attempt}`);
+        lastResult = {
+          ...lastResult,
+          success: false,
+          error: `Agent refused continuation: ${continuationRefusalMessage}`,
+          blockedReason: "continuation_refusal",
+          _continuationRefusal: true,
+        };
+      }
+
+      if (!lastResult.success) {
+        const retriesLeft = totalAttempts + continuesUsed - attempt;
+        if (retriesLeft > 0) {
+          console.warn(
+            `${TAG} attempt ${attempt} hit continuation refusal for "${taskKey}" — forcing a fresh thread retry (${retriesLeft} left)`,
+          );
+        }
+      }
+
+      if (lastResult.success && enforceCompletionSignal && !hasExplicitCompletionSignal(lastResult)) {
         if (continuesUsed < maxContinues) {
           continuesUsed++;
           console.log(
@@ -5674,7 +5869,9 @@ export async function execWithRetry(prompt, options = {}) {
         };
       }
 
-      return { ...lastResult, attempts: attempt, continues: continuesUsed };
+      if (lastResult.success) {
+        return { ...lastResult, attempts: attempt, continues: continuesUsed };
+      }
     }
 
     // Failed — should we retry?
@@ -5864,4 +6061,5 @@ export const __testables = {
   hasExplicitCompletionSignal,
   normalizeRetryFailureFingerprint,
   classifyRetryCircuitBreak,
+  injectGitHubSessionEnv,
 };

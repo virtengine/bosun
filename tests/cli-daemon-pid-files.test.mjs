@@ -101,10 +101,14 @@ describe("cli daemon pid tracking", () => {
 
   it("forwards Ctrl+C shutdown signals to the monitor child instead of waiting indefinitely", () => {
     expect(cliSource).toContain("function requestMonitorChildShutdown(signal = \"SIGINT\")");
+    expect(cliSource).toContain("function installMonitorChildSignalHandlers() {");
+    expect(cliSource).toContain("if (monitorChildSignalHandlersInstalled) return;");
     expect(cliSource).toContain("shutdownSignalCount > 1 ? \"SIGTERM\" : signal");
     expect(cliSource).toContain("monitorChild.kill(requestedSignal)");
     expect(cliSource).toContain("monitorShutdownForceTimer = setTimeout(() => {");
     expect(cliSource).toContain("child.kill(\"SIGTERM\")");
+    expect(cliSource).toContain("installMonitorChildSignalHandlers();\n  await runMonitor();");
+    expect(cliSource).toContain("async function startDaemon() {\n  installMonitorChildSignalHandlers();");
   });
 
 

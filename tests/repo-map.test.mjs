@@ -197,6 +197,30 @@ describe("repo-map", () => {
     expect(frame).not.toContain("## Repo Topology");
   });
 
+  it("scopes architect/editor repo topology to declared repo areas", () => {
+    const frame = buildArchitectEditorFrame({
+      executionRole: "editor",
+      repoAreas: ["workflow", "cli"],
+      repoMap: {
+        root: "C:/repo",
+        files: [
+          { path: "workflow/workflow-engine.mjs", summary: "workflow runtime" },
+          { path: "voice/voice-tools.mjs", summary: "voice adapter" },
+          { path: "cli.mjs", summary: "command entrypoint" },
+        ],
+      },
+    }, "agent");
+
+    expect(frame).toContain("Restrict discovery and edits to these repo areas");
+    expect(frame).toContain("Only inspect tests that directly cover these repo areas");
+    expect(frame).toContain("Avoid unrelated test suites from other product areas");
+    expect(frame).toContain("- workflow");
+    expect(frame).toContain("- cli");
+    expect(frame).toContain("workflow/workflow-engine.mjs");
+    expect(frame).toContain("cli.mjs");
+    expect(frame).not.toContain("voice/voice-tools.mjs");
+  });
+
   it("does not inject repo topology when no architect or editor role is active", () => {
     const frame = buildArchitectEditorFrame({
       repoMap: {
@@ -233,6 +257,4 @@ describe("repo-map", () => {
     expect(repoMap.files[0].symbols).toContain("tokenizeQuery");
   });
 });
-
-
 

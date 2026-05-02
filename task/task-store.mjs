@@ -2823,7 +2823,7 @@ export function getTaskComments(taskId) {
   return normalizeTaskComments(task.comments || []);
 }
 
-export function linkTaskWorkflowRun(taskId, workflowRun = {}) {
+export function linkTaskWorkflowRun(taskId, workflowRun = {}, options = {}) {
   ensureLoaded();
   const task = _store.tasks[taskId];
   if (!task) return null;
@@ -2836,7 +2836,9 @@ export function linkTaskWorkflowRun(taskId, workflowRun = {}) {
   const dedup = existing.filter((entry) => String(entry?.runId || "") !== run.runId);
   const nextWorkflowRuns = normalizeWorkflowRunLinks([...dedup, run]);
   task.workflowRuns = nextWorkflowRuns;
-  const shouldPromoteLatest = shouldPromoteLatestWorkflowRun(task, run, nextWorkflowRuns);
+  const shouldPromoteLatest =
+    options?.forcePromoteLatest === true
+      || shouldPromoteLatestWorkflowRun(task, run, nextWorkflowRuns);
   const nextLatestNodeId = resolveLatestWorkflowNodeId(task, run, shouldPromoteLatest);
   task.topology = normalizeTaskTopology({
     ...(task.topology && typeof task.topology === "object" ? task.topology : {}),

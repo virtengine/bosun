@@ -54,6 +54,42 @@ function countStructuredParts(parts = [], targetType = "") {
     String(entry?.type || "").trim().toLowerCase() === normalizedTarget).length;
 }
 
+const PROVIDER_SESSION_COMPLETE_SIGNAL_RE = /\btask_complete\b|<\|return\|>|<\/final_response>/i;
+const PROVIDER_SESSION_COMPLETION_LABEL_RE = /^(?:completion|completion message|task complete|done|completed)\s*:/im;
+const PROVIDER_SESSION_BLOCKED_PREFIX_RE = /^\s*blocked\s*:/im;
+
+function collectProviderTurnText(result = {}) {
+  const parts = [
+    toTrimmedString(result?.finalResponse || result?.output || result?.text || ""),
+  ];
+  for (const item of Array.isArray(result?.items) ? result.items : []) {
+    const itemText = toTrimmedString(
+      item?.text
+      || item?.content
+      || item?.summary
+      || (Array.isArray(item?.content) ? extractTextParts(item.content).join("\n") : ""),
+    );
+    if (itemText) parts.push(itemText);
+  }
+  return parts.filter(Boolean).join("\n").trim();
+}
+
+function hasProviderTurnCompletionSignal(result = {}) {
+  const hasLifecycleSignal = Array.isArray(result?.items)
+    && result.items.some((item) => {
+      const lifecycle = toTrimmedString(item?.meta?.lifecycle || item?.lifecycle || "").toLowerCase();
+      return lifecycle === "session_turn_complete"
+        || lifecycle === "session_stream_complete"
+        || lifecycle === "session_completed";
+    });
+  const text = collectProviderTurnText(result);
+  if (!text) return hasLifecycleSignal;
+  return hasLifecycleSignal
+    || PROVIDER_SESSION_COMPLETE_SIGNAL_RE.test(text)
+    || PROVIDER_SESSION_COMPLETION_LABEL_RE.test(text)
+    || PROVIDER_SESSION_BLOCKED_PREFIX_RE.test(text);
+}
+
 function summarizeCompactedAssistantStep(message = {}) {
   const parts = Array.isArray(message?.content) ? message.content : [];
   const toolCallCount = Math.max(
@@ -491,6 +527,19 @@ export function createProviderSession(providerId = null, options = {}) {
           });
         }
       }
+      const turnTimeoutMs = Math.max(0, Number(turnOptions.timeoutMs ?? options.timeoutMs) || 0);
+      const parentAbortController = turnOptions.abortController || options.abortController || null;
+      const turnAbortController = createLinkedAbortController(parentAbortController);
+      let turnTimeoutTimer = null;
+      if (turnTimeoutMs > 0 && !turnAbortController.signal.aborted) {
+        turnTimeoutTimer = setTimeout(() => {
+          if (turnAbortController.signal.aborted) return;
+          turnAbortController.abort(`provider_turn_timeout:${turnTimeoutMs}ms`);
+        }, turnTimeoutMs);
+        if (typeof turnTimeoutTimer.unref === "function") {
+          turnTimeoutTimer.unref();
+        }
+      }
       const inputPayload = buildProviderTurnPayload(message, {
         providerId: provider,
         model: turnOptions.model || activeModel || runtime.provider?.defaultModel || null,
@@ -520,157 +569,175 @@ export function createProviderSession(providerId = null, options = {}) {
         ...inputPayload,
         messages: workingMessages,
       };
-      const turnAbortController = turnOptions.abortController || options.abortController || null;
-      for (let round = 0; round <= maxToolRounds; round += 1) {
-        const result = await raceWithAbortSignal(
-          typeof runner === "function"
-            ? runner(lastPayload, {
-              ...options,
-              ...turnOptions,
-              provider,
-              providerEntry: runtime.provider || null,
-              adapter,
-            })
-            : adapter.exec(lastPayload, {
-              ...options,
-              ...turnOptions,
-              provider,
-              providerEntry: runtime.provider || null,
-            }),
-          turnAbortController,
-        );
-        const normalized = normalizeProviderResult(result, {
+      try {
+        for (let round = 0; round <= maxToolRounds; round += 1) {
+          const result = await raceWithAbortSignal(
+            typeof runner === "function"
+              ? runner(lastPayload, {
+                ...options,
+                ...turnOptions,
+                provider,
+                providerEntry: runtime.provider || null,
+                adapter,
+              })
+              : adapter.exec(lastPayload, {
+                ...options,
+                ...turnOptions,
+                provider,
+                providerEntry: runtime.provider || null,
+              }),
+            turnAbortController,
+          );
+          const normalized = normalizeProviderResult(result, {
+            providerId: provider,
+            model: lastPayload.model,
+            sessionId: lastPayload.sessionId,
+            threadId: lastPayload.threadId,
+          });
+          finalNormalized = normalized;
+          aggregatedUsage = sumUsage(aggregatedUsage, normalized.usage);
+          const roundAssistantMessages = buildAssistantMessagesFromResult(normalized, round);
+          aggregatedMessages.push(...roundAssistantMessages);
+          aggregatedToolCalls.push(...(Array.isArray(normalized.toolCalls) ? normalized.toolCalls.map((entry) => cloneValue(entry)) : []));
+          aggregatedToolResults.push(...(Array.isArray(normalized.toolResults) ? normalized.toolResults.map((entry) => cloneValue(entry)) : []));
+          aggregatedReasoning.push(...(Array.isArray(normalized.reasoning) ? normalized.reasoning.map((entry) => cloneValue(entry)) : []));
+
+          if (hasProviderTurnCompletionSignal({
+            finalResponse: normalized.finalResponse || normalized.output,
+            items: roundAssistantMessages,
+          })) {
+            workingMessages = [...workingMessages, ...roundAssistantMessages];
+            break;
+          }
+
+          if (!Array.isArray(normalized.toolCalls) || normalized.toolCalls.length === 0 || typeof executeTool !== "function") {
+            workingMessages = [...workingMessages, ...roundAssistantMessages];
+            break;
+          }
+
+          const toolExecutions = await raceWithAbortSignal(
+            executeProviderToolCalls(normalized.toolCalls, executeTool, {
+              sessionId: normalized.sessionId || lastPayload.sessionId || activeSessionId,
+              threadId: normalized.threadId || lastPayload.threadId || activeThreadId,
+              providerId: provider,
+              providerSelection:
+                toTrimmedString(
+                  turnOptions.providerSelection
+                  || options.providerSelection
+                  || turnOptions.providerConfig?.selectionId
+                  || options.providerConfig?.selectionId
+                  || turnOptions.provider
+                  || options.provider
+                  || options.providerConfig?.providerId
+                  || options.providerConfig?.provider
+                  || provider,
+                ) || null,
+              adapterName:
+                toTrimmedString(
+                  turnOptions.adapterName
+                  || options.adapterName
+                  || adapter?.name
+                  || runtime.provider?.adapterId
+                  || "",
+                ) || null,
+              providerConfig:
+                turnOptions.providerConfig && typeof turnOptions.providerConfig === "object" && !Array.isArray(turnOptions.providerConfig)
+                  ? cloneValue(turnOptions.providerConfig)
+                  : (
+                    options.providerConfig && typeof options.providerConfig === "object" && !Array.isArray(options.providerConfig)
+                      ? cloneValue(options.providerConfig)
+                      : null
+                  ),
+              model:
+                toTrimmedString(
+                  turnOptions.providerConfig?.model
+                  || options.providerConfig?.model
+                  || lastPayload.model
+                  || turnOptions.model
+                  || options.model
+                  || options.providerConfig?.model
+                  || "",
+                ) || null,
+              sessionManager: turnOptions.sessionManager || options.sessionManager || null,
+              requestedBy: turnOptions.requestedBy || options.requestedBy || null,
+              taskKey: turnOptions.taskKey || options.taskKey || null,
+              cwd: turnOptions.cwd || options.cwd || null,
+              repoRoot: turnOptions.repoRoot || options.repoRoot || turnOptions.cwd || options.cwd || null,
+              runId: turnOptions.runId || options.runId || null,
+              turnId: turnOptions.turnId || options.turnId || null,
+              onEvent: turnOptions.onEvent || options.onEvent,
+              approval: turnOptions.approval || options.approval || null,
+              agentProfileId: turnOptions.agentProfileId || options.agentProfileId || null,
+              subagentMaxParallel: turnOptions.subagentMaxParallel || options.subagentMaxParallel || null,
+              abortController: turnAbortController,
+            }, emitSessionEvent),
+            turnAbortController,
+          );
+          const toolResultMessages = buildToolResultMessages(normalized.toolCalls, toolExecutions, round);
+          aggregatedToolResults.push(...toolResultMessages.flatMap((entry) => entry.content || []).map((entry, index) => ({
+            id: entry.id || `provider-tool-result-entry-${round + 1}-${index + 1}`,
+            type: "tool_result",
+            toolCallId: entry.toolCallId,
+            name: entry.name || null,
+            output: cloneValue(entry.output),
+            isError: entry.is_error === true,
+            status: entry.status || null,
+          })));
+          workingMessages = [
+            ...workingMessages,
+            ...roundAssistantMessages,
+            ...toolResultMessages,
+          ];
+          lastPayload = buildProviderTurnPayload({
+            providerId: provider,
+            model: lastPayload.model,
+            messages: workingMessages,
+            metadata: lastPayload.metadata,
+            tools: lastPayload.tools,
+            reasoningEffort: lastPayload.reasoningEffort,
+            sessionId: normalized.sessionId || lastPayload.sessionId,
+            threadId: normalized.threadId || lastPayload.threadId,
+          }, {
+            providerId: provider,
+            model: lastPayload.model,
+          });
+        }
+        const normalized = finalNormalized || normalizeProviderResult({}, {
           providerId: provider,
           model: lastPayload.model,
           sessionId: lastPayload.sessionId,
           threadId: lastPayload.threadId,
         });
-        finalNormalized = normalized;
-        aggregatedUsage = sumUsage(aggregatedUsage, normalized.usage);
-        aggregatedMessages.push(...buildAssistantMessagesFromResult(normalized, round));
-        aggregatedToolCalls.push(...(Array.isArray(normalized.toolCalls) ? normalized.toolCalls.map((entry) => cloneValue(entry)) : []));
-        aggregatedToolResults.push(...(Array.isArray(normalized.toolResults) ? normalized.toolResults.map((entry) => cloneValue(entry)) : []));
-        aggregatedReasoning.push(...(Array.isArray(normalized.reasoning) ? normalized.reasoning.map((entry) => cloneValue(entry)) : []));
-
-        if (!Array.isArray(normalized.toolCalls) || normalized.toolCalls.length === 0 || typeof executeTool !== "function") {
-          workingMessages = [...workingMessages, ...buildAssistantMessagesFromResult(normalized, round)];
-          break;
+        const finalError = normalized.error || (normalized.success === false
+          ? toTrimmedString(normalized.finalResponse || normalized.output || "provider_error") || "provider_error"
+          : null);
+        const finalSuccess = normalized.success !== false
+          && !finalError
+          && !["failed", "error"].includes(toTrimmedString(normalized.status).toLowerCase());
+        const finalMessages = workingMessages.length > 0 ? workingMessages : buildAssistantMessagesFromResult(normalized, 0);
+        messageHistory = buildCompactedContinuationHistory(finalMessages);
+        activeModel = normalized.model || lastPayload.model || activeModel;
+        activeSessionId = normalized.sessionId || lastPayload.sessionId || activeSessionId;
+        activeThreadId = normalized.threadId || lastPayload.threadId || activeThreadId || activeSessionId;
+        return {
+          ...normalized,
+          success: finalSuccess,
+          items: aggregatedMessages.length > 0 ? aggregatedMessages : normalized.items,
+          usage: aggregatedUsage || normalized.usage,
+          toolCalls: aggregatedToolCalls.length > 0 ? aggregatedToolCalls : normalized.toolCalls,
+          toolResults: aggregatedToolResults.length > 0 ? aggregatedToolResults : normalized.toolResults,
+          reasoning: aggregatedReasoning.length > 0 ? aggregatedReasoning : normalized.reasoning,
+          reasoningText:
+            aggregatedReasoning.length > 0
+              ? aggregatedReasoning.map((entry) => toTrimmedString(entry?.text || entry?.content || "")).filter(Boolean).join("\n")
+              : normalized.reasoningText,
+          error: finalError,
+        };
+      } finally {
+        if (turnTimeoutTimer) {
+          clearTimeout(turnTimeoutTimer);
         }
-
-        const toolExecutions = await executeProviderToolCalls(normalized.toolCalls, executeTool, {
-          sessionId: normalized.sessionId || lastPayload.sessionId || activeSessionId,
-          threadId: normalized.threadId || lastPayload.threadId || activeThreadId,
-          providerId: provider,
-          providerSelection:
-            toTrimmedString(
-              turnOptions.providerSelection
-              || options.providerSelection
-              || turnOptions.providerConfig?.selectionId
-              || options.providerConfig?.selectionId
-              || turnOptions.provider
-              || options.provider
-              || options.providerConfig?.providerId
-              || options.providerConfig?.provider
-              || provider,
-            ) || null,
-          adapterName:
-            toTrimmedString(
-              turnOptions.adapterName
-              || options.adapterName
-              || adapter?.name
-              || runtime.provider?.adapterId
-              || "",
-            ) || null,
-          providerConfig:
-            turnOptions.providerConfig && typeof turnOptions.providerConfig === "object" && !Array.isArray(turnOptions.providerConfig)
-              ? cloneValue(turnOptions.providerConfig)
-              : (
-                options.providerConfig && typeof options.providerConfig === "object" && !Array.isArray(options.providerConfig)
-                  ? cloneValue(options.providerConfig)
-                  : null
-              ),
-          model:
-            toTrimmedString(
-              turnOptions.providerConfig?.model
-              || options.providerConfig?.model
-              || lastPayload.model
-              || turnOptions.model
-              || options.model
-              || options.providerConfig?.model
-              || "",
-            ) || null,
-          sessionManager: turnOptions.sessionManager || options.sessionManager || null,
-          requestedBy: turnOptions.requestedBy || options.requestedBy || null,
-          taskKey: turnOptions.taskKey || options.taskKey || null,
-          cwd: turnOptions.cwd || options.cwd || null,
-          repoRoot: turnOptions.repoRoot || options.repoRoot || turnOptions.cwd || options.cwd || null,
-          runId: turnOptions.runId || options.runId || null,
-          turnId: turnOptions.turnId || options.turnId || null,
-          onEvent: turnOptions.onEvent || options.onEvent,
-          approval: turnOptions.approval || options.approval || null,
-          agentProfileId: turnOptions.agentProfileId || options.agentProfileId || null,
-          subagentMaxParallel: turnOptions.subagentMaxParallel || options.subagentMaxParallel || null,
-        }, emitSessionEvent);
-        const toolResultMessages = buildToolResultMessages(normalized.toolCalls, toolExecutions, round);
-        aggregatedToolResults.push(...toolResultMessages.flatMap((entry) => entry.content || []).map((entry, index) => ({
-          id: entry.id || `provider-tool-result-entry-${round + 1}-${index + 1}`,
-          type: "tool_result",
-          toolCallId: entry.toolCallId,
-          name: entry.name || null,
-          output: cloneValue(entry.output),
-          isError: entry.is_error === true,
-          status: entry.status || null,
-        })));
-        workingMessages = [
-          ...workingMessages,
-          ...buildAssistantMessagesFromResult(normalized, round),
-          ...toolResultMessages,
-        ];
-        lastPayload = buildProviderTurnPayload({
-          providerId: provider,
-          model: lastPayload.model,
-          messages: workingMessages,
-          metadata: lastPayload.metadata,
-          tools: lastPayload.tools,
-          reasoningEffort: lastPayload.reasoningEffort,
-          sessionId: normalized.sessionId || lastPayload.sessionId,
-          threadId: normalized.threadId || lastPayload.threadId,
-        }, {
-          providerId: provider,
-          model: lastPayload.model,
-        });
       }
-      const normalized = finalNormalized || normalizeProviderResult({}, {
-        providerId: provider,
-        model: lastPayload.model,
-        sessionId: lastPayload.sessionId,
-        threadId: lastPayload.threadId,
-      });
-      const finalError = normalized.error || (normalized.success === false
-        ? toTrimmedString(normalized.finalResponse || normalized.output || "provider_error") || "provider_error"
-        : null);
-      const finalSuccess = normalized.success !== false
-        && !finalError
-        && !["failed", "error"].includes(toTrimmedString(normalized.status).toLowerCase());
-      const finalMessages = workingMessages.length > 0 ? workingMessages : buildAssistantMessagesFromResult(normalized, 0);
-      messageHistory = buildCompactedContinuationHistory(finalMessages);
-      activeModel = normalized.model || lastPayload.model || activeModel;
-      activeSessionId = normalized.sessionId || lastPayload.sessionId || activeSessionId;
-      activeThreadId = normalized.threadId || lastPayload.threadId || activeThreadId || activeSessionId;
-      return {
-        ...normalized,
-        success: finalSuccess,
-        items: aggregatedMessages.length > 0 ? aggregatedMessages : normalized.items,
-        usage: aggregatedUsage || normalized.usage,
-        toolCalls: aggregatedToolCalls.length > 0 ? aggregatedToolCalls : normalized.toolCalls,
-        toolResults: aggregatedToolResults.length > 0 ? aggregatedToolResults : normalized.toolResults,
-        reasoning: aggregatedReasoning.length > 0 ? aggregatedReasoning : normalized.reasoning,
-        reasoningText:
-          aggregatedReasoning.length > 0
-            ? aggregatedReasoning.map((entry) => toTrimmedString(entry?.text || entry?.content || "")).filter(Boolean).join("\n")
-            : normalized.reasoningText,
-        error: finalError,
-      };
     },
     normalizeStreamEvent(event, eventOptions = {}) {
       return normalizeProviderStreamEnvelope(event, {

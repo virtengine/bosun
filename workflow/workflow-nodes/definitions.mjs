@@ -373,14 +373,38 @@ function evaluateTaskAssignedTriggerConfig(config = {}, eventData = {}) {
   return triggered;
 }
 
+function listManagedBosunWorktreeRoots(repoRoot) {
+  const normalizedRepoRoot = resolve(String(repoRoot || process.cwd()));
+  const roots = new Set([
+    resolve(normalizedRepoRoot, ".bosun", "worktrees"),
+  ]);
+  try {
+    const output = execGitArgsSync(["worktree", "list", "--porcelain"], {
+      cwd: normalizedRepoRoot,
+      encoding: "utf8",
+      timeout: 10000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    for (const line of String(output || "").split(/\r?\n/)) {
+      if (!line.startsWith("worktree ")) continue;
+      const attachedRoot = resolve(line.slice("worktree ".length).trim());
+      if (!attachedRoot) continue;
+      roots.add(resolve(attachedRoot, ".bosun", "worktrees"));
+    }
+  } catch {
+    // Best-effort only. Fall back to the repo-local managed root.
+  }
+  return [...roots];
+}
+
 function isManagedBosunWorktree(worktreePath, repoRoot) {
   const resolvedWorktree = resolve(String(worktreePath || ""));
-  const managedRoot = resolve(String(repoRoot || process.cwd()), ".bosun", "worktrees");
-  return (
+  const managedRoots = listManagedBosunWorktreeRoots(repoRoot);
+  return managedRoots.some((managedRoot) => (
     resolvedWorktree === managedRoot ||
     resolvedWorktree.startsWith(`${managedRoot}\\`) ||
     resolvedWorktree.startsWith(`${managedRoot}/`)
-  );
+  ));
 }
 
 function deriveManagedWorktreeDirName(taskId, branch) {

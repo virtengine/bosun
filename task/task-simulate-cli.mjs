@@ -50,6 +50,7 @@ function resolveKanbanStorePath() {
 }
 
 const TASK_SIMULATION_TEMPLATE_ID = "template-task-lifecycle";
+const TASK_SIMULATION_PR_PROGRESSOR_TEMPLATE_ID = "template-bosun-pr-progressor";
 const TASK_SIMULATION_TEMPLATE_FORCE_UPDATE_IDS = [
   "template-task-batch-processor",
   "template-task-lifecycle",
@@ -87,6 +88,16 @@ function readCurrentGitBranch(repoRoot) {
 
 function isBosunLocalOpsBranch(branchName) {
   return String(branchName || "").trim().toLowerCase() === BOSUN_LOCAL_OPS_BRANCH;
+}
+
+function isSyntheticSimulationBaseBranch(branchName) {
+  const normalized = String(branchName || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    isBosunLocalOpsBranch(normalized)
+    || /^monitor(?:[-/]|$)/.test(normalized)
+    || normalized.includes("postmerge-sync")
+  );
 }
 
 export function resolveTaskSimulationDefaultTargetBranch(
@@ -127,7 +138,7 @@ export function resolveTaskSimulationDefaultTargetBranch(
 function shouldOverrideSimulationTaskBaseBranch(task, defaultTargetBranch) {
   const normalizedDefault = String(defaultTargetBranch || "").trim().toLowerCase();
   const taskBaseBranch = String(task?.baseBranch || task?.base_branch || "").trim().toLowerCase();
-  if (isBosunLocalOpsBranch(taskBaseBranch)) {
+  if (isSyntheticSimulationBaseBranch(taskBaseBranch)) {
     return true;
   }
   if (
@@ -138,6 +149,125 @@ function shouldOverrideSimulationTaskBaseBranch(task, defaultTargetBranch) {
     return false;
   }
   return !taskBaseBranch || taskBaseBranch === "origin/main" || taskBaseBranch === "main";
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function parseTaskPrNumber(task = {}) {
+  const rawValue =
+    task?.prNumber
+    ?? task?.pr_number
+    ?? task?.pullRequestNumber
+    ?? task?.pull_request_number
+    ?? task?.meta?.prNumber
+    ?? task?.meta?.pr_number
+    ?? task?.meta?.pullRequestNumber
+    ?? task?.meta?.pull_request_number
+    ?? null;
+  const parsed = Number.parseInt(String(rawValue || "").trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseRepoFromPrUrl(prUrl = "") {
+  const match = String(prUrl || "").trim().match(/github\.com\/([^/]+\/[^/?#]+)/i);
+  return match ? String(match[1] || "").trim() : "";
+}
+
+function normalizeSimulationTaskStatus(task = {}) {
+  return firstNonEmptyString(
+    task?.status,
+    task?.state,
+    task?.taskStatus,
+    task?.task_status,
+    task?.meta?.status,
+    task?.meta?.state,
+    task?.meta?.taskStatus,
+    task?.meta?.task_status,
+  ).toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isTerminalSimulationTaskStatus(task = {}) {
+  const normalizedStatus = normalizeSimulationTaskStatus(task);
+  return normalizedStatus === "done" || normalizedStatus === "completed" || normalizedStatus === "cancelled";
+}
+
+function resolveSimulationTaskPrContext(task = {}, defaultTargetBranch = "") {
+  const prUrl = firstNonEmptyString(
+    task?.prUrl,
+    task?.pr_url,
+    task?.pullRequestUrl,
+    task?.pull_request_url,
+    task?.meta?.prUrl,
+    task?.meta?.pr_url,
+    task?.meta?.pullRequestUrl,
+    task?.meta?.pull_request_url,
+  );
+  return {
+    prNumber: parseTaskPrNumber(task),
+    prUrl,
+    repo: firstNonEmptyString(
+      task?.repo,
+      task?.repoSlug,
+      task?.repo_slug,
+      task?.repository,
+      task?.repositorySlug,
+      task?.meta?.repo,
+      task?.meta?.repoSlug,
+      task?.meta?.repo_slug,
+      task?.meta?.repository,
+      task?.meta?.repositorySlug,
+      parseRepoFromPrUrl(prUrl),
+    ),
+    branch: firstNonEmptyString(
+      task?.branch,
+      task?.branchName,
+      task?.branch_name,
+      task?.headRefName,
+      task?.head_ref_name,
+      task?.meta?.branch,
+      task?.meta?.branchName,
+      task?.meta?.branch_name,
+      task?.meta?.headRefName,
+      task?.meta?.head_ref_name,
+    ),
+    baseBranch: firstNonEmptyString(
+      task?.baseBranch,
+      task?.base_branch,
+      task?.targetBranch,
+      task?.target_branch,
+      task?.meta?.baseBranch,
+      task?.meta?.base_branch,
+      defaultTargetBranch,
+    ),
+  };
+}
+
+function resolveTaskSimulationTemplateId(task = null, defaultTargetBranch = "") {
+  const normalizedStatus = normalizeSimulationTaskStatus(task);
+  if (normalizedStatus !== "inreview") {
+    return TASK_SIMULATION_TEMPLATE_ID;
+  }
+  const taskBaseBranch = firstNonEmptyString(
+    task?.baseBranch,
+    task?.base_branch,
+    task?.targetBranch,
+    task?.target_branch,
+    task?.meta?.baseBranch,
+    task?.meta?.base_branch,
+  );
+  if (isSyntheticSimulationBaseBranch(taskBaseBranch)) {
+    return TASK_SIMULATION_TEMPLATE_ID;
+  }
+  const prContext = resolveSimulationTaskPrContext(task, defaultTargetBranch);
+  return prContext.prNumber && (prContext.repo || prContext.prUrl)
+    ? TASK_SIMULATION_PR_PROGRESSOR_TEMPLATE_ID
+    : TASK_SIMULATION_TEMPLATE_ID;
 }
 
 function buildSimulationTaskInput(task, defaultTargetBranch) {
@@ -153,8 +283,65 @@ function buildSimulationTaskInput(task, defaultTargetBranch) {
   };
 }
 
+function buildSimulationExecutionInput(task, defaultTargetBranch, templateId = TASK_SIMULATION_TEMPLATE_ID) {
+  if (!task) return {};
+  if (templateId !== TASK_SIMULATION_PR_PROGRESSOR_TEMPLATE_ID) {
+    return {
+      task: buildSimulationTaskInput(task, defaultTargetBranch),
+    };
+  }
+  const prContext = resolveSimulationTaskPrContext(task, defaultTargetBranch);
+  return {
+    ...(prContext.branch ? { branch: prContext.branch } : {}),
+    ...(prContext.baseBranch ? { baseBranch: prContext.baseBranch } : {}),
+    ...(prContext.prNumber ? { prNumber: prContext.prNumber } : {}),
+    ...(prContext.prUrl ? { prUrl: prContext.prUrl } : {}),
+    ...(prContext.repo ? { repo: prContext.repo } : {}),
+  };
+}
+
 function hasFlag(args, ...flags) {
   return flags.some((flag) => args.includes(flag));
+}
+
+function getFlagValue(args = [], ...flags) {
+  for (const flag of flags) {
+    const directIdx = args.indexOf(flag);
+    if (directIdx >= 0) {
+      return String(args[directIdx + 1] || "").trim();
+    }
+    const inline = args.find((arg) => String(arg || "").startsWith(`${flag}=`));
+    if (inline) {
+      return String(inline).slice(flag.length + 1).trim();
+    }
+  }
+  return "";
+}
+
+const TASK_SIMULATION_FLAGS_WITH_VALUES = new Set([
+  "--config-dir",
+  "--lock-path",
+  "--log-dir",
+  "--mode",
+  "--repo-root",
+  "--state-path",
+]);
+
+function getPositionalTaskArgs(args = []) {
+  const positional = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index] || "");
+    if (!arg) continue;
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    if (arg.includes("=")) continue;
+    if (TASK_SIMULATION_FLAGS_WITH_VALUES.has(arg)) {
+      index += 1;
+    }
+  }
+  return positional;
 }
 
 function cloneJson(value) {
@@ -316,11 +503,58 @@ function resolveRunTaskId(run = {}) {
   return String(
     run?.taskId
     || run?.rootTaskId
+    || run?.data?.taskId
+    || run?.data?.task?.id
     || run?.detail?.taskId
     || run?.detail?.rootTaskId
     || run?.detail?.data?.taskId
+    || run?.detail?.data?.task?.id
     || "",
   ).trim();
+}
+
+function resolveRunTaskTitle(run = {}) {
+  return String(
+    run?.taskTitle
+    || run?.title
+    || run?.data?.taskTitle
+    || run?.data?.title
+    || run?.data?.task?.title
+    || run?.detail?.taskTitle
+    || run?.detail?.title
+    || run?.detail?.data?.taskTitle
+    || run?.detail?.data?.task?.title
+    || "",
+  ).trim();
+}
+
+function readSimulationRunArtifact(runsDir = "", runId = "") {
+  const normalizedRunsDir = String(runsDir || "").trim();
+  const normalizedRunId = String(runId || "").trim();
+  if (!normalizedRunsDir || !normalizedRunId) return null;
+  const artifactPath = resolve(normalizedRunsDir, `${normalizedRunId}.json`);
+  if (!existsSync(artifactPath)) return null;
+  try {
+    return JSON.parse(readFileSync(artifactPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function resolveResumeArtifactTaskIds(runArtifact = null) {
+  const taskIds = new Set();
+  const appendTaskId = (value) => {
+    const normalized = String(value || "").trim();
+    if (normalized) taskIds.add(normalized);
+  };
+  appendTaskId(resolveRunTaskId(runArtifact));
+  for (const task of runArtifact?.nodeOutputs?.trigger?.filteredTasks || []) {
+    appendTaskId(task?.taskId || task?.id);
+  }
+  for (const task of runArtifact?.nodeOutputs?.trigger?.tasks || []) {
+    appendTaskId(task?.taskId || task?.id);
+  }
+  return [...taskIds];
 }
 
 function resolveRunWorkflowId(run = {}) {
@@ -410,6 +644,18 @@ function compareResumeCandidateScores(left = [], right = []) {
   return 0;
 }
 
+function pickBestResumeCandidate(candidates = [], savedRunId = "") {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  return candidates.reduce((best, candidate) => {
+    if (!best) return candidate;
+    const bestScore = resolveResumeCandidateScore(best, savedRunId);
+    const candidateScore = resolveResumeCandidateScore(candidate, savedRunId);
+    return compareResumeCandidateScores(candidateScore, bestScore) > 0
+      ? candidate
+      : best;
+  }, null);
+}
+
 function resolveResumeRunId(savedState, runtime = {}) {
   const savedRunId = String(savedState?.runId || "").trim();
   if (!savedRunId) return "";
@@ -427,6 +673,11 @@ function resolveResumeRunId(savedState, runtime = {}) {
 
   const savedRun =
     runHistory.find((entry) => resolveRunId(entry) === savedRunId) || null;
+  const fallbackTaskIds = taskId
+    ? [taskId]
+    : resolveResumeArtifactTaskIds(
+      readSimulationRunArtifact(runtime?.runsDir, savedRunId),
+    );
   const lineageRootRunId =
     resolveRunRootRunId(savedRun) || resolveRunRootRunId(savedState) || savedRunId;
   const matchingCandidates = runHistory.filter((entry) => {
@@ -443,14 +694,28 @@ function resolveResumeRunId(savedState, runtime = {}) {
     );
   });
   if (matchingCandidates.length === 0) return savedRunId;
-  const bestCandidate = matchingCandidates.reduce((best, candidate) => {
-    if (!best) return candidate;
-    const bestScore = resolveResumeCandidateScore(best, savedRunId);
-    const candidateScore = resolveResumeCandidateScore(candidate, savedRunId);
-    return compareResumeCandidateScores(candidateScore, bestScore) > 0
-      ? candidate
-      : best;
-  }, null);
+  let bestCandidate = pickBestResumeCandidate(matchingCandidates, savedRunId);
+  const bestCandidateStatus = normalizeRunStatus(bestCandidate?.status || bestCandidate?.detail?.status);
+  const strictLineageIsTerminal =
+    !bestCandidateStatus || bestCandidateStatus === "completed" || bestCandidateStatus === "cancelled";
+  if ((taskId || fallbackTaskIds.length > 0) && strictLineageIsTerminal) {
+    const sameTaskCandidates = runHistory.filter((entry) => {
+      const runId = resolveRunId(entry);
+      if (!runId) return false;
+      if (workflowId && resolveRunWorkflowId(entry) !== workflowId) return false;
+      const entryTaskId = resolveRunTaskId(entry);
+      if (taskId) return entryTaskId === taskId;
+      return fallbackTaskIds.includes(entryTaskId);
+    });
+    const bestTaskCandidate = pickBestResumeCandidate(sameTaskCandidates, savedRunId);
+    if (bestTaskCandidate) {
+      const taskCandidateScore = resolveResumeCandidateScore(bestTaskCandidate, savedRunId);
+      const strictCandidateScore = resolveResumeCandidateScore(bestCandidate, savedRunId);
+      if (compareResumeCandidateScores(taskCandidateScore, strictCandidateScore) > 0) {
+        bestCandidate = bestTaskCandidate;
+      }
+    }
+  }
   return resolveRunId(bestCandidate) || savedRunId;
 }
 
@@ -610,6 +875,7 @@ function installConfiguredTemplates(engine, config) {
       : [],
   );
   requestedTemplateIds.add(TASK_SIMULATION_TEMPLATE_ID);
+  requestedTemplateIds.add(TASK_SIMULATION_PR_PROGRESSOR_TEMPLATE_ID);
   const workflowDefaultAutoInstallEnabled = workflowDefaults.autoInstall !== false;
   for (const templateId of requestedTemplateIds) {
     const overrides = requestedTemplateOverridesById?.[templateId] || {};
@@ -667,21 +933,54 @@ function installConfiguredTemplates(engine, config) {
   }
 }
 
-function resolveInstalledTaskLifecycleWorkflowId(engine) {
+function resolveInstalledWorkflowId(engine, templateId) {
   const installed = (engine.list?.() || []).find(
     (workflow) =>
       String(workflow?.metadata?.installedFrom || "").trim()
-      === TASK_SIMULATION_TEMPLATE_ID &&
+      === templateId &&
       workflow?.enabled !== false,
   );
   if (installed?.id) return installed.id;
   const fallback = (engine.list?.() || []).find(
     (workflow) =>
       String(workflow?.metadata?.installedFrom || "").trim()
-      === TASK_SIMULATION_TEMPLATE_ID,
+      === templateId,
   );
   if (fallback?.id) return fallback.id;
   return "";
+}
+
+function resolveInstalledTaskLifecycleWorkflowId(engine) {
+  return resolveInstalledWorkflowId(engine, TASK_SIMULATION_TEMPLATE_ID);
+}
+
+function resolveWorkflowTemplateIdFromDefinition(definition = null) {
+  return String(definition?.metadata?.installedFrom || "").trim();
+}
+
+function resolveSimulationWorkflowSelection(runtime = {}, task = null) {
+  const templateId = resolveTaskSimulationTemplateId(task, runtime.defaultTargetBranch);
+  if (templateId === TASK_SIMULATION_TEMPLATE_ID) {
+    return {
+      workflowId: runtime.workflowId,
+      templateId,
+    };
+  }
+  const workflowId = resolveInstalledWorkflowId(runtime.engine, templateId);
+  if (workflowId) {
+    return { workflowId, templateId };
+  }
+  const runtimeWorkflowDefinition =
+    typeof runtime.engine?.get === "function"
+      ? runtime.engine.get(runtime.workflowId)
+      : null;
+  if (resolveWorkflowTemplateIdFromDefinition(runtimeWorkflowDefinition) === templateId) {
+    return {
+      workflowId: runtime.workflowId,
+      templateId,
+    };
+  }
+  throw new Error(`Installed workflow for ${templateId} not found`);
 }
 
 export async function createTaskSimulationRuntime(options = {}) {
@@ -863,9 +1162,16 @@ function buildSimulationReport({
     .map((node) => node.id)
     .filter(Boolean);
   const runtimeDiagnostics = buildRuntimeDriftDiagnostics(runtime);
+  const resolvedWorkflowId = String(
+    workflowId || ctx?.definition?.id || workflowDefinition?.id || "",
+  ).trim();
+  const templateId =
+    resolveWorkflowTemplateIdFromDefinition(ctx?.definition)
+    || resolveWorkflowTemplateIdFromDefinition(workflowDefinition)
+    || TASK_SIMULATION_TEMPLATE_ID;
   return {
-    templateId: TASK_SIMULATION_TEMPLATE_ID,
-    workflowId: workflowId || null,
+    templateId,
+    workflowId: resolvedWorkflowId || null,
     runId: ctx?.id || null,
     status: inferredStatus,
     explicitTaskId: explicitTaskId || null,
@@ -959,32 +1265,35 @@ export async function executeTaskSimulationCommand(args, options = {}) {
 
   const taskArgs = normalizedArgs.slice(1);
   const asJson = hasFlag(taskArgs, "--json") || options.json === true;
+  const cliStatePath = getFlagValue(taskArgs, "--state-path");
+  const cliLockPath = getFlagValue(taskArgs, "--lock-path");
   const runtime =
     options.runtime || await createTaskSimulationRuntime(options);
   const statePath = resolveSimulationStatePath(runtime.repoRoot, {
-    statePath: options.statePath || runtime.statePath,
+    statePath: cliStatePath || options.statePath || runtime.statePath,
   });
-  const lockPath = resolveSimulationLockPath(runtime.repoRoot, options);
-  const positional = taskArgs.filter((arg) => !arg.startsWith("--"));
+  const lockPath = resolveSimulationLockPath(runtime.repoRoot, {
+    ...options,
+    ...(cliLockPath ? { lockPath: cliLockPath } : {}),
+  });
+  const positional = getPositionalTaskArgs(taskArgs);
   let explicitTaskId = String(positional[0] || "").trim();
   let restarted = false;
   let resumed = false;
   let resumeRunId = "";
   let resumeMode = "from_failed";
+  let savedState = null;
 
   if (explicitTaskId.toLowerCase() === "restart") {
-    const savedState = readSimulationState(statePath);
+    savedState = readSimulationState(statePath);
     explicitTaskId = String(savedState?.taskId || "").trim();
     if (!explicitTaskId) {
       throw new Error("No prior simulated task recorded for restart");
     }
     restarted = true;
   } else if (explicitTaskId.toLowerCase() === "resume") {
-    const modeIdx = taskArgs.indexOf("--mode");
-    if (modeIdx >= 0) {
-      resumeMode = String(taskArgs[modeIdx + 1] || "from_failed").trim() || "from_failed";
-    }
-    const savedState = readSimulationState(statePath);
+      resumeMode = getFlagValue(taskArgs, "--mode") || "from_failed";
+      savedState = readSimulationState(statePath);
     resumeRunId = resolveResumeRunId(savedState, runtime);
     if (!resumeRunId) {
       throw new Error(
@@ -1005,6 +1314,23 @@ export async function executeTaskSimulationCommand(args, options = {}) {
   if (explicitTaskId && !kanbanTask && !resumed) {
     throw new Error(`Task "${explicitTaskId}" not found`);
   }
+  if (resumed && kanbanTask && isTerminalSimulationTaskStatus(kanbanTask)) {
+    throw new Error(
+      `Task "${explicitTaskId}" is already ${normalizeSimulationTaskStatus(kanbanTask)}; resume is not allowed for terminal tasks`,
+    );
+  }
+  const workflowSelection =
+    explicitTaskId && !resumed
+      ? resolveSimulationWorkflowSelection(runtime, kanbanTask)
+      : {
+          workflowId: runtime.workflowId,
+          templateId:
+            resolveWorkflowTemplateIdFromDefinition(
+              typeof runtime.engine?.get === "function"
+                ? runtime.engine.get(runtime.workflowId)
+                : null,
+            ) || TASK_SIMULATION_TEMPLATE_ID,
+        };
 
   const input = {
     repoRoot: runtime.repoRoot,
@@ -1015,10 +1341,11 @@ export async function executeTaskSimulationCommand(args, options = {}) {
     input.taskId = explicitTaskId;
     input.taskTitle = kanbanTask?.title || "";
     if (kanbanTask) {
-      input.task = buildSimulationTaskInput(
+      Object.assign(input, buildSimulationExecutionInput(
         kanbanTask,
         runtime.defaultTargetBranch,
-      );
+        workflowSelection.templateId,
+      ));
     }
   }
 
@@ -1050,7 +1377,7 @@ export async function executeTaskSimulationCommand(args, options = {}) {
         const execution = await withCapturedConsole(
           captureConsole,
           async () => withInterceptedProcessExit(
-            () => runtime.engine.execute(runtime.workflowId, input),
+            () => runtime.engine.execute(workflowSelection.workflowId, input),
           ),
         );
         ctx = execution.result;
@@ -1061,10 +1388,10 @@ export async function executeTaskSimulationCommand(args, options = {}) {
       consoleLines = Array.isArray(error?.consoleLines) ? error.consoleLines : [];
     }
     const report = buildSimulationReport({
-      workflowId: runtime.workflowId,
+      workflowId: ctx?.definition?.id || workflowSelection.workflowId,
       workflowDefinition:
         typeof runtime.engine?.get === "function"
-          ? runtime.engine.get(runtime.workflowId)
+          ? (ctx?.definition || runtime.engine.get(ctx?.definition?.id || workflowSelection.workflowId))
           : null,
       ctx,
       runtime,
@@ -1080,11 +1407,53 @@ export async function executeTaskSimulationCommand(args, options = {}) {
       executionError,
     });
     if (report.runId) {
+      let recoveredRunState = null;
+      try {
+        if (typeof runtime.engine?.getRunHistory === "function") {
+          const history = runtime.engine.getRunHistory(
+            report.workflowId || savedState?.workflowId || null,
+            200,
+          );
+          if (Array.isArray(history)) {
+            const recoveryRunId = String(
+              originalRunId || resumeRunId || savedState?.runId || "",
+            ).trim();
+            recoveredRunState =
+              history.find((entry) => resolveRunId(entry) === recoveryRunId)
+              || null;
+          }
+        }
+      } catch {
+        recoveredRunState = null;
+      }
+      const preservedTaskId = String(
+        report.taskId
+        || explicitTaskId
+        || savedState?.taskId
+        || resolveRunTaskId(recoveredRunState)
+        || "",
+      ).trim() || null;
+      const preservedTaskTitle = String(
+        report.taskTitle
+        || savedState?.taskTitle
+        || resolveRunTaskTitle(recoveredRunState)
+        || "",
+      ).trim() || null;
+      const preservedWorkflowId = String(
+        report.workflowId || savedState?.workflowId || "",
+      ).trim() || null;
+      const preservePriorRunState =
+        resumed
+        && (!report.taskId || !explicitTaskId)
+        && String(originalRunId || "").trim();
+      const persistedRunId = preservePriorRunState
+        ? String(originalRunId || "").trim()
+        : report.runId;
       writeSimulationState(statePath, {
-        taskId: report.taskId || explicitTaskId || null,
-        taskTitle: report.taskTitle,
-        runId: report.runId,
-        workflowId: runtime.workflowId,
+        taskId: preservedTaskId,
+        taskTitle: preservedTaskTitle,
+        runId: persistedRunId,
+        workflowId: preservedWorkflowId,
         repoRoot: runtime.repoRoot,
         savedAt: new Date().toISOString(),
       });

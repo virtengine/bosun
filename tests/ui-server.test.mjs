@@ -6364,6 +6364,130 @@ describeUiServer("ui-server mini app", () => {
     }
   }, 30000);
 
+  it("surfaces paused-run retry guidance and safe resume through the workflow retry API", async () => {
+    process.env.TELEGRAM_UI_TUNNEL = "disabled";
+
+    const mod = await import("../server/ui-server.mjs");
+    const workflowEngineModule = await import("../workflow/workflow-engine.mjs");
+    const getRunDetail = vi.fn(async (runId, opts = {}) => ({
+      runId,
+      workflowId: "wf-paused-retry",
+      workflowName: "Paused Retry Workflow",
+      status: "paused",
+      detail: {
+        data: {
+          _workflowId: "wf-paused-retry",
+          _workflowName: "Paused Retry Workflow",
+        },
+      },
+      _requestedOpts: opts,
+    }));
+    const getRetryOptions = vi.fn(() => ({
+      runId: "run-paused-retry-1",
+      status: "paused",
+      recommendedMode: "from_failed",
+      recommendedReason: "create_tasks_pending.resume_only",
+      guardedState: {
+        code: "create_tasks_pending",
+        nextNodeId: "create-tasks",
+        nextNodeLabel: "Create Tasks",
+        nextNodeType: "action.materialize_planner_tasks",
+        safeResume: true,
+        blockers: [],
+        summary: "Run is paused with Create Tasks as the next pending node.",
+      },
+      options: [
+        {
+          mode: "from_failed",
+          label: "Resume from next pending step",
+          description: "Resume at Create Tasks. Manual retry is blocked because task creation may already be partially applied; interrupted-run resume remains safe because existing tasks can be listed and skipped.",
+          recommended: true,
+          reason: "create_tasks_pending.resume_only",
+          available: true,
+          failedNodes: [],
+        },
+        {
+          mode: "from_scratch",
+          label: "Retry from scratch",
+          description: "Blocked: Create Tasks is the next pending node and task creation may already be partially applied. Manual restart is blocked; use interrupted-run resume instead.",
+          recommended: false,
+          reason: null,
+          available: false,
+          failedNodes: [],
+        },
+      ],
+    }));
+    const retryRun = vi.fn(async (runId, opts = {}) => ({
+      retryRunId: "retry-paused-run-1",
+      originalRunId: runId,
+      mode: opts.mode || "from_failed",
+      ctx: { errors: [] },
+    }));
+    const engine = {
+      getRunDetail,
+      getRetryOptions,
+      retryRun,
+    };
+    mod._testInjectWorkflowEngine(workflowEngineModule, engine);
+
+    const server = await mod.startTelegramUiServer({
+      port: await getFreePort(),
+      host: "127.0.0.1",
+      skipInstanceLock: true,
+      skipAutoOpen: true,
+    });
+    const port = server.address().port;
+
+    try {
+      const optionsRes = await fetch(`http://127.0.0.1:${port}/api/workflows/runs/run-paused-retry-1/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const optionsJson = await optionsRes.json();
+
+      expect(optionsRes.status).toBe(200);
+      expect(optionsJson.ok).toBe(true);
+      expect(optionsJson.status).toBe("paused");
+      expect(optionsJson.recommendedMode).toBe("from_failed");
+      expect(optionsJson.guardedState).toMatchObject({
+        code: "create_tasks_pending",
+        nextNodeLabel: "Create Tasks",
+        safeResume: true,
+      });
+      expect(optionsJson.options?.find((entry) => entry.mode === "from_failed")).toMatchObject({
+        label: "Resume from next pending step",
+        available: true,
+      });
+
+      const resumeRes = await fetch(`http://127.0.0.1:${port}/api/workflows/runs/run-paused-retry-1/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "from_failed" }),
+      });
+      const resumeJson = await resumeRes.json();
+
+      expect(resumeRes.status).toBe(200);
+      expect(resumeJson).toMatchObject({
+        ok: true,
+        retryRunId: "retry-paused-run-1",
+        originalRunId: "run-paused-retry-1",
+        mode: "from_failed",
+        status: "completed",
+      });
+      expect(getRunDetail).toHaveBeenCalledWith("run-paused-retry-1", { decorate: false });
+      expect(getRetryOptions).toHaveBeenCalledWith("run-paused-retry-1");
+      expect(retryRun).toHaveBeenCalledWith("run-paused-retry-1", {
+        mode: "from_failed",
+        _resumeInterrupted: true,
+        _decisionReason: "create_tasks_pending.resume_only",
+      });
+    } finally {
+      mod.stopTelegramUiServer();
+      mod._testInjectWorkflowEngine(workflowEngineModule, null);
+    }
+  }, 30000);
+
   it.skip("includes replayable task runs and a latest run summary on task detail", async () => {
     const isolatedDir = mkdtempSync(join(tmpdir(), "bosun-ui-task-runs-"));
     process.env.TELEGRAM_UI_TUNNEL = "disabled";

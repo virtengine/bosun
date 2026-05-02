@@ -82,6 +82,23 @@ describe("session-tracker", () => {
       expect(status).toBe("completed");
     });
 
+    it("treats recovered publish summaries as completed despite earlier repo blockers", () => {
+      const status = _test.deriveTerminalSessionStatus({
+        messages: [{
+          role: "assistant",
+          content: [
+            "GitHub rejected the PR because `monitor-postmerge-sync-linux` is not a valid remote base branch.",
+            "The pre-push hook reran Bosun's targeted verification and passed.",
+            "Branch pushed: `origin/task/taskimport1-updated-title`",
+            "Draft PR: `#488`",
+            "Completion: verified existing task changes, pushed the branch, and opened draft PR #488.",
+          ].join("\n"),
+        }],
+      }, "completed");
+
+      expect(status).toBe("completed");
+    });
+
     it("replaces existing session", () => {
       tracker.startSession("task-1", "First");
       tracker.recordEvent("task-1", {

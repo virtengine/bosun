@@ -350,6 +350,7 @@
     "infra/update-check.mjs",
     "infra/windows-hidden-child-processes.mjs",
     "kanban/kanban-adapter.mjs",
+    "kanban/gnap-projection-store.mjs",
     "kanban/repo-mirror-projection-store.mjs",
     "lib/codebase-audit-manifests.mjs",
     "lib/codebase-audit.mjs",

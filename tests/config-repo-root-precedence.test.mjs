@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../config/config.mjs";
+import { resolveTrustedBosunConfigDir } from "../config/repo-root.mjs";
 
 describe("config repo-root precedence", () => {
   const source = readFileSync(resolve(process.cwd(), "config/config.mjs"), "utf8");
@@ -65,5 +66,18 @@ describe("config repo-root precedence", () => {
     expect(config.repoRoot).toBe(explicitRepoRoot);
     expect(config.repositories[0]?.path).toBe(workspaceRepoRoot);
     expect(config.activeWorkspace).toBe("virtengine-gh");
+  });
+
+  it("prefers current repo-local .bosun over a stale checkout-local BOSUN_HOME", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "bosun-stale-home-"));
+    tempDirs.push(root);
+
+    const currentRepo = resolve(root, "current", "bosun");
+    const currentBosunDir = resolve(currentRepo, ".bosun");
+    const staleBosunDir = resolve(root, "old", "bosun", ".bosun");
+    await mkdir(currentBosunDir, { recursive: true });
+    await writeFile(resolve(currentBosunDir, ".env"), "PROJECT_NAME=current\n", "utf8");
+
+    expect(resolveTrustedBosunConfigDir(staleBosunDir, currentRepo)).toBe(currentBosunDir);
   });
 });

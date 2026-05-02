@@ -1,76 +1,55 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { isManagedBosunWorktree } from "../workflow/workflow-nodes/definitions.mjs";
 
-let childProcessMocks;
+const tempDirs = [];
 
-async function loadDefinitionsWithChildProcessMocks() {
-  childProcessMocks = {
-    execFileSync: vi.fn(),
-    execSync: vi.fn(),
-    spawn: vi.fn(),
-    spawnSync: vi.fn(),
-  };
-  vi.resetModules();
-  vi.doMock("node:child_process", async () => {
-    const actual = await vi.importActual("node:child_process");
-    return {
-      ...actual,
-      execFileSync: childProcessMocks.execFileSync,
-      execSync: childProcessMocks.execSync,
-      spawn: childProcessMocks.spawn,
-      spawnSync: childProcessMocks.spawnSync,
-    };
-  });
-  return import("../workflow/workflow-nodes/definitions.mjs");
+function makeTempDir() {
+  const dir = mkdtempSync(resolve(tmpdir(), "bosun-worktree-defs-"));
+  tempDirs.push(dir);
+  return dir;
 }
 
-describe("execGitArgsSync", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.restoreAllMocks();
-    childProcessMocks = null;
+function git(args, cwd) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  expect(result.status).toBe(0);
+  return result;
+}
+
+describe("workflow node definitions worktree helpers", () => {
+  it("treats repo-local .bosun/worktrees paths as managed", () => {
+    const repoRoot = makeTempDir();
+    const worktreePath = resolve(repoRoot, ".bosun", "worktrees", "task-local");
+    mkdirSync(worktreePath, { recursive: true });
+
+    expect(isManagedBosunWorktree(worktreePath, repoRoot)).toBe(true);
   });
 
-  it("falls back to spawnSync when git execFileSync returns EPERM on Windows", async () => {
-    if (process.platform !== "win32") {
-      return;
-    }
+  it("treats .bosun/worktrees under attached git worktrees as managed", () => {
+    const repoRoot = makeTempDir();
+    git(["init"], repoRoot);
+    git(["config", "user.email", "test@example.com"], repoRoot);
+    git(["config", "user.name", "Test"], repoRoot);
+    writeFileSync(resolve(repoRoot, "README.md"), "init\n", "utf8");
+    git(["add", "README.md"], repoRoot);
+    git(["commit", "-m", "init"], repoRoot);
+    git(["branch", "-M", "main"], repoRoot);
 
-    const { execGitArgsSync } = await loadDefinitionsWithChildProcessMocks();
+    const proofRoot = resolve(repoRoot, "workspace", "postmerge-sync");
+    git(["worktree", "add", proofRoot, "-b", "monitor-postmerge-sync"], repoRoot);
 
-    childProcessMocks.execFileSync.mockImplementation((cmd) => {
-      if (cmd === "where.exe") {
-        return "C:\\Program Files\\Git\\cmd\\git.exe\r\n";
-      }
-      if (String(cmd).toLowerCase().endsWith("\\git.exe")) {
-        const error = new Error(`spawnSync ${cmd} EPERM`);
-        error.code = "EPERM";
-        throw error;
-      }
-      throw new Error(`unexpected execFileSync call: ${cmd}`);
-    });
+    const managedPath = resolve(proofRoot, ".bosun", "worktrees", "task-e274");
+    mkdirSync(managedPath, { recursive: true });
 
-    childProcessMocks.spawnSync.mockReturnValue({
-      status: 0,
-      stdout: "git version 2.52.0.windows.1\n",
-      stderr: "",
-      error: undefined,
-    });
-
-    const result = execGitArgsSync(["--version"], {
-      encoding: "utf8",
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    expect(result).toBe("git version 2.52.0.windows.1\n");
-    expect(childProcessMocks.spawnSync).toHaveBeenCalledWith(
-      "C:\\Program Files\\Git\\cmd\\git.exe",
-      ["--version"],
-      expect.objectContaining({
-        encoding: "utf8",
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      }),
-    );
+    expect(isManagedBosunWorktree(managedPath, repoRoot)).toBe(true);
   });
+});
+
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

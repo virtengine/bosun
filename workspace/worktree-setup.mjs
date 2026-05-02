@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { scaffoldAgentHookFiles, normalizeHookTargets } from "../agent/hook-profiles.mjs";
 import { CONFIG_FILES } from "../config/config-file-names.mjs";
@@ -14,30 +14,44 @@ const DEFAULT_HOOK_PROFILE_SETTINGS = Object.freeze({
   commands: Object.freeze({}),
 });
 const BOSUN_LOCAL_OPS_BRANCH = "bosun/codex-self-improvement-loop-commits";
-const BOSUN_LOCAL_OPS_WORKTREE_OVERLAY_PREFIXES = Object.freeze([
+const BOSUN_LOCAL_OPS_WORKTREE_SAFE_OVERLAY_PREFIXES = Object.freeze([
   "package.json",
   "vitest.config.mjs",
+  "tools/vitest-full-suite.mjs",
+  "tools/vitest-runner.mjs",
+  "tools/sync-demo-ui.mjs",
+  "tests/setup.mjs",
+  "tests/near-timeout-reporter.mjs",
+  "tests/shims/codex-sdk.mjs",
+]);
+const BOSUN_LOCAL_OPS_WORKTREE_BRANCH_ONLY_OVERLAY_PREFIXES = Object.freeze([
   "tui",
   "ui/tui",
   "ui/modules",
   "ui/tabs/agents.js",
   "site/ui/tabs/agents.js",
   "server/ui-server.mjs",
-  "tools/vitest-runner.mjs",
   "lib/agent-configuration-guide.mjs",
   "telegram/telegram-bot.mjs",
   "telegram/executor-health-region-cache.mjs",
   "telegram/harness-api-client.mjs",
   "tests/fleet-tab-render.test.mjs",
-  "tests/near-timeout-reporter.mjs",
-  "tests/setup.mjs",
-  "tests/shims/codex-sdk.mjs",
   "tests/ui-server-fallback-auth.test.mjs",
   "tests/ui-server-session-actions.test.mjs",
   "tests/ui-server-tui-events.test.mjs",
   "tests/ui-server-tunnel-hostname.test.mjs",
   "tests/tui-settings-screen.test.mjs",
   "tests/tui-status-header.test.mjs",
+]);
+const BOSUN_LOCAL_OPS_TASK_BRANCH_BLOCKED_OVERLAY_PREFIXES = Object.freeze([
+  "agent/",
+  "server/",
+  "site/ui/",
+  "telegram/",
+  "ui/",
+  "voice/",
+  "workflow/",
+  "workflow-templates/",
 ]);
 const LOCAL_IMPORT_SPECIFIER_PATTERN = /(?:import|export)\s+[^"'`]*?\sfrom\s*["'`](\.[^"'`]+)["'`]|import\s*\(\s*["'`](\.[^"'`]+)["'`]\s*\)|import\s*["'`](\.[^"'`]+)["'`]|require\(\s*["'`](\.[^"'`]+)["'`]\s*\)/g;
 
@@ -93,6 +107,24 @@ function readCurrentGitBranch(repoRoot) {
   return String(result.stdout || "").trim();
 }
 
+function isBosunLocalOpsBranch(branchName) {
+  return String(branchName || "").trim().toLowerCase() === BOSUN_LOCAL_OPS_BRANCH;
+}
+
+function shouldSyncLocalOpsOverlayFiles(repoRoot, worktreePath = repoRoot) {
+  const repoBranch = readCurrentGitBranch(repoRoot).toLowerCase();
+  if (repoBranch !== BOSUN_LOCAL_OPS_BRANCH) {
+    return false;
+  }
+  const resolvedRepoRoot = resolve(repoRoot || process.cwd());
+  const resolvedWorktreePath = resolve(worktreePath || resolvedRepoRoot);
+  if (resolvedRepoRoot === resolvedWorktreePath) {
+    return true;
+  }
+  const worktreeBranch = readCurrentGitBranch(resolvedWorktreePath).toLowerCase();
+  return worktreeBranch === BOSUN_LOCAL_OPS_BRANCH;
+}
+
 function getGitPath(worktreePath, gitPath) {
   const result = spawnSync("git", ["rev-parse", "--git-path", gitPath], {
     cwd: worktreePath,
@@ -145,6 +177,61 @@ function isTrackedGitPath(worktreePath, relativePath) {
     env: sanitizeGitEnv(),
   });
   return result.status === 0;
+}
+
+function getGitTrackedPathFlag(worktreePath, relativePath) {
+  const result = spawnSync("git", ["ls-files", "-v", "--", relativePath], {
+    cwd: worktreePath,
+    encoding: "utf8",
+    timeout: 5_000,
+    windowsHide: true,
+    env: sanitizeGitEnv(),
+  });
+  if (result.status !== 0) return "";
+  const line = String(result.stdout || "").trim();
+  return line ? line.charAt(0) : "";
+}
+
+function clearTrackedRuntimeSetupFilesSkipWorktree(worktreePath, expectedFiles = []) {
+  const relativePaths = Array.from(
+    new Set(
+      (Array.isArray(expectedFiles) ? expectedFiles : [])
+        .map((entry) => String(entry || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const clearedFiles = [];
+  const errors = [];
+
+  for (const relativePath of relativePaths) {
+    if (!isTrackedGitPath(worktreePath, relativePath)) {
+      continue;
+    }
+    const trackedFlag = getGitTrackedPathFlag(worktreePath, relativePath);
+    if (trackedFlag.toUpperCase() !== "S") {
+      continue;
+    }
+    const result = spawnSync("git", ["update-index", "--no-skip-worktree", "--", relativePath], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+      env: sanitizeGitEnv(),
+    });
+    if (result.status === 0) {
+      clearedFiles.push(relativePath);
+      continue;
+    }
+    errors.push({
+      relativePath,
+      error: String(result.stderr || result.stdout || "").trim() || "git update-index --no-skip-worktree failed",
+    });
+  }
+
+  return {
+    clearedFiles,
+    errors,
+  };
 }
 
 function markTrackedRuntimeSetupFilesSkipWorktree(worktreePath, expectedFiles = []) {
@@ -250,6 +337,190 @@ function ignoreUntrackedRuntimeSetupFiles(worktreePath, expectedFiles = []) {
   return { ignoredFiles, alreadyIgnoredFiles, errors };
 }
 
+function removeIgnoredRuntimeSetupFiles(worktreePath, expectedFiles = []) {
+  const relativePaths = new Set(
+    (Array.isArray(expectedFiles) ? expectedFiles : [])
+      .map((entry) => String(entry || "").trim().replace(/\\/g, "/"))
+      .filter(Boolean),
+  );
+  const removedFiles = [];
+  const missingFiles = [];
+  const errors = [];
+  const excludePath = getGitPath(worktreePath, "info/exclude");
+  if (!excludePath) {
+    return {
+      removedFiles,
+      missingFiles: Array.from(relativePaths),
+      errors: [{ error: "git rev-parse --git-path info/exclude failed" }],
+    };
+  }
+  const resolvedExcludePath = resolve(worktreePath, excludePath);
+  const existingLines = existsSync(resolvedExcludePath)
+    ? readFileSync(resolvedExcludePath, "utf8").split(/\r?\n/)
+    : [];
+  const nextLines = [];
+  for (const line of existingLines) {
+    const normalized = String(line || "").trim().replace(/\\/g, "/");
+    if (normalized && relativePaths.has(normalized)) {
+      removedFiles.push(normalized);
+      relativePaths.delete(normalized);
+      continue;
+    }
+    nextLines.push(line);
+  }
+  if (removedFiles.length === 0) {
+    return {
+      removedFiles,
+      missingFiles: Array.from(relativePaths),
+      errors,
+    };
+  }
+  try {
+    mkdirSync(dirname(resolvedExcludePath), { recursive: true });
+    writeFileSync(resolvedExcludePath, `${nextLines.filter((line) => line.length > 0).join("\n")}\n`, "utf8");
+  } catch (error) {
+    return {
+      removedFiles: [],
+      missingFiles: Array.from(relativePaths),
+      errors: [{ error: error?.message || "failed to update git info exclude" }],
+    };
+  }
+  return {
+    removedFiles,
+    missingFiles: Array.from(relativePaths),
+    errors,
+  };
+}
+
+function restoreTrackedOverlayFilesThatStillMirrorSource(repoRoot, worktreePath, expectedFiles = []) {
+  const relativePaths = Array.from(
+    new Set(
+      (Array.isArray(expectedFiles) ? expectedFiles : [])
+        .map((entry) => String(entry || "").trim().replace(/\\/g, "/"))
+        .filter(Boolean),
+    ),
+  );
+  const restoredFiles = [];
+  const preservedFiles = [];
+  const errors = [];
+
+  for (const relativePath of relativePaths) {
+    if (!isTrackedGitPath(worktreePath, relativePath)) {
+      continue;
+    }
+    const sourcePath = resolve(repoRoot, relativePath);
+    const targetPath = resolve(worktreePath, relativePath);
+    if (!existsSync(sourcePath) || !existsSync(targetPath)) {
+      continue;
+    }
+    let sourceStat = null;
+    let targetStat = null;
+    try {
+      sourceStat = statSync(sourcePath);
+      targetStat = statSync(targetPath);
+    } catch {
+      continue;
+    }
+    if (!sourceStat.isFile() || !targetStat.isFile()) {
+      continue;
+    }
+    const sourceContent = readFileSync(sourcePath);
+    const targetContent = readFileSync(targetPath);
+    if (Buffer.compare(sourceContent, targetContent) !== 0) {
+      preservedFiles.push(relativePath);
+      continue;
+    }
+    const result = spawnSync("git", ["checkout", "--", relativePath], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+      env: sanitizeGitEnv(),
+    });
+    if (result.status === 0) {
+      restoredFiles.push(relativePath);
+      continue;
+    }
+    errors.push({
+      relativePath,
+      error: String(result.stderr || result.stdout || "").trim() || "git checkout -- path failed",
+    });
+  }
+
+  return {
+    restoredFiles,
+    preservedFiles,
+    errors,
+  };
+}
+
+function removeUntrackedOverlayFilesThatStillMirrorSource(repoRoot, worktreePath, expectedFiles = []) {
+  const relativePaths = Array.from(
+    new Set(
+      (Array.isArray(expectedFiles) ? expectedFiles : [])
+        .map((entry) => String(entry || "").trim().replace(/\\/g, "/"))
+        .filter(Boolean),
+    ),
+  );
+  const removedFiles = [];
+  const preservedFiles = [];
+
+  for (const relativePath of relativePaths) {
+    if (isTrackedGitPath(worktreePath, relativePath)) {
+      continue;
+    }
+    const sourcePath = resolve(repoRoot, relativePath);
+    const targetPath = resolve(worktreePath, relativePath);
+    if (!existsSync(targetPath)) {
+      continue;
+    }
+    let shouldRemove = false;
+    if (existsSync(sourcePath)) {
+      try {
+        const sourceStat = statSync(sourcePath);
+        const targetStat = statSync(targetPath);
+        if (sourceStat.isFile() && targetStat.isFile()) {
+          shouldRemove = Buffer.compare(readFileSync(sourcePath), readFileSync(targetPath)) === 0;
+        }
+      } catch {
+        shouldRemove = false;
+      }
+    }
+    if (!shouldRemove) {
+      preservedFiles.push(relativePath);
+      continue;
+    }
+    rmSync(targetPath, { recursive: true, force: true });
+    removedFiles.push(relativePath);
+  }
+
+  return {
+    removedFiles,
+    preservedFiles,
+  };
+}
+
+function reconcileUnexpectedLocalOpsOverlayFiles(repoRoot, worktreePath, expectedFiles = []) {
+  const expected = new Set(
+    (Array.isArray(expectedFiles) ? expectedFiles : [])
+      .map((entry) => String(entry || "").trim().replace(/\\/g, "/"))
+      .filter(Boolean),
+  );
+  const overlayUniverse = buildExpectedLocalOpsOverlayFiles(repoRoot, repoRoot);
+  const unexpectedFiles = overlayUniverse.filter((relativePath) => !expected.has(relativePath));
+  const gitIgnore = removeIgnoredRuntimeSetupFiles(worktreePath, unexpectedFiles);
+  const gitIndex = clearTrackedRuntimeSetupFilesSkipWorktree(worktreePath, unexpectedFiles);
+  const restoredTracked = restoreTrackedOverlayFilesThatStillMirrorSource(repoRoot, worktreePath, unexpectedFiles);
+  const removedUntracked = removeUntrackedOverlayFilesThatStillMirrorSource(repoRoot, worktreePath, unexpectedFiles);
+  return {
+    unexpectedFiles,
+    gitIgnore,
+    gitIndex,
+    restoredTracked,
+    removedUntracked,
+  };
+}
+
 export function resolveWorktreeHookProfileSettings(repoRoot) {
   const document = readRepoConfigDocument(repoRoot);
   const raw = document?.hookProfiles && typeof document.hookProfiles === "object"
@@ -265,15 +536,19 @@ export function resolveWorktreeHookProfileSettings(repoRoot) {
   });
 }
 
-function buildExpectedLocalOpsOverlayFiles(repoRoot) {
-  const currentBranch = readCurrentGitBranch(repoRoot).toLowerCase();
-  if (currentBranch !== BOSUN_LOCAL_OPS_BRANCH) {
+function buildExpectedLocalOpsOverlayFiles(repoRoot, worktreePath = repoRoot) {
+  const syncFullOverlay = shouldSyncLocalOpsOverlayFiles(repoRoot, worktreePath);
+  if (!syncFullOverlay && !isBosunLocalOpsBranch(readCurrentGitBranch(repoRoot))) {
     return [];
   }
+  const overlayPrefixes = [
+    ...BOSUN_LOCAL_OPS_WORKTREE_SAFE_OVERLAY_PREFIXES,
+    ...(syncFullOverlay ? BOSUN_LOCAL_OPS_WORKTREE_BRANCH_ONLY_OVERLAY_PREFIXES : []),
+  ];
   const discoveredFiles = new Set();
   const visitedDirectories = new Set();
   const visitedFiles = new Set();
-  for (const relativePrefix of BOSUN_LOCAL_OPS_WORKTREE_OVERLAY_PREFIXES) {
+  for (const relativePrefix of overlayPrefixes) {
     const pending = [String(relativePrefix || "").trim().replace(/\\/g, "/")];
     while (pending.length > 0) {
       const currentRelativePath = pending.pop();
@@ -293,6 +568,9 @@ function buildExpectedLocalOpsOverlayFiles(repoRoot) {
         visitedFiles.add(currentRelativePath);
         discoveredFiles.add(currentRelativePath);
         for (const dependencyPath of resolveLocalImportOverlayFiles(repoRoot, currentRelativePath)) {
+          if (!syncFullOverlay && !shouldIncludeTaskBranchOverlayDependency(dependencyPath)) {
+            continue;
+          }
           if (!visitedFiles.has(dependencyPath)) {
             pending.push(dependencyPath);
           }
@@ -319,6 +597,14 @@ function buildExpectedLocalOpsOverlayFiles(repoRoot) {
     }
   }
   return Array.from(discoveredFiles).sort();
+}
+
+function shouldIncludeTaskBranchOverlayDependency(relativePath) {
+  const normalized = String(relativePath || "").trim().replace(/\\/g, "/");
+  if (!normalized) return false;
+  return !BOSUN_LOCAL_OPS_TASK_BRANCH_BLOCKED_OVERLAY_PREFIXES.some((prefix) =>
+    normalized.startsWith(prefix)
+  );
 }
 
 function resolveLocalImportOverlayFiles(repoRoot, relativeFilePath) {
@@ -368,12 +654,12 @@ function resolveRelativeOverlayImport(repoRoot, fromRelativePath, specifier) {
   return "";
 }
 
-function buildExpectedSetupFiles(repoRoot, hookSettings) {
+function buildExpectedSetupFiles(repoRoot, hookSettings, worktreePath = repoRoot) {
   const expectedFiles = [
     ".githooks/pre-commit",
     ".githooks/pre-push",
     ".codex/config.toml",
-    ...buildExpectedLocalOpsOverlayFiles(repoRoot),
+    ...buildExpectedLocalOpsOverlayFiles(repoRoot, worktreePath),
   ];
 
   if (!hookSettings?.enabled) {
@@ -445,7 +731,7 @@ export function ensureWorktreeRuntimeSetup(repoRoot, worktreePath) {
   const resolvedRepoRoot = resolve(repoRoot || process.cwd());
   const resolvedWorktreePath = resolve(worktreePath || resolvedRepoRoot);
   const hookSettings = resolveWorktreeHookProfileSettings(resolvedRepoRoot);
-  const expectedFiles = buildExpectedSetupFiles(resolvedRepoRoot, hookSettings);
+  const expectedFiles = buildExpectedSetupFiles(resolvedRepoRoot, hookSettings, resolvedWorktreePath);
   const repoConfigResult = ensureRepoConfigs(resolvedWorktreePath);
   const gitHooks = ensureGitHooksPath(resolvedWorktreePath);
   const hookResult = scaffoldAgentHookFiles(resolvedWorktreePath, {
@@ -468,6 +754,11 @@ export function ensureWorktreeRuntimeSetup(repoRoot, worktreePath) {
     resolvedWorktreePath,
     expectedFiles,
   );
+  const staleOverlay = reconcileUnexpectedLocalOpsOverlayFiles(
+    resolvedRepoRoot,
+    resolvedWorktreePath,
+    expectedFiles,
+  );
 
   return {
     repoConfigResult,
@@ -477,6 +768,7 @@ export function ensureWorktreeRuntimeSetup(repoRoot, worktreePath) {
     runtimeSync,
     gitIndex,
     gitIgnore,
+    staleOverlay,
   };
 }
 
@@ -485,7 +777,7 @@ export function inspectWorktreeRuntimeSetup(repoRoot, worktreePath = repoRoot) {
   const resolvedWorktreePath = resolve(worktreePath || resolvedRepoRoot);
   const hookSettings = resolveWorktreeHookProfileSettings(resolvedRepoRoot);
   const hooksPath = getGitConfigValue(resolvedWorktreePath, "core.hooksPath");
-  const expectedFiles = buildExpectedSetupFiles(resolvedRepoRoot, hookSettings);
+  const expectedFiles = buildExpectedSetupFiles(resolvedRepoRoot, hookSettings, resolvedWorktreePath);
   const missingFiles = expectedFiles.filter((relativePath) =>
     !existsSync(resolve(resolvedWorktreePath, relativePath)),
   );

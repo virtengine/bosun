@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -32,6 +32,21 @@ export function findPackageRoot({ startDir = process.cwd() } = {}) {
     currentDir = getParentDir(currentDir);
   }
   return null;
+}
+
+export function findVitestConfigPath(
+  { startDir = process.cwd(), packageRoot = findPackageRoot({ startDir }) } = {},
+) {
+  const searchRoot = packageRoot || resolve(startDir);
+  const candidates = [
+    "vitest.config.mjs",
+    "vitest.config.js",
+    "vitest.config.ts",
+    "vite.config.mjs",
+    "vite.config.js",
+    "vite.config.ts",
+  ].map((relativePath) => resolve(searchRoot, relativePath));
+  return candidates.find((candidate) => existsSync(candidate)) || null;
 }
 
 function resolveNpmInvocation(
@@ -341,19 +356,164 @@ export function resolveVitestArgs(
     }
     filteredArgs.push(arg);
   }
-  if (process.platform === "win32" && !hasConfigLoaderArg) {
-    filteredArgs.push("--configLoader", "runner");
+  if (!hasConfigLoaderArg) {
+    filteredArgs.push("--configLoader", resolveVitestConfigLoader({ startDir, packageRoot }));
   }
   return filteredArgs;
 }
 
-export function runVitest(args = process.argv.slice(2), { startDir = process.cwd() } = {}) {
+export function resolveVitestConfigLoader(
+  { startDir = process.cwd(), packageRoot = findPackageRoot({ startDir }), env = process.env } = {},
+) {
+  const explicit = String(
+    env?.BOSUN_VITEST_CONFIG_LOADER || env?.VITEST_CONFIG_LOADER || "",
+  ).trim().toLowerCase();
+  if (explicit === "native" || explicit === "runner") {
+    return explicit;
+  }
+  const nodeModulesPath = resolve(packageRoot || startDir, "node_modules");
+  if (existsSync(nodeModulesPath)) {
+    try {
+      if (lstatSync(nodeModulesPath).isSymbolicLink()) {
+        return "native";
+      }
+    } catch {
+      // Fall through to the standard default when the node_modules metadata is unreadable.
+    }
+  }
+  return "runner";
+}
+
+export function resolveVitestExperimentalCacheDir(
+  { startDir = process.cwd(), packageRoot = findPackageRoot({ startDir }), env = process.env } = {},
+) {
+  const explicit = String(env?.VITEST_EXPERIMENTAL_CACHE || "").trim();
+  if (explicit) return explicit;
+  const sharedCacheRoot = String(env?.BOSUN_TEST_CACHE_DIR || "").trim();
+  const cacheRoot = sharedCacheRoot || resolve(packageRoot || startDir, ".cache", "vitest");
+  return resolve(cacheRoot, "experimental-cache");
+}
+
+export function resolveVitestCacheDir(
+  { startDir = process.cwd(), packageRoot = findPackageRoot({ startDir }), env = process.env } = {},
+) {
+  const explicit = String(env?.BOSUN_VITE_CACHE_DIR || "").trim();
+  if (explicit) return explicit;
+  const sharedCacheRoot = String(env?.BOSUN_TEST_CACHE_DIR || "").trim();
+  const cacheRoot = sharedCacheRoot || resolve(packageRoot || startDir, ".cache", "vitest");
+  return resolve(cacheRoot, "vite");
+}
+
+export function buildVitestCacheOverrideConfigSource(
+  { baseConfigPath = null, viteCacheDir, experimentalCacheDir } = {},
+) {
+  const baseImport = baseConfigPath
+    ? `await import(${JSON.stringify(pathToFileURL(baseConfigPath).href)})`
+    : "{}";
+  return `import * as vitestConfig from "vitest/config";
+
+const defineConfig =
+  vitestConfig.defineConfig ??
+  vitestConfig.default?.defineConfig ??
+  ((config) => config);
+
+const mergeConfig =
+  vitestConfig.mergeConfig ??
+  vitestConfig.default?.mergeConfig ??
+  ((base, override) => ({
+    ...(base && typeof base === "object" ? base : {}),
+    ...(override && typeof override === "object" ? override : {}),
+    test: {
+      ...((base && typeof base === "object" && base.test && typeof base.test === "object") ? base.test : {}),
+      ...((override && typeof override === "object" && override.test && typeof override.test === "object") ? override.test : {}),
+    },
+  }));
+
+const baseModule = ${baseImport};
+const baseExport = baseModule.default ?? baseModule;
+const baseConfig = typeof baseExport === "function"
+  ? await baseExport({ command: "serve", mode: "test" })
+  : baseExport;
+
+export default mergeConfig(
+  baseConfig && typeof baseConfig === "object" ? baseConfig : {},
+  defineConfig({
+    cacheDir: ${JSON.stringify(viteCacheDir)},
+    test: {
+      experimental: {
+        fsModuleCachePath: ${JSON.stringify(experimentalCacheDir)},
+      },
+    },
+  }),
+);
+`;
+}
+
+export function injectVitestConfigOverride(args = [], configPath) {
+  if (!configPath) return [...args];
+  const nextArgs = [...args];
+  for (let index = 0; index < nextArgs.length; index += 1) {
+    if ((nextArgs[index] === "--config" || nextArgs[index] === "-c") && typeof nextArgs[index + 1] === "string") {
+      nextArgs[index + 1] = configPath;
+      return nextArgs;
+    }
+    if (String(nextArgs[index] || "").startsWith("--config=")) {
+      nextArgs[index] = `--config=${configPath}`;
+      return nextArgs;
+    }
+  }
+  const configLoaderIndex = nextArgs.findIndex((arg) => arg === "--configLoader" || arg === "--config-loader");
+  const inlineConfigLoaderIndex = nextArgs.findIndex(
+    (arg) => String(arg || "").startsWith("--configLoader=") || String(arg || "").startsWith("--config-loader="),
+  );
+  const insertAt = configLoaderIndex >= 0
+    ? configLoaderIndex
+    : inlineConfigLoaderIndex >= 0
+      ? inlineConfigLoaderIndex
+      : nextArgs.length;
+  nextArgs.splice(insertAt, 0, "--config", configPath);
+  return nextArgs;
+}
+
+function writeVitestCacheOverrideConfig(
+  {
+    startDir = process.cwd(),
+    packageRoot = findPackageRoot({ startDir }),
+    baseConfigPath = findVitestConfigPath({ startDir, packageRoot }),
+    viteCacheDir = resolveVitestCacheDir({ startDir, packageRoot }),
+    experimentalCacheDir = resolveVitestExperimentalCacheDir({ startDir, packageRoot }),
+  } = {},
+) {
+  const cacheRoot = resolve(packageRoot || startDir, ".cache", "vitest");
+  mkdirSync(cacheRoot, { recursive: true });
+  const overridePath = resolve(cacheRoot, "bosun-vitest-cache-override.mjs");
+  writeFileSync(
+    overridePath,
+    buildVitestCacheOverrideConfigSource({
+      baseConfigPath,
+      viteCacheDir,
+      experimentalCacheDir,
+    }),
+    "utf8",
+  );
+  return overridePath;
+}
+
+export function runVitest(
+  args = process.argv.slice(2),
+  {
+    startDir = process.cwd(),
+    ensureVitest = ensureVitestEntry,
+    spawn = spawnSync,
+    env: baseEnv = process.env,
+  } = {},
+) {
   if (shouldSkipVitestForBlockedChildSpawn({ startDir })) {
     console.log("[vitest] skipped: Windows child-process launch blocked in current Node runtime");
     return 0;
   }
 
-  const vitestEntry = ensureVitestEntry({ startDir });
+  const vitestEntry = ensureVitest({ startDir });
   if (!vitestEntry) {
     console.error(
       `Unable to locate vitest from ${startDir}. Run npm install in this repository root first.`,
@@ -376,17 +536,31 @@ export function runVitest(args = process.argv.slice(2), { startDir = process.cwd
   nodeArgs.push("--no-warnings=ExperimentalWarning");
   nodeArgs.push(`--max-old-space-size=${heapMb}`);
 
+  const packageRoot = findPackageRoot({ startDir });
+  const viteCacheDir = resolveVitestCacheDir({ startDir, packageRoot, env: baseEnv });
+  const experimentalCacheDir = resolveVitestExperimentalCacheDir({ startDir, packageRoot, env: baseEnv });
+  const configOverridePath = writeVitestCacheOverrideConfig({
+    startDir,
+    packageRoot,
+    baseConfigPath: findVitestConfigPath({ startDir, packageRoot }),
+    viteCacheDir,
+    experimentalCacheDir,
+  });
+  const vitestArgsWithOverride = injectVitestConfigOverride(vitestArgs, configOverridePath);
   const esbuildBinaryPath = resolveWindowsEsbuildBinary({ startDir });
   const env = {
-    ...process.env,
-    NODE_OPTIONS: mergeNodeOptions(process.env.NODE_OPTIONS, heapMb),
+    ...baseEnv,
+    NODE_OPTIONS: mergeNodeOptions(baseEnv.NODE_OPTIONS, heapMb),
     BOSUN_TEST_CHILD_SPAWN_BLOCKED: detectChildSpawnBlocked() ? "1" : "0",
+    VITEST_EXPERIMENTAL_CACHE: experimentalCacheDir,
     ...(esbuildBinaryPath && !process.env.ESBUILD_BINARY_PATH
       ? { ESBUILD_BINARY_PATH: esbuildBinaryPath }
       : {}),
   };
+  mkdirSync(env.VITEST_EXPERIMENTAL_CACHE, { recursive: true });
+  mkdirSync(viteCacheDir, { recursive: true });
 
-  const result = spawnSync(process.execPath, [...nodeArgs, vitestEntry, ...vitestArgs], {
+  const result = spawn(process.execPath, [...nodeArgs, vitestEntry, ...vitestArgsWithOverride], {
     cwd: startDir,
     stdio: "inherit",
     env,

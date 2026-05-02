@@ -387,6 +387,111 @@ describe("provider kernel support", () => {
     });
   });
 
+  it("stops the provider tool loop when a turn already carries an explicit blocked completion handoff", async () => {
+    const toolRunner = {
+      runTool: vi.fn(async () => ({ output: "tool-output" })),
+    };
+    const blockedSummary = [
+      "blocked: tool transcript in this turn is already sufficient to stop safely.",
+      "",
+      "Repositories touched:",
+      "- bosun",
+      "",
+      "task_complete",
+    ].join("\n");
+    const runTurn = vi.fn(async () => ({
+      sessionId: "provider-session-blocked",
+      threadId: "provider-thread-blocked",
+      status: "in_progress",
+      finish_reason: "tool_calls",
+      finalResponse: blockedSummary,
+      items: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: blockedSummary }],
+          text: blockedSummary,
+        },
+      ],
+      toolCalls: [
+        {
+          id: "tool-call-blocked-1",
+          name: "search_files",
+          input: { query: "should not run" },
+        },
+      ],
+    }));
+    const session = createProviderSession("openai-compatible", {
+      model: "qwen2.5-coder:latest",
+      runTurn,
+      toolRunner,
+    });
+
+    const result = await session.runTurn("Stop when blocked.", {
+      toolRunner,
+      tools: [{ id: "search_files" }],
+    });
+
+    expect(runTurn).toHaveBeenCalledTimes(1);
+    expect(toolRunner.runTool).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      finalResponse: blockedSummary,
+      output: blockedSummary,
+      success: true,
+    });
+  });
+
+  it("honors timeoutMs when a later provider tool round never settles", async () => {
+    const toolRunner = {
+      runTool: vi.fn(async (toolName, args) => ({
+        toolName,
+        args,
+        output: "tool-output",
+      })),
+    };
+    const runTurn = vi.fn(async (payload) => {
+      const hasToolResult = Array.isArray(payload.messages)
+        && payload.messages.some((message) => Array.isArray(message.toolResults) && message.toolResults.length > 0);
+      if (!hasToolResult) {
+        return {
+          sessionId: "provider-session-timeout",
+          threadId: "provider-thread-timeout",
+          status: "in_progress",
+          finish_reason: "tool_calls",
+          toolCalls: [
+            {
+              id: "tool-call-timeout-1",
+              name: "search_files",
+              input: { query: "provider timeout" },
+            },
+          ],
+        };
+      }
+      return new Promise(() => {});
+    });
+    const session = createProviderSession("openai-compatible", {
+      model: "qwen2.5-coder:latest",
+      runTurn,
+      toolRunner,
+    });
+
+    const pendingTurn = session.runTurn("Use the tool loop and time out.", {
+      toolRunner,
+      tools: [{ id: "search_files" }],
+      timeoutMs: 20,
+    });
+
+    await expect(pendingTurn).rejects.toMatchObject({
+      name: "AbortError",
+      message: "provider_turn_timeout:20ms",
+    });
+    expect(toolRunner.runTool).toHaveBeenCalledWith("search_files", { query: "provider timeout" }, expect.objectContaining({
+      providerId: "openai-compatible",
+      sessionId: "provider-session-timeout",
+      threadId: "provider-thread-timeout",
+    }));
+    expect(runTurn).toHaveBeenCalledTimes(2);
+  });
+
   it("creates execution sessions that expose built-in Bosun tools by default and route tool calls through the session manager", async () => {
     const exec = vi.fn(async (message, options) => {
       if (!String(message || "").includes("TOOL_RESULT list_subagents")) {

@@ -40,6 +40,7 @@ import {
 } from "./compat.mjs";
 import {
   resolveRepoLocalBosunDir,
+  resolveTrustedBosunConfigDir,
   resolveRepoRoot,
   detectBosunModuleRoot,
 } from "./config/repo-root.mjs";
@@ -280,10 +281,11 @@ function resolveRepoRootForCliRuntime(options = {}) {
 function resolveConfigDirForCli() {
   const configDirArg = getArgValue("--config-dir");
   if (configDirArg) return resolve(configDirArg);
-  if (process.env.BOSUN_HOME) return resolve(process.env.BOSUN_HOME);
-  if (process.env.BOSUN_DIR) return resolve(process.env.BOSUN_DIR);
 
   const repoRoot = resolveRepoRootForCliRuntime();
+  if (process.env.BOSUN_HOME) return resolveTrustedBosunConfigDir(process.env.BOSUN_HOME, repoRoot);
+  if (process.env.BOSUN_DIR) return resolveTrustedBosunConfigDir(process.env.BOSUN_DIR, repoRoot);
+
   const repoLocalConfigDir = resolveRepoLocalBosunDir(repoRoot);
   if (repoLocalConfigDir) return repoLocalConfigDir;
 
@@ -914,6 +916,7 @@ function startDaemonViaWindowsStartProcess(launchSpec) {
 }
 
 async function startDaemon() {
+  installMonitorChildSignalHandlers();
   const existing = getDaemonPid();
   if (existing) {
     console.log(`  bosun daemon is already running (PID ${existing})`);
@@ -2610,6 +2613,7 @@ async function main() {
 
   // Fork monitor as a child process — enables self-restart on source changes.
   // When monitor exits with code 75, cli re-forks with a fresh ESM module cache.
+  installMonitorChildSignalHandlers();
   await runMonitor();
 }
 
@@ -2699,6 +2703,7 @@ const SELF_RESTART_EXIT_CODE = 75;
 let monitorChild = null;
 let shutdownSignalCount = 0;
 let monitorShutdownForceTimer = null;
+let monitorChildSignalHandlersInstalled = false;
 
 function getMonitorPidFileCandidates(extraCacheDirs = []) {
   return uniqueResolvedPaths([
@@ -3193,14 +3198,19 @@ function requestMonitorChildShutdown(signal = "SIGINT") {
   monitorShutdownForceTimer.unref?.();
 }
 
-// Let forked monitor handle signal cleanup — prevent parent from dying first
+function installMonitorChildSignalHandlers() {
+  if (monitorChildSignalHandlersInstalled) return;
+  monitorChildSignalHandlersInstalled = true;
+  // Let forked monitor handle signal cleanup — prevent parent from dying first
+  process.on("SIGINT", () => {
+    requestMonitorChildShutdown("SIGINT");
+  });
+  process.on("SIGTERM", () => {
+    requestMonitorChildShutdown("SIGTERM");
+  });
+}
+
 let gracefulShutdown = false;
-process.on("SIGINT", () => {
-  requestMonitorChildShutdown("SIGINT");
-});
-process.on("SIGTERM", () => {
-  requestMonitorChildShutdown("SIGTERM");
-});
 
 main().catch(async (err) => {
   console.error(`bosun failed: ${err.message}`);

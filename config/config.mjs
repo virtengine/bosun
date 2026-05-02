@@ -27,6 +27,7 @@ import {
 import {
   resolveAgentRepoRoot,
   resolveRepoLocalBosunDir,
+  resolveTrustedBosunConfigDir,
   detectBosunModuleRoot,
 } from "./repo-root.mjs";
 import { applyAllCompatibility } from "../compat.mjs";
@@ -151,8 +152,8 @@ function resolveConfigDir(repoRoot) {
     return dirname(resolve(process.env.BOSUN_CONFIG_PATH));
   }
   // 1. Explicit env override (BOSUN_HOME supersedes BOSUN_DIR; both are aliases)
-  if (process.env.BOSUN_HOME) return resolve(process.env.BOSUN_HOME);
-  if (process.env.BOSUN_DIR) return resolve(process.env.BOSUN_DIR);
+  if (process.env.BOSUN_HOME) return resolveTrustedBosunConfigDir(process.env.BOSUN_HOME, repoRoot);
+  if (process.env.BOSUN_DIR) return resolveTrustedBosunConfigDir(process.env.BOSUN_DIR, repoRoot);
 
   // 2. Prefer repo-local runtime state for source checkouts and repo-scoped runs.
   const repoLocalConfigDir = resolveRepoLocalBosunDir(repoRoot);
@@ -1240,7 +1241,7 @@ export function loadConfig(argv = process.argv, options = {}) {
 
   // Determine config directory (where bosun stores its config)
   let configDir =
-    explicitConfigDirRaw ||
+    (explicitConfigDirRaw ? resolve(explicitConfigDirRaw) : "") ||
     resolveConfigDir(normalizedRepoRootOverride);
   const canonicalEnvPath = resolve(configDir, ".env");
   const repoEnvPath = resolve(normalizedRepoRootOverride || getFallbackRepoRoot(), ".env");
@@ -1253,7 +1254,10 @@ export function loadConfig(argv = process.argv, options = {}) {
     loadDotEnv(configDir, { override: envOverride });
     const envConfigDirRaw = process.env.BOSUN_HOME || process.env.BOSUN_DIR || "";
     if (String(envConfigDirRaw).trim()) {
-      const resolvedEnvConfigDir = resolve(envConfigDirRaw);
+      const resolvedEnvConfigDir = resolveTrustedBosunConfigDir(
+        envConfigDirRaw,
+        normalizedRepoRootOverride || getFallbackRepoRoot(),
+      );
       if (resolvedEnvConfigDir !== resolve(configDir)) {
         configDir = resolvedEnvConfigDir;
       }

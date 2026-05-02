@@ -35,6 +35,7 @@ import {
   ensureTaskStoreMod,
   looksLikeFilesystemPath,
   MAX_NO_COMMIT_ATTEMPTS,
+  normalizeMirroredRepoRoot,
   normalizeCanStartGuardResult,
   pickTaskString,
   resolveTaskRepositoryRoot,
@@ -749,6 +750,11 @@ registerNodeType("trigger.task_available", {
       listRetryDelayMs: { type: "number", default: 2000, description: "Base delay between retries" },
       repoAreaParallelLimit: { type: "number", default: 0, description: "Per-repo-area active task cap (0 disables limit)" },
       enforceStartGuards: { type: "boolean", default: true, description: "Filter out tasks blocked by dependency/sprint DAG start guards" },
+      requireTaskPromptCompleteness: {
+        type: "boolean",
+        default: false,
+        description: "Skip tasks missing prompt-critical description or URL metadata before dispatch",
+      },
       sprintOrderMode: { type: "string", enum: ["parallel", "sequential"], description: "Optional global sprint-order override when evaluating guards" },
       strictStartGuardMissingTask: { type: "boolean", default: false, description: "When true, task_not_found from start guards blocks dispatch and emits audit events" },
     },
@@ -815,6 +821,8 @@ registerNodeType("trigger.task_available", {
     const listRetryDelayMs = node.config?.listRetryDelayMs ?? 2000;
     const repoAreaParallelLimit = Number(node.config?.repoAreaParallelLimit ?? 0);
     const enforceStartGuards = node.config?.enforceStartGuards !== false;
+    const requireTaskPromptCompleteness =
+      node.config?.requireTaskPromptCompleteness === true;
     const sprintOrderMode = String(node.config?.sprintOrderMode || "").trim().toLowerCase();
     const strictStartGuardMissingTask =
       typeof node.config?.strictStartGuardMissingTask === "boolean"
@@ -974,6 +982,96 @@ registerNodeType("trigger.task_available", {
     // Draft filter
     if (filterDrafts && tasks?.length > 0) {
       tasks = tasks.filter((t) => !t.draft && !t.isDraft);
+    }
+    if (requireTaskPromptCompleteness && tasks?.length > 0) {
+      const resolvePromptTaskUrl = (task = {}) => {
+        const taskMeta = task?.meta && typeof task.meta === "object" ? task.meta : {};
+        const taskId = pickTaskString(
+          task?.id,
+          task?.taskId,
+          task?.task_id,
+          taskMeta?.taskId,
+          taskMeta?.task_id,
+        );
+        return pickTaskString(
+          task?.taskUrl,
+          task?.task_url,
+          task?.url,
+          taskMeta?.taskUrl,
+          taskMeta?.task_url,
+          taskMeta?.url,
+          taskId ? `/api/tasks/detail?taskId=${encodeURIComponent(taskId)}` : "",
+        );
+      };
+      const eligibleTasks = [];
+      const filteredTasks = [];
+      for (const task of tasks) {
+        const taskId = String(task?.id || task?.task_id || "").trim();
+        let hydratedTask = task;
+        let taskDescription = pickTaskString(
+          task?.description,
+          task?.task_description,
+          task?.body,
+          task?.details,
+          task?.meta?.taskDescription,
+          task?.meta?.task_description,
+        );
+        let taskUrl = resolvePromptTaskUrl(task);
+        if ((!taskDescription || !taskUrl) && taskId && typeof kanban?.getTask === "function") {
+          try {
+            const fetchedTask = await kanban.getTask(taskId);
+            if (fetchedTask && typeof fetchedTask === "object") {
+              hydratedTask = {
+                ...fetchedTask,
+                ...task,
+                meta: {
+                  ...(fetchedTask.meta || {}),
+                  ...(task.meta || {}),
+                },
+              };
+              taskDescription = pickTaskString(
+                taskDescription,
+                fetchedTask.description,
+                fetchedTask.task_description,
+                fetchedTask.body,
+                fetchedTask.details,
+                fetchedTask.meta?.taskDescription,
+                fetchedTask.meta?.task_description,
+              );
+              taskUrl = pickTaskString(taskUrl, resolvePromptTaskUrl(fetchedTask));
+            }
+          } catch (err) {
+            ctx.log(node.id, `Prompt completeness lookup failed for ${taskId}: ${err?.message || err}`);
+          }
+        }
+        if (taskDescription && taskUrl) {
+          eligibleTasks.push(hydratedTask);
+          continue;
+        }
+        filteredTasks.push({
+          taskId: taskId || "(missing-id)",
+          missing: [
+            taskDescription ? null : "description",
+            taskUrl ? null : "url",
+          ].filter(Boolean),
+        });
+      }
+      if (filteredTasks.length > 0) {
+        const sample = filteredTasks
+          .slice(0, 3)
+          .map((entry) => `${entry.taskId}:${entry.missing.join("+")}`)
+          .join(", ");
+        ctx.log(node.id, `Prompt completeness filtered ${filteredTasks.length} task(s): ${sample}`);
+      }
+      tasks = eligibleTasks;
+      if (tasks.length === 0) {
+        return {
+          triggered: false,
+          reason: "prompt_quality_filtered",
+          taskCount: 0,
+          filteredTasks,
+        };
+      }
     }
     if (!tasks || tasks.length === 0) {
       return { triggered: false, reason: "no_tasks", taskCount: 0 };
@@ -1224,29 +1322,6 @@ registerNodeType("trigger.task_available", {
 
     const primaryTask = toDispatch[0] || null;
     if (primaryTask) {
-      const normalizeMirroredRepoRoot = (inputPath, fallbackRepoName = "") => {
-        const rawPath = String(inputPath || "").trim();
-        if (!rawPath) return "";
-        const normalized = rawPath.replace(/\\/g, "/");
-        const marker = "/.bosun/workspaces/";
-        const markerIndex = normalized.indexOf(marker);
-        if (markerIndex < 0) return rawPath;
-        const prefix = normalized.slice(0, markerIndex);
-        const tail = normalized.slice(markerIndex + marker.length).split("/").filter(Boolean);
-        const inferredRepoName = String(fallbackRepoName || tail[1] || tail[tail.length - 1] || "").trim();
-        if (!prefix || !inferredRepoName) return rawPath;
-        const prefixName = String(prefix.split("/").filter(Boolean).pop() || "").toLowerCase();
-        const candidate = prefixName === inferredRepoName.toLowerCase()
-          ? prefix
-          : resolve(prefix, inferredRepoName);
-        try {
-          if (existsSync(resolve(candidate, ".git"))) return candidate;
-        } catch {
-          // ignore and keep original
-        }
-        return candidate;
-      };
-
       const taskId = pickTaskString(primaryTask.id, primaryTask.task_id);
       const taskTitle = pickTaskString(primaryTask.title, primaryTask.task_title);
       bindTaskContext(ctx, { taskId, taskTitle, task: primaryTask });

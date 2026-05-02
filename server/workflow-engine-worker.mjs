@@ -358,6 +358,8 @@ async function dispatch(method, args) {
       return sanitise(await engine.getNodeForensics?.(...args));
     case "getRetryOptions":
       return sanitise(await engine.getRetryOptions?.(...args));
+    case "resolveOperatorRetry":
+      return sanitise(await engine.resolveOperatorRetry?.(...args));
     case "retryRun": {
       const retryResult = await engine.retryRun(...args);
       return sanitise({

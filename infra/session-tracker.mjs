@@ -96,6 +96,23 @@ const REPO_BLOCK_PATTERNS = [
   /index contains uncommitted changes/i,
 ];
 
+const REPO_RECOVERY_PATTERNS = [
+  /git push[\s\S]{0,400}\(exit 0\)/i,
+  /gh pr create[\s\S]{0,400}\(exit 0\)/i,
+  /gh pr edit[\s\S]{0,400}\(exit 0\)/i,
+  /\bbranch pushed:\b/i,
+  /\bdraft pr:\s*`?#\d+/i,
+  /\bopened draft pr\b/i,
+  /\bcreated (?:the )?draft pr\b/i,
+  /\bpre-push hook\b[\s\S]{0,120}\bpassed\b/i,
+];
+
+function hasRepoRecoveryText(text) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return REPO_RECOVERY_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 const ENV_BLOCK_PATTERNS = [
   /prompt quality/i,
   /missing task (description|url)/i,
@@ -190,6 +207,7 @@ function hasMeaningfulSessionOutput(session) {
 function classifyBlockedSessionText(text) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
+  if (hasRepoRecoveryText(normalized)) return null;
   if (COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return "implementation_done_commit_blocked";
   }
@@ -199,7 +217,10 @@ function classifyBlockedSessionText(text) {
   ) {
     return "implementation_done_commit_blocked";
   }
-  if (REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  if (
+    REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))
+    && !hasRepoRecoveryText(normalized)
+  ) {
     return "blocked_by_repo";
   }
   if (ENV_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {

@@ -41,15 +41,29 @@ function createFakeRuntime({
   ctx,
   retryCtx = null,
   workflowId = "workflow-task-lifecycle",
+  workflowDefinitionsById = null,
   runHistory = [],
 } = {}) {
-  const workflowDefinition = {
-    id: workflowId,
-    nodes: [
-      { id: "trigger", type: "trigger.task_available" },
-      { id: "run-agent-plan", type: "action.run_agent" },
-    ],
-  };
+  const definitionsById =
+    workflowDefinitionsById && typeof workflowDefinitionsById === "object"
+      ? workflowDefinitionsById
+      : {
+          [workflowId]: {
+            id: workflowId,
+            metadata: { installedFrom: "template-task-lifecycle" },
+            nodes: [
+              { id: "trigger", type: "trigger.task_available" },
+              { id: "run-agent-plan", type: "action.run_agent" },
+            ],
+          },
+        };
+  const workflowDefinition =
+    definitionsById[workflowId] || Object.values(definitionsById)[0];
+  const listedWorkflows = Object.values(definitionsById).map((definition) => ({
+    id: definition.id,
+    enabled: definition.enabled !== false,
+    metadata: definition.metadata || {},
+  }));
   const resolvedRetryCtx = retryCtx || (ctx ? { ...ctx, id: `retry-${ctx.id}` } : null);
   const engine = {
     services: {
@@ -57,6 +71,7 @@ function createFakeRuntime({
         getTask: vi.fn(async (taskId) => taskById[taskId] || null),
       },
     },
+    list: vi.fn(() => listedWorkflows),
     on: vi.fn(),
     off: vi.fn(),
     execute: vi.fn(async () => ctx),
@@ -67,10 +82,13 @@ function createFakeRuntime({
       ctx: resolvedRetryCtx,
     })),
     getRunHistory: vi.fn(() => runHistory),
-    get: vi.fn(() => workflowDefinition),
+    get: vi.fn((requestedWorkflowId) => (
+      definitionsById[requestedWorkflowId] || workflowDefinition
+    )),
   };
   return {
     repoRoot,
+    runsDir: resolve(repoRoot, ".bosun", "workflow-runs"),
     workflowId,
     statePath: resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json"),
     engine,
@@ -205,6 +223,67 @@ describe("task simulate CLI", () => {
     }
   });
 
+  it("refreshes the installed task lifecycle workflow before reuse when the stored definition is stale", async () => {
+    const repoRoot = makeTempDir();
+    git(["init"], repoRoot);
+    git(["config", "user.email", "test@example.com"], repoRoot);
+    git(["config", "user.name", "Test"], repoRoot);
+    writeFileSync(resolve(repoRoot, "README.md"), "init\n", "utf8");
+    git(["add", "README.md"], repoRoot);
+    git(["commit", "-m", "init"], repoRoot);
+    git(["branch", "-M", "main"], repoRoot);
+    git(["checkout", "-b", "bosun/codex-self-improvement-loop-commits"], repoRoot);
+
+    const config = {
+      repoRoot,
+      workflowDefaults: {
+        profile: "balanced",
+        templates: [],
+        autoInstall: true,
+      },
+      branchRouting: {
+        defaultBranch: "origin/main",
+        scopeMap: {},
+      },
+    };
+    const storePath = resolve(repoRoot, ".bosun", ".cache", "task-sim-stale-install-store.json");
+
+    const runtime = await createTaskSimulationRuntime({
+      repoRoot,
+      config,
+      storePath,
+    });
+
+    try {
+      const workflowPath = resolve(repoRoot, ".bosun", "workflows", `${runtime.workflowId}.json`);
+      const installed = JSON.parse(readFileSync(workflowPath, "utf8"));
+      const implementNode = installed.nodes.find((node) => node.id === "run-agent-implement");
+      expect(String(implementNode?.config?.prompt || "")).toContain("narrowest verification that proves the changed surface");
+
+      implementNode.config.prompt = "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.";
+      writeFileSync(workflowPath, JSON.stringify(installed, null, 2), "utf8");
+    } finally {
+      await runtime.close?.();
+      resetWorkflowEngine();
+    }
+
+    const refreshedRuntime = await createTaskSimulationRuntime({
+      repoRoot,
+      config,
+      storePath,
+    });
+
+    try {
+      const workflowPath = resolve(repoRoot, ".bosun", "workflows", `${refreshedRuntime.workflowId}.json`);
+      const refreshed = JSON.parse(readFileSync(workflowPath, "utf8"));
+      const implementNode = refreshed.nodes.find((node) => node.id === "run-agent-implement");
+      expect(String(implementNode?.config?.prompt || "")).toContain("narrowest verification that proves the changed surface");
+      expect(String(refreshedRuntime.engine.get(refreshedRuntime.workflowId)?.nodes?.find((node) => node.id === "run-agent-implement")?.config?.prompt || "")).toContain("narrowest verification that proves the changed surface");
+    } finally {
+      await refreshedRuntime.close?.();
+    }
+  });
+
   it("runs an explicit task through the installed lifecycle workflow", async () => {
     const repoRoot = makeTempDir();
     const task = {
@@ -260,6 +339,168 @@ describe("task simulate CLI", () => {
     expect(payload.nodes.some((node) => node.id === "run-agent-plan")).toBe(true);
     const saved = JSON.parse(readFileSync(runtime.statePath, "utf8"));
     expect(saved.taskId).toBe(task.id);
+  });
+
+  it("routes an in-review task with PR context through the installed PR progressor workflow", async () => {
+    const repoRoot = makeTempDir();
+    const task = {
+      id: "task-review",
+      title: "Repair failed PR",
+      status: "in_review",
+      branchName: "task/e274fdfc65a8-fix-pr",
+      baseBranch: "origin/main",
+      prNumber: 487,
+      prUrl: "https://github.com/virtengine/bosun/pull/487",
+    };
+    const ctx = buildContext({
+      runId: "run-pr-progressor",
+      taskId: task.id,
+      taskTitle: task.title,
+      triggerOutput: {
+        triggered: true,
+        reason: "direct_task",
+        taskId: task.id,
+        taskTitle: task.title,
+        prNumber: task.prNumber,
+        prUrl: task.prUrl,
+      },
+      nodeStatuses: {
+        trigger: "completed",
+        "inspect-pr": "completed",
+      },
+    });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      ctx,
+      workflowDefinitionsById: {
+        "workflow-task-lifecycle": {
+          id: "workflow-task-lifecycle",
+          metadata: { installedFrom: "template-task-lifecycle" },
+          nodes: [
+            { id: "trigger", type: "trigger.task_available" },
+            { id: "run-agent-plan", type: "action.run_agent" },
+          ],
+        },
+        "workflow-pr-progressor": {
+          id: "workflow-pr-progressor",
+          metadata: { installedFrom: "template-bosun-pr-progressor" },
+          nodes: [
+            { id: "trigger", type: "trigger.workflow_call" },
+            { id: "inspect-pr", type: "action.run_command" },
+          ],
+        },
+      },
+    });
+    const stdout = [];
+
+    const result = await executeTaskSimulationCommand(
+      ["simulate", "task", task.id, "--json"],
+      {
+        runtime,
+        stdout: (line) => stdout.push(line),
+        forceJsonOutput: true,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runtime.engine.execute).toHaveBeenCalledWith("workflow-pr-progressor", expect.objectContaining({
+      taskId: task.id,
+      taskTitle: task.title,
+      branch: task.branchName,
+      baseBranch: task.baseBranch,
+      prNumber: task.prNumber,
+      prUrl: task.prUrl,
+      repo: "virtengine/bosun",
+    }));
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.templateId).toBe("template-bosun-pr-progressor");
+    expect(payload.workflowId).toBe("workflow-pr-progressor");
+    expect(payload.nodes.some((node) => node.id === "inspect-pr")).toBe(true);
+    const saved = JSON.parse(readFileSync(runtime.statePath, "utf8"));
+    expect(saved.workflowId).toBe("workflow-pr-progressor");
+  });
+
+  it("replays a done task with stale synthetic base context through the installed lifecycle workflow", async () => {
+    const repoRoot = makeTempDir();
+    const task = {
+      id: "task-merged",
+      title: "Confirm merged PR state",
+      status: "done",
+      branchName: "task/e274fdfc65a8-fix-pr",
+      baseBranch: "monitor-postmerge-sync",
+      prNumber: 487,
+      prUrl: "https://github.com/virtengine/bosun/pull/487",
+    };
+    const ctx = buildContext({
+      runId: "run-pr-progressor-done",
+      taskId: task.id,
+      taskTitle: task.title,
+      triggerOutput: {
+        triggered: true,
+        reason: "direct_task",
+        taskId: task.id,
+        task,
+      },
+      nodeStatuses: {
+        trigger: "completed",
+        "run-agent-plan": "completed",
+      },
+    });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      ctx,
+      workflowDefinitionsById: {
+        "workflow-task-lifecycle": {
+          id: "workflow-task-lifecycle",
+          metadata: { installedFrom: "template-task-lifecycle" },
+          nodes: [
+            { id: "trigger", type: "trigger.task_available" },
+            { id: "run-agent-plan", type: "action.run_agent" },
+          ],
+        },
+        "workflow-pr-progressor": {
+          id: "workflow-pr-progressor",
+          metadata: { installedFrom: "template-bosun-pr-progressor" },
+          nodes: [
+            { id: "trigger", type: "trigger.workflow_call" },
+            { id: "inspect-pr", type: "action.run_command" },
+          ],
+        },
+      },
+    });
+    runtime.defaultTargetBranch = "origin/main";
+    const stdout = [];
+
+    const result = await executeTaskSimulationCommand(
+      ["simulate", "task", task.id, "--json"],
+      {
+        runtime,
+        stdout: (line) => stdout.push(line),
+        forceJsonOutput: true,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runtime.engine.execute).toHaveBeenCalledWith("workflow-task-lifecycle", expect.objectContaining({
+      taskId: task.id,
+      taskTitle: task.title,
+      task: expect.objectContaining({
+        id: task.id,
+        status: "done",
+        prNumber: task.prNumber,
+        prUrl: task.prUrl,
+        baseBranch: "origin/main",
+        base_branch: "origin/main",
+      }),
+    }));
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.templateId).toBe("template-task-lifecycle");
+    expect(payload.workflowId).toBe("workflow-task-lifecycle");
+    expect(payload.nodes.some((node) => node.id === "run-agent-plan")).toBe(true);
+    const saved = JSON.parse(readFileSync(runtime.statePath, "utf8"));
+    expect(saved.workflowId).toBe("workflow-task-lifecycle");
   });
 
   it("rewrites stored Bosun local ops task bases back to origin/main during simulation", async () => {
@@ -354,6 +595,54 @@ describe("task simulate CLI", () => {
     expect(payload.explicitTaskId).toBeNull();
     const saved = JSON.parse(readFileSync(runtime.statePath, "utf8"));
     expect(saved.taskId).toBe(selectedTask.id);
+  });
+
+  it("ignores flag values when selecting the next task without an explicit task id", async () => {
+    const repoRoot = makeTempDir();
+    const selectedTask = { id: "task-next-flags", title: "Next task with flags" };
+    const ctx = buildContext({
+      runId: "run-next-flags",
+      triggerOutput: {
+        triggered: true,
+        reason: "selected_task",
+        taskId: selectedTask.id,
+        task: selectedTask,
+      },
+      nodeStatuses: {
+        trigger: "completed",
+      },
+    });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      ctx,
+    });
+    const stdout = [];
+
+    const result = await executeTaskSimulationCommand(
+      [
+        "simulate",
+        "task",
+        "--json",
+        "--diagnose",
+        "--config-dir",
+        "/tmp/bosun-config",
+        "--repo-root",
+        "/tmp/repo-root",
+      ],
+      {
+        runtime,
+        stdout: (line) => stdout.push(line),
+        forceJsonOutput: true,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runtime.engine.execute).toHaveBeenCalledWith(runtime.workflowId, expect.not.objectContaining({
+      taskId: expect.any(String),
+    }));
+    const payload = JSON.parse(stdout[0]);
+    expect(payload.taskId).toBe(selectedTask.id);
+    expect(payload.explicitTaskId).toBeNull();
   });
 
   it("restarts the last simulated task from persisted state", async () => {
@@ -603,6 +892,76 @@ describe("task simulate CLI", () => {
     expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-mode-1", { mode: "replan_from_failed" });
   });
 
+  it("resume refuses to rerun a terminal task that is already done", async () => {
+    const repoRoot = makeTempDir();
+    const task = { id: "task-done", title: "Already done", status: "done" };
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        runId: "run-done-1",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    const ctx = buildContext({ runId: "run-done-retry", taskId: task.id, taskTitle: task.title });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      retryCtx: ctx,
+      ctx,
+    });
+
+    await expect(
+      executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime }),
+    ).rejects.toThrow(/resume is not allowed for terminal tasks/i);
+
+    expect(runtime.engine.retryRun).not.toHaveBeenCalled();
+    expect(runtime.engine.execute).not.toHaveBeenCalled();
+  });
+
+  it("resume honors --state-path overrides from the CLI", async () => {
+    const repoRoot = makeTempDir();
+    const task = { id: "task-state-override", title: "Use overridden resume state" };
+    const defaultStatePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    const overrideStatePath = resolve(repoRoot, ".bosun", ".cache", "resume-override.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      defaultStatePath,
+      JSON.stringify({ taskId: "task-stale", runId: "run-stale", savedAt: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      overrideStatePath,
+      JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        runId: "run-override-1",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: new Date().toISOString(),
+      }, null, 2),
+      "utf8",
+    );
+    const ctx = buildContext({ runId: "run-override-retry", taskId: task.id, taskTitle: task.title });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      retryCtx: ctx,
+      ctx,
+    });
+
+    await executeTaskSimulationCommand(
+      ["simulate", "task", "resume", "--state-path", overrideStatePath],
+      { runtime },
+    );
+
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-override-1", { mode: "from_failed" });
+  });
+
   it("resume prefers a newer same-lineage task run over the cached completed root run", async () => {
     const repoRoot = makeTempDir();
     const task = { id: "task-newer", title: "Use latest interrupted run" };
@@ -714,6 +1073,121 @@ describe("task simulate CLI", () => {
     expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-older-more-progressed", { mode: "from_failed" });
   });
 
+  it("resume falls back to the most useful same-task frontier when the cached run is a completed retry wrapper", async () => {
+    const repoRoot = makeTempDir();
+    const task = { id: "task-wrapper", title: "Skip completed retry wrapper" };
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: task.id,
+        taskTitle: task.title,
+        runId: "run-wrapper-completed",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: "2026-04-26T15:00:00.000Z",
+      }),
+      "utf8",
+    );
+    const retryCtx = buildContext({ runId: "run-wrapper-retry", taskId: task.id, taskTitle: task.title });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      taskById: { [task.id]: task },
+      retryCtx,
+      ctx: retryCtx,
+      runHistory: [
+        {
+          runId: "run-wrapper-completed",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-root-wrapper",
+          retryOf: "run-root-wrapper",
+          status: "completed",
+          startedAt: "2026-04-26T15:06:00.000Z",
+          endedAt: "2026-04-26T15:07:00.000Z",
+          latestCheckpoint: { eventCursor: 2, updatedAt: "2026-04-26T15:07:00.000Z" },
+        },
+        {
+          runId: "run-live-tests",
+          workflowId: "workflow-task-lifecycle",
+          taskId: task.id,
+          rootRunId: "run-live-tests",
+          status: "running",
+          startedAt: "2026-04-26T15:08:00.000Z",
+          latestCheckpoint: { eventCursor: 41, updatedAt: "2026-04-26T15:10:00.000Z" },
+        },
+      ],
+    });
+
+    await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
+
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-live-tests", { mode: "from_failed" });
+  });
+
+  it("resume recovers a same-task frontier from saved wrapper filtered tasks when cached state lost taskId", async () => {
+    const repoRoot = makeTempDir();
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    const runsDir = resolve(repoRoot, ".bosun", "workflow-runs");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: null,
+        taskTitle: null,
+        runId: "run-wrapper",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      resolve(runsDir, "run-wrapper.json"),
+      JSON.stringify({
+        id: "run-wrapper",
+        nodeOutputs: {
+          trigger: {
+            triggered: false,
+            reason: "prompt_quality_filtered",
+            filteredTasks: [
+              { taskId: "task-meaningful", missing: ["url"] },
+              { taskId: "task-other", missing: ["url"] },
+            ],
+          },
+        },
+      }),
+      "utf8",
+    );
+    const retryCtx = buildContext({
+      runId: "run-retried-meaningful",
+      taskId: "task-meaningful",
+      taskTitle: "Recovered meaningful task",
+    });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      retryCtx,
+      ctx: retryCtx,
+      runHistory: [
+        {
+          runId: "run-wrapper",
+          status: "completed",
+          workflowId: "workflow-task-lifecycle",
+          rootRunId: "lineage-root",
+        },
+        {
+          runId: "run-live-tests",
+          status: "running",
+          workflowId: "workflow-task-lifecycle",
+          taskId: "task-meaningful",
+        },
+      ],
+    });
+
+    await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
+
+    expect(runtime.engine.retryRun).toHaveBeenCalledWith("run-live-tests", { mode: "from_failed" });
+  });
+
   it("resume calls getRunHistory with the live engine binding before choosing a newer lineage run", async () => {
     const repoRoot = makeTempDir();
     const task = { id: "task-bound", title: "Bound run history" };
@@ -786,6 +1260,43 @@ describe("task simulate CLI", () => {
     const saved = JSON.parse(readFileSync(statePath, "utf8"));
     expect(saved.runId).toBe("run-new");
     expect(saved.taskId).toBe("task-persist");
+  });
+
+  it("resume preserves the prior task state when a skipped retry wrapper reports no task identity", async () => {
+    const repoRoot = makeTempDir();
+    const statePath = resolve(repoRoot, ".bosun", ".cache", "task-simulator-last-run.json");
+    mkdirSync(resolve(repoRoot, ".bosun", ".cache"), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        taskId: null,
+        taskTitle: null,
+        runId: "run-meaningful",
+        workflowId: "workflow-task-lifecycle",
+        savedAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    const retryCtx = buildContext({ runId: "run-wrapper-only" });
+    const runtime = createFakeRuntime({
+      repoRoot,
+      retryCtx,
+      ctx: retryCtx,
+      runHistory: [{
+        id: "run-meaningful",
+        taskId: "task-meaningful",
+        taskTitle: "Meaningful task",
+        workflowId: "workflow-task-lifecycle",
+      }],
+    });
+
+    await executeTaskSimulationCommand(["simulate", "task", "resume"], { runtime });
+
+    const saved = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(saved.runId).toBe("run-meaningful");
+    expect(saved.taskId).toBe("task-meaningful");
+    expect(saved.taskTitle).toBe("Meaningful task");
+    expect(saved.workflowId).toBe("workflow-task-lifecycle");
   });
 
   it("resume text-mode output includes mode=resume line with retryMode and originalRunId", async () => {

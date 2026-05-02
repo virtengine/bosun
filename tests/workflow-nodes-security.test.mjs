@@ -629,6 +629,165 @@ describe("action.run_command env interpolation", () => {
       rmSync(repoRoot, { recursive: true, force: true });
     }
   }, 30000);
+
+  it("supplies synthetic pre-push stdin for auto quality-gate hook resolution", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-auto-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git remote add origin https://example.com/virtengine/bosun.git", { cwd: repoRoot, stdio: "pipe" });
+
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cat > .hook-input.txt",
+        "echo hook ok",
+        "",
+      ].join("\n"));
+      writeFileSync(join(repoRoot, "package.json"), JSON.stringify({
+        name: "wf-prepush-auto",
+        version: "1.0.0",
+        scripts: {
+          "prepush:check": "node -e \"process.stdout.write('script fallback should not run')\"",
+        },
+      }, null, 2));
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      execSync("git add .githooks/pre-push package.json tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "change\n");
+      execSync("git add tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m change", { cwd: repoRoot, stdio: "pipe" });
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "auto",
+        commandType: "qualityGate",
+        cwd: repoRoot,
+      }, "quality-gate-auto-hook");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath: repoRoot,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("hook ok");
+
+      const hookInput = readFileSync(join(repoRoot, ".hook-input.txt"), "utf8").trim();
+      const [localRef, localSha, remoteRef, remoteSha] = hookInput.split(/\s+/);
+      expect(localRef).toBe("refs/heads/task/test");
+      expect(localSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(remoteRef).toBe("refs/heads/task/test");
+      expect(remoteSha).toBe("0000000000000000000000000000000000000000");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("fails direct pre-push validation early when git metadata is unavailable", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-missing-git-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "echo hook should not run",
+        "",
+      ].join("\n"));
+      execSync("git add .githooks/pre-push tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      rmSync(join(repoRoot, ".git"), { recursive: true, force: true });
+      writeFileSync(join(repoRoot, ".git"), "gitdir: C:/__bosun_missing__/worktrees/task-test\n");
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "bash .githooks/pre-push",
+        cwd: repoRoot,
+      }, "quality-gate-hook-missing-git");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath: repoRoot,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(false);
+      expect(result.exitCode).toBe(1);
+      expect(String(result.stderr || result.error || "")).toContain("requires a valid git worktree");
+      expect(String(result.output || "")).not.toContain("hook should not run");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("re-syncs managed pre-push hooks before direct execution so stale CRLF hook copies do not fail", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-worktree-source-"));
+    const worktreePath = mkdtempSync(join(tmpdir(), "wf-prepush-worktree-target-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git remote add origin https://example.com/virtengine/bosun.git", { cwd: repoRoot, stdio: "pipe" });
+
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cat > .hook-input.txt",
+        "echo hook ok",
+        "",
+      ].join("\n"));
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      execSync("git add .githooks/pre-push tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "change\n");
+      execSync("git add tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m change", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout main", { cwd: repoRoot, stdio: "pipe" });
+      execSync(`git worktree add "${worktreePath}" task/test`, { cwd: repoRoot, stdio: "pipe" });
+
+      writeFileSync(join(worktreePath, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash\r",
+        "set -euo pipefail\r",
+        "cat > .hook-input.txt\r",
+        "echo hook ok\r",
+        "",
+      ].join("\n"), "utf8");
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "bash .githooks/pre-push",
+        cwd: worktreePath,
+      }, "quality-gate-hook-resync-runtime");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("hook ok");
+      expect(readFileSync(join(worktreePath, ".githooks", "pre-push"), "utf8").includes("\r")).toBe(false);
+      expect(readFileSync(join(worktreePath, ".hook-input.txt"), "utf8")).toContain("refs/heads/task/test");
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
 });
 
 describe("workflow validation output compaction", () => {

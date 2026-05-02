@@ -856,10 +856,23 @@ registerAction("workflow.retry", async (params) => {
   const currentRun = engine?.getRunDetail ? engine.getRunDetail(runId) : null;
   if (!currentRun) throw new Error(`Workflow run "${runId}" not found`);
   const currentStatus = String(currentRun?.status || "").trim().toLowerCase();
-  if (mode === "from_failed" && currentStatus !== "failed") {
+  const retryOptions = typeof engine.getRetryOptions === "function"
+    ? engine.getRetryOptions(runId)
+    : null;
+  const safeInterruptedResume =
+    mode === "from_failed" &&
+    retryOptions?.guardedState?.code === "create_tasks_pending" &&
+    retryOptions?.guardedState?.safeResume === true &&
+    retryOptions?.recommendedMode === "from_failed";
+  if (mode === "from_failed" && currentStatus !== "failed" && !safeInterruptedResume) {
     throw new Error(`retry mode "from_failed" requires a failed run (current=${currentRun?.status || "unknown"})`);
   }
-  return engine.retryRun(runId, { mode });
+  const retryArgs = { mode };
+  if (safeInterruptedResume) {
+    retryArgs._resumeInterrupted = true;
+    if (retryOptions?.recommendedReason) retryArgs._decisionReason = retryOptions.recommendedReason;
+  }
+  return engine.retryRun(runId, retryArgs);
 });
 
 // ── Skill/prompt actions ────────────────────────────────────────────────────

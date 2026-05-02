@@ -156,6 +156,7 @@ describe("prepublish-check", () => {
         "shell/session-resume.mjs",
         "shell/session-store.mjs",
         "shell/codex-sdk-import.mjs",
+        "kanban/gnap-projection-store.mjs",
         "workspace/context-injector.mjs",
         "workspace/execution-journal.mjs",
         "workspace/scope-locks.mjs",

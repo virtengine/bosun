@@ -818,6 +818,17 @@ describe("codex-shell stream safeguards", () => {
     expect(resolved.env.OPENAI_BASE_URL).toBe("https://example-resource.openai.azure.com/openai/v1");
     expect(resolved.env.AZURE_OPENAI_API_KEY).toBe("azure-key");
   });
+  it("accepts AZURE_OPENAI_KEY as a legacy Azure auth alias", async () => {
+    const actualProfiles = await vi.importActual("../shell/codex-model-profiles.mjs");
+    const resolved = actualProfiles.resolveCodexProfileRuntime({
+      OPENAI_BASE_URL: "https://example-resource.openai.azure.com/openai/v1",
+      AZURE_OPENAI_KEY: "legacy-azure-key",
+    });
+
+    expect(resolved.provider).toBe("azure");
+    expect(resolved.env.AZURE_OPENAI_API_KEY).toBe("legacy-azure-key");
+    expect(resolved.env.OPENAI_API_KEY).toBe("legacy-azure-key");
+  });
   it("strips non-Azure OPENAI_BASE_URL before creating the SDK", async () => {
     const {
       execCodexPrompt: freshExecCodexPrompt,

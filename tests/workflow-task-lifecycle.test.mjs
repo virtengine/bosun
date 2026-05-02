@@ -425,6 +425,125 @@ describe("trigger.task_available", () => {
     }));
   });
 
+  it("filters prompt-incomplete tasks before dispatch when enabled", async () => {
+    const nt = getNodeType("trigger.task_available");
+    const listTasks = vi.fn().mockResolvedValue([
+      {
+        id: "empty-1",
+        title: "Placeholder task",
+        status: "todo",
+      },
+      {
+        id: "ready-1",
+        title: "Ready task",
+        description: "Has the required task description",
+        taskUrl: "https://example.test/tasks/ready-1",
+        status: "todo",
+      },
+    ]);
+    const getTask = vi.fn().mockImplementation(async (taskId) => taskId === "empty-1"
+      ? {
+          id: "empty-1",
+          title: "Placeholder task",
+          description: "",
+          taskUrl: "",
+          status: "todo",
+        }
+      : null);
+    const ctx = makeCtx({ activeSlotCount: 0 });
+    const node = makeNode("trigger.task_available", {
+      maxParallel: 1,
+      status: "todo",
+      requireTaskPromptCompleteness: true,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          listTasks,
+          getTask,
+        },
+      },
+    });
+
+    expect(result.triggered).toBe(true);
+    expect(result.selectedTaskId).toBe("ready-1");
+    expect(result.taskCount).toBe(1);
+    expect(ctx.data.taskId).toBe("ready-1");
+  });
+
+  it("dispatches internal tasks with descriptions even when no external URL is stored", async () => {
+    const nt = getNodeType("trigger.task_available");
+    const listTasks = vi.fn().mockResolvedValue([
+      {
+        id: "internal-1",
+        title: "Internal task",
+        description: "Ready for dispatch from the local task store.",
+        status: "todo",
+      },
+    ]);
+    const ctx = makeCtx({ activeSlotCount: 0 });
+    const node = makeNode("trigger.task_available", {
+      maxParallel: 1,
+      status: "todo",
+      requireTaskPromptCompleteness: true,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          listTasks,
+        },
+      },
+    });
+
+    expect(result.triggered).toBe(true);
+    expect(result.selectedTaskId).toBe("internal-1");
+    expect(ctx.data.taskId).toBe("internal-1");
+  });
+
+  it("returns prompt_quality_filtered when all candidate tasks lack prompt metadata", async () => {
+    const nt = getNodeType("trigger.task_available");
+    const listTasks = vi.fn().mockResolvedValue([
+      {
+        id: "empty-1",
+        title: "Placeholder task",
+        status: "todo",
+      },
+    ]);
+    const getTask = vi.fn().mockResolvedValue({
+      id: "empty-1",
+      title: "Placeholder task",
+      description: "",
+      taskUrl: "",
+      status: "todo",
+    });
+    const ctx = makeCtx({ activeSlotCount: 0 });
+    const node = makeNode("trigger.task_available", {
+      maxParallel: 1,
+      status: "todo",
+      requireTaskPromptCompleteness: true,
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: {
+          listTasks,
+          getTask,
+        },
+      },
+    });
+
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe("prompt_quality_filtered");
+    expect(result.filteredTasks).toEqual([
+      expect.objectContaining({
+        taskId: "empty-1",
+        missing: ["description"],
+      }),
+    ]);
+  });
+
   it("honors explicit task context before slot saturation checks", async () => {
     const nt = getNodeType("trigger.task_available");
     const listTasks = vi.fn().mockResolvedValue([]);
@@ -2183,6 +2302,52 @@ describe("action.resolve_executor", () => {
     }
   });
 
+  it("routes auto executor resolution away from codex when its Azure auth prerequisite is missing", async () => {
+    const nt = getNodeType("action.resolve_executor");
+    const saved = { ...process.env };
+    const tempHome = mkdtempSync(join(tmpdir(), "wf-resolve-executor-auto-auth-"));
+    const codexDir = join(tempHome, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(join(codexDir, "config.toml"), [
+      'model = "gpt-5.4"',
+      'model_provider = "azure-us"',
+      "",
+      "[model_providers.azure-us]",
+      'base_url = "https://example-resource.openai.azure.com/openai/v1"',
+      'env_key = "AZURE_OPENAI_API_KEY"',
+      "",
+    ].join("\n"), "utf8");
+    delete process.env.AZURE_OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.AGENT_POOL_SDK;
+    delete process.env.PRIMARY_AGENT;
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+
+    try {
+      const agentPoolMod = await import("../agent/agent-pool.mjs");
+      agentPoolMod.resetPoolSdkCache();
+      const ctx = makeCtx({});
+      const node = makeNode("action.resolve_executor", {
+        defaultSdk: "auto",
+        taskTitle: "[m] workflow resume checkpointing",
+      });
+      const result = await nt.execute(node, ctx);
+      expect(result.success).toBe(true);
+      expect(result.sdk).not.toBe("codex");
+      expect(ctx.data.resolvedSdk).toBe(result.sdk);
+      expect(ctx.log.mock.calls.flat().join("\n")).not.toContain(
+        "resolveWorkflowAgentSdkPrerequisiteFailure is not defined",
+      );
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in saved)) delete process.env[key];
+      }
+      Object.assign(process.env, saved);
+      rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it("prefers the harness primary executor over legacy codex defaults when harness runtime is active", async () => {
     const configMod = await import("../config/config.mjs");
     const loadConfigSpy = vi.spyOn(configMod, "loadConfig").mockReturnValue({
@@ -2866,6 +3031,47 @@ describe("action.resolve_executor", () => {
     expect(handler?.schema?.properties?.requireCompletionSignal?.default).toBe(true);
   });
 
+  it("pins templated resolved SDK selections so workflow run_agent does not fan out to fallback SDKs", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: false,
+      output: "",
+      sdk: "copilot",
+      error: "Copilot client start failed",
+      items: [],
+      threadId: null,
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/copilot-workflow",
+      repoRoot: "/tmp/copilot-repo",
+      resolvedSdk: "copilot",
+      resolvedModel: "sonnet-4.5",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Plan the work",
+      sdk: "{{resolvedSdk}}",
+      model: "{{resolvedModel}}",
+      failOnError: false,
+    }, "run-agent-resolved-sdk-pinned");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(execWithRetry.mock.calls[0][1]).toEqual(expect.objectContaining({
+      sdk: "copilot",
+      model: "sonnet-4.5",
+      pinSdk: true,
+    }));
+  });
+
   it("forwards autopilot defaults into harness execWithRetry options", async () => {
     const handler = getNodeType("action.run_agent");
     const execWithRetry = vi.fn().mockResolvedValue({
@@ -2899,6 +3105,40 @@ describe("action.resolve_executor", () => {
       maxContinues: 24,
       requireCompletionSignal: true,
     }));
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("injects the completion contract into initial run_agent prompts when completion enforcement is enabled", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Completion: tests written and validated.",
+      sdk: "copilot",
+      items: [],
+      threadId: "autopilot-thread-contract",
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Write the tests first",
+      failOnError: true,
+    }, "run-agent-autopilot-contract");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(execWithRetry.mock.calls[0][0]).toContain("## Completion Contract");
+    expect(execWithRetry.mock.calls[0][0]).toContain("Do not begin later workflow phases in this run.");
+    expect(execWithRetry.mock.calls[0][0]).toContain("Completion: <summary>");
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("disables completion-signal enforcement by default for plan-mode run_agent", async () => {
@@ -2935,6 +3175,7 @@ describe("action.resolve_executor", () => {
       maxContinues: 24,
       requireCompletionSignal: false,
     }));
+    expect(execWithRetry.mock.calls[0][0]).not.toContain("## Completion Contract");
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("respects explicit completion-signal enforcement for plan-mode run_agent", async () => {
@@ -2971,6 +3212,7 @@ describe("action.resolve_executor", () => {
     expect(execWithRetry.mock.calls[0][1]).toEqual(expect.objectContaining({
       requireCompletionSignal: true,
     }));
+    expect(execWithRetry.mock.calls[0][0]).toContain("## Completion Contract");
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("uses ephemeral launches by default for plan-mode run_agent passes", async () => {
@@ -3013,6 +3255,95 @@ describe("action.resolve_executor", () => {
     expect(result.success).toBe(true);
     expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
     expect(execWithRetry).not.toHaveBeenCalled();
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("falls back to retry-aware task execution when a plan-mode ephemeral launch throws terminated before first output", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Recovered plan after terminated ephemeral launch",
+      sdk: "openai-native",
+      items: [],
+      threadId: "plan-thread-retry-recovered",
+      attempts: 1,
+    });
+    const launchEphemeralThread = vi.fn().mockRejectedValue(new Error("terminated"));
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+          launchEphemeralThread,
+          launchOrResumeThread: vi.fn(),
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Plan the work",
+      mode: "plan",
+      failOnError: true,
+    }, "run-agent-plan-ephemeral-throw-recovery");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(result).toEqual(expect.objectContaining({
+      success: true,
+      output: "Recovered plan after terminated ephemeral launch",
+      attempts: 1,
+    }));
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("falls back to retry-aware task execution when a plan-mode ephemeral launch returns a raw terminated failure", async () => {
+    const handler = getNodeType("action.run_agent");
+    const execWithRetry = vi.fn().mockResolvedValue({
+      success: true,
+      output: "Recovered plan after raw terminated failure",
+      sdk: "openai-native",
+      items: [],
+      threadId: "plan-thread-retry-result-recovered",
+      attempts: 2,
+    });
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: false,
+      error: "terminated",
+      output: "",
+      sdk: "openai-native",
+      items: [],
+      threadId: null,
+    });
+    const ctx = makeCtx({
+      worktreePath: "/tmp/autopilot-workflow",
+      repoRoot: "/tmp/autopilot-repo",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          execWithRetry,
+          launchEphemeralThread,
+          launchOrResumeThread: vi.fn(),
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Plan the work",
+      mode: "plan",
+      failOnError: true,
+    }, "run-agent-plan-ephemeral-result-recovery");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(result).toEqual(expect.objectContaining({
+      success: true,
+      output: "Recovered plan after raw terminated failure",
+      attempts: 2,
+    }));
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("uses completion-aware default continuation prompt when resuming an existing session", async () => {
@@ -3253,6 +3584,52 @@ describe("action.resolve_executor", () => {
     expect(result.blockedReason).toBe("implementation_done_commit_blocked");
     expect(result.implementationState).toBe("implementation_done_commit_blocked");
     expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
+  }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
+
+  it("classifies blocked no-edit test-phase handoffs as blocked_by_env", async () => {
+    const handler = getNodeType("action.run_agent");
+    const ctx = makeCtx({
+      worktreePath: "/tmp/tests-blocked-worktree",
+      repoRoot: "/tmp/tests-blocked-repo",
+      taskId: "TASK-TESTS-BLOCKED-BY-ENV",
+      task: {
+        id: "TASK-TESTS-BLOCKED-BY-ENV",
+        title: "Blocked tests-first task",
+      },
+    });
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      sdk: "copilot",
+      output: [
+        "blocked: no implementation changes were made in the workspace; current phase did not progress beyond repeated read/search inspection, so the task is not complete.",
+        "",
+        "Completion notes:",
+        "- Repositories touched: none.",
+        "- Why blocked: the delegated session remained analysis-only in this run.",
+        "",
+        "I'm still blocked on actual execution in this run: the workspace remains unchanged and no implementation/test edits were applied.",
+      ].join("\n"),
+      items: [],
+      threadId: "agent-thread-tests-blocked",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+    const node = makeNode("action.run_agent", {
+      prompt: "Write tests first",
+      autoRecover: false,
+      failOnError: false,
+    }, "run-agent-tests");
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("blocked_by_env");
+    expect(result.error).toContain("blocked:");
   }, SLOW_WORKFLOW_TEST_TIMEOUT_MS);
 
   it("forwards OpenCode restart config through action.restart_agent execution", async () => {
@@ -4063,6 +4440,44 @@ describe("action.acquire_worktree", () => {
     }
   }, 15000);
 
+  it("prefers the actual repo root over mirrored .bosun workspace paths for acquire_worktree", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "wf-acquire-worktree-mirror-"));
+    const actualRepo = join(workspaceRoot, "bosun");
+    const mirroredRepo = join(actualRepo, ".bosun", "workspaces", "virtengine-gh", "bosun");
+    mkdirSync(actualRepo, { recursive: true });
+    gitExec("git init", { cwd: actualRepo, stdio: "ignore" });
+    gitExec("git config --local user.email test@test.com", { cwd: actualRepo, stdio: "ignore" });
+    gitExec("git config --local user.name Test", { cwd: actualRepo, stdio: "ignore" });
+    writeFileSync(join(actualRepo, "README.md"), "init\n");
+    gitExec("git add README.md && git commit -m init", { cwd: actualRepo, stdio: "ignore" });
+    gitExec("git branch -M main", { cwd: actualRepo, stdio: "ignore" });
+    mkdirSync(mirroredRepo, { recursive: true });
+    writeFileSync(join(mirroredRepo, ".git"), `gitdir: ${join(actualRepo, ".git")}\n`);
+
+    try {
+      const ctx = makeCtx({});
+      const node = makeNode("action.acquire_worktree", {
+        repoRoot: mirroredRepo,
+        taskId: "mirror-acquire-1",
+        branch: "task/mirror-acquire-1-fix",
+        baseBranch: "main",
+        defaultTargetBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      });
+
+      const result = await nt.execute(node, ctx);
+      expect(result.success).toBe(true);
+      expect(String(ctx.data.repoRoot || "").replace(/\\/g, "/")).toBe(actualRepo.replace(/\\/g, "/"));
+      expect(String(result.worktreePath || "").replace(/\\/g, "/")).toContain(
+        `${actualRepo.replace(/\\/g, "/")}/.bosun/worktrees/`,
+      );
+    } finally {
+      try { rmSync(workspaceRoot, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  }, 15000);
+
   it("marks reused worktrees as managed for cleanup", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const ctx1 = makeCtx({});
@@ -4725,6 +5140,666 @@ describe("action.acquire_worktree", () => {
     }
   }, 40000);
 
+  it.skipIf(skipLocallyForSpeed)("recreates a PR-linked managed task branch worktree when the remote task branch advances", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "remote-task-head-1";
+    const branch = "task/remote-task-head";
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-acquire-origin-"));
+    const cloneDir = mkdtempSync(join(tmpdir(), "wf-acquire-clone-"));
+    const taskData = {
+      id: taskId,
+      title: "Remote task branch refresh",
+      branchName: branch,
+      baseBranch: "origin/main",
+      prNumber: 489,
+    };
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "origin/main",
+      defaultTargetBranch: "origin/main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const previousAllowRefresh = process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+    process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = "true";
+    try {
+      gitExec("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      gitExec(`git remote add origin "${remoteDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+
+      const first = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(first.success).toBe(true);
+      expect(first.created).toBe(true);
+
+      gitExec("git config --local user.email test@test.com", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(first.worktreePath, "feature.txt"), "initial task branch work\n");
+      gitExec("git add feature.txt", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m initial-task-work", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec(`git push -u origin ${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      const firstHead = gitExec("git rev-parse HEAD", {
+        cwd: first.worktreePath,
+        encoding: "utf8",
+      }).trim();
+
+      gitExec(`git clone "${remoteDir}" "${cloneDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.email test@test.com", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(cloneDir, "remote.txt"), "remote branch advance\n");
+      gitExec("git add remote.txt", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m remote-advance", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git push origin ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      const remoteHead = gitExec("git rev-parse HEAD", {
+        cwd: cloneDir,
+        encoding: "utf8",
+      }).trim();
+
+      const second = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(second.success).toBe(true);
+      expect(second.created).toBe(true);
+      expect(second.reused).not.toBe(true);
+
+      const refreshedHead = gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(refreshedHead).toBe(remoteHead);
+      expect(refreshedHead).not.toBe(firstHead);
+      expect(existsSync(join(second.worktreePath, "remote.txt"))).toBe(true);
+
+      const recovery = readWorktreeRecoveryStatus(repoDir);
+      expect(recovery?.health).toBe("recovered");
+      expect(recovery?.recentEvents?.[0]).toMatchObject({
+        outcome: "recreated",
+        reason: "poisoned_worktree",
+        branch,
+        taskId,
+      });
+      expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("remote_task_branch_ahead");
+    } finally {
+      if (previousAllowRefresh === undefined) {
+        delete process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+      } else {
+        process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = previousAllowRefresh;
+      }
+      try { rmSync(remoteDir, { recursive: true, force: true }); } catch { /* ok */ }
+      try { rmSync(cloneDir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  }, 40000);
+
+  it.skipIf(skipLocallyForSpeed)("recreates a PR-linked managed task branch worktree when the local task branch has drifted back to base while the remote task branch advances", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "remote-task-head-reset-1";
+    const branch = "task/remote-task-head-reset";
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-acquire-origin-"));
+    const cloneDir = mkdtempSync(join(tmpdir(), "wf-acquire-clone-"));
+    const taskData = {
+      id: taskId,
+      title: "Remote task branch refresh after local reset",
+      branchName: branch,
+      baseBranch: "origin/main",
+      prNumber: 489,
+    };
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "origin/main",
+      defaultTargetBranch: "origin/main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const previousAllowRefresh = process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+    process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = "true";
+    try {
+      gitExec("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      gitExec(`git remote add origin "${remoteDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+
+      const first = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(first.success).toBe(true);
+      expect(first.created).toBe(true);
+
+      gitExec("git config --local user.email test@test.com", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(first.worktreePath, "feature.txt"), "initial task branch work\n");
+      gitExec("git add feature.txt", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m initial-task-work", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec(`git push -u origin ${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      const initialHead = gitExec("git rev-parse HEAD", {
+        cwd: first.worktreePath,
+        encoding: "utf8",
+      }).trim();
+
+      gitExec("git reset --hard origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git branch --set-upstream-to origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      const staleHead = gitExec("git rev-parse HEAD", {
+        cwd: first.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(staleHead).not.toBe(initialHead);
+
+      gitExec(`git clone "${remoteDir}" "${cloneDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.email test@test.com", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(cloneDir, "remote.txt"), "remote branch advance\n");
+      gitExec("git add remote.txt", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m remote-advance", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git push origin ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      const remoteHead = gitExec("git rev-parse HEAD", {
+        cwd: cloneDir,
+        encoding: "utf8",
+      }).trim();
+
+      const second = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(second.success).toBe(true);
+      expect(second.created).toBe(true);
+      expect(second.reused).not.toBe(true);
+
+      const refreshedHead = gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(refreshedHead).toBe(remoteHead);
+      expect(refreshedHead).not.toBe(staleHead);
+      expect(existsSync(join(second.worktreePath, "remote.txt"))).toBe(true);
+
+      const recovery = readWorktreeRecoveryStatus(repoDir);
+      expect(recovery?.health).toBe("recovered");
+      expect(recovery?.recentEvents?.[0]).toMatchObject({
+        outcome: "recreated",
+        reason: "poisoned_worktree",
+        branch,
+        taskId,
+      });
+      expect(recovery?.recentEvents?.[0]?.detectedIssues || []).toContain("remote_task_branch_ahead");
+    } finally {
+      if (previousAllowRefresh === undefined) {
+        delete process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+      } else {
+        process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = previousAllowRefresh;
+      }
+      try { rmSync(remoteDir, { recursive: true, force: true }); } catch { /* ok */ }
+      try { rmSync(cloneDir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  }, 40000);
+
+  it.skipIf(skipLocallyForSpeed)("restart-selected managed task branches still recreate from the remote task branch when PR metadata is missing but the remote branch is ahead", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "remote-task-head-restart-1";
+    const branch = "task/remote-task-head-restart";
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-acquire-origin-"));
+    const cloneDir = mkdtempSync(join(tmpdir(), "wf-acquire-clone-"));
+    const taskData = {
+      id: taskId,
+      title: "Remote task branch refresh on restart without PR metadata",
+      branchName: branch,
+      baseBranch: "origin/main",
+    };
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "origin/main",
+      defaultTargetBranch: "origin/main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const previousAllowRefresh = process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+    process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = "true";
+    try {
+      gitExec("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      gitExec(`git remote add origin "${remoteDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+
+      const first = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(first.success).toBe(true);
+      expect(first.created).toBe(true);
+
+      gitExec("git config --local user.email test@test.com", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(first.worktreePath, "feature.txt"), "initial task branch work\n");
+      gitExec("git add feature.txt", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m initial-task-work", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec(`git push -u origin ${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      gitExec("git reset --hard origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git branch --set-upstream-to origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      gitExec(`git clone "${remoteDir}" "${cloneDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.email test@test.com", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(cloneDir, "remote.txt"), "remote branch advance\n");
+      gitExec("git add remote.txt", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m remote-advance", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git push origin ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      const remoteHead = gitExec("git rev-parse HEAD", {
+        cwd: cloneDir,
+        encoding: "utf8",
+      }).trim();
+
+      const second = await nt.execute(node, makeCtx({
+        _triggerSource: "simulate.task.restart",
+        task: { ...taskData },
+      }));
+      expect(second.success).toBe(true);
+      expect(second.created).toBe(true);
+
+      const refreshedHead = gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(refreshedHead).toBe(remoteHead);
+      expect(existsSync(join(second.worktreePath, "remote.txt"))).toBe(true);
+    } finally {
+      if (previousAllowRefresh === undefined) {
+        delete process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+      } else {
+        process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = previousAllowRefresh;
+      }
+      try { rmSync(remoteDir, { recursive: true, force: true }); } catch { /* ok */ }
+      try { rmSync(cloneDir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  }, 40000);
+
+  it.skipIf(skipLocallyForSpeed)("restart-selected owned task branches recreate from the remote task branch when force-fresh restart and remote-ahead conditions both apply", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "d45f5936-4196-415e-8f39-b7195943dcee";
+    const branch = "task/d45f59364196-s-feat-workflow-add-operator-safe-guards-when-cr";
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-acquire-origin-"));
+    const cloneDir = mkdtempSync(join(tmpdir(), "wf-acquire-clone-"));
+    const taskData = {
+      id: taskId,
+      title: "[s] feat(workflow): add operator-safe guards when Create Tasks is the next pending node",
+      branchName: branch,
+      baseBranch: "origin/main",
+    };
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "origin/main",
+      defaultTargetBranch: "origin/main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const previousAllowRefresh = process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+    process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = "true";
+    try {
+      gitExec("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      gitExec(`git remote add origin "${remoteDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+
+      const first = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(first.success).toBe(true);
+      expect(first.created).toBe(true);
+
+      gitExec("git config --local user.email test@test.com", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(first.worktreePath, "feature.txt"), "initial task branch work\n");
+      gitExec("git add feature.txt", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m initial-task-work", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec(`git push -u origin ${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      gitExec("git reset --hard origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git branch --set-upstream-to origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      gitExec(`git clone "${remoteDir}" "${cloneDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.email test@test.com", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(cloneDir, "remote.txt"), "remote branch advance\n");
+      gitExec("git add remote.txt", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m remote-advance", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git push origin ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      const remoteHead = gitExec("git rev-parse HEAD", {
+        cwd: cloneDir,
+        encoding: "utf8",
+      }).trim();
+
+      const second = await nt.execute(node, makeCtx({
+        _triggerSource: "simulate.task.restart",
+        task: { ...taskData },
+      }));
+      expect(second.success).toBe(true);
+      expect(second.created).toBe(true);
+
+      const refreshedHead = gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(refreshedHead).toBe(remoteHead);
+      expect(existsSync(join(second.worktreePath, "remote.txt"))).toBe(true);
+    } finally {
+      if (previousAllowRefresh === undefined) {
+        delete process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+      } else {
+        process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = previousAllowRefresh;
+      }
+      try { rmSync(remoteDir, { recursive: true, force: true }); } catch { /* ok */ }
+      try { rmSync(cloneDir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  }, 40000);
+
+  it.skipIf(skipLocallyForSpeed)("restart-selected owned task branches recreate from the remote task branch even when a local-only commit sits ahead of remote", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const taskId = "d45f5936-4196-415e-8f39-b7195943dcee";
+    const branch = "task/d45f59364196-s-feat-workflow-add-operator-safe-guards-when-cr";
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-acquire-origin-"));
+    const cloneDir = mkdtempSync(join(tmpdir(), "wf-acquire-clone-"));
+    const taskData = {
+      id: taskId,
+      title: "[s] feat(workflow): add operator-safe guards when Create Tasks is the next pending node",
+      branchName: branch,
+      baseBranch: "origin/main",
+    };
+    const node = makeNode("action.acquire_worktree", {
+      repoRoot: repoDir,
+      taskId,
+      branch,
+      baseBranch: "origin/main",
+      defaultTargetBranch: "origin/main",
+      fetchTimeout: 5000,
+      worktreeTimeout: 10000,
+    });
+    const previousAllowRefresh = process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+    process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = "true";
+    try {
+      gitExec("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      gitExec(`git remote add origin "${remoteDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+
+      const first = await nt.execute(node, makeCtx({ task: { ...taskData } }));
+      expect(first.success).toBe(true);
+      expect(first.created).toBe(true);
+
+      gitExec("git config --local user.email test@test.com", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(first.worktreePath, "feature.txt"), "initial task branch work\n");
+      gitExec("git add feature.txt", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m initial-task-work", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec(`git push -u origin ${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      gitExec(`git clone "${remoteDir}" "${cloneDir}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.email test@test.com", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git config --local user.name Test", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(cloneDir, "remote.txt"), "remote branch advance\n");
+      gitExec("git add remote.txt", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m remote-advance", {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      gitExec(`git push origin ${branch}`, {
+        cwd: cloneDir,
+        stdio: "ignore",
+      });
+      const remoteHead = gitExec("git rev-parse HEAD", {
+        cwd: cloneDir,
+        encoding: "utf8",
+      }).trim();
+
+      gitExec(`git fetch origin ${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec(`git reset --hard origin/${branch}`, {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git branch --set-upstream-to origin/main", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(first.worktreePath, "local-only.txt"), "local ahead commit\n");
+      gitExec("git add local-only.txt", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      gitExec("git commit -m local-ahead-only", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+
+      const second = await nt.execute(node, makeCtx({
+        _triggerSource: "simulate.task.restart",
+        task: { ...taskData },
+      }));
+      expect(second.success).toBe(true);
+      expect(second.created).toBe(true);
+
+      const refreshedHead = gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim();
+      expect(refreshedHead).toBe(remoteHead);
+      expect(existsSync(join(second.worktreePath, "remote.txt"))).toBe(true);
+      expect(existsSync(join(second.worktreePath, "local-only.txt"))).toBe(false);
+    } finally {
+      if (previousAllowRefresh === undefined) {
+        delete process.env.BOSUN_TEST_ALLOW_GIT_REFRESH;
+      } else {
+        process.env.BOSUN_TEST_ALLOW_GIT_REFRESH = previousAllowRefresh;
+      }
+      try { rmSync(remoteDir, { recursive: true, force: true }); } catch { /* ok */ }
+      try { rmSync(cloneDir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  }, 40000);
+
   it("enables core.longpaths before checkout", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const ctx = makeCtx({});
@@ -4927,6 +6002,31 @@ describe("action.build_task_prompt", () => {
     expect(result.prompt).toContain("**Workspace:** workspace-a");
     expect(result.prompt).toContain("**Primary Repository:** org/primary");
     expect(result.prompt).toContain("org/shared-lib");
+  });
+
+  it("surfaces task repo-area scope metadata in the prompt", async () => {
+    const nt = getNodeType("action.build_task_prompt");
+    const ctx = makeCtx({
+      task: {
+        meta: {
+          repo_areas: ["workflow", "task", "cli"],
+        },
+      },
+    });
+    const node = makeNode("action.build_task_prompt", {
+      taskId: "T4b",
+      taskTitle: "Scoped task",
+      taskDescription: "Stay within the declared repo areas.",
+      worktreePath: "/tmp/wt-repo-areas",
+    });
+    const result = await nt.execute(node, ctx);
+    expect(result.prompt).toContain("## Repo Area Scope");
+    expect(result.prompt).toContain("workflow");
+    expect(result.prompt).toContain("task");
+    expect(result.prompt).toContain("cli");
+    expect(result.prompt).toContain("Only inspect tests that directly cover these areas");
+    expect(result.prompt).toContain("Avoid unrelated test suites from other product areas");
+    expect(result.prompt).toContain("If you need to widen beyond these areas");
   });
 
   it("strips unresolved template placeholders from prompt fields", async () => {
@@ -6474,6 +7574,7 @@ describe("template-task-lifecycle", () => {
     const triggerNode = t.nodes.find((n) => n.id === "trigger");
     expect(triggerNode?.type).toBe("trigger.task_available");
     expect(triggerNode?.config?.statuses).toEqual(["todo"]);
+    expect(triggerNode?.config?.requireTaskPromptCompleteness).toBe(true);
   });
 
   it("has all required node IDs", () => {
@@ -6487,7 +7588,7 @@ describe("template-task-lifecycle", () => {
       "plan-agent-ok", "tests-agent-ok", "implement-agent-ok",
       "set-blocked-agent-plan-failed", "set-blocked-agent-tests-failed", "set-blocked-agent-implement-failed",
       "claim-stolen", "detect-commits", "has-commits", "no-commit-retries-exhausted",
-      "pre-pr-validation", "pre-pr-validation-ok", "set-fix-summary", "auto-fix-validation", "retry-pre-pr-validation", "retry-validation-ok", "log-validation-failed", "set-blocked-validation-failed", "notify-validation-blocked",
+      "pre-pr-validation", "pre-pr-validation-ok", "set-fix-summary", "auto-fix-validation", "validation-fix1-worktree-ok", "retry-pre-pr-validation", "retry-validation-ok", "set-fix2-summary", "auto-fix-validation-2", "validation-fix2-worktree-ok", "retry2-pre-pr-validation", "retry2-validation-ok", "log-validation-failed", "set-blocked-validation-failed", "notify-validation-blocked", "log-validation-worktree-failed", "set-blocked-validation-worktree-failed", "annotate-blocked-validation-worktree-failed",
       "auto-commit-pre-push",
       "push-branch", "push-ok", "build-pr-body", "create-pr", "push-pr-linked", "set-inreview", "handoff-pr-progressor", "log-success",
       "log-no-commits", "log-no-commits-exhausted", "set-todo-cooldown", "set-blocked-no-commits", "build-pr-body-stolen", "create-pr-retry", "pr-created-stolen", "set-inreview-stolen", "handoff-pr-progressor-stolen", "log-claim-stolen-recovered",
@@ -6608,6 +7709,8 @@ describe("template-task-lifecycle", () => {
     const t = getTemplate("template-task-lifecycle");
     const autoFixValidation = t.nodes.find((n) => n.id === "auto-fix-validation");
     const autoFixValidation2 = t.nodes.find((n) => n.id === "auto-fix-validation-2");
+    const validationFix1WorktreeOk = t.nodes.find((n) => n.id === "validation-fix1-worktree-ok");
+    const validationFix2WorktreeOk = t.nodes.find((n) => n.id === "validation-fix2-worktree-ok");
     const autoCommitBeforePush = t.nodes.find((n) => n.id === "auto-commit-pre-push");
     expect(t.edges.find((e) => e.source === "has-commits" && e.target === "pre-pr-validation")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation" && e.target === "pre-pr-validation-ok")).toBeDefined();
@@ -6617,16 +7720,23 @@ describe("template-task-lifecycle", () => {
     expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "auto-commit-pre-push")).toBeDefined();
     expect(t.edges.find((e) => e.source === "pre-pr-validation-ok" && e.target === "set-fix-summary")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-fix-summary" && e.target === "auto-fix-validation")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "auto-fix-validation" && e.target === "retry-pre-pr-validation")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "auto-fix-validation" && e.target === "validation-fix1-worktree-ok")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "validation-fix1-worktree-ok" && e.target === "retry-pre-pr-validation")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "validation-fix1-worktree-ok" && e.target === "log-validation-worktree-failed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry-pre-pr-validation" && e.target === "retry-validation-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry-validation-ok" && e.target === "auto-commit-pre-push")).toBeDefined();
     // Pass 1 failed → escalated pass 2
     expect(t.edges.find((e) => e.source === "retry-validation-ok" && e.target === "set-fix2-summary")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-fix2-summary" && e.target === "auto-fix-validation-2")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "auto-fix-validation-2" && e.target === "retry2-pre-pr-validation")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "auto-fix-validation-2" && e.target === "validation-fix2-worktree-ok")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "validation-fix2-worktree-ok" && e.target === "retry2-pre-pr-validation")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "validation-fix2-worktree-ok" && e.target === "log-validation-worktree-failed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry2-pre-pr-validation" && e.target === "retry2-validation-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry2-validation-ok" && e.target === "auto-commit-pre-push")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry2-validation-ok" && e.target === "log-validation-failed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "log-validation-worktree-failed" && e.target === "set-blocked-validation-worktree-failed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "set-blocked-validation-worktree-failed" && e.target === "annotate-blocked-validation-worktree-failed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "annotate-blocked-validation-worktree-failed" && e.target === "join-outcomes")).toBeDefined();
     expect(t.edges.find((e) => e.source === "log-validation-failed" && e.target === "set-blocked-validation-failed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "set-blocked-validation-failed" && e.target === "notify-validation-blocked")).toBeDefined();
     expect(t.edges.find((e) => e.source === "notify-validation-blocked" && e.target === "join-outcomes")).toBeDefined();
@@ -6636,6 +7746,10 @@ describe("template-task-lifecycle", () => {
     expect(autoFixValidation?.config?.prompt).toContain("$ctx.getNodeOutput('pre-pr-validation')?.output");
     expect(autoFixValidation2?.config?.prompt).toContain("$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr");
     expect(autoFixValidation2?.config?.prompt).toContain("$ctx.getNodeOutput('retry-pre-pr-validation')?.output");
+    expect(validationFix1WorktreeOk?.config?.expression).toContain("needsReacquire !== true");
+    expect(validationFix1WorktreeOk?.config?.expression).toContain("worktree_failure");
+    expect(validationFix2WorktreeOk?.config?.expression).toContain("needsReacquire !== true");
+    expect(validationFix2WorktreeOk?.config?.expression).toContain("worktree_failure");
   });
 
   it("passes repository scope metadata into build-prompt node", () => {
@@ -6694,14 +7808,32 @@ describe("template-task-lifecycle", () => {
   it("worktree-failed path releases claim and slot", () => {
     const t = getTemplate("template-task-lifecycle");
     const retryGate = t.nodes.find((n) => n.id === "wt-retry-eligible");
+    const planReacquire = t.nodes.find((n) => n.id === "plan-agent-worktree-reacquire-needed");
+    const testsReacquire = t.nodes.find((n) => n.id === "tests-agent-worktree-reacquire-needed");
+    const implementReacquire = t.nodes.find((n) => n.id === "implement-agent-worktree-reacquire-needed");
     expect(retryGate?.config?.expression).toBe("$ctx.getNodeOutput('acquire-worktree')?.retryable === true");
+    expect(planReacquire?.config?.expression).toContain("worktree_failure");
+    expect(planReacquire?.config?.expression).toContain("needsReacquire === true");
+    expect(testsReacquire?.config?.expression).toContain("worktree_failure");
+    expect(testsReacquire?.config?.expression).toContain("needsReacquire === true");
+    expect(implementReacquire?.config?.expression).toContain("worktree_failure");
+    expect(implementReacquire?.config?.expression).toContain("needsReacquire === true");
     // Auto-recovery path: worktree-ok -> wt-retry-eligible -> recover -> retry -> retry-wt-ok
     expect(t.edges.find((e) => e.source === "worktree-ok" && e.target === "wt-retry-eligible")).toBeDefined();
     expect(t.edges.find((e) => e.source === "wt-retry-eligible" && e.target === "recover-worktree")).toBeDefined();
     expect(t.edges.find((e) => e.source === "recover-worktree" && e.target === "retry-acquire-wt")).toBeDefined();
     expect(t.edges.find((e) => e.source === "retry-acquire-wt" && e.target === "retry-wt-ok")).toBeDefined();
-    // Retry success rejoins main flow
+    expect(t.edges.find((e) => e.source === "plan-agent-ok" && e.target === "plan-agent-worktree-reacquire-needed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "tests-agent-ok" && e.target === "tests-agent-worktree-reacquire-needed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "implement-agent-worktree-reacquire-needed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "plan-agent-worktree-reacquire-needed" && e.target === "recover-worktree")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "tests-agent-worktree-reacquire-needed" && e.target === "recover-worktree")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "implement-agent-worktree-reacquire-needed" && e.target === "recover-worktree")).toBeDefined();
+    // Retry success rejoins main flow or the failed agent phase
     expect(t.edges.find((e) => e.source === "retry-wt-ok" && e.target === "resolve-executor")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "retry-wt-ok" && e.target === "run-agent-plan" && e.backEdge === true)).toBeDefined();
+    expect(t.edges.find((e) => e.source === "retry-wt-ok" && e.target === "run-agent-tests" && e.backEdge === true)).toBeDefined();
+    expect(t.edges.find((e) => e.source === "retry-wt-ok" && e.target === "run-agent-implement" && e.backEdge === true)).toBeDefined();
     // Retry failure falls through to original failure path
     expect(t.edges.find((e) => e.source === "retry-wt-ok" && e.target === "release-claim-wt-failed")).toBeDefined();
     // Non-retryable goes directly to failure

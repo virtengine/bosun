@@ -72,7 +72,7 @@ node-compile-cache/*
 */*.log
 *.log
 *.tmp
-{{*}}
+\{\{*\}\}
 *tmp*
 *null*
 *git-cache*
@@ -83,6 +83,7 @@ _docs/internal-harness-v2/*
 output/playwright
 native/**/target/
 .cache-test-tool-logs/*
+.bosun-monitor/session-*.md
 .bosun-monitor/*.txt
 .bosun-monitor/*.log
 *.txt

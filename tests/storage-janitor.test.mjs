@@ -9,7 +9,9 @@ import {
   isKanbanBackupName,
   pruneAuditInventory,
   pruneKanbanBackups,
+  pruneMonitorSessionNotes,
   pruneQuarantine,
+  pruneRunnerArtifacts,
   pruneSessionLogs,
   pruneStateLedgerEventRows,
   rotateHarnessEvents,
@@ -224,6 +226,52 @@ describe("storage-janitor: age-based pruning", () => {
     const result = await pruneAuditInventory(auditDir, { maxAgeMs: 7 * 24 * 60 * 60 * 1000 });
     expect(result.deleted).toBe(0);
     expect(existsSync(file)).toBe(true);
+  });
+
+  it("pruneRunnerArtifacts keeps recent entries and deletes old overflow", async () => {
+    const artifactDir = join(bosunDir, "artifacts", "isolated-runs");
+    mkdirSync(artifactDir, { recursive: true });
+    const oldEntry = join(artifactDir, "runner-old");
+    const recentEntry = join(artifactDir, "runner-new");
+    mkdirSync(oldEntry, { recursive: true });
+    mkdirSync(recentEntry, { recursive: true });
+    writeFileSync(join(oldEntry, "metadata.json"), "{}");
+    writeFileSync(join(recentEntry, "metadata.json"), "{}");
+    setMtime(oldEntry, 30 * 24 * 60 * 60 * 1000);
+
+    const result = await pruneRunnerArtifacts(bosunDir, {
+      maxAgeMs: 14 * 24 * 60 * 60 * 1000,
+      keep: 1,
+    });
+
+    expect(result.deleted).toBe(1);
+    expect(existsSync(oldEntry)).toBe(false);
+    expect(existsSync(recentEntry)).toBe(true);
+  });
+
+  it("pruneMonitorSessionNotes deletes only old session markdown notes", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "bosun-monitor-notes-"));
+    const monitorDir = join(repoRoot, ".bosun-monitor");
+    mkdirSync(monitorDir, { recursive: true });
+    const oldNote = join(monitorDir, "session-20260101-000000.md");
+    const recentNote = join(monitorDir, "session-20260502-000000.md");
+    const otherNote = join(monitorDir, "manual.md");
+    writeFileSync(oldNote, "old");
+    writeFileSync(recentNote, "new");
+    writeFileSync(otherNote, "manual");
+    setMtime(oldNote, 30 * 24 * 60 * 60 * 1000);
+    try {
+      const result = await pruneMonitorSessionNotes(repoRoot, {
+        maxAgeMs: 14 * 24 * 60 * 60 * 1000,
+        keep: 1,
+      });
+      expect(result.deleted).toBe(1);
+      expect(existsSync(oldNote)).toBe(false);
+      expect(existsSync(recentNote)).toBe(true);
+      expect(existsSync(otherNote)).toBe(true);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
   });
 });
 

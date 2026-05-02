@@ -90,6 +90,17 @@ describe("prompt lint", () => {
     const violations = collectPromptLintViolations(testRoot);
     expect(violations).toEqual([]);
   });
+
+  it("keeps the repo .gitignore parseable for ripgrep-based workflow searches", () => {
+    const output = execFileSync("rg", ["--files", "workflow", "tests", "voice"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    expect(output).toContain("workflow/workflow-engine.mjs");
+    expect(output).toContain("tests/workflow-engine.test.mjs");
+  });
   it("keeps CI and pre-commit prompt lint wiring enabled", () => {
     const packageJson = readFileSync(resolve(process.cwd(), "package.json"), "utf8");
     const preCommitHook = readFileSync(resolve(process.cwd(), ".githooks", "pre-commit"), "utf8");

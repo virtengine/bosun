@@ -347,8 +347,14 @@ export function resolveCodexProfileRuntime(envInput = process.env) {
   }
 
   if (resolvedProvider === "azure") {
+    if (!clean(env.AZURE_OPENAI_API_KEY) && clean(sourceEnv.AZURE_OPENAI_KEY)) {
+      env.AZURE_OPENAI_API_KEY = clean(sourceEnv.AZURE_OPENAI_KEY);
+    }
     if (!clean(env.AZURE_OPENAI_API_KEY) && clean(env.OPENAI_API_KEY)) {
       env.AZURE_OPENAI_API_KEY = env.OPENAI_API_KEY;
+    }
+    if (!clean(env.OPENAI_API_KEY) && clean(env.AZURE_OPENAI_API_KEY)) {
+      env.OPENAI_API_KEY = env.AZURE_OPENAI_API_KEY;
     }
   }
 

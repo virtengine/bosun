@@ -68,7 +68,7 @@ import {
   writeWorkflowRunDetailToStateLedger,
 } from "../lib/state-ledger-sqlite.mjs";
 import { recordHarnessTelemetryEvent } from "../infra/session-telemetry.mjs";
-import { linkTaskWorkflowRun } from "../task/task-store.mjs";
+import { getTask as getKanbanTask, linkTaskWorkflowRun } from "../task/task-store.mjs";
 import {
   buildDelegationWatchdogDecision,
   extractDelegationGuardMap,
@@ -206,6 +206,29 @@ function resolveWorkflowRunTaskTitle(data = {}) {
     || data?.taskDetail?.title
     || "",
   ) || null;
+}
+
+function normalizeWorkflowTaskStatus(task = {}) {
+  const value = normalizeWorkflowIdentityText(
+    task?.status
+    || task?.state
+    || task?.taskStatus
+    || task?.task_status
+    || task?.meta?.status
+    || task?.meta?.state
+    || task?.meta?.taskStatus
+    || task?.meta?.task_status
+    || "",
+  ).toLowerCase().replace(/[\s_-]+/g, "");
+  if (!value) return "";
+  if (value === "completed") return "done";
+  if (value === "canceled") return "cancelled";
+  return value;
+}
+
+function isWorkflowTaskTerminal(task = {}) {
+  const status = normalizeWorkflowTaskStatus(task);
+  return status === "done" || status === "cancelled";
 }
 
 function resolveWorkflowRunSessionScope(data = {}) {
@@ -3768,6 +3791,229 @@ export class WorkflowEngine extends EventEmitter {
       : null;
   }
 
+  _resolveNextPendingDagNode(detail = {}, def = null) {
+    const pendingStatuses = new Set([NodeStatus.PENDING, NodeStatus.WAITING]);
+    const dagNodes =
+      detail?.dagState?.nodes && typeof detail.dagState.nodes === "object"
+        ? Object.values(detail.dagState.nodes)
+        : [];
+    const nextFromDag = dagNodes.find((node) =>
+      pendingStatuses.has(String(node?.status || "").trim().toLowerCase()),
+    );
+    if (nextFromDag) {
+      const nodeId = String(nextFromDag.nodeId || "").trim();
+      const nodeDef = Array.isArray(def?.nodes)
+        ? def.nodes.find((entry) => String(entry?.id || "").trim() === nodeId) || null
+        : null;
+      return {
+        nodeId,
+        label: String(nextFromDag.label || nodeDef?.label || nodeId || "").trim() || null,
+        type: String(nextFromDag.type || nodeDef?.type || "").trim() || null,
+        config: nodeDef?.config && typeof nodeDef.config === "object" ? nodeDef.config : {},
+      };
+    }
+
+    if (!Array.isArray(def?.nodes)) return null;
+    const nodeStatuses =
+      detail?.nodeStatuses && typeof detail.nodeStatuses === "object"
+        ? detail.nodeStatuses
+        : {};
+    for (const node of def.nodes) {
+      const nodeId = String(node?.id || "").trim();
+      if (!nodeId) continue;
+      const status = String(nodeStatuses[nodeId] || NodeStatus.PENDING).trim().toLowerCase();
+      if (!pendingStatuses.has(status)) continue;
+      return {
+        nodeId,
+        label: String(node?.label || nodeId).trim() || null,
+        type: String(node?.type || "").trim() || null,
+        config: node?.config && typeof node.config === "object" ? node.config : {},
+      };
+    }
+    return null;
+  }
+
+  _resolvePendingCreateTasksGuard(runOrDetail, def = null) {
+    const run =
+      runOrDetail?.detail && typeof runOrDetail.detail === "object"
+        ? runOrDetail
+        : null;
+    const detail = run?.detail || runOrDetail || {};
+    const runStatus = String(run?.status || detail?.status || "").trim().toLowerCase();
+    if (runStatus !== WorkflowStatus.PAUSED) return null;
+
+    const nextPending = this._resolveNextPendingDagNode(detail, def);
+    if (!nextPending || String(nextPending.type || "").trim() !== "action.materialize_planner_tasks") {
+      return null;
+    }
+
+    const dedupEnabled = nextPending.config?.dedup !== false;
+    const hasListTasks = typeof this.services?.kanban?.listTasks === "function";
+    const safeResume = dedupEnabled && hasListTasks;
+    const blockers = [];
+    if (!dedupEnabled) blockers.push("dedup is disabled on the Create Tasks node");
+    if (!hasListTasks) blockers.push("the Kanban adapter cannot list existing tasks for idempotent recovery");
+    const nextNodeLabel = nextPending.label || nextPending.nodeId || "Create Tasks";
+    const summary =
+      `Run is paused with ${nextNodeLabel} as the next pending node, and task creation may already be partially applied.`;
+
+    return {
+      code: "create_tasks_pending",
+      nextNodeId: nextPending.nodeId,
+      nextNodeLabel,
+      nextNodeType: nextPending.type,
+      safeResume,
+      dedupEnabled,
+      hasListTasks,
+      blockers,
+      summary,
+      manualRetryMessage:
+        `${summary} Manual retry is blocked to avoid duplicate task creation. ` +
+        `${safeResume
+          ? "Use interrupted-run resume so existing tasks can be prefetched and skipped."
+          : "Interrupted-run resume is also blocked until idempotent recovery is available."}`,
+      resumeBlockedMessage:
+        `${summary} Interrupted-run resume is blocked because ${blockers.join(" and ") || "idempotent recovery is not available"}.`,
+      resumeAllowedMessage:
+        `${summary} Interrupted-run resume is allowed because dedup is enabled and existing tasks can be prefetched before re-running Create Tasks.`,
+    };
+  }
+
+  resolveOperatorRetry(runId, requestedMode = "from_failed") {
+    const run = this.getRunDetail(runId);
+    if (!run) {
+      throw new Error(`${TAG} Run "${runId}" not found — cannot resolve retry request`);
+    }
+
+    const mode = ["from_scratch", "replan_from_failed", "replan_subgraph"].includes(
+      String(requestedMode || "").trim().toLowerCase(),
+    )
+      ? String(requestedMode || "").trim().toLowerCase()
+      : "from_failed";
+    const retryOptions = this.getRetryOptions(runId);
+    const selectedOption = Array.isArray(retryOptions?.options)
+      ? retryOptions.options.find((entry) => String(entry?.mode || "").trim().toLowerCase() === mode) || null
+      : null;
+    const guardedState =
+      retryOptions?.guardedState && typeof retryOptions.guardedState === "object"
+        ? retryOptions.guardedState
+        : null;
+    const createTasksResume =
+      String(run?.status || "").trim().toLowerCase() === WorkflowStatus.PAUSED &&
+      mode === "from_failed" &&
+      guardedState?.code === "create_tasks_pending" &&
+      guardedState?.safeResume === true;
+    const operatorAction = createTasksResume
+      ? "resume"
+      : (mode === "from_scratch" ? "restart" : "retry");
+    const decisionReason = createTasksResume
+      ? String(
+          selectedOption?.reason ||
+          retryOptions?.recommendedReason ||
+          "create_tasks_pending.resume_only",
+        ).trim()
+      : null;
+    const blocked = selectedOption?.available === false;
+    let blockedMessage = null;
+    if (blocked) {
+      blockedMessage = String(
+        selectedOption?.description ||
+        retryOptions?.summary ||
+        "",
+      ).trim() || null;
+      const recommendedMode = String(retryOptions?.recommendedMode || "").trim().toLowerCase();
+      const recommendedOption = recommendedMode && Array.isArray(retryOptions?.options)
+        ? retryOptions.options.find((entry) => String(entry?.mode || "").trim().toLowerCase() === recommendedMode) || null
+        : null;
+      if (recommendedOption && recommendedMode !== mode) {
+        const recommendedMessage = [
+          recommendedOption?.label ? `Recommended alternative: ${recommendedOption.label}.` : null,
+          String(recommendedOption?.description || "").trim() || null,
+        ].filter(Boolean).join(" ");
+        if (recommendedMessage) {
+          blockedMessage = [blockedMessage, recommendedMessage].filter(Boolean).join(" ");
+        }
+      }
+    }
+
+    return {
+      runId: run.runId,
+      status: run.status,
+      mode,
+      operatorAction,
+      decisionReason,
+      blocked,
+      blockedMessage,
+      guardedState,
+      selectedOption,
+      retryOptions,
+      retryArgs: {
+        mode,
+        ...(createTasksResume ? { _resumeInterrupted: true } : {}),
+        ...(decisionReason ? { _decisionReason: decisionReason } : {}),
+      },
+    };
+  }
+
+  _rehydrateTaskLifecycleRetryState(ctx, data = {}, nodeOutputs = {}) {
+    if (!ctx?.data || typeof ctx.data !== "object") return;
+    const claimTaskOutput =
+      nodeOutputs?.["claim-task"] && typeof nodeOutputs["claim-task"] === "object"
+        ? nodeOutputs["claim-task"]
+        : {};
+    const acquireWorktreeOutput =
+      nodeOutputs?.["acquire-worktree"] && typeof nodeOutputs["acquire-worktree"] === "object"
+        ? nodeOutputs["acquire-worktree"]
+        : {};
+    const persistedClaimToken = String(
+      ctx.data?._claimToken
+      || data?._claimToken
+      || data?.claimToken
+      || claimTaskOutput?.claimToken
+      || "",
+    ).trim();
+    if (persistedClaimToken) {
+      ctx.data._claimToken = persistedClaimToken;
+    }
+    const persistedClaimInstanceId = String(
+      ctx.data?._claimInstanceId
+      || data?._claimInstanceId
+      || data?.claimInstanceId
+      || claimTaskOutput?.instanceId
+      || "",
+    ).trim();
+    if (persistedClaimInstanceId) {
+      ctx.data._claimInstanceId = persistedClaimInstanceId;
+    }
+    const persistedWorktreePath = String(
+      ctx.data?.worktreePath
+      || data?.worktreePath
+      || acquireWorktreeOutput?.worktreePath
+      || data?.task?.worktreePath
+      || "",
+    ).trim();
+    if (persistedWorktreePath) {
+      ctx.data.worktreePath = persistedWorktreePath;
+      if (ctx.data.task && typeof ctx.data.task === "object" && !String(ctx.data.task.worktreePath || "").trim()) {
+        ctx.data.task.worktreePath = persistedWorktreePath;
+      }
+    }
+    if (ctx.data._worktreeCreated == null) {
+      if (typeof data?._worktreeCreated === "boolean") {
+        ctx.data._worktreeCreated = data._worktreeCreated;
+      } else if (typeof acquireWorktreeOutput?.created === "boolean") {
+        ctx.data._worktreeCreated = acquireWorktreeOutput.created;
+      }
+    }
+    if (ctx.data._worktreeManaged == null) {
+      if (typeof data?._worktreeManaged === "boolean") {
+        ctx.data._worktreeManaged = data._worktreeManaged;
+      } else if (persistedWorktreePath) {
+        ctx.data._worktreeManaged = true;
+      }
+    }
+  }
+
   _resolveTaskTraceContext(ctx, node = null, result = null) {
     const nodeTaskIdCandidate = (() => {
       if (!node?.config || typeof node.config !== "object") return "";
@@ -4797,6 +5043,21 @@ export class WorkflowEngine extends EventEmitter {
     if (!def) {
       throw new Error(`${TAG} Workflow "${workflowId}" no longer exists — cannot retry`);
     }
+    const createTasksGuard = this._resolvePendingCreateTasksGuard(originalRun, def);
+    const isResumeLikeRetry =
+      mode === "from_failed"
+      || mode === "replan_from_failed"
+      || mode === "replan_subgraph";
+    const blocksManualRestart = mode === "from_scratch" && createTasksGuard?.safeResume;
+    if (createTasksGuard && (isResumeLikeRetry || blocksManualRestart)) {
+      if (retryOpts._resumeInterrupted === true) {
+        if (!createTasksGuard.safeResume) {
+          throw new Error(`${TAG} ${createTasksGuard.resumeBlockedMessage}`);
+        }
+      } else {
+        throw new Error(`${TAG} ${createTasksGuard.manualRetryMessage}`);
+      }
+    }
 
     // Recover original input data (strip internal enrichment keys).
     const originalData = { ...(originalRun.detail?.data || {}) };
@@ -4855,6 +5116,7 @@ export class WorkflowEngine extends EventEmitter {
       ...retryData,
       _workflowId: workflowId,
       _workflowName: def.name,
+      _workflowDefinitionSnapshot: cloneRunSnapshot(def),
       _retryOf: runId,
     });
     ctx.variables = { ...def.variables };
@@ -4891,6 +5153,7 @@ export class WorkflowEngine extends EventEmitter {
       }
       // Reset failed / skipped nodes so the DAG will re-run them.
     }
+    this._rehydrateTaskLifecycleRetryState(ctx, originalData, nodeOutputs);
 
     this._recordDagRevision(ctx, {
       reason: "retry_resume",
@@ -6606,6 +6869,9 @@ export class WorkflowEngine extends EventEmitter {
   getRetryOptions(runId) {
     const run = this.getRunDetail(runId);
     if (!run) return null;
+    const workflowId = run.workflowId || run.detail?.data?._workflowId || null;
+    const def = workflowId ? this.get(workflowId) : null;
+    const createTasksGuard = this._resolvePendingCreateTasksGuard(run, def);
     const issueAdvisor =
       run?.detail?.issueAdvisor && typeof run.detail.issueAdvisor === "object"
         ? run.detail.issueAdvisor
@@ -6631,52 +6897,98 @@ export class WorkflowEngine extends EventEmitter {
       fallbackMode: "from_failed",
     });
     const canResumeFromFailed = retryDecision.completedCount > 0 || failedNodes.length > 0;
+    const isPausedResume = String(run?.status || "").trim().toLowerCase() === WorkflowStatus.PAUSED;
+    const guardForcesResumeOnly = Boolean(createTasksGuard?.safeResume);
+    const guardForcesRestart = Boolean(createTasksGuard) && !guardForcesResumeOnly;
+    const effectiveRecommendedMode = guardForcesResumeOnly
+      ? "from_failed"
+      : (guardForcesRestart ? "from_scratch" : retryDecision.mode);
+    const effectiveRecommendedReason = guardForcesResumeOnly
+      ? "create_tasks_pending.resume_only"
+      : (guardForcesRestart ? "create_tasks_pending.requires_restart" : retryDecision.reason);
+    const fromFailedLabel = isPausedResume
+      ? "Resume from next pending step"
+      : "Retry from last failed step";
+    const fromFailedDescription = createTasksGuard
+      ? (
+        createTasksGuard.safeResume
+          ? `Resume at ${createTasksGuard.nextNodeLabel}. Manual retry is blocked because task creation may already be partially applied; interrupted-run resume remains safe because existing tasks can be listed and skipped.`
+          : `Blocked: ${createTasksGuard.nextNodeLabel} is the next pending node and task creation may already be partially applied. Safe interrupted-run resume requires dedup=true and kanban.listTasks support.`
+      )
+      : (
+        canResumeFromFailed
+          ? "Reuse already completed node outputs and resume remaining workflow work."
+          : "Resume state is limited; this may behave similarly to a fresh rerun."
+      );
+    const fromScratchDescription = createTasksGuard
+      ? (
+        createTasksGuard.safeResume
+          ? `Blocked: ${createTasksGuard.nextNodeLabel} is the next pending node and task creation may already be partially applied. Manual restart is blocked; use interrupted-run resume instead.`
+          : `Re-run the workflow from the beginning with the original input data. Verify whether ${createTasksGuard.nextNodeLabel} already created tasks before using this path.`
+      )
+      : "Re-run the workflow from the beginning with the original input data.";
+    const replanFromFailedDescription = createTasksGuard
+      ? `Blocked: ${createTasksGuard.nextNodeLabel} is the next pending node, so replanning from the failed boundary is treated as a manual retry and may duplicate task creation. ${createTasksGuard.safeResume ? createTasksGuard.resumeAllowedMessage : createTasksGuard.resumeBlockedMessage}`
+      : "Preserve completed node outputs and rerun the planner or replanner path from the failed boundary.";
+    const replanSubgraphDescription = createTasksGuard
+      ? `Blocked: ${createTasksGuard.nextNodeLabel} is the next pending node, so replanning the impacted subgraph is treated as a manual retry and may duplicate task creation. ${createTasksGuard.safeResume ? createTasksGuard.resumeAllowedMessage : createTasksGuard.resumeBlockedMessage}`
+      : "Preserve completed work and rerun planner-aware downstream steps for the impacted subgraph.";
+    const summary = [retryDecision.issueAdvisorSummary, createTasksGuard?.summary].filter(Boolean).join(" ");
 
     return {
       runId: run.runId,
       status: run.status,
-      recommendedMode: retryDecision.mode,
-      recommendedReason: retryDecision.reason,
+      recommendedMode: effectiveRecommendedMode,
+      recommendedReason: effectiveRecommendedReason,
       recommendedAction: retryDecision.issueAdvisorRecommendation,
-      summary: retryDecision.issueAdvisorSummary,
+      summary,
       failedNodes,
+      guardedState: createTasksGuard
+        ? {
+            code: createTasksGuard.code,
+            nextNodeId: createTasksGuard.nextNodeId,
+            nextNodeLabel: createTasksGuard.nextNodeLabel,
+            nextNodeType: createTasksGuard.nextNodeType,
+            safeResume: createTasksGuard.safeResume,
+            blockers: [...createTasksGuard.blockers],
+            summary: createTasksGuard.summary,
+          }
+        : null,
       options: [
         {
           mode: "from_failed",
-          label: "Retry from last failed step",
-          description: canResumeFromFailed
-            ? "Reuse already completed node outputs and resume remaining workflow work."
-            : "Resume state is limited; this may behave similarly to a fresh rerun.",
-          recommended: retryDecision.mode === "from_failed",
-          reason: retryDecision.mode === "from_failed" ? retryDecision.reason : null,
-          available: canResumeFromFailed,
+          label: fromFailedLabel,
+          description: fromFailedDescription,
+          recommended: effectiveRecommendedMode === "from_failed",
+          reason: effectiveRecommendedMode === "from_failed" ? effectiveRecommendedReason : null,
+          available: canResumeFromFailed && (!createTasksGuard || createTasksGuard.safeResume),
           failedNodes,
         },
         {
           mode: "replan_from_failed",
           label: "Replan from failed boundary",
-          description: "Preserve completed node outputs and rerun the planner or replanner path from the failed boundary.",
-          recommended: retryDecision.mode === "replan_from_failed",
-          reason: retryDecision.mode === "replan_from_failed" ? retryDecision.reason : null,
-          available: canResumeFromFailed,
+          description: replanFromFailedDescription,
+          recommended: effectiveRecommendedMode === "replan_from_failed",
+          reason: effectiveRecommendedMode === "replan_from_failed" ? effectiveRecommendedReason : null,
+          available: canResumeFromFailed && !createTasksGuard,
           failedNodes,
         },
         {
           mode: "replan_subgraph",
           label: "Replan impacted subgraph",
-          description: "Preserve completed work and rerun planner-aware downstream steps for the impacted subgraph.",
-          recommended: retryDecision.mode === "replan_subgraph",
-          reason: retryDecision.mode === "replan_subgraph" ? retryDecision.reason : null,
-          available: canResumeFromFailed,
+          description: replanSubgraphDescription,
+          recommended: effectiveRecommendedMode === "replan_subgraph",
+          reason: effectiveRecommendedMode === "replan_subgraph" ? effectiveRecommendedReason : null,
+          available: canResumeFromFailed && !createTasksGuard,
           failedNodes,
         },
         {
           mode: "from_scratch",
           label: "Retry from scratch",
-          description: "Re-run the workflow from the beginning with the original input data.",
-          recommended: retryDecision.mode === "from_scratch",
-          reason: retryDecision.mode === "from_scratch" ? retryDecision.reason : null,
-          available: true,
+          description: fromScratchDescription,
+          recommended: effectiveRecommendedMode === "from_scratch",
+          reason: effectiveRecommendedMode === "from_scratch" ? effectiveRecommendedReason : null,
+          available: !guardForcesResumeOnly,
           failedNodes,
         },
       ],
@@ -8282,6 +8594,11 @@ export class WorkflowEngine extends EventEmitter {
       detail?.data?._resumeResult ??
       (identityValidation?.code === "invalid_task_identity" ? "invalid_task_identity" : null),
     );
+    const resumeResultMessage = normalizeWorkflowRunText(
+      detail?.resumeResultMessage ??
+      detail?.data?._resumeResultMessage ??
+      null,
+    );
     const resumable =
       typeof detail?.resumable === "boolean"
         ? detail.resumable
@@ -8373,6 +8690,7 @@ export class WorkflowEngine extends EventEmitter {
       executionPolicy: governanceState.executionPolicy || null,
       budgetOutcome: governanceState.budgetOutcome || null,
       policyOutcome: governanceState.policyOutcome || null,
+      ...(resumeResultMessage ? { resumeResultMessage } : {}),
       ...(validationFailures.length > 0
         ? {
             validationFailures,
@@ -8404,6 +8722,7 @@ export class WorkflowEngine extends EventEmitter {
       taskTitle: normalizeWorkflowRunText(summary.taskTitle || null),
       issueAdvisorSummary: normalizeWorkflowRunText(summary.issueAdvisorSummary || null),
       primaryGoalTitle: normalizeWorkflowRunText(summary.primaryGoalTitle || null),
+      resumeResultMessage: normalizeWorkflowRunText(summary.resumeResultMessage || null),
     });
     if (!Number.isFinite(Number(normalized.stuckThresholdMs))) {
       normalized.stuckThresholdMs = this._getRunStuckThresholdMs();
@@ -8646,6 +8965,7 @@ export class WorkflowEngine extends EventEmitter {
         data._workflowTaskId || data.taskId || data.task?.id || data.activeTaskId || "",
       );
       if (!taskId) return;
+      const forcePromoteLatest = this._shouldForcePromoteTaskRunOnStart(taskId, runId);
       const startedAtMs = Number(ctx?.startedAt);
       linkTaskWorkflowRun(taskId, {
         runId,
@@ -8674,10 +8994,68 @@ export class WorkflowEngine extends EventEmitter {
           : 0,
         source: "workflow",
         summary: `Workflow run ${runId} started`,
+      }, {
+        forcePromoteLatest,
       });
     } catch (err) {
       console.warn(`${TAG} Failed to sync task projection for run ${runId}: ${String(err?.message || err)}`);
     }
+  }
+
+  _hasRecentTaskRunLinkEvidence(task, runId) {
+    const normalizedRunId = normalizeWorkflowIdentityText(runId || "");
+    if (!normalizedRunId) return false;
+    const workflowRuns = Array.isArray(task?.workflowRuns) ? task.workflowRuns : [];
+    const runLink =
+      workflowRuns.find(
+        (entry) => normalizeWorkflowIdentityText(entry?.runId || "") === normalizedRunId,
+      ) || null;
+    const activeEntry =
+      this._readActiveRunsIndex().find(
+        (entry) => normalizeWorkflowIdentityText(entry?.runId || entry?.id || "") === normalizedRunId,
+      ) || null;
+    const detail = this._readPersistedRunDetail(normalizedRunId);
+    const dagState = detail?.data?._dagState || detail?._dagState || null;
+    const status = String(
+      runLink?.status || dagState?.status || detail?.status || activeEntry?.status || activeEntry?.outcome || "",
+    )
+      .trim()
+      .toLowerCase();
+    if (
+      status === WorkflowStatus.COMPLETED
+      || status === WorkflowStatus.FAILED
+      || status === WorkflowStatus.CANCELLED
+      || status === WorkflowStatus.PAUSED
+    ) {
+      return false;
+    }
+    const lastActivityMs = Math.max(
+      normalizeWorkflowRunTimestampMs(runLink?.startedAt),
+      normalizeWorkflowRunTimestampMs(runLink?.endedAt),
+      normalizeWorkflowRunTimestampMs(detail?.startedAt),
+      normalizeWorkflowRunTimestampMs(detail?.lastProgressAt),
+      normalizeWorkflowRunTimestampMs(detail?.updatedAt),
+      normalizeWorkflowRunTimestampMs(dagState?.createdAt),
+      normalizeWorkflowRunTimestampMs(dagState?.updatedAt),
+      normalizeWorkflowRunTimestampMs(dagState?.lastStatusAt),
+      normalizeWorkflowRunTimestampMs(activeEntry?.startedAt),
+      normalizeWorkflowRunTimestampMs(activeEntry?.updatedAt),
+      normalizeWorkflowRunTimestampMs(activeEntry?.lastStatusAt),
+    );
+    return lastActivityMs > 0 && Date.now() - lastActivityMs <= this._getRunStuckThresholdMs();
+  }
+
+  _shouldForcePromoteTaskRunOnStart(taskId, runId) {
+    const normalizedTaskId = normalizeWorkflowIdentityText(taskId || "");
+    const normalizedRunId = normalizeWorkflowIdentityText(runId || "");
+    if (!normalizedTaskId || !normalizedRunId) return false;
+    const task = getKanbanTask(normalizedTaskId);
+    if (!task || typeof task !== "object") return false;
+    const currentLatestRunId = normalizeWorkflowIdentityText(
+      task?.topology?.latestRunId || task?.latestRunId || "",
+    );
+    if (!currentLatestRunId || currentLatestRunId === normalizedRunId) return false;
+    return !this._hasRecentTaskRunLinkEvidence(task, currentLatestRunId);
   }
 
   _syncTaskProjectionFromRunSummary(summary, detail = null) {
@@ -9505,6 +9883,19 @@ export class WorkflowEngine extends EventEmitter {
               this._markRunUnresumable(run.runId, "task_already_active");
               continue;
             }
+            if (typeof this.services?.kanban?.getTask === "function") {
+              const currentTask = await Promise.resolve(
+                this.services.kanban.getTask(resumedTaskId),
+              ).catch(() => null);
+              if (currentTask && isWorkflowTaskTerminal(currentTask)) {
+                const terminalStatus = normalizeWorkflowTaskStatus(currentTask) || "done";
+                const message =
+                  `Task "${resumedTaskId}" is already ${terminalStatus}; interrupted run resume is not allowed for terminal tasks`;
+                console.warn(`${TAG} Skipping run ${run.runId}: ${message}`);
+                this._markRunUnresumable(run.runId, "terminal_task_status", message);
+                continue;
+              }
+            }
           }
           const watchdogDecision = buildDelegationWatchdogDecision(detail, {
             defaultTimeoutMs: DEFAULT_DELEGATION_WATCHDOG_TIMEOUT_MS,
@@ -9527,6 +9918,17 @@ export class WorkflowEngine extends EventEmitter {
             : (watchdogDecision || this._chooseRetryModeFromDetail(detail, {
                 fallbackMode: "from_scratch",
               }));
+          const detailedRun = this.getRunDetail(run.runId) || run;
+          const createTasksGuard = this._resolvePendingCreateTasksGuard(detailedRun, def);
+          if (createTasksGuard && !createTasksGuard.safeResume) {
+            console.warn(`${TAG} Skipping run ${run.runId}: ${createTasksGuard.resumeBlockedMessage}`);
+            this._noteRunResumeResult(
+              run.runId,
+              "create_tasks_pending_guard",
+              createTasksGuard.resumeBlockedMessage,
+            );
+            continue;
+          }
 
           console.log(
             `${TAG} Resuming run ${run.runId} via retryRun(${retryDecision.mode}) ` +
@@ -9536,6 +9938,7 @@ export class WorkflowEngine extends EventEmitter {
             this.retryRun(run.runId, {
               mode: retryDecision.mode,
               _decisionReason: retryDecision.reason,
+              _resumeInterrupted: true,
             })
               .then(() => {
                 // Mark the original interrupted run as no longer resumable
@@ -9613,13 +10016,15 @@ export class WorkflowEngine extends EventEmitter {
   /**
    * Mark a run as no longer resumable in the main index.
    */
-  _markRunUnresumable(runId, reason) {
+  _markRunUnresumable(runId, reason, message = null) {
     try {
       const runs = this._readRunIndex();
       const idx = runs.findIndex((r) => r.runId === runId);
       if (idx >= 0) {
         runs[idx].resumable = false;
         runs[idx].resumeResult = reason;
+        if (message) runs[idx].resumeResultMessage = message;
+        else delete runs[idx].resumeResultMessage;
         this._writeRunIndex(runs);
         this._syncTaskProjectionFromRunSummary(runs[idx]);
       }
@@ -9631,6 +10036,22 @@ export class WorkflowEngine extends EventEmitter {
       }
     } catch (err) {
       console.error(`${TAG} Failed to mark run unresumable:`, err.message);
+    }
+  }
+
+  _noteRunResumeResult(runId, reason, message = null) {
+    try {
+      const runs = this._readRunIndex();
+      const idx = runs.findIndex((r) => r.runId === runId);
+      if (idx >= 0) {
+        runs[idx].resumeResult = reason;
+        if (message) runs[idx].resumeResultMessage = message;
+        else delete runs[idx].resumeResultMessage;
+        this._writeRunIndex(runs);
+        this._syncTaskProjectionFromRunSummary(runs[idx]);
+      }
+    } catch (err) {
+      console.error(`${TAG} Failed to note run resume result:`, err.message);
     }
   }
 
