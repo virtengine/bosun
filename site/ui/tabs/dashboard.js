@@ -13,7 +13,7 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic, showConfirm, showAlert } from "../../../ui/modules/telegram.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
 import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
 import {
   statusData,

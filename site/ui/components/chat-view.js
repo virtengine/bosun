@@ -14,7 +14,7 @@ import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../../../ui/mo
 import { buildTraceTimelineBlocks } from "../../../ui/modules/stream-timeline.js";
 import { showToast } from "../../../ui/modules/state.js";
 import { formatRelative, truncate, formatBytes } from "../../../ui/modules/utils.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   Paper, Typography, Box, Stack, IconButton, TextField,
   InputAdornment, Chip, CircularProgress, Skeleton, Tooltip,

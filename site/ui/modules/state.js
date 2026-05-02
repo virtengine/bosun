@@ -5,7 +5,6 @@
 
 import { signal } from "@preact/signals";
 import { apiFetch, onWsMessage, withLoadingSuppressed, withLoadingTracked } from "../../../ui/modules/api.js";
-import { cloneValue } from "../../../ui/modules/utils.js";
 import { generateId } from "../../../ui/modules/utils.js";
 import { cloudStorageGet } from "../../../ui/modules/telegram.js";
 

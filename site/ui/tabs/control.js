@@ -31,7 +31,7 @@ import { ICONS } from "../../../ui/modules/icons.js";
 import { iconText as iconTextUtil } from "../../../ui/modules/icon-utils.js";
 import { cloneValue, truncate } from "../../../ui/modules/utils.js";
 import { SegmentedControl, Collapsible } from "../../../ui/components/forms.js";
-import { Card, Badge, SkeletonCard } from "../../../ui/components/shared.js";
+import { Card } from "../../../ui/components/shared.js";
 import { WorkspaceExecutorSettingsFields } from "../../../ui/components/workspace-executor-settings.js";
 import {
   activeWorkspaceId,

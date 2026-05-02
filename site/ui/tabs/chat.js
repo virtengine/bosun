@@ -59,7 +59,7 @@ import {
 } from "../../../ui/modules/session-api.js";
 import { showToast } from "../../../ui/modules/state.js";
 import { VoiceMicButton, requestVoiceModeOpen } from "../../../ui/modules/voice.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   ChatInputToolbar,
   loadAvailableAgents,

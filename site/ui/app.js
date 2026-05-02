@@ -509,10 +509,10 @@ function lazyTab(tabPath, exportName, nativeLoader) {
 }
 
 /* ── Lazy tab definitions ── */
-const TasksTab = lazyTab("./tabs/tasks.js", "TasksTab", () => import("../../ui/tabs/tasks.js"));
-const BenchmarksTab = lazyTab("./tabs/benchmarks.js", "BenchmarksTab", () => import("../../ui/tabs/benchmarks.js"));
-const AgentsTab = lazyTab("./tabs/agents.js", "AgentsTab", () => import("../../ui/tabs/agents.js"));
-const FleetSessionsTab = lazyTab("./tabs/agents.js", "FleetSessionsTab", () => import("../../ui/tabs/agents.js"));
+const TasksTab = lazyTab("./tabs/tasks.js", "TasksTab", () => import("./tabs/tasks.js"));
+const BenchmarksTab = lazyTab("./tabs/benchmarks.js", "BenchmarksTab", () => import("./tabs/benchmarks.js"));
+const AgentsTab = lazyTab("./tabs/agents.js", "AgentsTab", () => import("./tabs/agents.js"));
+const FleetSessionsTab = lazyTab("./tabs/agents.js", "FleetSessionsTab", () => import("./tabs/agents.js"));
 const InfraTab = lazyTab("./tabs/infra.js", "InfraTab", () => import("../../ui/tabs/infra.js"));
 const GuardrailsTab = lazyTab("./tabs/guardrails.js", "GuardrailsTab", () => import("../../ui/tabs/guardrails.js"));
 const ControlTab = lazyTab("./tabs/control.js", "ControlTab", () => import("../../ui/tabs/control.js"));

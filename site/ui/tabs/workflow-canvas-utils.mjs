@@ -228,7 +228,7 @@ function isPortConnectionCompatible(sourcePort, targetPort) {
       .map((value) => String(value || "").trim())
       .filter(Boolean),
   );
-  if (isWildcardPortType(sourceType) || isWildcardPortType(targetType) || accepted.has("*") || accepted.has("Any")) {
+  if (isWildcardPortType(sourceType) || accepted.has("*") || accepted.has("Any")) {
     return { compatible: true, reason: null };
   }
   if (sourceType === targetType || accepted.has(sourceType)) {

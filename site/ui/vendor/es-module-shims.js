@@ -910,7 +910,7 @@
     }
   };
 
-  const urlJsString = url => `'${url.replace(/'/g, "\\'")}'`;
+  const urlJsString = url => `'${url.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 
   let resolvedSource, lastIndex;
   const pushStringTo = (load, originalIndex, dynamicImportEndStack) => {
