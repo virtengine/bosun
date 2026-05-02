@@ -15357,6 +15357,13 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
     id: "task-1001",
     title: "[m] fix(workflow): create tasks",
   });
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      title: "[m] fix(workflow): duplicate title",
+      reason: "duplicate_title",
+      existingTaskId: "existing-1",
+    }),
+  ]));
   expect(listTasks).toHaveBeenCalledTimes(1);
   expect(createTask).toHaveBeenCalledTimes(1);
   expect(createTask).toHaveBeenCalledWith("proj-123", expect.objectContaining({
@@ -15374,6 +15381,165 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       }),
     }),
   }));
+});
+
+it("action.materialize_planner_tasks resumed run does not recreate already-created tasks (idempotent handoff)", async () => {
+  // Simulates a replenishment run that was interrupted while Create Tasks was executing.
+  // On resume the node re-runs; previously materialized tasks must be detected via
+  // listTasks and skipped — no duplicates, existingTaskId recorded for every skipped item.
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[m] feat(workflow): already created task",
+          description: "Was created in the interrupted run",
+          acceptance_criteria: ["ac1"],
+          verification: ["v1"],
+          repo_areas: ["workflow"],
+          impact: 0.9,
+          confidence: 0.85,
+          risk: 0.1,
+        },
+        {
+          title: "[m] feat(workflow): new task pending",
+          description: "Not yet created — must be created on resume",
+          acceptance_criteria: ["ac2"],
+          verification: ["v2"],
+          repo_areas: ["workflow"],
+          impact: 0.8,
+          confidence: 0.8,
+          risk: 0.2,
+        },
+      ],
+    }),
+  });
+
+  // listTasks returns the task already created in the prior (interrupted) execution
+  const existingTask = { id: "pre-existing-42", title: "[m] feat(workflow): already created task" };
+  const createTask = vi.fn(async (_projectId, payload) => ({ id: "new-task-99", title: payload.title }));
+  const listTasks = vi.fn().mockResolvedValue([existingTask]);
+
+  const mockEngine = {
+    services: { kanban: { createTask, listTasks } },
+  };
+
+  const node = {
+    id: "materialize-resume",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-resume",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  const result = await handler.execute(node, ctx, mockEngine);
+
+  // Run must succeed idempotently — the already-created task is skipped, not duplicated
+  expect(result.success).toBe(true);
+  expect(result.parsedCount).toBe(2);
+  expect(result.createdCount).toBe(1);
+  expect(result.skippedCount).toBe(1);
+
+  // The new task is created exactly once
+  expect(createTask).toHaveBeenCalledTimes(1);
+  expect(createTask).toHaveBeenCalledWith("proj-resume", expect.objectContaining({
+    title: "[m] feat(workflow): new task pending",
+  }));
+
+  // The already-materialized task is skipped with the pre-existing id recorded
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      title: "[m] feat(workflow): already created task",
+      reason: "duplicate_title",
+      existingTaskId: "pre-existing-42",
+    }),
+  ]));
+
+  // listTasks called exactly once — no redundant fetches on resume
+  expect(listTasks).toHaveBeenCalledTimes(1);
+});
+
+it("action.materialize_planner_tasks repeated resume attempts produce no duplicate task side effects", async () => {
+  // RED TEST — implementation gap: when failOnZero:false and minCreated:0, the node
+  // clamps minCreated to 1 and returns success:false even though all tasks are accounted for.
+  // Fix needed in actions.mjs: respect minCreated:0 when failOnZero:false so a fully-idempotent
+  // resume (all tasks already exist) is treated as success.
+  // Verifies that calling the node multiple times (repeated resumes for the same run/node)
+  // is safe: once all tasks exist in listTasks the node creates nothing and skips all.
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[s] fix(task): idempotent-a",
+          description: "Desc A",
+          acceptance_criteria: ["ac"],
+          verification: ["v"],
+          repo_areas: ["task"],
+          impact: 0.7,
+          confidence: 0.7,
+          risk: 0.3,
+        },
+        {
+          title: "[s] fix(task): idempotent-b",
+          description: "Desc B",
+          acceptance_criteria: ["ac"],
+          verification: ["v"],
+          repo_areas: ["task"],
+          impact: 0.6,
+          confidence: 0.7,
+          risk: 0.3,
+        },
+      ],
+    }),
+  });
+
+  // All tasks are already present — full idempotent run
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([
+    { id: "exist-a", title: "[s] fix(task): idempotent-a" },
+    { id: "exist-b", title: "[s] fix(task): idempotent-b" },
+  ]);
+
+  const mockEngine = { services: { kanban: { createTask, listTasks } } };
+
+  const node = {
+    id: "materialize-repeated-resume",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-idempotent",
+      status: "todo",
+      failOnZero: false,
+      dedup: true,
+      minCreated: 0,
+    },
+  };
+
+  const result = await handler.execute(node, ctx, mockEngine);
+
+  // All tasks already exist — nothing new created, no errors
+  expect(result.success).toBe(true);
+  expect(result.createdCount).toBe(0);
+  expect(result.skippedCount).toBe(2);
+  expect(createTask).not.toHaveBeenCalled();
+
+  // Both skipped items carry the pre-existing task ids
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({ title: "[s] fix(task): idempotent-a", existingTaskId: "exist-a" }),
+    expect.objectContaining({ title: "[s] fix(task): idempotent-b", existingTaskId: "exist-b" }),
+  ]));
 });
 
 it("action.materialize_planner_tasks fails when all parsed tasks are skipped and minCreated is not met", async () => {

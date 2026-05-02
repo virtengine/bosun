@@ -21,8 +21,8 @@ import {
   LinearProgress, Skeleton, Card, CardContent,
 } from "@mui/material";
 
-import { haptic, showAlert, getTg, openLink } from "../modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../modules/api.js";
+import { haptic, showAlert, getTg, openLink } from "../../../ui/modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
 import {
   logsData,
   logsLines,
@@ -42,15 +42,15 @@ import {
   loadAgentContextData,
   showToast,
   scheduleRefresh,
-} from "../modules/state.js";
-import { navigateTo } from "../modules/router.js";
-import { ICONS } from "../modules/icons.js";
-import { iconText } from "../modules/icon-utils.js";
-import { formatBytes } from "../modules/utils.js";
+} from "../../../ui/modules/state.js";
+import { navigateTo } from "../../../ui/modules/router.js";
+import { ICONS } from "../../../ui/modules/icons.js";
+import { iconText } from "../../../ui/modules/icon-utils.js";
+import { formatBytes } from "../../../ui/modules/utils.js";
 import {
   Card as LegacyCard, Badge, EmptyState, SkeletonCard, Modal,
-} from "../components/shared.js";
-import { SearchInput } from "../components/forms.js";
+} from "../../../ui/components/shared.js";
+import { SearchInput } from "../../../ui/components/forms.js";
 
 /* ─── Log level helpers ─── */
 const LOG_LEVELS = [
