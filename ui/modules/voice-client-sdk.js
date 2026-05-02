@@ -18,9 +18,9 @@ import {
   ensureMicTrackingPatched,
   registerMicStream,
   stopTrackedMicStreams,
-} from "./mic-track-registry.js";
-import { shouldAutoBargeIn } from "./voice-barge-in.js";
-import { isVoiceMicMuted } from "./voice-client.js";
+} from "../../../ui/modules/mic-track-registry.js";
+import { shouldAutoBargeIn } from "../../../ui/modules/voice-barge-in.js";
+import { isVoiceMicMuted } from "../../../ui/modules/voice-client.js";
 
 // ── State Signals (same shape as voice-client.js) ───────────────────────────
 

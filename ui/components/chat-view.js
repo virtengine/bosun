@@ -9,12 +9,12 @@ import { h } from "preact";
 import { memo } from "preact/compat";
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "preact/hooks";
 import htm from "htm";
-import { apiFetch } from "../modules/api.js";
-import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../modules/session-api.js";
-import { buildTraceTimelineBlocks } from "../modules/stream-timeline.js";
-import { showToast } from "../modules/state.js";
-import { formatRelative, truncate, formatBytes } from "../modules/utils.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../../../ui/modules/session-api.js";
+import { buildTraceTimelineBlocks } from "../../../ui/modules/stream-timeline.js";
+import { showToast } from "../../../ui/modules/state.js";
+import { formatRelative, truncate, formatBytes } from "../../../ui/modules/utils.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   Paper, Typography, Box, Stack, IconButton, TextField,
   InputAdornment, Chip, CircularProgress, Skeleton, Tooltip,
@@ -27,7 +27,7 @@ import {
   loadSessions,
   sessionsData,
   sessionPagination,
-} from "./session-list.js";
+} from "../../../ui/components/session-list.js";
 import {
   pendingMessages,
   typingIndicator,
@@ -36,12 +36,12 @@ import {
   startAgentStatusTracking,
   retryPendingMessage,
   clearPendingMessages,
-} from "../modules/streaming.js";
+} from "../../../ui/modules/streaming.js";
 import {
   startAgentEventTracking,
   agentAutoActions,
   totalErrorCount,
-} from "../modules/agent-events.js";
+} from "../../../ui/modules/agent-events.js";
 
 const html = htm.bind(h);
 

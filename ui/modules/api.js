@@ -4,7 +4,7 @@
  * ────────────────────────────────────────────────────────────── */
 
 import { signal } from "@preact/signals";
-import { getInitData } from "./telegram.js";
+import { getInitData } from "../../../ui/modules/telegram.js";
 
 /** Map of in-flight GET request promises, keyed by path */
 const _inflight = new Map();
@@ -49,6 +49,29 @@ export function withLoadingTracked(fn) {
   return withDepthCounter("force", fn);
 }
 
+/* ─── REST API Client ─── */
+
+/**
+ * Fetch from the API (same-origin). Automatically injects the
+ * X-Telegram-InitData header and handles JSON parsing / errors.
+ *
+ * @param {string} path  - API path, e.g. "/api/status"
+ * @param {RequestInit & {_silent?: boolean}} options
+ * @returns {Promise<any>} parsed JSON body
+ */
+const MAX_FETCH_RETRIES = 2;
+const FETCH_RETRY_BASE_MS = 800;
+let _sessionRecoveryPromise = null;
+
+function buildSessionRecoveryPath() {
+  try {
+    const current = new URL(globalThis.location?.href || "/", globalThis.location?.origin || "http://localhost");
+    return `${current.pathname}${current.search}` || "/";
+  } catch {
+    return "/";
+  }
+}
+
 async function readApiErrorBody(response) {
   const text = await response.text().catch(() => "");
   if (!text) return { text: "", payload: null };
@@ -68,22 +91,53 @@ function resolveApiErrorMessage(status, text, payload) {
   }
   const normalizedText = String(text || "").trim();
   if (normalizedText && !normalizedText.startsWith("{")) return normalizedText;
+  if (status === 401) return "Unauthorized.";
+  if (status === 403) return "Forbidden.";
   return normalizedText || `Request failed (${status})`;
 }
 
-/* ─── REST API Client ─── */
+function createApiError(status, body = {}) {
+  const error = new Error(resolveApiErrorMessage(status, body.text, body.payload));
+  error.status = status;
+  error.payload = body.payload || null;
+  error.responseText = body.text || "";
+  error.isAuthError = status === 401 || status === 403;
+  return error;
+}
 
-/**
- * Fetch from the API (same-origin). Automatically injects the
- * X-Telegram-InitData header and handles JSON parsing / errors.
- *
- * @param {string} path  - API path, e.g. "/api/status"
- * @param {RequestInit & {_silent?: boolean}} options
- * @returns {Promise<any>} parsed JSON body
- */
+async function recoverUiSession() {
+  if (_sessionRecoveryPromise) return _sessionRecoveryPromise;
+  _sessionRecoveryPromise = (async () => {
+    const headers = {};
+    const initData = getInitData();
+    if (initData) {
+      headers["X-Telegram-InitData"] = initData;
+    }
+    const response = await fetch(buildSessionRecoveryPath(), {
+      method: "GET",
+      headers,
+      redirect: "follow",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw createApiError(response.status, await readApiErrorBody(response));
+    }
+    return true;
+  })().finally(() => {
+    _sessionRecoveryPromise = null;
+  });
+  return _sessionRecoveryPromise;
+}
+
 export function apiFetch(path, options = {}) {
-  const headers = { ...options.headers };
-  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const {
+    _silent: silentOption = false,
+    _trackLoading: trackLoadingOption,
+    _sessionRecoveryAttempted: sessionRecoveryAttempted = false,
+    ...requestInit
+  } = options || {};
+  const headers = { ...requestInit.headers };
+  const isFormData = typeof FormData !== "undefined" && requestInit.body instanceof FormData;
   if (!isFormData) {
     headers["Content-Type"] = headers["Content-Type"] || "application/json";
   }
@@ -93,56 +147,54 @@ export function apiFetch(path, options = {}) {
     headers["X-Telegram-InitData"] = initData;
   }
 
-  const silent = Boolean(options._silent);
-  const trackLoadingOption = options._trackLoading;
-  const method = String(options.method || "GET").toUpperCase();
-  delete options._silent;
-  delete options._trackLoading;
+  const silent = Boolean(silentOption);
+  const method = String(requestInit.method || "GET").toUpperCase();
 
   const forceLoading = trackLoadingOption === true || _loadingForceDepth > 0;
   const suppressLoading = trackLoadingOption === false || _loadingSuppressionDepth > 0;
-  // Default behavior: only non-GET requests show global loading unless explicitly forced.
   const defaultTrackLoading = !silent && method !== "GET";
   const trackLoading =
     !suppressLoading &&
     (forceLoading || trackLoadingOption === true || defaultTrackLoading);
 
-  // Deduplicate concurrent identical GETs
   const isGet = method === "GET";
-  if (isGet && !options.body) {
+  const requestOptions = { ...requestInit, method, headers };
+  if (isGet && !requestOptions.body && !sessionRecoveryAttempted) {
     if (_inflight.has(path)) {
       return _inflight.get(path);
     }
   }
 
-  // Retry config for network-level failures only (not 4xx/5xx HTTP errors)
-  const MAX_FETCH_RETRIES = 2;
-  const FETCH_RETRY_BASE_MS = 800;
-
   const promise = (async () => {
     if (trackLoading) loadingCount.value += 1;
-    let res;
-    let fetchAttempt = 0;
     try {
-      while (fetchAttempt <= MAX_FETCH_RETRIES) {
-        try {
-          res = await fetch(path, { ...options, headers });
-          break; // success — exit retry loop
-        } catch (networkErr) {
-          fetchAttempt++;
-          if (fetchAttempt > MAX_FETCH_RETRIES || silent) throw networkErr;
-          await new Promise((r) => setTimeout(r, FETCH_RETRY_BASE_MS * fetchAttempt));
+      const performRequest = async (allowSessionRecovery = true) => {
+        let response;
+        let fetchAttempt = 0;
+        while (fetchAttempt <= MAX_FETCH_RETRIES) {
+          try {
+            response = await fetch(path, requestOptions);
+            break;
+          } catch (networkErr) {
+            fetchAttempt += 1;
+            if (fetchAttempt > MAX_FETCH_RETRIES || silent) throw networkErr;
+            await new Promise((r) => setTimeout(r, FETCH_RETRY_BASE_MS * fetchAttempt));
+          }
         }
-      }
-      if (!res.ok) {
-        const body = await readApiErrorBody(res);
-        throw new Error(resolveApiErrorMessage(res.status, body.text, body.payload));
-      }
-      return await res.json();
+        if (!response.ok) {
+          const body = await readApiErrorBody(response);
+          if (allowSessionRecovery && (response.status === 401 || response.status === 403)) {
+            await recoverUiSession();
+            return performRequest(false);
+          }
+          throw createApiError(response.status, body);
+        }
+        return await response.json();
+      };
+
+      return await performRequest(!sessionRecoveryAttempted);
     } catch (err) {
-      // Re-throw so callers can catch, but don't toast on silent requests
       if (!silent) {
-        // Dispatch a custom event so the state layer can show a toast
         try {
           globalThis.dispatchEvent(
             new CustomEvent("ve:api-error", { detail: { message: err.message } }),
@@ -156,11 +208,11 @@ export function apiFetch(path, options = {}) {
       if (trackLoading) {
         loadingCount.value = Math.max(0, loadingCount.value - 1);
       }
-      if (isGet && !options.body) _inflight.delete(path);
+      if (isGet && !requestOptions.body) _inflight.delete(path);
     }
   })();
 
-  if (isGet && !options.body) _inflight.set(path, promise);
+  if (isGet && !requestOptions.body && !sessionRecoveryAttempted) _inflight.set(path, promise);
   return promise;
 }
 

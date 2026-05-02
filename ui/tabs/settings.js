@@ -22,9 +22,9 @@ import {
   cloudStorageGet,
   cloudStorageSet,
   cloudStorageRemove,
-} from "../modules/telegram.js";
-import { apiFetch, wsConnected } from "../modules/api.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+} from "../../../ui/modules/telegram.js";
+import { apiFetch, wsConnected } from "../../../ui/modules/api.js";
+import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   connected,
   statusData,
@@ -34,7 +34,7 @@ import {
   pendingChanges,
   setPendingChange,
   clearPendingChange,
-} from "../modules/state.js";
+} from "../../../ui/modules/state.js";
 import {
   Card,
   Badge,
@@ -43,13 +43,13 @@ import {
   Modal,
   ConfirmDialog,
   Spinner,
-} from "../components/shared.js";
+} from "../../../ui/components/shared.js";
 import {
   SegmentedControl,
   Collapsible,
   Toggle,
   SearchInput,
-} from "../components/forms.js";
+} from "../../../ui/components/forms.js";
 import {
   Typography, Box, Stack, Button, IconButton, Chip, TextField,
   Select, MenuItem, FormControl, InputLabel, Switch, FormControlLabel,
@@ -62,7 +62,7 @@ import {
   getGroupedSettings,
   validateSetting,
   SENSITIVE_KEYS,
-} from "../modules/settings-schema.js";
+} from "../../../ui/modules/settings-schema.js";
 
 const SETTINGS_EXTERNAL_EDITORS = new Map();
 

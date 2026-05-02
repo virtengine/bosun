@@ -9,12 +9,12 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic } from "../modules/telegram.js";
-import { apiFetch } from "../modules/api.js";
-import { showToast } from "../modules/state.js";
-import { formatDate, formatDuration, formatRelative } from "../modules/utils.js";
-import { ICONS } from "../modules/icons.js";
-import { resolveIcon } from "../modules/icon-utils.js";
+import { haptic } from "../../../ui/modules/telegram.js";
+import { apiFetch } from "../../../ui/modules/api.js";
+import { showToast } from "../../../ui/modules/state.js";
+import { formatDate, formatDuration, formatRelative } from "../../../ui/modules/utils.js";
+import { ICONS } from "../../../ui/modules/icons.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip,
   TextField, Select, MenuItem, FormControl, InputLabel, Switch,
