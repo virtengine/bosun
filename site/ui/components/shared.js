@@ -55,19 +55,19 @@ import {
   IconButton,
 } from "@mui/material";
 
-import { ICONS } from "../../../ui/modules/icons.js";
+import { ICONS } from "../modules/icons.js";
 import {
   toasts,
   showToast,
   shouldShowToast,
-} from "../../../ui/modules/state.js";
+} from "../modules/state.js";
 import {
   haptic,
   showBackButton,
   hideBackButton,
   getTg,
-} from "../../../ui/modules/telegram.js";
-
+} from "../modules/telegram.js";
+import { classNames } from "../modules/utils.js";
 
 /* ── helper: map status strings → MUI Chip colors ─────────── */
 

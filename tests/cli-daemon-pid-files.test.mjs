@@ -116,7 +116,7 @@ describe("cli daemon pid tracking", () => {
     expect(cliSource).toContain("const configDirArg = getArgValue(\"--config-dir\");");
     expect(cliSource).toContain("const explicitRepoRoot = getArgValue(\"--repo-root\");");
     expect(cliSource).toContain("if (configDirArg) return resolve(configDirArg);");
-    expect(cliSource).toContain("if (process.env.BOSUN_HOME) return resolve(process.env.BOSUN_HOME);");
+    expect(cliSource).toContain("if (process.env.BOSUN_HOME) return resolveTrustedBosunConfigDir(process.env.BOSUN_HOME, repoRoot);");
     expect(cliSource).toContain("if (repoRootArg) return resolve(repoRootArg);");
     expect(cliSource).toContain("BOSUN_DIR: process.env.BOSUN_DIR || resolveConfigDirForCli(),");
     expect(cliSource).toContain("? { REPO_ROOT: resolve(process.env.REPO_ROOT) }");

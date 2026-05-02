@@ -9,17 +9,17 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic } from "../../../ui/modules/telegram.js";
-import { apiFetch } from "../../../ui/modules/api.js";
+import { haptic } from "../modules/telegram.js";
+import { apiFetch } from "../modules/api.js";
 import {
   showToast,
   refreshTab,
   setPendingChange,
   clearPendingChange,
-} from "../../../ui/modules/state.js";
-import { ICONS } from "../../../ui/modules/icons.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
-import { formatRelative, countChangedFields } from "../../../ui/modules/utils.js";
+} from "../modules/state.js";
+import { ICONS } from "../modules/icons.js";
+import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { formatRelative, countChangedFields } from "../modules/utils.js";
 import {
   Card as LegacyCard,
   Badge as LegacyBadge,
@@ -29,8 +29,8 @@ import {
   Spinner,
   ListItem as LegacyListItem,
   SaveDiscardBar,
-} from "../../../ui/components/shared.js";
-import { SearchInput, SegmentedControl, Toggle } from "../../../ui/components/forms.js";
+} from "../components/shared.js";
+import { SearchInput, SegmentedControl, Toggle } from "../components/forms.js";
 import {
   Typography, Box, Stack, Card, CardContent, CardHeader, CardActions,
   Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment,

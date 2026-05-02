@@ -18,8 +18,8 @@
         "event-driven",
         "worktree-managed"
       ],
-      "nodeCount": 23,
-      "edgeCount": 27,
+      "nodeCount": 24,
+      "edgeCount": 29,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.workflow_call",
@@ -247,7 +247,7 @@
             "command": "node",
             "args": [
               "-e",
-              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused}));"
+              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); const repoRoot=String(process.env.REPO_ROOT||'').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const nodeModulesSource=repoRoot?path.join(repoRoot,'node_modules'):''; const nodeModulesTarget=path.join(wt,'node_modules'); let dependenciesLinked=false; let dependenciesLinkError=''; if(nodeModulesSource&&fs.existsSync(nodeModulesSource)){   if(fs.existsSync(nodeModulesTarget)){     dependenciesLinked=true;   }else{     try{       fs.symlinkSync(nodeModulesSource,nodeModulesTarget,process.platform==='win32'?'junction':'dir');       dependenciesLinked=true;     }catch(e){       dependenciesLinkError=String(e?.message||e);     }   } } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused,dependenciesLinked,dependenciesLinkError,dependencySource:dependenciesLinked?nodeModulesSource:''}));"
             ],
             "parseJson": true,
             "failOnError": true,
@@ -256,7 +256,8 @@
               "PR_REPO": "{{prParams.repo}}",
               "PR_BRANCH": "{{prParams.branch}}",
               "PR_BASE": "{{prParams.base}}",
-              "PR_NUMBER": "{{prParams.number}}"
+              "PR_NUMBER": "{{prParams.number}}",
+              "REPO_ROOT": "{{repoRoot}}"
             }
           },
           "position": {
@@ -350,7 +351,7 @@
           "type": "action.run_agent",
           "label": "Dispatch Focused Fix Agent",
           "config": {
-            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n- After fixing, remove the label:\n  `gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label bosun-needs-fix`\n",
+            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n9. **Do NOT remove PR labels yourself.** The workflow clears `{{labelNeedsFix}}` after a successful push.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n",
             "sdk": "auto",
             "timeoutMs": 1800000,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
@@ -388,6 +389,24 @@
           "position": {
             "x": 220,
             "y": 1020
+          },
+          "outputs": [
+            "default"
+          ]
+        },
+        {
+          "id": "clear-fix-label",
+          "type": "action.run_command",
+          "label": "Clear bosun-needs-fix",
+          "config": {
+            "command": "gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label {{labelNeedsFix}}",
+            "continueOnError": true,
+            "failOnError": false,
+            "timeoutMs": 60000
+          },
+          "position": {
+            "x": 220,
+            "y": 1040
           },
           "outputs": [
             "default"
@@ -660,8 +679,22 @@
           "sourcePort": "default"
         },
         {
+          "id": "push-pr-fixes->clear-fix-label",
+          "source": "push-pr-fixes",
+          "target": "clear-fix-label",
+          "sourcePort": "default",
+          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed===true;}catch{return false;}})()"
+        },
+        {
           "id": "push-pr-fixes->cleanup-pr-worktree",
           "source": "push-pr-fixes",
+          "target": "cleanup-pr-worktree",
+          "sourcePort": "default",
+          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed!==true;}catch{return true;}})()"
+        },
+        {
+          "id": "clear-fix-label->cleanup-pr-worktree",
+          "source": "clear-fix-label",
           "target": "cleanup-pr-worktree",
           "sourcePort": "default"
         },
@@ -23168,8 +23201,8 @@
         "workflow-first",
         "core"
       ],
-      "nodeCount": 92,
-      "edgeCount": 117,
+      "nodeCount": 93,
+      "edgeCount": 119,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.task_available",
@@ -23563,6 +23596,22 @@
           "position": {
             "x": 380,
             "y": 1740
+          },
+          "outputs": [
+            "yes",
+            "no"
+          ]
+        },
+        {
+          "id": "plan-agent-commit-blocked",
+          "type": "condition.expression",
+          "label": "Plan Commit Blocked?",
+          "config": {
+            "expression": "$ctx.getNodeOutput('run-agent-plan')?.implementationState === 'implementation_done_commit_blocked'"
+          },
+          "position": {
+            "x": 380,
+            "y": 1675
           },
           "outputs": [
             "yes",
@@ -24974,10 +25023,24 @@
           "sourcePort": "default"
         },
         {
-          "id": "run-agent-plan->plan-agent-ok",
+          "id": "run-agent-plan->plan-agent-commit-blocked",
           "source": "run-agent-plan",
-          "target": "plan-agent-ok",
+          "target": "plan-agent-commit-blocked",
           "sourcePort": "default"
+        },
+        {
+          "id": "plan-agent-commit-blocked->claim-stolen",
+          "source": "plan-agent-commit-blocked",
+          "target": "claim-stolen",
+          "sourcePort": "yes",
+          "condition": "$output?.result === true"
+        },
+        {
+          "id": "plan-agent-commit-blocked->plan-agent-ok",
+          "source": "plan-agent-commit-blocked",
+          "target": "plan-agent-ok",
+          "sourcePort": "no",
+          "condition": "$output?.result !== true"
         },
         {
           "id": "plan-agent-ok->run-agent-tests",
@@ -25580,7 +25643,8 @@
           "source": "retry-wt-ok",
           "target": "resolve-executor",
           "sourcePort": "yes",
-          "condition": "(() => { if ($output?.result !== true) return false; const plan = $ctx.getNodeOutput('run-agent-plan') || {}; const tests = $ctx.getNodeOutput('run-agent-tests') || {}; const implement = $ctx.getNodeOutput('run-agent-implement') || {}; const isRecoverable = (out) => out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); return !isRecoverable(plan) && !isRecoverable(tests) && !isRecoverable(implement); })()"
+          "condition": "(() => { if ($output?.result !== true) return false; const plan = $ctx.getNodeOutput('run-agent-plan') || {}; const tests = $ctx.getNodeOutput('run-agent-tests') || {}; const implement = $ctx.getNodeOutput('run-agent-implement') || {}; const isRecoverable = (out) => out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); return !isRecoverable(plan) && !isRecoverable(tests) && !isRecoverable(implement); })()",
+          "backEdge": true
         },
         {
           "id": "retry-wt-ok->release-claim-wt-failed",
@@ -26021,7 +26085,7 @@
       "description": "Direct per-PR progression workflow for bosun-managed tasks. Runs immediately after PR handoff, evaluates a single PR, retries simple CI failures, dispatches focused repair when needed, and performs the first merge-review pass without waiting for the periodic watchdog.",
       "category": "github",
       "enabled": true,
-      "nodeCount": 23,
+      "nodeCount": 24,
       "trigger": "trigger.workflow_call",
       "variables": {
         "mergeMethod": "merge",
@@ -26227,7 +26291,7 @@
             "command": "node",
             "args": [
               "-e",
-              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused}));"
+              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); const repoRoot=String(process.env.REPO_ROOT||'').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const nodeModulesSource=repoRoot?path.join(repoRoot,'node_modules'):''; const nodeModulesTarget=path.join(wt,'node_modules'); let dependenciesLinked=false; let dependenciesLinkError=''; if(nodeModulesSource&&fs.existsSync(nodeModulesSource)){   if(fs.existsSync(nodeModulesTarget)){     dependenciesLinked=true;   }else{     try{       fs.symlinkSync(nodeModulesSource,nodeModulesTarget,process.platform==='win32'?'junction':'dir');       dependenciesLinked=true;     }catch(e){       dependenciesLinkError=String(e?.message||e);     }   } } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused,dependenciesLinked,dependenciesLinkError,dependencySource:dependenciesLinked?nodeModulesSource:''}));"
             ],
             "parseJson": true,
             "failOnError": true,
@@ -26236,7 +26300,8 @@
               "PR_REPO": "{{prParams.repo}}",
               "PR_BRANCH": "{{prParams.branch}}",
               "PR_BASE": "{{prParams.base}}",
-              "PR_NUMBER": "{{prParams.number}}"
+              "PR_NUMBER": "{{prParams.number}}",
+              "REPO_ROOT": "{{repoRoot}}"
             }
           },
           "position": {
@@ -26330,7 +26395,7 @@
           "type": "action.run_agent",
           "label": "Dispatch Focused Fix Agent",
           "config": {
-            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n- After fixing, remove the label:\n  `gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label bosun-needs-fix`\n",
+            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n9. **Do NOT remove PR labels yourself.** The workflow clears `{{labelNeedsFix}}` after a successful push.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n",
             "sdk": "auto",
             "timeoutMs": 1800000,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
@@ -26368,6 +26433,24 @@
           "position": {
             "x": 220,
             "y": 1020
+          },
+          "outputs": [
+            "default"
+          ]
+        },
+        {
+          "id": "clear-fix-label",
+          "type": "action.run_command",
+          "label": "Clear bosun-needs-fix",
+          "config": {
+            "command": "gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label {{labelNeedsFix}}",
+            "continueOnError": true,
+            "failOnError": false,
+            "timeoutMs": 60000
+          },
+          "position": {
+            "x": 220,
+            "y": 1040
           },
           "outputs": [
             "default"
@@ -26640,8 +26723,22 @@
           "sourcePort": "default"
         },
         {
+          "id": "push-pr-fixes->clear-fix-label",
+          "source": "push-pr-fixes",
+          "target": "clear-fix-label",
+          "sourcePort": "default",
+          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed===true;}catch{return false;}})()"
+        },
+        {
           "id": "push-pr-fixes->cleanup-pr-worktree",
           "source": "push-pr-fixes",
+          "target": "cleanup-pr-worktree",
+          "sourcePort": "default",
+          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed!==true;}catch{return true;}})()"
+        },
+        {
+          "id": "clear-fix-label->cleanup-pr-worktree",
+          "source": "clear-fix-label",
           "target": "cleanup-pr-worktree",
           "sourcePort": "default"
         },
@@ -48009,7 +48106,7 @@
       "description": "Complete task execution pipeline: poll for tasks → claim → worktree → agent dispatch → commit detection → PR creation → status transition. Replaces the monolithic TaskExecutor.executeTask() method with a composable workflow DAG.",
       "category": "task-execution",
       "enabled": true,
-      "nodeCount": 92,
+      "nodeCount": 93,
       "trigger": "trigger.task_available",
       "variables": {
         "maxParallel": 3,
@@ -48369,6 +48466,22 @@
           "position": {
             "x": 380,
             "y": 1740
+          },
+          "outputs": [
+            "yes",
+            "no"
+          ]
+        },
+        {
+          "id": "plan-agent-commit-blocked",
+          "type": "condition.expression",
+          "label": "Plan Commit Blocked?",
+          "config": {
+            "expression": "$ctx.getNodeOutput('run-agent-plan')?.implementationState === 'implementation_done_commit_blocked'"
+          },
+          "position": {
+            "x": 380,
+            "y": 1675
           },
           "outputs": [
             "yes",
@@ -49780,10 +49893,24 @@
           "sourcePort": "default"
         },
         {
-          "id": "run-agent-plan->plan-agent-ok",
+          "id": "run-agent-plan->plan-agent-commit-blocked",
           "source": "run-agent-plan",
-          "target": "plan-agent-ok",
+          "target": "plan-agent-commit-blocked",
           "sourcePort": "default"
+        },
+        {
+          "id": "plan-agent-commit-blocked->claim-stolen",
+          "source": "plan-agent-commit-blocked",
+          "target": "claim-stolen",
+          "sourcePort": "yes",
+          "condition": "$output?.result === true"
+        },
+        {
+          "id": "plan-agent-commit-blocked->plan-agent-ok",
+          "source": "plan-agent-commit-blocked",
+          "target": "plan-agent-ok",
+          "sourcePort": "no",
+          "condition": "$output?.result !== true"
         },
         {
           "id": "plan-agent-ok->run-agent-tests",
@@ -50386,7 +50513,8 @@
           "source": "retry-wt-ok",
           "target": "resolve-executor",
           "sourcePort": "yes",
-          "condition": "(() => { if ($output?.result !== true) return false; const plan = $ctx.getNodeOutput('run-agent-plan') || {}; const tests = $ctx.getNodeOutput('run-agent-tests') || {}; const implement = $ctx.getNodeOutput('run-agent-implement') || {}; const isRecoverable = (out) => out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); return !isRecoverable(plan) && !isRecoverable(tests) && !isRecoverable(implement); })()"
+          "condition": "(() => { if ($output?.result !== true) return false; const plan = $ctx.getNodeOutput('run-agent-plan') || {}; const tests = $ctx.getNodeOutput('run-agent-tests') || {}; const implement = $ctx.getNodeOutput('run-agent-implement') || {}; const isRecoverable = (out) => out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); return !isRecoverable(plan) && !isRecoverable(tests) && !isRecoverable(implement); })()",
+          "backEdge": true
         },
         {
           "id": "retry-wt-ok->release-claim-wt-failed",
@@ -50825,7 +50953,7 @@
       "workflowId": "wf-bosun-pr-progressor",
       "workflowName": "Bosun PR Progressor",
       "status": "completed",
-      "nodeCount": 23,
+      "nodeCount": 24,
       "duration": 20000,
       "errorCount": 0,
       "triggerSource": "manual",

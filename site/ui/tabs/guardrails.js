@@ -5,10 +5,10 @@ import { h } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import htm from "htm";
 
-import { apiFetch } from "../../../ui/modules/api.js";
-import { guardrailsData, refreshTab, showToast } from "../../../ui/modules/state.js";
-import { ICONS } from "../../../ui/modules/icons.js";
-import { formatRelative } from "../../../ui/modules/utils.js";
+import { apiFetch } from "../modules/api.js";
+import { guardrailsData, refreshTab, showToast } from "../modules/state.js";
+import { ICONS } from "../modules/icons.js";
+import { formatRelative } from "../modules/utils.js";
 
 const html = htm.bind(h);
 

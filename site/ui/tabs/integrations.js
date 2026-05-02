@@ -1,9 +1,9 @@
 import { h } from "preact";
 import { useState, useEffect, useCallback } from "preact/hooks";
 import htm from "htm";
-import { apiFetch } from "../../../ui/modules/api.js";
-import { showToast } from "../../../ui/modules/state.js";
-import { formatBytes, formatDuration, formatRelative } from "../../../ui/modules/utils.js";
+import { apiFetch } from "../modules/api.js";
+import { showToast } from "../modules/state.js";
+import { formatBytes, formatDuration, formatRelative } from "../modules/utils.js";
 
 const html = htm.bind(h);
 const S = {
