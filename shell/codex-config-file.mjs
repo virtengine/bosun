@@ -81,6 +81,15 @@ function buildTrustedPathVariants(pathValue) {
   const variants = [base];
   const namespaced = toWindowsNamespacePath(base);
   if (namespaced && namespaced !== base) variants.push(namespaced);
+  // On Windows, resolve() changes WSL-style paths (/mnt/c/...) to native Windows paths,
+  // losing the WSL drive letter. Also try namespace conversion on the original unresolved path
+  // so that /mnt/c/... produces \\?\C:\... entries as expected.
+  if (pathValue !== base) {
+    const namespacedOrig = toWindowsNamespacePath(pathValue);
+    if (namespacedOrig && namespacedOrig !== base && !variants.includes(namespacedOrig)) {
+      variants.push(namespacedOrig);
+    }
+  }
   return variants;
 }
 
