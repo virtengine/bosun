@@ -855,6 +855,20 @@ function hasWorkflowAgentRepoRecoveryText(text = "") {
   return WORKFLOW_AGENT_REPO_RECOVERY_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+const WORKFLOW_AGENT_PLAN_HANDOFF_PATTERN_GROUPS = [
+  [/\barchitect handoff\b/i, /\bno planning-side code changes were made\b/i],
+  [/\barchitect handoff\b/i, /\bno code changes were made in this planning phase\b/i],
+  [/\barchitect handoff\b/i, /\bcompletion:\s*architect plan produced\b/i],
+];
+
+function hasWorkflowAgentPlanHandoffText(text = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return WORKFLOW_AGENT_PLAN_HANDOFF_PATTERN_GROUPS.some((group) =>
+    group.every((pattern) => pattern.test(normalized)),
+  );
+}
+
 const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
   /prompt[_ ]quality/i,
   /missing task (description|url)/i,
@@ -2199,15 +2213,19 @@ function summarizeWorkflowTeamState(state) {
   };
 }
 
-function classifyWorkflowAgentBlockedStatus(result = {}) {
+function classifyWorkflowAgentBlockedStatus(result = {}, options = {}) {
   const fragments = collectWorkflowAgentResultFragments(result);
   const text = fragments.join("\n");
+  const isPlanMode = String(options?.mode || "").trim().toLowerCase() === "plan"
+    || String(options?.nodeId || "").trim() === "run-agent-plan";
+  const isPlanHandoff = isPlanMode && hasWorkflowAgentPlanHandoffText(text);
   if (isWorkflowAgentCommitBlockedText(text)) {
     return "implementation_done_commit_blocked";
   }
   if (
     WORKFLOW_AGENT_REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(text))
     && !hasWorkflowAgentRepoRecoveryText(text)
+    && !isPlanHandoff
   ) {
     return "blocked_by_repo";
   }
@@ -2234,8 +2252,8 @@ function isWorkflowAgentImplementationAlreadyPresent(text = "") {
   return WORKFLOW_AGENT_IMPLEMENTATION_PRESENT_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-function deriveWorkflowAgentSessionStatus(result = {}, { streamEventCount = 0 } = {}) {
-  const blockedStatus = classifyWorkflowAgentBlockedStatus(result);
+function deriveWorkflowAgentSessionStatus(result = {}, { streamEventCount = 0, mode, nodeId } = {}) {
+  const blockedStatus = classifyWorkflowAgentBlockedStatus(result, { mode, nodeId });
   if (blockedStatus) return blockedStatus;
   const output = String(result?.output || "").replace(/\s+/g, " ").trim().toLowerCase();
   const itemCount = Array.isArray(result?.items) ? result.items.length : 0;
@@ -2253,12 +2271,12 @@ function isNullSessionIdCrash(error) {
   );
 }
 
-function resolveSuccessfulWorkflowAgentSessionStatus(result = {}) {
-  return classifyWorkflowAgentBlockedStatus(result) || "completed";
+function resolveSuccessfulWorkflowAgentSessionStatus(result = {}, options = {}) {
+  return classifyWorkflowAgentBlockedStatus(result, options) || "completed";
 }
 
-function normalizeWorkflowAgentBlockedResult(result = {}) {
-  const blockedStatus = classifyWorkflowAgentBlockedStatus(result);
+function normalizeWorkflowAgentBlockedResult(result = {}, options = {}) {
+  const blockedStatus = classifyWorkflowAgentBlockedStatus(result, options);
   if (!blockedStatus) return result;
 
   const normalized = { ...result };
@@ -4346,7 +4364,7 @@ registerNodeType("action.run_agent", {
           narrative: String(result?.narrative || "").trim() || digest.narrative,
           stream: normalizedStream,
           items: normalizedItems,
-        });
+        }, { mode: effectiveMode, nodeId: node.id });
         if (node.id === "run-agent-implement") {
           result = normalizeWorkflowAgentImplementationCommitBlock(result, digest);
         }
@@ -4379,7 +4397,7 @@ registerNodeType("action.run_agent", {
           }
           tracker.endSession(
             trackedTaskId,
-            deriveWorkflowAgentSessionStatus(result, { streamEventCount }),
+            deriveWorkflowAgentSessionStatus(result, { streamEventCount, mode: effectiveMode, nodeId: node.id }),
           );
         }
 

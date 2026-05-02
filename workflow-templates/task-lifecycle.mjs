@@ -830,6 +830,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
       condition:
         "(() => { if ($output?.result !== true) return false; const plan = $ctx.getNodeOutput('run-agent-plan') || {}; const tests = $ctx.getNodeOutput('run-agent-tests') || {}; const implement = $ctx.getNodeOutput('run-agent-implement') || {}; const isRecoverable = (out) => out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); return !isRecoverable(plan) && !isRecoverable(tests) && !isRecoverable(implement); })()",
       port: "yes",
+      backEdge: true,
     }),
     // Retry failed — fall through to original failure path
     edge("retry-wt-ok", "release-claim-wt-failed", { condition: "$output?.result !== true", port: "no" }),
