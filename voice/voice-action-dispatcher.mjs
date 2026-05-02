@@ -854,10 +854,29 @@ registerAction("workflow.retry", async (params) => {
   const currentRun = engine?.getRunDetail ? engine.getRunDetail(runId) : null;
   if (!currentRun) throw new Error(`Workflow run "${runId}" not found`);
   const currentStatus = String(currentRun?.status || "").trim().toLowerCase();
-  if (mode === "from_failed" && currentStatus !== "failed") {
+  const retryOptions = typeof engine.getRetryOptions === "function"
+    ? engine.getRetryOptions(runId)
+    : null;
+  const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
+  if (mode === "from_failed" && currentStatus !== "failed" && !createTasksPendingGuard) {
     throw new Error(`retry mode "from_failed" requires a failed run (current=${currentRun?.status || "unknown"})`);
   }
-  return engine.retryRun(runId, { mode });
+  const resolvedRetry =
+    createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+      ? engine.resolveOperatorRetry(runId, mode)
+      : null;
+  if (resolvedRetry?.blocked) {
+    throw new Error(resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.");
+  }
+  const retryArgs = resolvedRetry?.retryArgs || { mode };
+  const result = await engine.retryRun(runId, retryArgs);
+  return {
+    ...result,
+    operatorAction:
+      resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+    decisionReason: resolvedRetry?.decisionReason || null,
+    guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
+  };
 });
 
 // ── Skill/prompt actions ────────────────────────────────────────────────────
@@ -1241,4 +1260,3 @@ export function getVoiceActionPromptSection() {
   lines.push("");
   return lines.join("\n");
 }
-

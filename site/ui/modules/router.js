@@ -4,8 +4,8 @@
  * ────────────────────────────────────────────────────────────── */
 
 import { signal } from "@preact/signals";
-import { haptic, showBackButton, hideBackButton } from "./telegram.js";
-import { refreshTab, hasPendingChanges } from "./state.js";
+import { haptic, showBackButton, hideBackButton } from "../../../ui/modules/telegram.js";
+import { refreshTab, hasPendingChanges } from "../../../ui/modules/state.js";
 
 /** Currently active tab ID */
 export const activeTab = signal("dashboard");

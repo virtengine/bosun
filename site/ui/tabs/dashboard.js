@@ -13,8 +13,8 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic, showConfirm, showAlert } from "../modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../modules/api.js";
+import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
 import {
   statusData,
   executorData,
@@ -36,17 +36,17 @@ import {
   clearPendingChange,
   retryQueueData,
   KANBAN_PAGE_SIZE,
-} from "../modules/state.js";
-import { navigateTo } from "../modules/router.js";
-import { ICONS } from "../modules/icons.js";
+} from "../../../ui/modules/state.js";
+import { navigateTo } from "../../../ui/modules/router.js";
+import { ICONS } from "../../../ui/modules/icons.js";
 import {
   cloneValue,
   formatRelative,
   truncate,
   countChangedFields,
-} from "../modules/utils.js";
-import { buildWorktreeRecoveryViewModel } from "../modules/worktree-recovery.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+} from "../../../ui/modules/utils.js";
+import { buildWorktreeRecoveryViewModel } from "../../../ui/modules/worktree-recovery.js";
+import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   Card,
   Badge,
@@ -54,15 +54,15 @@ import {
   Modal,
   EmptyState,
   SaveDiscardBar,
-} from "../components/shared.js";
-import { DonutChart, ProgressBar, MiniSparkline } from "../components/charts.js";
+} from "../../../ui/components/shared.js";
+import { DonutChart, ProgressBar, MiniSparkline } from "../../../ui/components/charts.js";
 import {
   SegmentedControl,
   PullToRefresh,
   SliderControl,
-} from "../components/forms.js";
-import { StartTaskModal } from "./tasks.js";
-import { CommitGraph } from "../components/commit-graph.js";
+} from "../../../ui/components/forms.js";
+import { StartTaskModal } from "../../../ui/tabs/tasks.js";
+import { CommitGraph } from "../../../ui/components/commit-graph.js";
 import {
   Button, TextField, Typography, Box, Stack, Chip, Paper,
   IconButton, Tooltip, CircularProgress, Alert, Skeleton,
@@ -435,6 +435,16 @@ export function DashboardTab() {
   const worktreeRecovery = buildWorktreeRecoveryViewModel(
     status?.worktreeRecovery || status?.worktree_recovery || null,
   );
+  const sessionHealth = status?.sessionHealth && typeof status.sessionHealth === "object"
+    ? status.sessionHealth
+    : {};
+  const durableContext = status?.context && typeof status.context === "object"
+    ? status.context
+    : {};
+  const toolSummary = status?.toolSummary && typeof status.toolSummary === "object"
+    ? status.toolSummary
+    : {};
+  const topRuntimeTool = Array.isArray(toolSummary.topTools) ? toolSummary.topTools[0] : null;
   const harnessActiveCount = harnessRuns.filter((run) => run?.active === true || getHarnessRunState(run) === "working").length;
   const harnessWaitingCount = harnessRuns.filter((run) => run?.approvalPending === true || run?.health?.waitingForOperator === true || getHarnessRunState(run) === "waiting").length;
   const harnessStalledCount = harnessRuns.filter((run) => getHarnessRunState(run) === "stalled").length;
@@ -997,6 +1007,20 @@ export function DashboardTab() {
               </div>
             `)}
           </div>
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <div>
+                <div style="font-size:12px;font-weight:600;">Durable Runtime</div>
+                <div style="font-size:11px;color:var(--text-secondary);">Session lineage and context pressure from the durable runtime / SQL-backed ledger surfaces.</div>
+              </div>
+              <span class="dashboard-chip">State ledger / SQL</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-secondary);line-height:1.6;">
+              <div><b>Sessions:</b> live ${Number(durableContext.liveSessionCount || sessionHealth.live || status?.activeSessionCount || 0)} · completed ${Number(durableContext.completedSessionCount || sessionHealth.completed || status?.completedSessionCount || 0)} · total ${Number(status?.totalSessionCount || status?.totalSessions || 0)}</div>
+              <div><b>Context Pressure:</b> near limit ${Number(durableContext.sessionsNearContextLimit || 0)} · high pressure ${Number(durableContext.sessionsHighContextPressure || 0)} · max ${Number(durableContext.maxContextUsagePercent || 0)}%</div>
+              <div><b>Top Tool:</b> ${topRuntimeTool?.name ? `${topRuntimeTool.name}${Number(topRuntimeTool.count || 0) > 0 ? ` · ${Number(topRuntimeTool.count)} calls` : ""}` : "No durable tool summary recorded yet."}</div>
+            </div>
+          </div>
           ${tickerTasks.length > 0 ? html`
             <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
               <div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-secondary);margin-bottom:6px;display:flex;align-items:center;gap:5px;">
@@ -1024,75 +1048,75 @@ export function DashboardTab() {
           className="dashboard-card dashboard-overview"
         >
           <section role="region" aria-label="Dashboard overview">
-          ${fleetAtRest
-            ? html`
-              <div class="fleet-rest-badge">
-                <div class="fleet-rest-icon">${resolveIcon("check")}</div>
-                <div class="fleet-rest-label">Fleet at rest</div>
-                <div class="fleet-rest-sub">${done} task${done !== 1 ? "s" : ""} completed · zero pending</div>
-              </div>
-            `
-            : html`
-              <div class="dashboard-metric-grid stat-flash" key=${flashKey} aria-label="Overview metrics">
-                ${overviewMetrics.map(
-                  (metric) => html`
-                    <div
-                      class="dashboard-metric"
-                      style="cursor:pointer;"
-                      role="button"
-                      tabindex="0"
-                      onClick=${() => navigateTo(metric.tab || "tasks")}
-                      onKeyDown=${(e) => (e.key === "Enter" || e.key === " ") && navigateTo(metric.tab || "tasks")}
-                    >
-                      <div class="dashboard-metric-label">${metric.label}</div>
+            ${fleetAtRest
+              ? html`
+                <div class="fleet-rest-badge">
+                  <div class="fleet-rest-icon">${resolveIcon("check")}</div>
+                  <div class="fleet-rest-label">Fleet at rest</div>
+                  <div class="fleet-rest-sub">${done} task${done !== 1 ? "s" : ""} completed · zero pending</div>
+                </div>
+              `
+              : html`
+                <div class="dashboard-metric-grid stat-flash" key=${flashKey} aria-label="Overview metrics">
+                  ${overviewMetrics.map(
+                    (metric) => html`
                       <div
-                        class="dashboard-metric-value"
-                        style="color: ${metric.color}"
+                        class="dashboard-metric"
+                        style="cursor:pointer;"
+                        role="button"
+                        tabindex="0"
+                        onClick=${() => navigateTo(metric.tab || "tasks")}
+                        onKeyDown=${(e) => (e.key === "Enter" || e.key === " ") && navigateTo(metric.tab || "tasks")}
                       >
-                        ${typeof metric.value === "number"
-                          ? html`<${AnimatedNumber} value=${metric.value} />`
-                          : metric.value} ${trend(metric.trend)}
+                        <div class="dashboard-metric-label">${metric.label}</div>
+                        <div
+                          class="dashboard-metric-value"
+                          style="color: ${metric.color}"
+                        >
+                          ${typeof metric.value === "number"
+                            ? html`<${AnimatedNumber} value=${metric.value} />`
+                            : metric.value} ${trend(metric.trend)}
+                        </div>
+                        <div class="dashboard-metric-spark">
+                          <${MiniSparkline}
+                            data=${sparkData(metric.spark)}
+                            color=${metric.color}
+                            height=${20}
+                            width=${90}
+                          />
+                        </div>
                       </div>
-                      <div class="dashboard-metric-spark">
-                        <${MiniSparkline}
-                          data=${sparkData(metric.spark)}
-                          color=${metric.color}
-                          height=${20}
-                          width=${90}
-                        />
+                    `,
+                  )}
+                </div>
+              `}
+            ${segments.length > 0 && html`
+              <div class="dashboard-work-layout" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+                <div class="dashboard-work-list">
+                  ${workItems.map(
+                    (item) => html`
+                      <div class="dashboard-work-item">
+                        <div class="dashboard-work-left">
+                          <span
+                            class="dashboard-work-dot"
+                            style="background: ${item.color}"
+                          ></span>
+                          <span class="dashboard-work-label">${item.label}</span>
+                        </div>
+                        <span class="dashboard-work-value">${item.value}</span>
                       </div>
-                    </div>
-                  `,
-                )}
+                    `,
+                  )}
+                </div>
+                <div class="dashboard-work-chart">
+                  <${DonutChart} segments=${segments} size=${90} strokeWidth=${9} />
+                  <div class="dashboard-work-meta">
+                    ${progressPct}% engaged
+                  </div>
+                  <${ProgressBar} percent=${progressPct} />
+                </div>
               </div>
             `}
-          ${segments.length > 0 && html`
-            <div class="dashboard-work-layout" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-              <div class="dashboard-work-list">
-                ${workItems.map(
-                  (item) => html`
-                    <div class="dashboard-work-item">
-                      <div class="dashboard-work-left">
-                        <span
-                          class="dashboard-work-dot"
-                          style="background: ${item.color}"
-                        ></span>
-                        <span class="dashboard-work-label">${item.label}</span>
-                      </div>
-                      <span class="dashboard-work-value">${item.value}</span>
-                    </div>
-                  `,
-                )}
-              </div>
-              <div class="dashboard-work-chart">
-                <${DonutChart} segments=${segments} size=${90} strokeWidth=${9} />
-                <div class="dashboard-work-meta">
-                  ${progressPct}% engaged
-                </div>
-                <${ProgressBar} percent=${progressPct} />
-              </div>
-            </div>
-          `}
           </section>
         <//>
 

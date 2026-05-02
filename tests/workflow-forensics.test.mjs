@@ -8,6 +8,7 @@ import {
   NodeStatus,
 } from "../workflow/workflow-engine.mjs";
 import { registerNodeType } from "../workflow/workflow-nodes.mjs";
+import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,7 @@ function makeTmpEngine(services = {}) {
 }
 
 function cleanup() {
+  resetStateLedgerCache();
   if (tmpDir && existsSync(tmpDir)) {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -351,5 +353,4 @@ describe("Snapshot create / restore lifecycle", () => {
     await expect(e.restoreFromSnapshot("missing")).rejects.toThrow(/not found/);
   });
 });
-
 

@@ -17,8 +17,8 @@
  * ────────────────────────────────────────────────────────────── */
 
 import { signal, computed } from "@preact/signals";
-import { wsConnected, onWsMessage, wsSend } from "./api.js";
-import { apiFetch } from "./api.js";
+import { wsConnected, onWsMessage, wsSend } from "../../../ui/modules/api.js";
+import { apiFetch } from "../../../ui/modules/api.js";
 
 /* ── Helpers ────────────────────────────────────────────── */
 

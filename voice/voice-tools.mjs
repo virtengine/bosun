@@ -1757,19 +1757,43 @@ const TOOL_HANDLERS = {
     const currentRun = engine?.getRunDetail ? engine.getRunDetail(runId) : null;
     if (!currentRun) return { ok: false, error: `Workflow run "${runId}" not found.` };
     const currentStatus = String(currentRun?.status || "").trim().toLowerCase();
-    if (mode === "from_failed" && currentStatus !== "failed") {
+    const retryOptions = typeof engine.getRetryOptions === "function"
+      ? engine.getRetryOptions(runId)
+      : null;
+    const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
+    if (mode === "from_failed" && currentStatus !== "failed" && !createTasksPendingGuard) {
       return {
         ok: false,
         error: `retry mode "from_failed" requires a failed run. Current status is "${currentRun?.status || "unknown"}".`,
       };
     }
-    const result = await engine.retryRun(runId, { mode });
+    const resolvedRetry =
+      createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+        ? engine.resolveOperatorRetry(runId, mode)
+        : null;
+    if (resolvedRetry?.blocked) {
+      return {
+        ok: false,
+        error: resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.",
+        mode: resolvedRetry.mode || mode,
+        operatorAction: resolvedRetry.operatorAction || null,
+        decisionReason: resolvedRetry.decisionReason || null,
+        guardedState: resolvedRetry.guardedState || retryOptions?.guardedState || null,
+        retryOptions,
+      };
+    }
+    const retryArgs = resolvedRetry?.retryArgs || { mode };
+    const result = await engine.retryRun(runId, retryArgs);
     return {
       ok: true,
       mode,
       originalRunId: result?.originalRunId || runId,
       retryRunId: result?.retryRunId || null,
       status: result?.ctx?.errors?.length ? "failed" : "running_or_completed",
+      operatorAction:
+        resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+      decisionReason: resolvedRetry?.decisionReason || null,
+      guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
     };
   },
 
@@ -2321,5 +2345,4 @@ export { TOOL_DEFS as VOICE_TOOLS };
 export async function warmCodebaseContext(context = {}) {
   await TOOL_HANDLERS.warm_codebase_context({}, context).catch(() => {});
 }
-
 

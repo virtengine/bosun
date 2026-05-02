@@ -1,12 +1,30 @@
-/* ─────────────────────────────────────────────────────────────
- *  VirtEngine Control Center – Preact + HTM Entry Point
+/* VirtEngine Control Center – Preact + HTM Entry Point
  *  Modular SPA for Telegram Mini App (no build step)
- * ────────────────────────────────────────────────────────────── */
+ */
 
-// ── Error telemetry ring buffer (max 50 entries, persisted to sessionStorage) ──
+// Error telemetry ring buffer (max 50 entries, persisted to sessionStorage) ──
 const MAX_ERROR_LOG = 50;
 function getErrorLog() {
   try { return JSON.parse(sessionStorage.getItem("ve_error_log") || "[]"); } catch { return []; }
+}
+
+
+function clampPanelLayoutValue(value, min, max, fallback) {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+export function getStoredPanelLayout(storage = globalThis?.localStorage) {
+  const readNumber = (key) => Number(storage?.getItem?.(key));
+  const readBool = (key) => storage?.getItem?.(key) === "true";
+  return {
+    sidebarWidth: clampPanelLayoutValue(readNumber("ve-sidebar-width"), DESKTOP_MIN_SIDEBAR_WIDTH, DESKTOP_MAX_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH),
+    railWidth: clampPanelLayoutValue(readNumber("ve-rail-width"), RAIL_ICON_WIDTH, 440, DEFAULT_RAIL_WIDTH),
+    inspectorWidth: clampPanelLayoutValue(readNumber("ve-inspector-width"), 260, 440, DEFAULT_INSPECTOR_WIDTH),
+    sidebarCollapsed: readBool("ve-sidebar-collapsed"),
+    railCollapsed: readBool("ve-rail-collapsed"),
+    inspectorCollapsed: readBool("ve-inspector-collapsed"),
+  };
 }
 function appendErrorLog(entry) {
   try {
@@ -75,11 +93,11 @@ const html = htm.bind(h);
 
 // Guard: catch invalid VNode types before they hit createElementNS.
 // An array type causes "Failed to execute 'createElementNS': invalid character '['".
+// An object type causes "createElementNS: The qualified name provided ('[object Object]')".
 (function installVnodeTypeGuard() {
   const prev = _preactOptions.vnode;
   _preactOptions.vnode = (vnode) => {
     if (Array.isArray(vnode.type)) {
-      console.warn("[vnode-guard] Array used as element type — converting to Fragment. Items:", vnode.type.length);
       vnode.props = { children: vnode.type };
       vnode.type = _PreactFragment;
     } else if (vnode.type != null && typeof vnode.type === "object" && typeof vnode.type !== "function") {
@@ -117,11 +135,17 @@ const backendDown = signal(false);
 const backendError = signal("");
 const backendLastSeen = signal(null);
 const backendRetryCount = signal(0);
-const DESKTOP_MIN_WIDTH = 1400;
+const DESKTOP_MIN_WIDTH = 1200;
+const WIDE_DESKTOP_MIN_WIDTH = 1400;
 const TABLET_MIN_WIDTH = 768;
 const COMPACT_NAV_MAX_WIDTH = 520;
 const RAIL_ICON_WIDTH = 54;
 const SIDEBAR_ICON_WIDTH = 54;
+const DEFAULT_SIDEBAR_WIDTH = 240;
+const DEFAULT_RAIL_WIDTH = 300;
+const DEFAULT_INSPECTOR_WIDTH = 320;
+const DESKTOP_MIN_SIDEBAR_WIDTH = 200;
+const DESKTOP_MAX_SIDEBAR_WIDTH = 360;
 const APP_LOGO_SOURCES = ["/logo.png", "/logo.svg", "/favicon.png"];
 const VOICE_LAUNCH_QUERY_KEYS = [
   "launch",
@@ -213,23 +237,25 @@ function readForcedLayoutMode() {
 }
 
 function resolveLayoutFlags(win, forcedMode = "auto") {
+  const width = Number(win?.innerWidth || 0);
+  const isWideDesktop = width >= WIDE_DESKTOP_MIN_WIDTH;
   if (!win?.matchMedia) {
-    return { isCompactNav: false, isDesktop: false, isTablet: false };
+    return { isCompactNav: false, isDesktop: false, isTablet: false, isWideDesktop: false };
   }
   if (forcedMode === "desktop") {
-    return { isCompactNav: false, isDesktop: true, isTablet: false };
+    return { isCompactNav: false, isDesktop: true, isTablet: false, isWideDesktop };
   }
   if (forcedMode === "mobile") {
-    return { isCompactNav: true, isDesktop: false, isTablet: false };
+    return { isCompactNav: true, isDesktop: false, isTablet: false, isWideDesktop: false };
   }
   if (forcedMode === "tablet") {
-    return { isCompactNav: false, isDesktop: false, isTablet: true };
+    return { isCompactNav: false, isDesktop: false, isTablet: true, isWideDesktop: false };
   }
-  const width = Number(win.innerWidth || 0);
   return {
     isCompactNav: win.matchMedia(`(max-width: ${COMPACT_NAV_MAX_WIDTH}px)`).matches,
     isDesktop: win.matchMedia(`(min-width: ${DESKTOP_MIN_WIDTH}px)`).matches,
     isTablet: width >= TABLET_MIN_WIDTH && width < DESKTOP_MIN_WIDTH,
+    isWideDesktop,
   };
 }
 
@@ -335,8 +361,8 @@ function writeFloatingCallState(nextState) {
 }
 
 /* ── Module imports ── */
-import { ICONS } from "./modules/icons.js";
-import { iconText, resolveIcon } from "./modules/icon-utils.js";
+import { ICONS } from "../../ui/modules/icons.js";
+import { iconText, resolveIcon } from "../../ui/modules/icon-utils.js";
 import {
   initTelegramApp,
   onThemeChange,
@@ -344,7 +370,7 @@ import {
   showSettingsButton,
   getTelegramUser,
   colorScheme,
-} from "./modules/telegram.js";
+} from "../../ui/modules/telegram.js";
 import {
   apiFetch,
   connectWebSocket,
@@ -356,7 +382,7 @@ import {
   wsStatus,
   wsLastReconnectAt,
   loadingCount,
-} from "./modules/api.js";
+} from "../../ui/modules/api.js";
 import {
   connected,
   statusData,
@@ -369,14 +395,14 @@ import {
   applyStoredDefaults,
   dataFreshness,
   hasPendingChanges,
-} from "./modules/state.js";
+} from "../../ui/modules/state.js";
 import {
   activeTab,
   navigateTo,
   shouldBlockTabSwipe,
   TAB_CONFIG,
-} from "./modules/router.js";
-import { formatRelative } from "./modules/utils.js";
+} from "../../ui/modules/router.js";
+import { formatRelative } from "../../ui/modules/utils.js";
 import {
   buildSessionApiPath,
   shouldFallbackToAllSessions,
@@ -384,13 +410,13 @@ import {
   getSessionRecencyTimestamp,
   getSessionRuntimeState,
   resolveSessionWorkspaceHint,
-} from "./modules/session-api.js";
-import { buildSessionInsights, formatCompactCount } from "./modules/session-insights.js";
-import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Avatar, Stack, Paper, CircularProgress, Button, Divider, Menu, MenuItem, Fab, Snackbar, Alert } from "./modules/mui.js";
+} from "../../ui/modules/session-api.js";
+import { buildSessionInsights, formatCompactCount } from "../../ui/modules/session-insights.js";
+import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Stack, Paper, CircularProgress, Button, Alert } from "../../ui/modules/mui.js";
 
 /* ── Component imports ── */
-import { ToastContainer, Modal } from "./components/shared.js";
-import { PullToRefresh } from "./components/forms.js";
+import { ToastContainer, Modal } from "../../ui/components/shared.js";
+import { PullToRefresh } from "../../ui/components/forms.js";
 import {
   SessionList,
   loadSessions,
@@ -398,23 +424,23 @@ import {
   selectedSessionId,
   sessionsData,
   initSessionWsListener,
-} from "./components/session-list.js";
+} from "../../ui/components/session-list.js";
 import {
   activeAgent,
   agentMode,
   selectedModel,
-} from "./components/agent-selector.js";
-import { WorkspaceSwitcher } from "./components/workspace-switcher.js";
-import { DiffViewer } from "./components/diff-viewer.js";
+} from "../../ui/components/agent-selector.js";
+import { WorkspaceSwitcher } from "../../ui/components/workspace-switcher.js";
+import { DiffViewer } from "../../ui/components/diff-viewer.js";
 import {
   CommandPalette,
   useCommandPalette,
-} from "./components/command-palette.js";
-import { VoiceOverlay } from "./modules/voice-overlay.js";
+} from "../../ui/components/command-palette.js";
+import { VoiceOverlay } from "../../ui/modules/voice-overlay.js";
 
 /* ── Tab imports (eager — loaded with app.js) ── */
-import { DashboardTab } from "./tabs/dashboard.js";
-import { ChatTab } from "./tabs/chat.js";
+import { DashboardTab } from "../../ui/tabs/dashboard.js";
+import { ChatTab } from "../../ui/tabs/chat.js";
 
 /* ── Lazy tab loading ── */
 const _lazyTabCache = {};
@@ -487,17 +513,17 @@ const TasksTab = lazyTab("./tabs/tasks.js", "TasksTab", () => import("./tabs/tas
 const BenchmarksTab = lazyTab("./tabs/benchmarks.js", "BenchmarksTab", () => import("./tabs/benchmarks.js"));
 const AgentsTab = lazyTab("./tabs/agents.js", "AgentsTab", () => import("./tabs/agents.js"));
 const FleetSessionsTab = lazyTab("./tabs/agents.js", "FleetSessionsTab", () => import("./tabs/agents.js"));
-const InfraTab = lazyTab("./tabs/infra.js", "InfraTab", () => import("./tabs/infra.js"));
-const GuardrailsTab = lazyTab("./tabs/guardrails.js", "GuardrailsTab", () => import("./tabs/guardrails.js"));
-const ControlTab = lazyTab("./tabs/control.js", "ControlTab", () => import("./tabs/control.js"));
-const LogsTab = lazyTab("./tabs/logs.js", "LogsTab", () => import("./tabs/logs.js"));
-const TelemetryTab = lazyTab("./tabs/telemetry.js", "TelemetryTab", () => import("./tabs/telemetry.js"));
-const SettingsTab = lazyTab("./tabs/settings.js", "SettingsTab", () => import("./tabs/settings.js"));
-const IntegrationsTab = lazyTab("./tabs/integrations.js", "IntegrationsTab", () => import("./tabs/integrations.js"));
-const WorkflowsTab = lazyTab("./tabs/workflows.js", "WorkflowsTab", () => import("./tabs/workflows.js"));
-const LibraryTab = lazyTab("./tabs/library.js", "LibraryTab", () => import("./tabs/library.js"));
-const LibraryMarketplaceTab = lazyTab("./tabs/library.js", "LibraryMarketplaceTab", () => import("./tabs/library.js"));
-const ManualFlowsTab = lazyTab("./tabs/manual-flows.js", "ManualFlowsTab", () => import("./tabs/manual-flows.js"));
+const InfraTab = lazyTab("./tabs/infra.js", "InfraTab", () => import("../../ui/tabs/infra.js"));
+const GuardrailsTab = lazyTab("./tabs/guardrails.js", "GuardrailsTab", () => import("../../ui/tabs/guardrails.js"));
+const ControlTab = lazyTab("./tabs/control.js", "ControlTab", () => import("../../ui/tabs/control.js"));
+const LogsTab = lazyTab("./tabs/logs.js", "LogsTab", () => import("../../ui/tabs/logs.js"));
+const TelemetryTab = lazyTab("./tabs/telemetry.js", "TelemetryTab", () => import("../../ui/tabs/telemetry.js"));
+const SettingsTab = lazyTab("./tabs/settings.js", "SettingsTab", () => import("../../ui/tabs/settings.js"));
+const IntegrationsTab = lazyTab("./tabs/integrations.js", "IntegrationsTab", () => import("../../ui/tabs/integrations.js"));
+const WorkflowsTab = lazyTab("./tabs/workflows.js", "WorkflowsTab", () => import("../../ui/tabs/workflows.js"));
+const LibraryTab = lazyTab("./tabs/library.js", "LibraryTab", () => import("../../ui/tabs/library.js"));
+const LibraryMarketplaceTab = lazyTab("./tabs/library.js", "LibraryMarketplaceTab", () => import("../../ui/tabs/library.js"));
+const ManualFlowsTab = lazyTab("./tabs/manual-flows.js", "ManualFlowsTab", () => import("../../ui/tabs/manual-flows.js"));
 
 /* ── Shared components ── */
 
@@ -790,6 +816,7 @@ const TAB_COMPONENTS = {
   settings: SettingsTab,
   integrations: IntegrationsTab,
 };
+
 function getMaxFreshnessMs(rawFreshness) {
   if (typeof rawFreshness === "number") {
     return Number.isFinite(rawFreshness) ? rawFreshness : null;
@@ -856,6 +883,16 @@ function Header() {
   const latency = wsLatency.value;
   const reconnect = wsReconnectIn.value;
   const freshness = getMaxFreshnessMs(dataFreshness.value);
+  const activeConfig = TAB_CONFIG.find((tab) => tab.id === activeTab.value) || TAB_CONFIG[0] || { id: "dashboard", label: "Dashboard" };
+  const sessionId = selectedSessionId.value;
+  const activeSession = (sessionsData.value || []).find((session) => session?.id === sessionId);
+  const breadcrumbParts = [activeConfig.label];
+  if (activeSession?.title || activeSession?.taskId || activeSession?.id) {
+    breadcrumbParts.push(activeSession.title || activeSession.taskId || activeSession.id);
+  }
+  if (activeSession?.taskId && breadcrumbParts[breadcrumbParts.length - 1] !== activeSession.taskId) {
+    breadcrumbParts.push(activeSession.taskId);
+  }
 
   // Connection quality label
   let connLabel = "Offline";
@@ -889,6 +926,14 @@ function Header() {
       <${Toolbar} variant="dense" className="app-header-toolbar">
         <img src=${logoSrc} alt="Bosun" style=${{height: 24, width: 24, marginRight: 4}} data-logo-fallback-index="0" onError=${handleAppLogoLoadError} />
         <${Typography} variant="h6" sx=${{ml: 1, flexGrow: 0}}>Bosun</${Typography}>
+        <div class="app-breadcrumbs" aria-label="Breadcrumb">
+          ${breadcrumbParts.map((part, index) => html`
+            <span class="app-breadcrumb-part" key=${`${part}-${index}`}>
+              ${index > 0 ? html`<span class="app-breadcrumb-separator" aria-hidden="true">›</span>` : null}
+              <span>${part}</span>
+            </span>
+          `)}
+        </div>
         <${Box} sx=${{ml: 2}} className="app-header-workspace">
           <${WorkspaceSwitcher} />
         </${Box}>
@@ -921,10 +966,53 @@ function Header() {
 function SidebarNav({ collapsed = false, onToggle }) {
   const user = getTelegramUser();
   const isConn = inferUiConnected();
+  const navRef = useRef(null);
 
   const collapseIcon = collapsed
     ? html`<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 3l5 5-5 5"/></svg>`
     : html`<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 3l-5 5 5 5"/></svg>`;
+
+  const focusSidebarTab = (targetIndex) => {
+    const navEl = navRef.current;
+    if (!navEl) return;
+    const tabEls = Array.from(navEl.querySelectorAll('[role="tab"]'));
+    if (tabEls.length === 0) return;
+    const nextIndex = Math.max(0, Math.min(tabEls.length - 1, targetIndex));
+    tabEls[nextIndex]?.focus();
+  };
+
+  const handleSidebarKeyDown = (event) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const navEl = navRef.current;
+    if (!navEl) return;
+    const tabEls = Array.from(navEl.querySelectorAll('[role="tab"]'));
+    if (tabEls.length === 0) return;
+    const activeIndex = tabEls.findIndex((tabEl) => tabEl === document.activeElement);
+    if (activeIndex < 0) return;
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusSidebarTab((activeIndex + 1) % tabEls.length);
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusSidebarTab((activeIndex - 1 + tabEls.length) % tabEls.length);
+      return;
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault();
+      focusSidebarTab(0);
+      return;
+    }
+
+    if (event.key === "End") {
+      event.preventDefault();
+      focusSidebarTab(tabEls.length - 1);
+    }
+  };
 
   return html`
     <aside class="sidebar ${collapsed ? 'sidebar-icon-only' : ''}">
@@ -973,13 +1061,16 @@ function SidebarNav({ collapsed = false, onToggle }) {
         </div>
       `}
       <${Tabs}
+        ref=${navRef}
         orientation="vertical"
         value=${Math.max(0, TAB_CONFIG.findIndex((t) => t.id === activeTab.value))}
         onChange=${(_, idx) => {
           const tab = TAB_CONFIG[idx];
           if (tab) navigateTo(tab.id, { resetHistory: tab.id === "dashboard", forceRefresh: tab.id === "dashboard" && activeTab.value === "dashboard" });
         }}
+        onKeyDown=${handleSidebarKeyDown}
         aria-label="Main navigation"
+        aria-orientation="vertical"
         sx=${{
           flexGrow: 1,
           "& .MuiTab-root": { minHeight: 40, justifyContent: collapsed ? "center" : "flex-start", px: collapsed ? 1 : 2 },
@@ -1132,7 +1223,7 @@ function filterSessionsByType(allSessions, sessionType = "primary") {
   });
 }
 
-function InspectorPanel({ onResizeStart, onResizeReset, showResizer }) {
+function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed = false, onToggleCollapse }) {
   const sessionId = selectedSessionId.value;
   const session = (sessionsData.value || []).find((s) => s.id === sessionId);
   const isSessionTab = activeTab.value === "chat" || activeTab.value === "agents";
@@ -1349,7 +1440,15 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer }) {
   }
 
   return html`
-    <aside class="inspector">
+    <aside class="inspector" aria-label="Inspector panel">
+      <button
+        type="button"
+        class="inspector-collapse-btn"
+        onClick=${onToggleCollapse}
+        aria-label=${collapsed ? "Expand inspector" : "Collapse inspector"}
+        aria-pressed=${collapsed ? "true" : "false"}
+        title=${collapsed ? "Expand inspector" : "Collapse inspector"}
+      >${collapsed ? "⟨" : "⟩"}</button>
       <div class="inspector-section">
         <div class="inspector-title">Focus</div>
         ${session
@@ -1895,28 +1994,17 @@ function App() {
   const [isCompactNav, setIsCompactNav] = useState(initialLayout.isCompactNav);
   const [isDesktop, setIsDesktop] = useState(initialLayout.isDesktop);
   const [isTablet, setIsTablet] = useState(initialLayout.isTablet);
+  const [isWideDesktop, setIsWideDesktop] = useState(initialLayout.isWideDesktop);
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false);
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
-  const [railWidth, setRailWidth] = useState(() => {
-    if (!globalThis.window) return 280;
-    const stored = Number(localStorage.getItem("ve-rail-width"));
-    // Ensure a sensible default — never start at 0 or very small
-    return Number.isFinite(stored) && stored >= RAIL_ICON_WIDTH ? stored : 280;
-  });
-  const [inspectorWidth, setInspectorWidth] = useState(() => {
-    if (!globalThis.window) return 320;
-    const stored = Number(localStorage.getItem("ve-inspector-width"));
-    return Number.isFinite(stored) && stored >= 200 ? stored : 320;
-  });
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (!globalThis.window) return false;
-    return localStorage.getItem("ve-sidebar-collapsed") === "true";
-  });
-  const [railCollapsed, setRailCollapsed] = useState(() => {
-    if (!globalThis.window) return false;
-    return localStorage.getItem("ve-rail-collapsed") === "true";
-  });
-  const railWidthBeforeCollapseRef = useRef(280);
+  const initialPanelLayout = getStoredPanelLayout();
+  const [sidebarWidth] = useState(initialPanelLayout.sidebarWidth);
+  const [railWidth, setRailWidth] = useState(initialPanelLayout.railWidth);
+  const [inspectorWidth, setInspectorWidth] = useState(initialPanelLayout.inspectorWidth);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(initialPanelLayout.sidebarCollapsed);
+  const [railCollapsed, setRailCollapsed] = useState(initialPanelLayout.railCollapsed);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(initialPanelLayout.inspectorCollapsed);
+  const railWidthBeforeCollapseRef = useRef(initialPanelLayout.railWidth || DEFAULT_RAIL_WIDTH);
 
   const clamp = useCallback((value, min, max) => {
     if (!Number.isFinite(value)) return min;
@@ -1978,6 +2066,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const onKeyDown = (event) => {
+      const key = String(event.key || "").toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key === "b") {
+        event.preventDefault();
+        setSidebarCollapsed((value) => !value);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === "i") {
+        event.preventDefault();
+        setInspectorCollapsed((value) => !value);
+      }
+    };
+    globalThis.addEventListener?.("keydown", onKeyDown);
+    return () => globalThis.removeEventListener?.("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     const win = globalThis.window;
     if (!win?.matchMedia) return;
     if (forcedLayoutMode !== "auto") {
@@ -1987,6 +2092,23 @@ function App() {
     }
     const query = win.matchMedia(`(min-width: ${DESKTOP_MIN_WIDTH}px)`);
     const update = () => setIsDesktop(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => {
+      query.removeEventListener?.("change", update);
+    };
+  }, [forcedLayoutMode]);
+
+  useEffect(() => {
+    const win = globalThis.window;
+    if (!win?.matchMedia) return;
+    if (forcedLayoutMode !== "auto") {
+      const next = resolveLayoutFlags(win, forcedLayoutMode);
+      setIsWideDesktop(next.isWideDesktop);
+      return;
+    }
+    const query = win.matchMedia(`(min-width: ${WIDE_DESKTOP_MIN_WIDTH}px)`);
+    const update = () => setIsWideDesktop(query.matches);
     update();
     query.addEventListener?.("change", update);
     return () => {
@@ -2032,14 +2154,24 @@ function App() {
 
 
   useEffect(() => {
-    if (!isDesktop || !globalThis.window) return;
-    if (!railCollapsed) localStorage.setItem("ve-rail-width", String(railWidth));
-  }, [railWidth, isDesktop, railCollapsed]);
+    if (!globalThis.window) return;
+    localStorage.setItem("ve-sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
 
   useEffect(() => {
-    if (!isDesktop || !globalThis.window) return;
-    localStorage.setItem("ve-inspector-width", String(inspectorWidth));
-  }, [inspectorWidth, isDesktop]);
+    if (!globalThis.window) return;
+    if (!railCollapsed) localStorage.setItem("ve-rail-width", String(railWidth));
+  }, [railWidth, railCollapsed]);
+
+  useEffect(() => {
+    if (!globalThis.window) return;
+    if (!inspectorCollapsed) localStorage.setItem("ve-inspector-width", String(inspectorWidth));
+  }, [inspectorWidth, inspectorCollapsed]);
+
+  useEffect(() => {
+    if (!globalThis.window) return;
+    localStorage.setItem("ve-inspector-collapsed", String(inspectorCollapsed));
+  }, [inspectorCollapsed]);
 
   useEffect(() => {
     if (!globalThis.window) return;
@@ -2545,9 +2677,11 @@ function App() {
   const CurrentTab = TAB_COMPONENTS[activeTab.value] || DashboardTab;
   const isChatOrAgents = activeTab.value === "chat" || activeTab.value === "agents" || activeTab.value === "fleet-sessions";
   const isChat = activeTab.value === "chat";
-  const showSessionRail = isDesktop && isChat;
+  // The detached session rail only has wide-desktop CSS. Keep 1200-1399 in the
+  // compact desktop layout so chat keeps its inline session pane.
+  const showSessionRail = isWideDesktop && isChat;
   const showInspector = isDesktop && isChatOrAgents;
-  const showBottomNav = !isDesktop;
+  const showBottomNav = !(isDesktop || isTablet);
   const railSessionType = "primary";
   const showDrawerToggles = isTablet;
   const showInspectorToggle = isTablet && isChatOrAgents;
@@ -2632,7 +2766,7 @@ function App() {
   return html`<${VeTheme}><${CssBaseline} />
     <div class="top-loading-bar" style="width: ${loadingPct}%; opacity: ${loadingVisible ? 1 : 0}"></div>
     <div
-      class="app-shell"
+      class=${`app-shell${isDesktop ? " app-desktop-grid" : isTablet ? " app-tablet-grid" : ""}`}
       style=${shellStyle}
       data-tab=${activeTab.value}
       data-has-rail=${showSessionRail ? "true" : "false"}
@@ -2727,6 +2861,8 @@ function App() {
             onResizeStart=${handleResizeStart}
             onResizeReset=${handleResizeReset}
             showResizer=${isDesktop}
+            collapsed=${inspectorCollapsed}
+            onToggleCollapse=${() => setInspectorCollapsed((value) => !value)}
           />`
         : null}
     </div>
