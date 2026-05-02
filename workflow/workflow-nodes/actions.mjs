@@ -3389,6 +3389,13 @@ registerNodeType("action.materialize_planner_tasks", {
       savePlannerPriorState(priorStatePath, priorState);
     }
 
+    const existingTaskByTitle = new Map();
+    for (const row of existingRows) {
+      const titleKey = String(row?.title || "").trim().toLowerCase();
+      if (!titleKey || existingTaskByTitle.has(titleKey)) continue;
+      existingTaskByTitle.set(titleKey, row);
+    }
+
     const rankedTasks = rankPlannerTaskCandidatesForResume(
       rankPlannerTaskCandidates(parsedTasks, priorState, rankingConfig),
       plannerFeedback,
@@ -3409,8 +3416,10 @@ registerNodeType("action.materialize_planner_tasks", {
       };
       const key = task.title.toLowerCase();
       if (dedupEnabled && existingTitleSet.has(key)) {
-        skipped.push({ title: task.title, reason: "duplicate_title" });
-        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "duplicate_title" });
+        const existingTask = existingTaskByTitle.get(key);
+        const existingTaskId = String(existingTask?.id || existingTask?.task_id || "").trim() || null;
+        skipped.push({ title: task.title, reason: "duplicate_title", existingTaskId });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "duplicate_title", existingTaskId });
         continue;
       }
       if (!Array.isArray(task.acceptanceCriteria) || task.acceptanceCriteria.length === 0) {
