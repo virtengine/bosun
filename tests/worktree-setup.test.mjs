@@ -10,6 +10,7 @@ import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { sanitizeGitEnv } from "../git/git-safety.mjs";
 
 import {
   ensureWorktreeRuntimeSetup,
@@ -36,21 +37,28 @@ function createTempDir(prefix) {
   return dir;
 }
 
+function execGit(command, options = {}) {
+  return execSync(command, {
+    ...options,
+    env: sanitizeGitEnv(options.env),
+  });
+}
+
 function initGitRepo(dir) {
   mkdirSync(dir, { recursive: true });
-  execSync("git init", { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
-  execSync('git config user.email "bosun-tests@example.com"', {
+  execGit("git init", { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
+  execGit('git config user.email "bosun-tests@example.com"', {
     cwd: dir,
     stdio: ["ignore", "ignore", "ignore"],
   });
-  execSync('git config user.name "Bosun Tests"', {
+  execGit('git config user.name "Bosun Tests"', {
     cwd: dir,
     stdio: ["ignore", "ignore", "ignore"],
   });
 }
 
 function checkoutBranch(dir, branchName) {
-  execSync(`git checkout -b ${branchName}`, {
+  execGit(`git checkout -b ${branchName}`, {
     cwd: dir,
     stdio: ["ignore", "ignore", "ignore"],
   });
@@ -158,22 +166,22 @@ describe("worktree runtime setup", () => {
     writeFileSync(join(worktreePath, ".githooks", "pre-commit"), "#!/usr/bin/env bash\n# baseline pre-commit\n", "utf8");
     writeFileSync(join(worktreePath, ".githooks", "pre-push"), "#!/usr/bin/env bash\n# baseline pre-push\n", "utf8");
     writeFileSync(join(worktreePath, ".codex", "config.toml"), "[runtime]\nlabel = \"baseline\"\n", "utf8");
-    execSync("git add .githooks/pre-commit .githooks/pre-push .codex/config.toml", {
+    execGit("git add .githooks/pre-commit .githooks/pre-push .codex/config.toml", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline runtime files"', {
+    execGit('git commit -m "baseline runtime files"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
-    const porcelain = execSync("git status --short -- .githooks/pre-commit .githooks/pre-push .codex/config.toml", {
+    const porcelain = execGit("git status --short -- .githooks/pre-commit .githooks/pre-push .codex/config.toml", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeBits = execSync("git ls-files -v .githooks/pre-commit .githooks/pre-push .codex/config.toml", {
+    const skipWorktreeBits = execGit("git ls-files -v .githooks/pre-commit .githooks/pre-push .codex/config.toml", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -209,11 +217,11 @@ describe("worktree runtime setup", () => {
       "tui/screens/status.mjs",
       'import * as ink from "ink";\nconst Box = ink.Box ?? ink.default?.Box;\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -230,11 +238,11 @@ describe("worktree runtime setup", () => {
       "tui/screens/status.mjs",
       'import { Box } from "ink";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -242,12 +250,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const syncedOverlay = readFileSync(join(worktreePath, "tui", "screens", "status.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- tui/screens/status.mjs", {
+    const porcelain = execGit("git status --short -- tui/screens/status.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlag = execSync("git ls-files -v tui/screens/status.mjs", {
+    const skipWorktreeFlag = execGit("git ls-files -v tui/screens/status.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -271,11 +279,11 @@ describe("worktree runtime setup", () => {
       "tui/screens/connection-setup.mjs",
       'export default function ConnectionSetupScreen() {}\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -283,11 +291,11 @@ describe("worktree runtime setup", () => {
 
     initGitRepo(worktreePath);
     writeRuntimeSourceFiles(worktreePath, "baseline");
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -295,12 +303,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const syncedOverlay = readFileSync(join(worktreePath, "tui", "screens", "connection-setup.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- tui/screens/connection-setup.mjs", {
+    const porcelain = execGit("git status --short -- tui/screens/connection-setup.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const checkIgnore = execSync("git check-ignore -v --no-index tui/screens/connection-setup.mjs", {
+    const checkIgnore = execGit("git check-ignore -v --no-index tui/screens/connection-setup.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -324,11 +332,11 @@ describe("worktree runtime setup", () => {
       "ui/modules/harness-client.js",
       'export function buildHarnessRunPath(id) { return `/harness/runs/${id}`; }\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -336,11 +344,11 @@ describe("worktree runtime setup", () => {
 
     initGitRepo(worktreePath);
     writeRuntimeSourceFiles(worktreePath, "baseline");
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -348,12 +356,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const syncedOverlay = readFileSync(join(worktreePath, "ui", "modules", "harness-client.js"), "utf8");
-    const porcelain = execSync("git status --short -- ui/modules/harness-client.js", {
+    const porcelain = execGit("git status --short -- ui/modules/harness-client.js", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const checkIgnore = execSync("git check-ignore -v --no-index ui/modules/harness-client.js", {
+    const checkIgnore = execGit("git check-ignore -v --no-index ui/modules/harness-client.js", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -377,11 +385,11 @@ describe("worktree runtime setup", () => {
       "tests/fleet-tab-render.test.mjs",
       'expect("source").toContain("updated overlay expectation");\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -394,11 +402,11 @@ describe("worktree runtime setup", () => {
       "tests/fleet-tab-render.test.mjs",
       'expect("worktree").toContain("stale expectation");\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -406,12 +414,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const syncedOverlay = readFileSync(join(worktreePath, "tests", "fleet-tab-render.test.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- tests/fleet-tab-render.test.mjs", {
+    const porcelain = execGit("git status --short -- tests/fleet-tab-render.test.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlag = execSync("git ls-files -v tests/fleet-tab-render.test.mjs", {
+    const skipWorktreeFlag = execGit("git ls-files -v tests/fleet-tab-render.test.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -465,11 +473,11 @@ describe("worktree runtime setup", () => {
       "tests/shims/codex-sdk.mjs",
       'export const codexShimLabel = "source-codex-shim";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -512,11 +520,11 @@ describe("worktree runtime setup", () => {
       "tests/shims/codex-sdk.mjs",
       'export const codexShimLabel = "worktree-stale-codex-shim";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -530,12 +538,12 @@ describe("worktree runtime setup", () => {
     const syncedSetup = readFileSync(join(worktreePath, "tests", "setup.mjs"), "utf8");
     const syncedReporter = readFileSync(join(worktreePath, "tests", "near-timeout-reporter.mjs"), "utf8");
     const syncedShim = readFileSync(join(worktreePath, "tests", "shims", "codex-sdk.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- tools/vitest-full-suite.mjs tools/vitest-runner.mjs tools/sync-demo-ui.mjs vitest.config.mjs tests/setup.mjs tests/near-timeout-reporter.mjs tests/shims/codex-sdk.mjs", {
+    const porcelain = execGit("git status --short -- tools/vitest-full-suite.mjs tools/vitest-runner.mjs tools/sync-demo-ui.mjs vitest.config.mjs tests/setup.mjs tests/near-timeout-reporter.mjs tests/shims/codex-sdk.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlags = execSync("git ls-files -v tools/vitest-full-suite.mjs tools/vitest-runner.mjs tools/sync-demo-ui.mjs vitest.config.mjs tests/setup.mjs tests/near-timeout-reporter.mjs tests/shims/codex-sdk.mjs", {
+    const skipWorktreeFlags = execGit("git ls-files -v tools/vitest-full-suite.mjs tools/vitest-runner.mjs tools/sync-demo-ui.mjs vitest.config.mjs tests/setup.mjs tests/near-timeout-reporter.mjs tests/shims/codex-sdk.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -600,11 +608,11 @@ describe("worktree runtime setup", () => {
       "tests/ui-server-tunnel-hostname.test.mjs",
       'export const tunnelHostnameLabel = "source-tunnel-hostname";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -632,11 +640,11 @@ describe("worktree runtime setup", () => {
       "tests/ui-server-tunnel-hostname.test.mjs",
       'export const tunnelHostnameLabel = "worktree-stale-tunnel-hostname";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -647,12 +655,12 @@ describe("worktree runtime setup", () => {
     const syncedSessionActions = readFileSync(join(worktreePath, "tests", "ui-server-session-actions.test.mjs"), "utf8");
     const syncedTuiEvents = readFileSync(join(worktreePath, "tests", "ui-server-tui-events.test.mjs"), "utf8");
     const syncedTunnelHostname = readFileSync(join(worktreePath, "tests", "ui-server-tunnel-hostname.test.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- tests/ui-server-fallback-auth.test.mjs tests/ui-server-session-actions.test.mjs tests/ui-server-tui-events.test.mjs tests/ui-server-tunnel-hostname.test.mjs", {
+    const porcelain = execGit("git status --short -- tests/ui-server-fallback-auth.test.mjs tests/ui-server-session-actions.test.mjs tests/ui-server-tui-events.test.mjs tests/ui-server-tunnel-hostname.test.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlags = execSync("git ls-files -v tests/ui-server-fallback-auth.test.mjs tests/ui-server-session-actions.test.mjs tests/ui-server-tui-events.test.mjs tests/ui-server-tunnel-hostname.test.mjs", {
+    const skipWorktreeFlags = execGit("git ls-files -v tests/ui-server-fallback-auth.test.mjs tests/ui-server-session-actions.test.mjs tests/ui-server-tui-events.test.mjs tests/ui-server-tunnel-hostname.test.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -698,11 +706,11 @@ describe("worktree runtime setup", () => {
       "workflow/workflow-engine.mjs",
       'export const workflowEngineSource = "source-local-ops";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -720,11 +728,11 @@ describe("worktree runtime setup", () => {
       "workflow/workflow-engine.mjs",
       'export const workflowEngineSource = "task-branch";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -732,12 +740,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const workflowEngine = readFileSync(join(worktreePath, "workflow", "workflow-engine.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- workflow/workflow-engine.mjs", {
+    const porcelain = execGit("git status --short -- workflow/workflow-engine.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlag = execSync("git ls-files -v workflow/workflow-engine.mjs", {
+    const skipWorktreeFlag = execGit("git ls-files -v workflow/workflow-engine.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -771,11 +779,11 @@ describe("worktree runtime setup", () => {
       "agent/session-manager.mjs",
       'export const sessionManagerSource = "source-local-ops";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -793,11 +801,11 @@ describe("worktree runtime setup", () => {
       "voice/voice-tools.mjs",
       'export const voiceToolsSource = "task-branch";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -818,7 +826,7 @@ describe("worktree runtime setup", () => {
       "voice/voice-tools.mjs",
       'import "../agent/session-manager.mjs";\nexport const voiceToolsSource = "task-live-edit";\n',
     );
-    execSync("git checkout -b task/demo-stale-overlay-cleanup", {
+    execGit("git checkout -b task/demo-stale-overlay-cleanup", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -826,7 +834,7 @@ describe("worktree runtime setup", () => {
     const cleanedResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const uiServerContent = readFileSync(join(worktreePath, "server", "ui-server.mjs"), "utf8");
     const voiceToolsContent = readFileSync(join(worktreePath, "voice", "voice-tools.mjs"), "utf8");
-    const skipFlags = execSync("git ls-files -v server/ui-server.mjs voice/voice-tools.mjs", {
+    const skipFlags = execGit("git ls-files -v server/ui-server.mjs voice/voice-tools.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -835,14 +843,14 @@ describe("worktree runtime setup", () => {
       .split(/\r?\n/)
       .filter(Boolean)
       .map((line) => line.charAt(0));
-    const porcelain = execSync("git status --short -- server/ui-server.mjs voice/voice-tools.mjs agent/session-manager.mjs", {
+    const porcelain = execGit("git status --short -- server/ui-server.mjs voice/voice-tools.mjs agent/session-manager.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     const ignoreExitCode = (() => {
       try {
-        execSync("git check-ignore -q agent/session-manager.mjs", {
+        execGit("git check-ignore -q agent/session-manager.mjs", {
           cwd: worktreePath,
           stdio: "ignore",
         });
@@ -895,11 +903,11 @@ describe("worktree runtime setup", () => {
       "tests/setup.mjs",
       'export const setupLabel = "source-setup";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -927,11 +935,11 @@ describe("worktree runtime setup", () => {
       "tests/setup.mjs",
       'export const setupLabel = "worktree-stale-setup";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -942,12 +950,12 @@ describe("worktree runtime setup", () => {
     const syncedRunner = readFileSync(join(worktreePath, "tools", "vitest-runner.mjs"), "utf8");
     const syncedConfig = readFileSync(join(worktreePath, "vitest.config.mjs"), "utf8");
     const syncedSetup = readFileSync(join(worktreePath, "tests", "setup.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- tools/vitest-full-suite.mjs tools/vitest-runner.mjs vitest.config.mjs tests/setup.mjs", {
+    const porcelain = execGit("git status --short -- tools/vitest-full-suite.mjs tools/vitest-runner.mjs vitest.config.mjs tests/setup.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlags = execSync("git ls-files -v tools/vitest-full-suite.mjs tools/vitest-runner.mjs vitest.config.mjs tests/setup.mjs", {
+    const skipWorktreeFlags = execGit("git ls-files -v tools/vitest-full-suite.mjs tools/vitest-runner.mjs vitest.config.mjs tests/setup.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -993,11 +1001,11 @@ describe("worktree runtime setup", () => {
       "telegram/sticky-menu-state.mjs",
       'export const stickyMenuState = "source-overlay";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -1015,11 +1023,11 @@ describe("worktree runtime setup", () => {
       "telegram/sticky-menu-state.mjs",
       'export const stickyMenuState = "worktree-stale";\n',
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -1027,12 +1035,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const syncedDependency = readFileSync(join(worktreePath, "telegram", "sticky-menu-state.mjs"), "utf8");
-    const porcelain = execSync("git status --short -- telegram/sticky-menu-state.mjs", {
+    const porcelain = execGit("git status --short -- telegram/sticky-menu-state.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlag = execSync("git ls-files -v telegram/sticky-menu-state.mjs", {
+    const skipWorktreeFlag = execGit("git ls-files -v telegram/sticky-menu-state.mjs", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -1060,11 +1068,11 @@ describe("worktree runtime setup", () => {
         files: ["agent/agent-launcher.mjs"],
       }, null, 2)}\n`,
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline source"', {
+    execGit('git commit -m "baseline source"', {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -1081,11 +1089,11 @@ describe("worktree runtime setup", () => {
         files: [],
       }, null, 2)}\n`,
     );
-    execSync("git add .", {
+    execGit("git add .", {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
-    execSync('git commit -m "baseline worktree"', {
+    execGit('git commit -m "baseline worktree"', {
       cwd: worktreePath,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -1093,12 +1101,12 @@ describe("worktree runtime setup", () => {
 
     const ensureResult = ensureWorktreeRuntimeSetup(repoRoot, worktreePath);
     const syncedPackageJson = readFileSync(join(worktreePath, "package.json"), "utf8");
-    const porcelain = execSync("git status --short -- package.json", {
+    const porcelain = execGit("git status --short -- package.json", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const skipWorktreeFlag = execSync("git ls-files -v package.json", {
+    const skipWorktreeFlag = execGit("git ls-files -v package.json", {
       cwd: worktreePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

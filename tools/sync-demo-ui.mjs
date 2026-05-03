@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sanitizeGitEnv } from "../git/git-safety.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,6 +31,7 @@ const ROOT_DIRS = [
   "assets",
   "vendor",
 ];
+const GIT_ENV = sanitizeGitEnv();
 
 function ensureParentDir(filePath) {
   mkdirSync(dirname(filePath), { recursive: true });
@@ -55,6 +57,7 @@ export function refreshMirroredUiGitIndex({ repoRoot = ROOT, targetRoot = TARGET
   const trackedPathsRaw = execFileSync("git", ["ls-files", "-z", "--", pathspec], {
     cwd: repoRoot,
     stdio: "pipe",
+    env: GIT_ENV,
   });
   const trackedPaths = Buffer.from(trackedPathsRaw || "")
     .toString("utf8")
@@ -68,6 +71,7 @@ export function refreshMirroredUiGitIndex({ repoRoot = ROOT, targetRoot = TARGET
       cwd: repoRoot,
       input: `${trackedPaths.join("\0")}\0`,
       stdio: "pipe",
+      env: GIT_ENV,
     });
   } catch (error) {
     const exitCode = Number(error?.status ?? error?.exitCode ?? 0);
@@ -79,6 +83,7 @@ export function refreshMirroredUiGitIndex({ repoRoot = ROOT, targetRoot = TARGET
   const remainingStatus = execFileSync("git", ["status", "--porcelain", "--", pathspec], {
     cwd: repoRoot,
     stdio: "pipe",
+    env: GIT_ENV,
   }).toString("utf8").trim();
   if (remainingStatus) {
     return { attempted: true, refreshed: false, reason: "dirty_paths", details: remainingStatus };

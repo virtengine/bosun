@@ -96,7 +96,7 @@ describe("prompt lint", () => {
       cwd: process.cwd(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    }).replace(/\\/g, "/");
 
     expect(output).toContain("workflow/workflow-engine.mjs");
     expect(output).toContain("tests/workflow-engine.test.mjs");

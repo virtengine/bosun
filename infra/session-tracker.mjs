@@ -113,6 +113,20 @@ function hasRepoRecoveryText(text) {
   return REPO_RECOVERY_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+const PLAN_HANDOFF_PATTERN_GROUPS = [
+  [/\barchitect handoff\b/i, /\bno planning-side code changes were made\b/i],
+  [/\barchitect handoff\b/i, /\bno code changes were made in this planning phase\b/i],
+  [/\barchitect handoff\b/i, /\bcompletion:\s*architect plan produced\b/i],
+];
+
+function hasPlanHandoffText(text) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return PLAN_HANDOFF_PATTERN_GROUPS.some((group) =>
+    group.every((pattern) => pattern.test(normalized)),
+  );
+}
+
 const ENV_BLOCK_PATTERNS = [
   /prompt quality/i,
   /missing task (description|url)/i,
@@ -126,7 +140,8 @@ const ENV_BLOCK_PATTERNS = [
   /authentication failed/i,
   /not authenticated/i,
   /missing credentials/i,
-  /token/i,
+  /\b(?:access|auth|oauth|api|bearer|refresh|session|credential|credentials|missing|invalid|expired)\s+tokens?\b/i,
+  /\btokens?\s+(?:missing|invalid|expired|required|not found)\b/i,
   /connection refused/i,
   /connection reset/i,
   /network/i,
@@ -220,6 +235,7 @@ function classifyBlockedSessionText(text) {
   if (
     REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))
     && !hasRepoRecoveryText(normalized)
+    && !hasPlanHandoffText(normalized)
   ) {
     return "blocked_by_repo";
   }

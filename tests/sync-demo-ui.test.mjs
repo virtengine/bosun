@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sanitizeGitEnv } from "../git/git-safety.mjs";
 
 const tempDirs = [];
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -14,11 +15,11 @@ function createFixture() {
   const mirroredDir = resolve(root, "site", "ui", "vendor");
   mkdirSync(mirroredDir, { recursive: true });
   writeFileSync(resolve(mirroredDir, "es-module-shims.js"), "export const shim = true;\n");
-  execFileSync("git", ["init", "--quiet"], { cwd: root, stdio: "pipe" });
-  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root, stdio: "pipe" });
-  execFileSync("git", ["config", "user.name", "Test User"], { cwd: root, stdio: "pipe" });
-  execFileSync("git", ["add", "."], { cwd: root, stdio: "pipe" });
-  execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["init", "--quiet"], { cwd: root, stdio: "pipe", env: sanitizeGitEnv() });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root, stdio: "pipe", env: sanitizeGitEnv() });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: root, stdio: "pipe", env: sanitizeGitEnv() });
+  execFileSync("git", ["add", "."], { cwd: root, stdio: "pipe", env: sanitizeGitEnv() });
+  execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: root, stdio: "pipe", env: sanitizeGitEnv() });
   return root;
 }
 
@@ -32,6 +33,7 @@ function runRefreshMirroredUiGitIndex(args) {
     cwd: repoRoot,
     encoding: "utf8",
     stdio: "pipe",
+    env: sanitizeGitEnv(),
   }).trim();
   return JSON.parse(output);
 }

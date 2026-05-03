@@ -88,7 +88,7 @@ describe("session runtime telemetry", () => {
     expect(runtimeStats.healthBuckets.completed).toBe(1);
 
     const completedSession = runtimeStats.completedSessions[0];
-    expect(completedSession.status).toBe("implementation_done_commit_blocked");
+    expect(completedSession.status).toBe("completed");
     expect(completedSession.totalEvents).toBe(5);
     expect(completedSession.lastEventType).toBe("assistant");
     expect(completedSession.hasEdits).toBe(true);
