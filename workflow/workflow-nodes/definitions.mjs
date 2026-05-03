@@ -98,7 +98,14 @@ function appendSafeDirectoryGitConfig(env, safeDirectories = []) {
 }
 
 function makeIsolatedGitEnv(extra = {}, options = {}) {
-  const env = { ...process.env, ...extra };
+  const env = {
+    ...process.env,
+    ...extra,
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+    GH_PAGER: "cat",
+    SYSTEMD_PAGER: "cat",
+  };
   for (const key of [
     "GIT_DIR",
     "GIT_WORK_TREE",
