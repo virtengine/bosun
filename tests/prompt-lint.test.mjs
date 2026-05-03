@@ -17,6 +17,25 @@ async function makeTempRoot() {
   return dir;
 }
 
+function listRepoFilesForSearchValidation() {
+  try {
+    return execFileSync("rg", ["--files", "workflow", "tests", "voice"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+    return execFileSync("git", ["ls-files", "workflow", "tests", "voice"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+}
+
 describe("prompt lint", () => {
   beforeEach(async () => {
     testRoot = await makeTempRoot();
@@ -92,11 +111,7 @@ describe("prompt lint", () => {
   });
 
   it("keeps the repo .gitignore parseable for ripgrep-based workflow searches", () => {
-    const output = execFileSync("rg", ["--files", "workflow", "tests", "voice"], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).replace(/\\/g, "/");
+    const output = listRepoFilesForSearchValidation().replace(/\\/g, "/");
 
     expect(output).toContain("workflow/workflow-engine.mjs");
     expect(output).toContain("tests/workflow-engine.test.mjs");

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
 
 import {
   _setActiveSessionForTesting,
@@ -124,11 +125,12 @@ describe("importCopilotSdkModuleWithCompat", () => {
       .mockRejectedValueOnce(new Error("Cannot find module 'vscode-jsonrpc/node' imported from session.js"))
       .mockResolvedValueOnce(fakeModule);
     const copied = [];
+    const packageDir = join(process.cwd(), "node_modules", "vscode-jsonrpc");
 
     const mod = await importCopilotSdkModuleWithCompat({
       importer,
       shimState: {},
-      resolvePackageJsonPath: () => "C:/repo/node_modules/vscode-jsonrpc/package.json",
+      resolvePackageJsonPath: () => join(packageDir, "package.json"),
       fileExists: (path) => path.endsWith("node.js"),
       copyFile: (src, dst) => {
         copied.push([src, dst]);
@@ -141,10 +143,10 @@ describe("importCopilotSdkModuleWithCompat", () => {
     expect(importer).toHaveBeenCalledTimes(2);
     expect(copied).toHaveLength(1);
     expect(copied[0][0].replaceAll("\\", "/")).toBe(
-      "C:/repo/node_modules/vscode-jsonrpc/node.js",
+      join(packageDir, "node.js").replaceAll("\\", "/"),
     );
     expect(copied[0][1].replaceAll("\\", "/")).toBe(
-      "C:/repo/node_modules/vscode-jsonrpc/node",
+      join(packageDir, "node").replaceAll("\\", "/"),
     );
   });
 });

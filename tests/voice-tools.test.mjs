@@ -1433,7 +1433,7 @@ describe("voice-tools", () => {
         expect.stringMatching(/npm(?:\.cmd)?$/i),
         ["test"],
         expect.objectContaining({
-          shell: true,
+          shell: process.platform === "win32",
         }),
       );
     });
