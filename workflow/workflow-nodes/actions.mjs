@@ -842,7 +842,11 @@ const WORKFLOW_AGENT_REPO_RECOVERY_PATTERNS = [
   /git push[\s\S]{0,400}\(exit 0\)/i,
   /gh pr create[\s\S]{0,400}\(exit 0\)/i,
   /gh pr edit[\s\S]{0,400}\(exit 0\)/i,
+  /\bpush succeeded\b/i,
+  /\bsuccessfully pushed\b/i,
+  /\bpushed successfully\b/i,
   /\bbranch pushed:\b/i,
+  /\bpr is now up to date with\b/i,
   /\bdraft pr:\s*`?#\d+/i,
   /\bopened draft pr\b/i,
   /\bcreated (?:the )?draft pr\b/i,
@@ -1028,6 +1032,44 @@ const WORKFLOW_AGENT_NOT_IMPLEMENTED_PATTERNS = [
   /workspace tool layer is not returning the needed source slice/i,
 ];
 
+const WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_PUSH_PATTERNS = [
+  /\bgit push\b/i,
+  /\bunpushed commits?\b/i,
+  /\bcommits? pending push\b/i,
+  /\bcommits? ahead\b/i,
+  /\blocal commits need pushing\b/i,
+  /\bneed(?:s)? pushing to\b/i,
+  /\bpure git push operation\b/i,
+  /\bgit push origin HEAD:refs\/heads\//i,
+];
+
+const WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_CLEAN_PATTERNS = [
+  /\bworking tree\b[\s\S]{0,40}\bclean\b/i,
+  /\bworking tree is empty\b/i,
+  /\bnothing to commit\b/i,
+];
+
+const WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_NO_EDIT_PATTERNS = [
+  /\bno planning-side code changes were made\b/i,
+  /\bno code changes (?:were )?made in this planning phase\b/i,
+  /\bno code edits required\b/i,
+  /\bno file edits required\b/i,
+  /\bno local file edits required\b/i,
+  /\bno code changes required\b/i,
+  /\bno code changes (?:are )?needed\b/i,
+  /\bno code files require changes\b/i,
+  /\btouched files\b[\s\S]{0,80}\bnone\b/i,
+];
+
+const WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_EXISTING_WORK_PATTERNS = [
+  /\bmerge was committed at\b/i,
+  /\bby prior run\b/i,
+  /\bunpushed commits?\b/i,
+  /\bcommits? (?:are )?unpushed\b/i,
+  /\bcommits? pending push\b/i,
+  /\bcommits? ahead\b/i,
+];
+
 function hasWorkflowAgentCreatedCommitText(text = "") {
   const normalized = String(text || "").trim();
   if (!normalized) return false;
@@ -1068,6 +1110,27 @@ function isWorkflowAgentCommitBlockedText(text = "") {
   }
   return hasImplementedEvidence
     && hasFollowupFailure;
+}
+
+function isWorkflowAgentPlanPushOnlyHandoffText(text = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  if (hasWorkflowAgentRepoRecoveryText(normalized)) return false;
+  const hasPushContext = WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_PUSH_PATTERNS.some(
+    (pattern) => pattern.test(normalized),
+  );
+  if (!hasPushContext) return false;
+  const hasNoEditContext = WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_NO_EDIT_PATTERNS.some(
+    (pattern) => pattern.test(normalized),
+  );
+  if (!hasNoEditContext) return false;
+  const hasCleanContext = WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_CLEAN_PATTERNS.some(
+    (pattern) => pattern.test(normalized),
+  );
+  const hasExistingWorkContext = WORKFLOW_AGENT_PLAN_PUSH_ONLY_HANDOFF_EXISTING_WORK_PATTERNS.some(
+    (pattern) => pattern.test(normalized),
+  );
+  return hasCleanContext || hasExistingWorkContext;
 }
 
 function parseWorkflowAgentTimeoutMs(value, fallback = null) {
@@ -1136,6 +1199,9 @@ function isMeaningfulWorkflowAgentEvent(event) {
     return event.trim().length > 0;
   }
   if (!event || typeof event !== "object") {
+    return false;
+  }
+  if (String(event?.type || "").trim() === "assistant.usage") {
     return false;
   }
   const summaryLine = summarizeAgentStreamEvent(event);
@@ -2219,6 +2285,9 @@ function classifyWorkflowAgentBlockedStatus(result = {}, options = {}) {
   const isPlanMode = String(options?.mode || "").trim().toLowerCase() === "plan"
     || String(options?.nodeId || "").trim() === "run-agent-plan";
   const isPlanHandoff = isPlanMode && hasWorkflowAgentPlanHandoffText(text);
+  if (isPlanMode && isWorkflowAgentPlanPushOnlyHandoffText(text)) {
+    return "implementation_done_commit_blocked";
+  }
   if (isWorkflowAgentCommitBlockedText(text)) {
     return "implementation_done_commit_blocked";
   }
@@ -2269,6 +2338,10 @@ function isNullSessionIdCrash(error) {
   return /Cannot read properties of null \(reading 'sessionId'\)/i.test(
     String(error?.message || error || "").trim(),
   );
+}
+
+function isFirstEventTimeoutAbort(error) {
+  return /first_event_timeout/i.test(String(error?.message || error?.error || error || "").trim());
 }
 
 function resolveSuccessfulWorkflowAgentSessionStatus(result = {}, options = {}) {
@@ -3617,7 +3690,19 @@ registerNodeType("action.run_agent", {
           timeoutMs,
           node.config?.idleEventTimeoutMs,
         );
-        const launchAbortController = new AbortController();
+        const taskAgentStallWatchdogTimeoutMs = (() => {
+          const candidates = [
+            ctx.resolve(node.config?.delegationWatchdogTimeoutMs),
+            ctx.data?.delegationWatchdogTimeoutMs,
+            ctx.data?.task?.delegationWatchdogTimeoutMs,
+          ];
+          for (const value of candidates) {
+            const parsed = Number(value);
+            if (Number.isFinite(parsed) && parsed > 0) return parsed;
+          }
+          return 300000;
+        })();
+        let launchAbortController = new AbortController();
         let firstEventGuardTimer = null;
         let idleEventGuardTimer = null;
         let firstEventGuardReject = null;
@@ -3626,7 +3711,10 @@ registerNodeType("action.run_agent", {
         let lastMeaningfulEventAt = 0;
         const storedSessionOwnerNodeId = String(ctx.data?._agentSessionNodeId || "").trim();
         const currentNodeId = String(node.id || "").trim();
-        const allowStoredSessionReuse = !storedSessionOwnerNodeId || storedSessionOwnerNodeId === currentNodeId;
+        const continueOnSession =
+          options.continueOnSession ?? (node.config?.continueOnSession !== false);
+        const allowStoredSessionReuse =
+          continueOnSession && (!storedSessionOwnerNodeId || storedSessionOwnerNodeId === currentNodeId);
         const explicitSessionId = String(
           ctx.resolve(options.sessionId ?? node.config?.sessionId ?? "") || "",
         ).trim();
@@ -3666,8 +3754,6 @@ registerNodeType("action.run_agent", {
           `${ctx.data?._workflowId || "workflow"}:${ctx.id}:${node.id}`;
         const recoveryTaskKey = options.taskKey || explicitTaskKey || fallbackTaskKey;
         const autoRecover = options.autoRecover ?? (node.config?.autoRecover !== false);
-        const continueOnSession =
-          options.continueOnSession ?? (node.config?.continueOnSession !== false);
         const continuePrompt = ctx.resolve(
           node.config?.continuePrompt ||
             "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end. Return only when fully done and include an explicit completion signal line such as 'Completion:', 'Completion message:', 'Task complete:', 'DONE:', 'COMPLETED:', or 'task_complete'.",
@@ -3726,6 +3812,8 @@ registerNodeType("action.run_agent", {
         const delegateTrackerSessionId = explicitTaskBackedRun
           ? String(managedSessionId || "").trim() || null
           : null;
+        let activeManagedSessionId = managedSessionId;
+        let activeDelegateTrackerSessionId = delegateTrackerSessionId;
         const agentGitEnv = makeIsolatedGitEnv({}, {
           cwd,
           safeDirectories: [
@@ -3767,9 +3855,13 @@ registerNodeType("action.run_agent", {
               tracker.renameSession(trackedTaskId, trackedTaskTitle);
             }
           }
-          if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId && !tracker.getSessionById(delegateTrackerSessionId)) {
+          const ensureDelegateTrackerSession = (candidateSessionId) => {
+            const normalizedSessionId = String(candidateSessionId || "").trim() || null;
+            if (!normalizedSessionId || normalizedSessionId === trackedTaskId || tracker.getSessionById(normalizedSessionId)) {
+              return;
+            }
             tracker.createSession({
-              id: delegateTrackerSessionId,
+              id: normalizedSessionId,
               type: "delegate",
               taskId: trackedTaskId,
               metadata: {
@@ -3791,7 +3883,8 @@ registerNodeType("action.run_agent", {
                 branch: String(ctx.data?.branch || ctx.data?.task?.branchName || ctx.data?.taskDetail?.branchName || "").trim() || undefined,
               },
             });
-          }
+          };
+          ensureDelegateTrackerSession(activeDelegateTrackerSessionId);
           tracker.recordEvent(trackedTaskId, {
             role: "system",
             type: "system",
@@ -3799,8 +3892,8 @@ registerNodeType("action.run_agent", {
             timestamp: new Date().toISOString(),
             _sessionType: trackedSessionType,
           });
-          if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
-            tracker.recordEvent(delegateTrackerSessionId, {
+          if (activeDelegateTrackerSessionId && activeDelegateTrackerSessionId !== trackedTaskId) {
+            tracker.recordEvent(activeDelegateTrackerSessionId, {
               role: "system",
               type: "system",
               content: `Workflow agent run started in ${cwd}`,
@@ -3845,7 +3938,7 @@ registerNodeType("action.run_agent", {
           model: modelOverride || null,
           sessionType: trackedSessionType,
         };
-        const workflowSessionLink = beginWorkflowLinkedSessionExecution(ctx, node, engine, {
+        let workflowSessionLink = beginWorkflowLinkedSessionExecution(ctx, node, engine, {
           sessionId: managedSessionId,
           threadId: managedSessionId,
           parentSessionId: workflowParentSessionId,
@@ -3932,9 +4025,55 @@ registerNodeType("action.run_agent", {
             idleEventGuardTimer.unref();
           }
         };
+        const triggerStalledTaskAgentGuard = (progress = null) => {
+          if (
+            !explicitTaskBackedRun ||
+            !tracker ||
+            !activeDelegateTrackerSessionId ||
+            waitingForSlot ||
+            !firstEventGuardReject ||
+            typeof tracker.getProgressStatus !== "function"
+          ) {
+            return false;
+          }
+          const sessionProgress =
+            progress && typeof progress === "object"
+              ? progress
+              : tracker.getProgressStatus(activeDelegateTrackerSessionId);
+          const idleMs = Math.max(0, Number(sessionProgress?.idleMs || 0));
+          if (
+            sessionProgress?.status !== "stalled" ||
+            sessionProgress?.recommendation !== "abort" ||
+            idleMs < taskAgentStallWatchdogTimeoutMs
+          ) {
+            return false;
+          }
+          const error = new Error(
+            `stalled_delegate_session: delegated agent session stalled after ${idleMs}ms without completion`,
+          );
+          error.code = "WORKFLOW_AGENT_STALLED_DELEGATE_SESSION";
+          error.blockedReason = "blocked_by_env";
+          error.failureKind = "stalled_delegate_session";
+          error.retryable = true;
+          const reject = firstEventGuardReject;
+          firstEventGuardReject = null;
+          clearFirstEventGuard();
+          clearIdleEventGuard();
+          if (!launchAbortController.signal.aborted) {
+            launchAbortController.abort("stalled_delegate_session");
+          }
+          ctx.log(
+            node.id,
+            `${passLabel || "Agent"} delegate session stalled after ${Math.max(1, Math.round(idleMs / 1000))}s of inactivity; aborting run`,
+            "warn",
+          );
+          reject(error);
+          return true;
+        };
         const withFirstEventGuard = async (launchAttempt) => {
+          launchAbortController = new AbortController();
           if (!firstEventTimeoutMs || firstEventSeen) {
-            return await launchAttempt();
+            return await launchAttempt(launchAbortController);
           }
           firstEventGuardReject = null;
           const timeoutPromise = new Promise((_, reject) => {
@@ -3943,7 +4082,7 @@ registerNodeType("action.run_agent", {
           armFirstEventGuard();
           try {
             return await Promise.race([
-              Promise.resolve().then(launchAttempt),
+              Promise.resolve().then(() => launchAttempt(launchAbortController)),
               timeoutPromise,
             ]);
           } finally {
@@ -4010,18 +4149,34 @@ registerNodeType("action.run_agent", {
             }
             if (tracker && trackedTaskId) {
               const trackerEvents = buildWorkflowSessionTrackerEvents(event);
+              const fallbackTrackerEvent =
+                typeof event === "string"
+                  ? {
+                      role: "system",
+                      type: "system",
+                      content: String(event || ""),
+                      timestamp: new Date().toISOString(),
+                    }
+                  : (
+                      event && typeof event === "object"
+                        ? event
+                        : {
+                            role: "system",
+                            type: "system",
+                            content: String(event || ""),
+                            timestamp: new Date().toISOString(),
+                          }
+                    );
               const eventsToRecord = trackerEvents.length > 0
                 ? trackerEvents
-                : [{
-                    ...(event && typeof event === "object" ? event : { content: String(event || "") }),
-                  }];
+                : [fallbackTrackerEvent];
               for (const trackerEvent of eventsToRecord) {
                 tracker.recordEvent(trackedTaskId, {
                   ...trackerEvent,
                   _sessionType: trackedSessionType,
                 });
-                if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
-                  tracker.recordEvent(delegateTrackerSessionId, {
+                if (activeDelegateTrackerSessionId && activeDelegateTrackerSessionId !== trackedTaskId) {
+                  tracker.recordEvent(activeDelegateTrackerSessionId, {
                     ...trackerEvent,
                     _sessionType: "delegate",
                   });
@@ -4066,6 +4221,17 @@ registerNodeType("action.run_agent", {
           // Heartbeats prove the workflow node is still alive, not that the
           // delegated agent emitted a meaningful first event, so they must not
           // re-arm the first-event timeout or refresh tracker activity.
+          if (
+            explicitTaskBackedRun &&
+            tracker &&
+            activeDelegateTrackerSessionId &&
+            typeof tracker.getProgressStatus === "function"
+          ) {
+            const progress = tracker.getProgressStatus(activeDelegateTrackerSessionId);
+            if (triggerStalledTaskAgentGuard(progress)) {
+              return;
+            }
+          }
           const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
           ctx.log(node.id, `${passLabel || "Agent"} still running (${elapsedSec}s elapsed)`);
         }, WORKFLOW_AGENT_HEARTBEAT_MS);
@@ -4093,15 +4259,15 @@ registerNodeType("action.run_agent", {
                 nodeLabel: String(node.label || node.id || "").trim() || null,
                 meta: { strategy: "continue_session", sessionId },
               });
-              result = await withFirstEventGuard(() => harnessAgentService.continueSession(sessionId, continuePrompt, {
+              result = await withFirstEventGuard((attemptAbortController) => harnessAgentService.continueSession(sessionId, continuePrompt, {
                 timeout: timeoutMs,
                 cwd,
                 ...(pinResolvedSdk ? { pinSdk: true } : {}),
                 ...(sdkOverride ? { sdk: sdkOverride } : {}),
                 ...(modelOverride ? { model: modelOverride } : {}),
-               ...(providerOverride ? { provider: providerOverride } : {}),
-                ...(providerConfigOverride ? { providerConfig: providerConfigOverride } : {}),
-                abortController: launchAbortController,
+                ...(providerOverride ? { provider: providerOverride } : {}),
+                 ...(providerConfigOverride ? { providerConfig: providerConfigOverride } : {}),
+                abortController: attemptAbortController,
                 onEvent: launchExtra.onEvent,
                 sendRawEvents: true,
                 slotOwnerKey,
@@ -4159,7 +4325,7 @@ registerNodeType("action.run_agent", {
               node.id,
               `${passLabel} Recovery: harness-agent-service taskKey=${recoveryTaskKey} retries=${sessionRetries} continues=${maxContinues}`.trim(),
             );
-            const baseRunTaskOptions = {
+            const buildRunTaskOptions = (overrides = {}) => ({
               autoRecover,
               taskKey: recoveryTaskKey,
               cwd,
@@ -4178,7 +4344,6 @@ registerNodeType("action.run_agent", {
               ...(modelOverride ? { model: modelOverride } : {}),
               ...(providerOverride ? { provider: providerOverride } : {}),
               ...(providerConfigOverride ? { providerConfig: providerConfigOverride } : {}),
-              abortController: launchAbortController,
               onEvent: launchExtra.onEvent,
               sendRawEvents: true,
               systemPrompt: effectiveSystemPrompt,
@@ -4187,7 +4352,8 @@ registerNodeType("action.run_agent", {
               onSlotQueued: launchExtra.onSlotQueued,
               onSlotAcquired: launchExtra.onSlotAcquired,
               env: agentGitEnv,
-            };
+              ...overrides,
+            });
             const preferEphemeralLaunch = (
               effectiveMode === "plan"
               || (
@@ -4214,14 +4380,21 @@ registerNodeType("action.run_agent", {
               return !output && itemCount === 0;
             };
             const launchRetryAwarePass = async (passOptions) =>
-              await withFirstEventGuard(() => harnessAgentService.runTask(effectivePassPrompt, passOptions));
+              await withFirstEventGuard((attemptAbortController) =>
+                harnessAgentService.runTask(effectivePassPrompt, {
+                  ...passOptions,
+                  abortController: attemptAbortController,
+                }));
             const launchPassWithEphemeralRecovery = async (passOptions) => {
               if (!preferEphemeralLaunch) {
                 return await launchRetryAwarePass(passOptions);
               }
               try {
-                const ephemeralResult = await withFirstEventGuard(() =>
-                  harnessAgentService.launchEphemeralThread(effectivePassPrompt, cwd, timeoutMs, passOptions),
+                const ephemeralResult = await withFirstEventGuard((attemptAbortController) =>
+                  harnessAgentService.launchEphemeralThread(effectivePassPrompt, cwd, timeoutMs, {
+                    ...passOptions,
+                    abortController: attemptAbortController,
+                  }),
                 );
                 if (!shouldRetryEphemeralLaunchFailure(ephemeralResult)) {
                   return ephemeralResult;
@@ -4244,6 +4417,95 @@ registerNodeType("action.run_agent", {
                 return await launchRetryAwarePass(passOptions);
               }
             };
+            const shouldRetryFreshManagedSession = (candidate = null, error = null) => {
+              if (autoRecover === false) return false;
+              if (!sessionId) return false;
+              if (streamEventCount > 0) return false;
+              if (!isFirstEventTimeoutAbort(error || candidate)) return false;
+              const output = String(candidate?.output || error?.output || "").trim();
+              const itemCount = Array.isArray(candidate?.items)
+                ? candidate.items.length
+                : Array.isArray(error?.items)
+                  ? error.items.length
+                  : 0;
+              return !output && itemCount === 0;
+            };
+            const retryWithFreshManagedSession = async (reason) => {
+              const freshSessionId = `${managedSessionId || recoveryTaskKey}:fresh-${Date.now()}`;
+              if (recoveryTaskKey && typeof harnessAgentService.invalidateThread === "function") {
+                harnessAgentService.invalidateThread(recoveryTaskKey);
+              }
+              activeManagedSessionId = freshSessionId;
+              activeDelegateTrackerSessionId = explicitTaskBackedRun
+                ? String(freshSessionId || "").trim() || null
+                : null;
+              workflowSessionLink = beginWorkflowLinkedSessionExecution(ctx, node, engine, {
+                sessionId: freshSessionId,
+                threadId: freshSessionId,
+                parentSessionId: workflowParentSessionId,
+                rootSessionId: workflowRootSessionId,
+                taskId: trackedTaskId || null,
+                taskTitle: trackedTaskTitle || null,
+                taskKey: recoveryTaskKey,
+                cwd,
+                status: "running",
+                sessionType: "workflow-agent",
+                scope: managedSessionScope,
+                source: "workflow-run-agent",
+                metadata: {
+                  ...launchExtra.metadata,
+                  recoveryReason: String(reason || "").trim() || null,
+                  retrySessionId: freshSessionId,
+                },
+              });
+              ctx.log(
+                node.id,
+                `${passLabel || "Agent"} Recovery: ${reason}; retrying with a fresh managed session (${freshSessionId})`.trim(),
+                "warn",
+              );
+              if (tracker && trackedTaskId && activeDelegateTrackerSessionId && activeDelegateTrackerSessionId !== trackedTaskId) {
+                if (!tracker.getSessionById(activeDelegateTrackerSessionId)) {
+                  tracker.createSession({
+                    id: activeDelegateTrackerSessionId,
+                    type: "delegate",
+                    taskId: trackedTaskId,
+                    metadata: {
+                      title: trackedTaskTitle || trackedTaskId,
+                      workflowRunId: String(ctx.id || "").trim() || undefined,
+                      workflowId: String(ctx.data?._workflowId || "").trim() || undefined,
+                      workflowName: String(ctx.data?._workflowName || ctx.data?._workflowId || "").trim() || undefined,
+                      workflowNodeId: node.id,
+                      workflowNodeLabel: String(node.label || node.id || "").trim() || undefined,
+                      rootTaskId: trackedTaskId,
+                      parentTaskId: trackedTaskId,
+                      rootSessionId: trackedTaskId,
+                      parentSessionId: trackedTaskId,
+                      rootRunId: String(ctx.id || "").trim() || undefined,
+                      parentRunId: String(ctx.id || "").trim() || undefined,
+                      delegationDepth: Number(ctx.data?._workflowDelegationDepth || 0) + 1,
+                      workspaceId: String(ctx.data?.workspaceId || ctx.data?.activeWorkspace || "").trim() || undefined,
+                      workspaceDir: String(cwd || "").trim() || undefined,
+                      branch: String(ctx.data?.branch || ctx.data?.task?.branchName || ctx.data?.taskDetail?.branchName || "").trim() || undefined,
+                    },
+                  });
+                }
+                tracker.recordEvent(activeDelegateTrackerSessionId, {
+                  role: "system",
+                  type: "system",
+                  content: `Workflow agent fresh retry started in ${cwd}`,
+                  timestamp: new Date().toISOString(),
+                  _sessionType: "delegate",
+                });
+              }
+              ctx.data.sessionId = null;
+              ctx.data.threadId = null;
+              const freshOptions = buildRunTaskOptions({
+                autoRecover: false,
+                sessionId: freshSessionId,
+                env: agentGitEnv,
+              });
+              return await launchPassWithEphemeralRecovery(freshOptions);
+            };
             try {
               engine?._recordLedgerEvent?.({
                 eventType: "agent.started",
@@ -4257,27 +4519,22 @@ registerNodeType("action.run_agent", {
                 nodeLabel: String(node.label || node.id || "").trim() || null,
                 meta: { taskId: explicitTaskBackedRun ? trackedTaskId : null, sessionType: trackedSessionType },
               });
-              result = await launchPassWithEphemeralRecovery(baseRunTaskOptions);
-            } catch (err) {
-              if (!isNullSessionIdCrash(err)) throw err;
-              const freshSessionId = `${managedSessionId || recoveryTaskKey}:fresh-${Date.now()}`;
-              if (recoveryTaskKey && typeof harnessAgentService.invalidateThread === "function") {
-                harnessAgentService.invalidateThread(recoveryTaskKey);
+              result = await launchPassWithEphemeralRecovery(buildRunTaskOptions());
+              if (shouldRetryFreshManagedSession(result)) {
+                result = await retryWithFreshManagedSession(
+                  `stale managed session produced no events before ${String(result?.error || "first_event_timeout").trim() || "first_event_timeout"}`,
+                );
               }
-              ctx.log(
-                node.id,
-                `${passLabel || "Agent"} Recovery: stale session state detected, retrying with a fresh managed session (${freshSessionId})`.trim(),
-                "warn",
-              );
-              ctx.data.sessionId = null;
-              ctx.data.threadId = null;
-              const freshOptions = {
-                ...baseRunTaskOptions,
-                autoRecover: false,
-                sessionId: freshSessionId,
-                env: agentGitEnv,
-              };
-              result = await launchPassWithEphemeralRecovery(freshOptions);
+            } catch (err) {
+              if (isNullSessionIdCrash(err)) {
+                result = await retryWithFreshManagedSession("stale session state detected");
+              } else if (shouldRetryFreshManagedSession(null, err)) {
+                result = await retryWithFreshManagedSession(
+                  `stale managed session aborted before first event (${String(err?.message || err).trim() || "first_event_timeout"})`,
+                );
+              } else {
+                throw err;
+              }
             }
           }
             return result;
@@ -4384,8 +4641,8 @@ registerNodeType("action.run_agent", {
                 timestamp: new Date().toISOString(),
                 _sessionType: trackedSessionType,
               });
-              if (delegateTrackerSessionId && delegateTrackerSessionId !== trackedTaskId) {
-                tracker.recordEvent(delegateTrackerSessionId, {
+              if (activeDelegateTrackerSessionId && activeDelegateTrackerSessionId !== trackedTaskId) {
+                tracker.recordEvent(activeDelegateTrackerSessionId, {
                   role: success ? "assistant" : "system",
                   type: success ? "agent_message" : "error",
                   content: fallbackContent,
@@ -4402,8 +4659,10 @@ registerNodeType("action.run_agent", {
         }
 
         const threadId = result?.threadId || result?.sessionId || sessionId || null;
+        const workflowSessionId =
+          String(activeManagedSessionId || result?.sessionId || threadId || managedSessionId || "").trim() || null;
         const childTrackerSessionId = explicitTaskBackedRun
-          ? delegateTrackerSessionId || String(threadId || managedSessionId || "").trim() || null
+          ? activeDelegateTrackerSessionId || workflowSessionId || String(threadId || managedSessionId || "").trim() || null
           : null;
         if (tracker && trackedTaskId && childTrackerSessionId && childTrackerSessionId !== trackedTaskId) {
           if (!tracker.getSessionById(childTrackerSessionId)) {
@@ -4457,7 +4716,8 @@ registerNodeType("action.run_agent", {
           const workflowRunId = String(ctx.id || "").trim() || null;
           const workflowId = String(ctx.data?._workflowId || "").trim() || null;
           const workflowName = String(ctx.data?._workflowName || ctx.data?._workflowId || "").trim() || null;
-          const latestSessionId = String(threadId || childTrackerSessionId || managedSessionId || "").trim() || null;
+          const latestSessionId =
+            String(childTrackerSessionId || workflowSessionId || threadId || managedSessionId || "").trim() || null;
           const rootRunId = String(
             ctx.data?._workflowRootRunId || ctx.data?._rootRunId || ctx.id || "",
           ).trim() || workflowRunId;
@@ -4506,9 +4766,9 @@ registerNodeType("action.run_agent", {
             },
           );
         }
-        if (persistSession && threadId) {
-          ctx.data.sessionId = threadId;
-          ctx.data.threadId = threadId;
+        if (persistSession && (threadId || workflowSessionId)) {
+          ctx.data.sessionId = workflowSessionId || threadId;
+          ctx.data.threadId = threadId || workflowSessionId;
           ctx.data._agentSessionNodeId = currentNodeId;
         }
         engine?._recordLedgerEvent?.({
@@ -4532,7 +4792,7 @@ registerNodeType("action.run_agent", {
           success,
           status: success ? "completed" : "failed",
           threadId,
-          sessionId: threadId || managedSessionId,
+          sessionId: workflowSessionId || threadId || managedSessionId,
           output: result?.output,
           error: success ? null : (result?.error || `Agent execution failed in node "${node.label || node.id}"`),
           result: {
@@ -4569,7 +4829,7 @@ registerNodeType("action.run_agent", {
             sdk: finalResult?.sdk,
             items: finalResult?.items,
             threadId,
-            sessionId: threadId,
+            sessionId: workflowSessionId || threadId,
             attempts: finalResult?.attempts,
             continues: finalResult?.continues,
             resumed: finalResult?.resumed,
@@ -4598,7 +4858,7 @@ registerNodeType("action.run_agent", {
           itemCount: digest.itemCount,
           omittedItemCount: digest.omittedItemCount,
           threadId,
-          sessionId: threadId,
+          sessionId: workflowSessionId || threadId,
           attempts: result?.attempts,
           continues: result?.continues,
           resumed: result?.resumed,
@@ -5620,19 +5880,31 @@ registerNodeType("action.update_task_status", {
         id: taskId,
         title: taskTitle || currentTask?.title || ctx.data?.task?.title || "",
       });
+      const explicitBranchName = pickTaskString(
+        ctx.data?.task?.meta?.branch_name,
+        ctx.data?.task?.meta?.branchName,
+        ctx.data?.task?.meta?.branch,
+        ctx.data?.taskDetail?.meta?.branch_name,
+        ctx.data?.taskDetail?.meta?.branchName,
+        ctx.data?.taskDetail?.meta?.branch,
+        currentTask?.meta?.branch_name,
+        currentTask?.meta?.branchName,
+        currentTask?.meta?.branch,
+      );
       const existingBranchName = pickTaskString(
         ctx.data?.branchName,
         ctx.data?.branch,
         currentTask?.branchName,
         currentTask?.branch,
       );
-      const normalizedBranchName = branchMatchesTaskOwnership(
-        existingBranchName,
-        taskId,
-        canonicalBranchName,
-      )
-        ? existingBranchName
-        : canonicalBranchName;
+      const normalizedBranchName = explicitBranchName
+        || (branchMatchesTaskOwnership(
+          existingBranchName,
+          taskId,
+          canonicalBranchName,
+        )
+          ? existingBranchName
+          : canonicalBranchName);
       if (normalizedBranchName) {
         updateOptions.branchName = normalizedBranchName;
         ctx.data.branchName = normalizedBranchName;
@@ -10380,6 +10652,46 @@ function resetManagedWorktree(repoRoot, worktreePath, gitDir = "") {
   }
 }
 
+function clearTrackedSkipWorktreeBits(worktreePath) {
+  if (!worktreePath || !existsSync(worktreePath)) return [];
+  let output = "";
+  try {
+    output = execGitArgsSync(["ls-files", "-v"], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: 10000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    return [];
+  }
+  const skippedPaths = output
+    .split(/\r?\n/)
+    .map((line) => String(line || "").trimEnd())
+    .filter(Boolean)
+    .filter((line) => /^[Ss]\s/.test(line))
+    .map((line) => line.slice(2).trim())
+    .filter(Boolean);
+  if (skippedPaths.length === 0) return [];
+  const chunkSize = 100;
+  const clearedPaths = [];
+  for (let index = 0; index < skippedPaths.length; index += chunkSize) {
+    const chunk = skippedPaths.slice(index, index + chunkSize);
+    try {
+      execGitArgsSync(["update-index", "--no-skip-worktree", "--", ...chunk], {
+        cwd: worktreePath,
+        encoding: "utf8",
+        timeout: 10000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      clearedPaths.push(...chunk);
+    } catch {
+      // Best-effort. A later reset/recreate path can still recover the worktree.
+    }
+  }
+  return clearedPaths;
+}
+
 registerNodeType("action.acquire_worktree", {
   describe: () =>
     "Create or checkout a git worktree for isolated task execution. " +
@@ -10887,7 +11199,58 @@ registerNodeType("action.acquire_worktree", {
         return false;
       };
 
+      const fastForwardDetachedWorktreeToBranchTip = (targetWorktreePath, phaseLabel = "detached-branch-tip") => {
+        if (!localBranchExists()) return false;
+        const localBranchRef = String(branch || "").trim().replace(/^origin\//, "");
+        if (!localBranchRef) return false;
+        try {
+          const currentBranch = execGitArgsSync(["rev-parse", "--abbrev-ref", "HEAD"], {
+            cwd: targetWorktreePath,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          }).trim().replace(/^refs\/heads\//, "");
+          if (currentBranch && currentBranch !== "HEAD") {
+            return false;
+          }
+          const divergence = execGitArgsSync(
+            ["rev-list", "--left-right", "--count", `HEAD...${localBranchRef}`],
+            {
+              cwd: targetWorktreePath,
+              encoding: "utf8",
+              timeout: 10000,
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          ).trim();
+          const match = divergence.match(/^(\d+)\s+(\d+)$/);
+          if (!match) return false;
+           const detachedAhead = Number(match[1]);
+           const branchAhead = Number(match[2]);
+           if (!Number.isFinite(detachedAhead) || !Number.isFinite(branchAhead)) {
+             return false;
+           }
+           if (branchAhead <= 0 || detachedAhead !== 0) {
+             return false;
+           }
+           clearTrackedSkipWorktreeBits(targetWorktreePath);
+           execGitArgsSync(["reset", "--hard", localBranchRef], {
+             cwd: targetWorktreePath,
+             encoding: "utf8",
+            timeout: 10000,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          ctx.log(
+            node.id,
+            `Fast-forwarded detached managed worktree (${phaseLabel}) to branch tip: ${targetWorktreePath} -> ${localBranchRef}`,
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
       const syncReusableWorktreeToBaseBranch = (targetWorktreePath) => {
+        fastForwardDetachedWorktreeToBranchTip(targetWorktreePath);
         if (shouldSyncFromOrigin()) {
           try {
             execGitArgsSync(["pull", "--rebase", "origin", baseBranchShort], {
@@ -10998,14 +11361,23 @@ registerNodeType("action.acquire_worktree", {
         return candidatePath;
       };
 
+      let preferDetachedFromMainCheckout = false;
+      let skipInitialBaseSync = false;
+      const isMainCheckoutPath = (candidatePath) =>
+        Boolean(candidatePath) && resolve(candidatePath) === resolve(repoRoot);
       const createWorktreeAtPath = () => {
+        if (preferDetachedFromMainCheckout) {
+          skipInitialBaseSync = true;
+        }
         execGitArgsSync(
-          branchExistsLocally
+          preferDetachedFromMainCheckout
+            ? ["worktree", "add", "--detach", worktreePath, branch]
+            : branchExistsLocally
             ? ["worktree", "add", worktreePath, branch]
             : ["worktree", "add", worktreePath, "-b", branch, baseBranch],
           { cwd: repoRoot, encoding: "utf8", timeout: worktreeTimeout },
         );
-        createdFromExistingBranch = branchExistsLocally;
+        createdFromExistingBranch = preferDetachedFromMainCheckout || branchExistsLocally;
       };
 
       const ensureCreatedManagedWorktree = (phaseLabel) => {
@@ -11043,6 +11415,7 @@ registerNodeType("action.acquire_worktree", {
 
       let recreatedManagedWorktree = false;
       if (existsSync(worktreePath)) {
+        clearTrackedSkipWorktreeBits(worktreePath);
         // Reuse existing worktree — pull latest base if possible
         recreatedManagedWorktree = invalidateBrokenReusableWorktree(worktreePath, "pre-reuse");
         if (!recreatedManagedWorktree && existsSync(worktreePath)) {
@@ -11147,10 +11520,22 @@ registerNodeType("action.acquire_worktree", {
         branchExistsLocally && !existsSync(worktreePath)
           ? await findAttachedWorktreeForBranch()
           : "";
+      if (attachedPath && existsSync(attachedPath) && isMainCheckoutPath(attachedPath)) {
+        preferDetachedFromMainCheckout = true;
+        ctx.log(
+          node.id,
+          `Branch ${branch} is checked out in the main repo; creating a detached managed worktree instead of blocking on ${attachedPath}`,
+        );
+      }
       if (branchExistsLocally && !attachedPath && !existsSync(worktreePath)) {
         recreateStaleDetachedTaskBranchIfNeeded();
       }
-      if (attachedPath && existsSync(attachedPath)) {
+      if (
+        attachedPath
+        && existsSync(attachedPath)
+        && !preferDetachedFromMainCheckout
+      ) {
+        clearTrackedSkipWorktreeBits(attachedPath);
         if (!isManagedBosunWorktree(attachedPath, repoRoot)) {
           return blockUnmanagedAttachedWorktree(attachedPath);
         }
@@ -11248,9 +11633,19 @@ registerNodeType("action.acquire_worktree", {
           let createdRecoveryWorktree = false;
           if (attachedPath && existsSync(attachedPath)) {
             if (!isManagedBosunWorktree(attachedPath, repoRoot)) {
-              return blockUnmanagedAttachedWorktree(attachedPath);
+              if (isMainCheckoutPath(attachedPath)) {
+                preferDetachedFromMainCheckout = true;
+              } else {
+                return blockUnmanagedAttachedWorktree(attachedPath);
+              }
             }
-            if (invalidateBrokenReusableWorktree(attachedPath, "attached-branch")) {
+            if (preferDetachedFromMainCheckout) {
+              if (existsSync(worktreePath)) {
+                allocateRecoveryWorktreePath("attached-branch-main-checkout");
+              }
+              createWorktreeAtPath();
+              createdRecoveryWorktree = true;
+            } else if (invalidateBrokenReusableWorktree(attachedPath, "attached-branch")) {
               fixGitConfigCorruption(repoRoot);
               if (existsSync(worktreePath)) {
                 allocateRecoveryWorktreePath("attached-branch");
@@ -11317,7 +11712,7 @@ registerNodeType("action.acquire_worktree", {
           }
         }
       }
-      if (createdFromExistingBranch) {
+      if (createdFromExistingBranch && !skipInitialBaseSync) {
         const recreatedFreshWorktree = syncReusableWorktreeToBaseBranch(worktreePath);
         if (recreatedFreshWorktree) {
           createdFromExistingBranch = false;
@@ -11411,6 +11806,7 @@ registerNodeType("action.release_worktree", {
     const taskId = cfgOrCtx(node, ctx, "taskId");
     const shouldPrune = node.config?.prune === true;
     const removeTimeout = node.config?.removeTimeout ?? 30000;
+    const currentClaimToken = String(ctx?.data?._claimToken || "").trim();
 
     const isManaged =
       Boolean(ctx.data?._worktreeManaged) ||
@@ -11419,6 +11815,44 @@ registerNodeType("action.release_worktree", {
     if (!worktreePath || !isManaged) {
       ctx.log(node.id, `No worktree to release for ${taskId || "(unknown)"}`);
       return { success: true, skipped: true, reason: "no_worktree" };
+    }
+
+    if (taskId) {
+      try {
+        const claims = await ensureTaskClaimsMod();
+        await ensureTaskClaimsInitialized(ctx, claims);
+        const activeClaims =
+          typeof claims?.listClaims === "function"
+            ? await claims.listClaims({ repoRoot })
+            : [];
+        const foreignClaim = activeClaims.find((claim) => {
+          const claimTaskId = String(claim?.task_id || claim?.taskId || "").trim();
+          if (!claimTaskId || claimTaskId !== String(taskId).trim()) return false;
+          const claimToken = String(claim?.claim_token || claim?.claimToken || "").trim();
+          return !currentClaimToken || !claimToken || claimToken !== currentClaimToken;
+        });
+        if (foreignClaim) {
+          const owner = String(
+            foreignClaim?.instance_id
+            || foreignClaim?.instanceId
+            || foreignClaim?.metadata?.pid
+            || "active-claim",
+          ).trim();
+          ctx.log(
+            node.id,
+            `Skipping worktree release for ${taskId} because another live claim still owns the task (${owner})`,
+          );
+          return {
+            success: true,
+            skipped: true,
+            reason: "foreign_live_claim",
+            worktreePath,
+            taskId,
+          };
+        }
+      } catch (err) {
+        ctx.log(node.id, `Live claim guard warning: ${err.message}`);
+      }
     }
 
     try {
@@ -11473,8 +11907,30 @@ registerNodeType("action.sweep_task_worktrees", {
     const timeout = Number(node.config?.timeout ?? 15000);
     const managedRoot = resolve(repoRoot, ".bosun", "worktrees");
     const removed = [];
+    const skipped = [];
     const errors = [];
     let scanned = 0;
+    let foreignLiveClaim = null;
+
+    if (taskId) {
+      try {
+        const claims = await ensureTaskClaimsMod();
+        await ensureTaskClaimsInitialized(ctx, claims);
+        const activeClaims =
+          typeof claims?.listClaims === "function"
+            ? await claims.listClaims({ repoRoot })
+            : [];
+        foreignLiveClaim = activeClaims.find((claim) => {
+          const claimTaskId = String(claim?.task_id || claim?.taskId || "").trim();
+          if (!claimTaskId || claimTaskId !== String(taskId).trim()) return false;
+          const claimToken = String(claim?.claim_token || claim?.claimToken || "").trim();
+          const currentClaimToken = String(ctx?.data?._claimToken || "").trim();
+          return !currentClaimToken || !claimToken || claimToken !== currentClaimToken;
+        }) || null;
+      } catch (err) {
+        ctx.log(node.id, `Task worktree sweep claim guard warning: ${err.message}`);
+      }
+    }
 
     try {
       if (existsSync(managedRoot)) {
@@ -11493,6 +11949,10 @@ registerNodeType("action.sweep_task_worktrees", {
               ? now - stats.mtimeMs > maxAgeMs
               : false;
             if (!matchesTask && !isStale) continue;
+            if (matchesTask && foreignLiveClaim) {
+              skipped.push(entry);
+              continue;
+            }
             try {
               execGitArgsSync(["worktree", "remove", String(entryPath), "--force"], {
                 cwd: repoRoot,
@@ -11526,12 +11986,21 @@ registerNodeType("action.sweep_task_worktrees", {
       fixGitConfigCorruption(repoRoot);
       ctx.log(
         node.id,
-        `Swept task worktrees for ${taskId || "(unknown task)"}: removed=${removed.length}, scanned=${scanned}`,
+        `Swept task worktrees for ${taskId || "(unknown task)"}: removed=${removed.length}, skipped=${skipped.length}, scanned=${scanned}`,
       );
-      return { success: true, taskId, swept: true, removed, scanned, errors };
+      return { success: true, taskId, swept: true, removed, skipped, scanned, errors };
     } catch (err) {
       ctx.log(node.id, `Task worktree sweep warning: ${err.message}`);
-      return { success: true, taskId, swept: false, removed, scanned, errors, warning: err.message };
+      return {
+        success: true,
+        taskId,
+        swept: false,
+        removed,
+        skipped,
+        scanned,
+        errors,
+        warning: err.message,
+      };
     }
   },
 });
@@ -12011,7 +12480,13 @@ registerNodeType("action.build_task_prompt", {
     if (normalizedBranch) envLines.push(`- **Branch:** ${normalizedBranch}`);
     if (normalizedBaseBranch) envLines.push(`- **Base Branch:** ${normalizedBaseBranch}`);
     if (normalizedRepoSlug) envLines.push(`- **Repository:** ${normalizedRepoSlug}`);
-    if (normalizedRepoRoot) envLines.push(`- **Repo Root:** ${normalizedRepoRoot}`);
+    if (normalizedRepoRoot) {
+      if (normalizedWorktreePath && normalizedRepoRoot !== normalizedWorktreePath) {
+        envLines.push("- **Repository Context:** Source-checkout instructions are already loaded; use the working directory above as the canonical checkout for git/file operations.");
+      } else {
+        envLines.push(`- **Repo Root:** ${normalizedRepoRoot}`);
+      }
+    }
     if (envLines.length) userParts.push(envLines.join("\n"));
     userParts.push("");
 
@@ -12038,6 +12513,16 @@ registerNodeType("action.build_task_prompt", {
     userParts.push("2. Modify code only in the allowed repositories listed above.");
     userParts.push("3. If required work depends on an unlisted repository, stop and report `blocked: cross-repo dependency`.");
     userParts.push("4. In completion notes, list every repository you touched and why.");
+    if (normalizedWorktreePath) {
+      userParts.push("5. Treat the write-scope root as the canonical checkout for git status, diff, test, commit, and push decisions.");
+    }
+    if (
+      normalizedWorktreePath
+      && normalizedRepoRoot
+      && normalizedWorktreePath !== normalizedRepoRoot
+    ) {
+      userParts.push("6. When `Repo Root` differs from `Working Directory`, do not treat dirty files in `Repo Root` as task-owned changes unless the same files are also inside the write-scope root or the task explicitly requires that checkout.");
+    }
     userParts.push("");
 
     // AGENTS.md + copilot-instructions.md
@@ -14005,7 +14490,9 @@ registerNodeType("action.push_branch", {
       };
     }
 
-    const cleanBranch = branch.replace(/^origin\//, "");
+    const cleanBranch = branch
+      .replace(/^origin\//, "")
+      .replace(/^refs\/heads\//, "");
     if (remote !== configuredRemote) {
       ctx.log(node.id, `Remapped push remote ${configuredRemote} -> ${remote} for ${repoHint || cleanBranch || "worktree"}`);
     }
@@ -14255,12 +14742,19 @@ registerNodeType("action.push_branch", {
     const pushArgs = ["push"];
     if (forceWithLease) pushArgs.push("--force-with-lease");
     if (skipHooks) pushArgs.push("--no-verify");
-    pushArgs.push("--set-upstream", remote, "HEAD");
+    pushArgs.push("--set-upstream", remote, cleanBranch ? `HEAD:refs/heads/${cleanBranch}` : "HEAD");
+
+    const pushEnv = {
+      REPO_ROOT: worktreePath,
+      BOSUN_REPO_ROOT: worktreePath,
+      BOSUN_AGENT_REPO_ROOT: worktreePath,
+    };
 
     try {
       const output = execGitArgsSync(pushArgs, {
         cwd: worktreePath, encoding: "utf8", timeout: pushTimeout,
         stdio: ["ignore", "pipe", "pipe"],
+        env: pushEnv,
       });
       ctx.log(node.id, `Push succeeded: ${cleanBranch || "HEAD"} → ${remote}`);
       return {

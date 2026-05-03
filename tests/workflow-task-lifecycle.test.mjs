@@ -4723,6 +4723,281 @@ describe("action.acquire_worktree", () => {
       }
     }
   }, 20000);
+  it("creates a detached managed worktree when an explicit branch is checked out in the main repo", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "bosun/epic-branch-attached-in-main";
+    let result = null;
+
+    try {
+      writeFileSync(join(repoDir, "README.md"), "base-line\n");
+      gitExec("git add README.md && git commit -m base-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout -b "${branch}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(repoDir, "README.md"), "epic-branch-line\n");
+      gitExec("git add README.md && git commit -m epic-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec("git checkout main", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(repoDir, "README.md"), "main-branch-line\n");
+      gitExec("git add README.md && git commit -m main-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout "${branch}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+
+      const ctx = makeCtx({});
+      const node = makeNode("action.acquire_worktree", {
+        repoRoot: repoDir,
+        taskId: "explicit-branch-main-checkout-1",
+        branch,
+        baseBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      });
+
+      result = await nt.execute(node, ctx);
+
+      expect(result.success).toBe(true);
+      expect(result.created).toBe(true);
+      expect(String(result.worktreePath).replace(/\\/g, "/"))
+        .not.toBe(String(repoDir).replace(/\\/g, "/"));
+      expect(existsSync(join(result.worktreePath, ".git"))).toBe(true);
+      expect(gitExec("git rev-parse --abbrev-ref HEAD", {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim()).toBe(branch);
+      expect(gitExec("git rev-parse --abbrev-ref HEAD", {
+        cwd: result.worktreePath,
+        encoding: "utf8",
+      }).trim()).toBe("HEAD");
+      expect(gitExec("git ls-files -u", {
+        cwd: result.worktreePath,
+        encoding: "utf8",
+      }).trim()).toBe("");
+    } finally {
+      try {
+        gitExec("git checkout main", {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {}
+      if (result?.worktreePath) {
+        try {
+          gitExec(`git worktree remove "${result.worktreePath}" --force`, {
+            cwd: repoDir,
+            stdio: "ignore",
+          });
+        } catch {
+          rmSync(result.worktreePath, { recursive: true, force: true });
+        }
+      }
+      try {
+        gitExec(`git branch -D "${branch}"`, {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {}
+    }
+  }, 20000);
+  it("fast-forwards a detached managed worktree to the explicit branch tip when the main repo branch advances", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "bosun/epic-branch-fast-forward";
+    let first = null;
+
+    try {
+      writeFileSync(join(repoDir, "README.md"), "base-line\n");
+      gitExec("git add README.md && git commit -m base-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout -b "${branch}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(repoDir, "README.md"), "epic-branch-line\n");
+      gitExec("git add README.md && git commit -m epic-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+
+      first = await nt.execute(makeNode("action.acquire_worktree", {
+        repoRoot: repoDir,
+        taskId: "explicit-branch-main-checkout-fast-forward-1",
+        branch,
+        baseBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      }), makeCtx({}));
+
+      expect(first.success).toBe(true);
+      expect(first.created).toBe(true);
+      const firstHead = gitExec("git rev-parse HEAD", {
+        cwd: first.worktreePath,
+        encoding: "utf8",
+      }).trim();
+
+      writeFileSync(join(repoDir, "README.md"), "epic-branch-line-2\n");
+      gitExec("git add README.md && git commit -m epic-readme-line-2", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      const branchTip = gitExec(`git rev-parse "${branch}"`, {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+      expect(branchTip).not.toBe(firstHead);
+
+      const second = await nt.execute(makeNode("action.acquire_worktree", {
+        repoRoot: repoDir,
+        taskId: "explicit-branch-main-checkout-fast-forward-1",
+        branch,
+        baseBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      }), makeCtx({}));
+
+      expect(second.success).toBe(true);
+      expect(second.worktreePath.replace(/\\/g, "/")).toBe(first.worktreePath.replace(/\\/g, "/"));
+      expect(gitExec("git rev-parse --abbrev-ref HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim()).toBe("HEAD");
+      expect(gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim()).toBe(branchTip);
+      expect(readFileSync(join(second.worktreePath, "README.md"), "utf8")).toBe("epic-branch-line-2\n");
+    } finally {
+      try {
+        gitExec("git checkout main", {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {}
+      if (first?.worktreePath) {
+        try {
+          gitExec(`git worktree remove "${first.worktreePath}" --force`, {
+            cwd: repoDir,
+            stdio: "ignore",
+          });
+        } catch {
+          rmSync(first.worktreePath, { recursive: true, force: true });
+        }
+      }
+      try {
+        gitExec(`git branch -D "${branch}"`, {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {}
+    }
+  }, 20000);
+  it("clears hidden skip-worktree bits before fast-forwarding a detached managed worktree", async () => {
+    const nt = getNodeType("action.acquire_worktree");
+    const branch = "bosun/epic-branch-fast-forward-skip-worktree";
+    let first = null;
+
+    try {
+      writeFileSync(join(repoDir, "README.md"), "base-line\n");
+      gitExec("git add README.md && git commit -m base-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      gitExec(`git checkout -b "${branch}"`, {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      writeFileSync(join(repoDir, "README.md"), "epic-branch-line\n");
+      gitExec("git add README.md && git commit -m epic-readme-line", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+
+      first = await nt.execute(makeNode("action.acquire_worktree", {
+        repoRoot: repoDir,
+        taskId: "explicit-branch-main-checkout-fast-forward-skip-worktree-1",
+        branch,
+        baseBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      }), makeCtx({}));
+
+      expect(first.success).toBe(true);
+      gitExec("git update-index --skip-worktree -- README.md", {
+        cwd: first.worktreePath,
+        stdio: "ignore",
+      });
+      expect(gitExec("git ls-files -v README.md", {
+        cwd: first.worktreePath,
+        encoding: "utf8",
+      }).trim().startsWith("S ")).toBe(true);
+
+      writeFileSync(join(repoDir, "README.md"), "epic-branch-line-2\n");
+      gitExec("git add README.md && git commit -m epic-readme-line-2", {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      const branchTip = gitExec(`git rev-parse "${branch}"`, {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim();
+
+      const second = await nt.execute(makeNode("action.acquire_worktree", {
+        repoRoot: repoDir,
+        taskId: "explicit-branch-main-checkout-fast-forward-skip-worktree-1",
+        branch,
+        baseBranch: "main",
+        fetchTimeout: 5000,
+        worktreeTimeout: 10000,
+      }), makeCtx({}));
+
+      expect(second.success).toBe(true);
+      expect(gitExec("git rev-parse HEAD", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim()).toBe(branchTip);
+      expect(readFileSync(join(second.worktreePath, "README.md"), "utf8")).toBe("epic-branch-line-2\n");
+      expect(gitExec("git ls-files -v README.md", {
+        cwd: second.worktreePath,
+        encoding: "utf8",
+      }).trim().startsWith("S ")).toBe(false);
+    } finally {
+      try {
+        gitExec("git checkout main", {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {}
+      if (first?.worktreePath) {
+        try {
+          gitExec(`git worktree remove "${first.worktreePath}" --force`, {
+            cwd: repoDir,
+            stdio: "ignore",
+          });
+        } catch {
+          rmSync(first.worktreePath, { recursive: true, force: true });
+        }
+      }
+      try {
+        gitExec(`git branch -D "${branch}"`, {
+          cwd: repoDir,
+          stdio: "ignore",
+        });
+      } catch {}
+    }
+  }, 20000);
   it("uses a short managed worktree directory derived from task id", async () => {
     const nt = getNodeType("action.acquire_worktree");
     const ctx = makeCtx({});
@@ -5983,6 +6258,25 @@ describe("action.build_task_prompt", () => {
     expect(result.prompt).toContain("blocked: cross-repo dependency");
   });
 
+  it("treats the worktree as canonical when repoRoot differs from the working directory", async () => {
+    const nt = getNodeType("action.build_task_prompt");
+    const ctx = makeCtx({});
+    const node = makeNode("action.build_task_prompt", {
+      taskId: "T3b",
+      taskTitle: "Respect detached worktree scope",
+      taskDescription: "Stay inside the managed worktree.",
+      worktreePath: "/tmp/wt-detached-scope",
+      repoRoot: "/tmp/repo-root-detached-scope",
+      workspace: "virtengine-gh",
+      repository: "virtengine/bosun",
+    });
+    const result = await nt.execute(node, ctx);
+    expect(result.prompt).toContain("**Repository Context:** Source-checkout instructions are already loaded; use the working directory above as the canonical checkout for git/file operations.");
+    expect(result.prompt).not.toContain("**Repo Root:** /tmp/repo-root-detached-scope");
+    expect(result.prompt).toContain("Treat the write-scope root as the canonical checkout for git status, diff, test, commit, and push decisions.");
+    expect(result.prompt).toContain("do not treat dirty files in `Repo Root` as task-owned changes");
+  });
+
   it("falls back to task payload scope metadata when config is not provided", async () => {
     const nt = getNodeType("action.build_task_prompt");
     const ctx = makeCtx({
@@ -7058,6 +7352,95 @@ describe("action.push_branch", () => {
     rmSync(repoRoot, { recursive: true, force: true });
   });
 
+  it("pushes an explicit branch ref from detached HEAD worktrees", async () => {
+    const nt = getNodeType("action.push_branch");
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-push-detached-head-"));
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-push-detached-head-remote-"));
+    try {
+      execGit("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.email test@test.com", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.name Test", { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "README.md"), "init\n");
+      execGit("git add README.md && git commit -m init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git branch -M main", { cwd: repoDir, stdio: "ignore" });
+      execGit(`git remote add origin "${remoteDir}"`, { cwd: repoDir, stdio: "ignore" });
+      execGit("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+      execGit("git checkout -b feature/detached-push", { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "feature.txt"), "feature\n");
+      execGit("git add feature.txt && git commit -m feature-work", { cwd: repoDir, stdio: "ignore" });
+      const headSha = execGit("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+      execGit(`git checkout --detach "${headSha}"`, { cwd: repoDir, stdio: "ignore" });
+
+      const result = await nt.execute(makeNode("action.push_branch", {
+        worktreePath: repoDir,
+        branch: "feature/detached-push",
+        baseBranch: "main",
+      }), makeCtx({ repoRoot: repoDir }));
+
+      expect(result.success).toBe(true);
+      expect(result.pushed).toBe(true);
+      expect(result.branch).toBe("feature/detached-push");
+      expect(execGit("git rev-parse origin/feature/detached-push", {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim()).toBe(headSha);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(remoteDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("exports the worktree repo root into git push hook env", async () => {
+    const nt = getNodeType("action.push_branch");
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-push-hook-env-"));
+    const remoteDir = mkdtempSync(join(tmpdir(), "wf-push-hook-env-remote-"));
+    try {
+      execGit("git init --bare", { cwd: remoteDir, stdio: "ignore" });
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.email test@test.com", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.name Test", { cwd: repoDir, stdio: "ignore" });
+      execGit(`git remote add origin "${remoteDir}"`, { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "README.md"), "init\n");
+      execGit("git add README.md && git commit -m init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git branch -M main", { cwd: repoDir, stdio: "ignore" });
+      execGit("git push -u origin main", { cwd: repoDir, stdio: "ignore" });
+      mkdirSync(join(repoDir, ".githooks"), { recursive: true });
+      writeFileSync(
+        join(repoDir, ".githooks", "pre-push"),
+        [
+          "#!/usr/bin/env node",
+          "const expected = process.cwd();",
+          "for (const key of ['REPO_ROOT', 'BOSUN_REPO_ROOT', 'BOSUN_AGENT_REPO_ROOT']) {",
+          "  if (process.env[key] !== expected) {",
+          "    console.error(`${key}=${process.env[key] || ''} expected=${expected}`);",
+          "    process.exit(1);",
+          "  }",
+          "}",
+          "process.exit(0);",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      execGit("git config core.hooksPath .githooks", { cwd: repoDir, stdio: "ignore" });
+      execGit("git checkout -b feature/push-hook-env", { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "feature.txt"), "feature\n");
+      execGit("git add feature.txt && git commit -m feature-work", { cwd: repoDir, stdio: "ignore" });
+
+      const result = await nt.execute(makeNode("action.push_branch", {
+        worktreePath: repoDir,
+        branch: "feature/push-hook-env",
+        baseBranch: "main",
+      }), makeCtx({ repoRoot: repoDir }));
+
+      expect(result.success).toBe(true);
+      expect(result.pushed).toBe(true);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(remoteDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
   it("preserves compacted hook stderr when push fails", async () => {
     const nt = getNodeType("action.push_branch");
     const repoDir = mkdtempSync(join(tmpdir(), "wf-push-stderr-"));
@@ -7165,6 +7548,52 @@ describe("action.release_worktree", () => {
     expect(result.skipped).toBe(true);
   });
 
+  it("skips releasing a managed worktree when another live claim owns the same task", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-release-worktree-claim-"));
+    try {
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.email test@test.com", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.name Test", { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "README.md"), "init\n");
+      execGit("git add README.md && git commit -m init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git branch -M main", { cwd: repoDir, stdio: "ignore" });
+
+      const taskId = "c823e0e6-ad52-4bd4-b457-5448e7502505";
+      const branch = "task/release-foreign-claim";
+      const worktreePath = join(repoDir, ".bosun", "worktrees", deriveManagedWorktreeDirName(taskId, branch));
+      execGit(`git worktree add "${worktreePath}" -b "${branch}" main`, { cwd: repoDir, stdio: "ignore" });
+
+      const claims = await import("../task/task-claims.mjs");
+      await claims.initTaskClaims({ repoRoot: repoDir });
+      const claim = await claims.claimTask({
+        repoRoot: repoDir,
+        taskId,
+        instanceId: "foreign-instance",
+      });
+      expect(claim?.success).toBe(true);
+
+      const nt = getNodeType("action.release_worktree");
+      const ctx = makeCtx({
+        repoRoot: repoDir,
+        _worktreeManaged: true,
+        _claimToken: "current-run-claim-token",
+      });
+      const node = makeNode("action.release_worktree", {
+        worktreePath,
+        repoRoot: repoDir,
+        taskId,
+      });
+
+      const result = await nt.execute(node, ctx);
+      expect(result.success).toBe(true);
+      expect(result.skipped).toBe(true);
+      expect(result.reason).toBe("foreign_live_claim");
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  });
+
   it("returns existing claim metadata when the same transition is replayed", async () => {
     const nt = getNodeType("action.claim_task");
     const claims = await import("../task/task-claims.mjs");
@@ -7202,6 +7631,49 @@ describe("action.release_worktree", () => {
     } finally {
       initSpy.mockRestore();
       claimSpy.mockRestore();
+    }
+  });
+});
+
+describe("action.sweep_task_worktrees", () => {
+  it("skips deleting task-matching managed worktrees when another live claim owns the task", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "wf-sweep-task-worktrees-"));
+    try {
+      execGit("git init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.email test@test.com", { cwd: repoDir, stdio: "ignore" });
+      execGit("git config --local user.name Test", { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, "README.md"), "init\n");
+      execGit("git add README.md && git commit -m init", { cwd: repoDir, stdio: "ignore" });
+      execGit("git branch -M main", { cwd: repoDir, stdio: "ignore" });
+
+      const taskId = "c823e0e6-ad52-4bd4-b457-5448e7502505";
+      const entryName = deriveManagedWorktreeDirName(taskId, "task/sweep-foreign-claim");
+      const worktreePath = join(repoDir, ".bosun", "worktrees", entryName);
+      mkdirSync(worktreePath, { recursive: true });
+
+      const claims = await import("../task/task-claims.mjs");
+      await claims.initTaskClaims({ repoRoot: repoDir });
+      const claim = await claims.claimTask({
+        repoRoot: repoDir,
+        taskId,
+        instanceId: "foreign-instance",
+      });
+      expect(claim?.success).toBe(true);
+
+      const nt = getNodeType("action.sweep_task_worktrees");
+      const ctx = makeCtx({ repoRoot: repoDir, taskId });
+      const node = makeNode("action.sweep_task_worktrees", {
+        repoRoot: repoDir,
+        taskId,
+      });
+
+      const result = await nt.execute(node, ctx);
+      expect(result.success).toBe(true);
+      expect(result.removed).toEqual([]);
+      expect(result.skipped).toEqual([entryName]);
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* ok */ }
     }
   });
 });
@@ -7486,6 +7958,63 @@ describe("action.update_task_status", () => {
     expect(ctx.data.branch).toBe("task/taskid123456-normalize-branch-persistence");
   });
 
+  it("preserves explicit epic branch metadata when moving an epic-merge task to inprogress", async () => {
+    const nt = getNodeType("action.update_task_status");
+    const updateTaskStatus = vi.fn().mockResolvedValue(true);
+    const updateTask = vi.fn().mockResolvedValue(true);
+    const getTask = vi.fn().mockResolvedValue({
+      id: "c823e0e6-ad52-4bd4-b457-5448e7502505",
+      title: "[m] Resolve epic merge for bosun/codex-self-improvement-loop-commits",
+      status: "blocked",
+      branchName: "task/c823e0e6ad52-m-resolve-epic-merge-for-bosun-codex-self-improv",
+      meta: {
+        branch_name: "bosun/codex-self-improvement-loop-commits",
+        base_branch: "origin/main",
+      },
+    });
+    const ctx = makeCtx({
+      taskId: "c823e0e6-ad52-4bd4-b457-5448e7502505",
+      taskTitle: "[m] Resolve epic merge for bosun/codex-self-improvement-loop-commits",
+      branch: "task/c823e0e6ad52-m-resolve-epic-merge-for-bosun-codex-self-improv",
+      branchName: "task/c823e0e6ad52-m-resolve-epic-merge-for-bosun-codex-self-improv",
+      task: {
+        meta: {
+          branch_name: "bosun/codex-self-improvement-loop-commits",
+        },
+      },
+    });
+    const node = makeNode("action.update_task_status", {
+      taskId: "{{taskId}}",
+      status: "inprogress",
+      taskTitle: "{{taskTitle}}",
+    });
+
+    const result = await nt.execute(node, ctx, {
+      services: {
+        kanban: { getTask, updateTaskStatus, updateTask },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.branchName).toBe("bosun/codex-self-improvement-loop-commits");
+    expect(updateTaskStatus).toHaveBeenCalledWith(
+      "c823e0e6-ad52-4bd4-b457-5448e7502505",
+      "inprogress",
+      expect.objectContaining({
+        source: "workflow",
+        branchName: "bosun/codex-self-improvement-loop-commits",
+      }),
+    );
+    expect(updateTask).toHaveBeenCalledWith(
+      "c823e0e6-ad52-4bd4-b457-5448e7502505",
+      expect.objectContaining({
+        branchName: "bosun/codex-self-improvement-loop-commits",
+      }),
+    );
+    expect(ctx.data.branchName).toBe("bosun/codex-self-improvement-loop-commits");
+    expect(ctx.data.branch).toBe("bosun/codex-self-improvement-loop-commits");
+  });
+
   it("allows workflows to set blocked status", async () => {
     const nt = getNodeType("action.update_task_status");
     const updateTaskStatus = vi.fn().mockResolvedValue(true);
@@ -7585,7 +8114,7 @@ describe("template-task-lifecycle", () => {
       "claim-ok", "set-inprogress", "acquire-worktree", "worktree-ok",
       "resolve-executor", "record-head", "read-workflow-contract",
       "workflow-contract-validation", "build-prompt", "run-agent-plan", "run-agent-tests", "run-agent-implement",
-      "plan-agent-ok", "tests-agent-ok", "implement-agent-ok",
+      "plan-agent-commit-blocked", "plan-agent-ok", "tests-agent-ok", "implement-agent-ok",
       "set-blocked-agent-plan-failed", "set-blocked-agent-tests-failed", "set-blocked-agent-implement-failed",
       "claim-stolen", "detect-commits", "has-commits", "no-commit-retries-exhausted",
       "pre-pr-validation", "pre-pr-validation-ok", "set-fix-summary", "auto-fix-validation", "validation-fix1-worktree-ok", "retry-pre-pr-validation", "retry-validation-ok", "set-fix2-summary", "auto-fix-validation-2", "validation-fix2-worktree-ok", "retry2-pre-pr-validation", "retry2-validation-ok", "log-validation-failed", "set-blocked-validation-failed", "notify-validation-blocked", "log-validation-worktree-failed", "set-blocked-validation-worktree-failed", "annotate-blocked-validation-worktree-failed",
@@ -7637,16 +8166,20 @@ describe("template-task-lifecycle", () => {
   it("gates each agent phase before entering the next stage or cleanup", () => {
     const t = getTemplate("template-task-lifecycle");
     const implementGate = t.nodes.find((n) => n.id === "implement-agent-ok");
+    const planCommitBlockedGate = t.nodes.find((n) => n.id === "plan-agent-commit-blocked");
     expect(t.edges.find((e) => e.source === "build-prompt" && e.target === "run-agent-plan")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "run-agent-plan" && e.target === "plan-agent-ok")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "run-agent-plan" && e.target === "plan-agent-commit-blocked")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "plan-agent-commit-blocked" && e.target === "claim-stolen")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "plan-agent-commit-blocked" && e.target === "plan-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "plan-agent-ok" && e.target === "run-agent-tests")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "plan-agent-ok" && e.target === "set-blocked-agent-plan-failed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "plan-agent-ok" && e.target === "plan-agent-worktree-reacquire-needed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "run-agent-tests" && e.target === "tests-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "tests-agent-ok" && e.target === "run-agent-implement")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "tests-agent-ok" && e.target === "set-blocked-agent-tests-failed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "tests-agent-ok" && e.target === "tests-agent-worktree-reacquire-needed")).toBeDefined();
     expect(t.edges.find((e) => e.source === "run-agent-implement" && e.target === "implement-agent-ok")).toBeDefined();
     expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "claim-stolen")).toBeDefined();
-    expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "set-blocked-agent-implement-failed")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "implement-agent-ok" && e.target === "implement-agent-worktree-reacquire-needed")).toBeDefined();
+    expect(planCommitBlockedGate?.config?.expression).toContain("implementation_done_commit_blocked");
     expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
   });
 
