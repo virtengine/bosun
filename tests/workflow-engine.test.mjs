@@ -7528,6 +7528,122 @@ describe("WorkflowEngine - run history details", () => {
     expect(replayRevision?.focusNodeIds).toEqual(["run-agent-implement"]);
   });
 
+  it("replans task-lifecycle retries from claim-task when replan_from_failed must reconsider persisted task resources", async () => {
+    const executedNodes = [];
+    registerNodeType("test.retry_resume_replan_persisted_claim", {
+      describe: () => "Records retry execution when replan_from_failed resets persisted task resources",
+      schema: { type: "object", properties: {} },
+      async execute(node, ctx) {
+        executedNodes.push(node.id);
+        if (node.id === "claim-task") {
+          ctx.data._claimToken = "claim-replanned";
+          return { success: true, taskId: "task-replan-persisted-claim-1", claimToken: "claim-replanned" };
+        }
+        if (node.id === "acquire-worktree") {
+          const worktreePath = join(tmpDir, "replanned-persisted-claim-worktree");
+          ctx.data.worktreePath = worktreePath;
+          return { success: true, worktreePath };
+        }
+        return { ok: true, nodeId: node.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "test.retry_resume_replan_persisted_claim", label: "Claim Task", config: {} },
+        { id: "acquire-worktree", type: "test.retry_resume_replan_persisted_claim", label: "Acquire Worktree", config: {} },
+        { id: "run-agent-plan", type: "test.retry_resume_replan_persisted_claim", label: "Plan", config: {} },
+        { id: "run-agent-implement", type: "test.retry_resume_replan_persisted_claim", label: "Implement", config: {} },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "claim-task" },
+        { id: "e2", source: "claim-task", target: "acquire-worktree" },
+        { id: "e3", source: "acquire-worktree", target: "run-agent-plan" },
+        { id: "e4", source: "run-agent-plan", target: "run-agent-implement" },
+      ],
+      {
+        id: "wf-retry-replan-persisted-claim",
+        name: "Retry Replan Persisted Claim Workflow",
+        metadata: { installedFrom: "template-task-lifecycle" },
+      },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-retry-replan-persisted-claim";
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId: "task-replan-persisted-claim-1",
+          _claimToken: "claim-persisted-token",
+          _claimInstanceId: "wf-persisted-claim",
+          worktreePath: join(tmpDir, "persisted-claim-worktree"),
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "acquire-worktree": NodeStatus.COMPLETED,
+          "run-agent-plan": NodeStatus.COMPLETED,
+          "run-agent-implement": NodeStatus.RUNNING,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": {
+            success: true,
+            taskId: "task-replan-persisted-claim-1",
+            claimToken: "claim-persisted-token",
+            instanceId: "wf-persisted-claim",
+          },
+          "acquire-worktree": { success: true, worktreePath: join(tmpDir, "persisted-claim-worktree") },
+          "run-agent-plan": { success: true, nodeId: "run-agent-plan" },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "replan_from_failed" });
+
+    expect(executedNodes).toEqual(["claim-task", "acquire-worktree", "run-agent-plan", "run-agent-implement"]);
+    const resumedRun = engine.getRunDetail(retryRunId);
+    const [resumeRevision, replayRevision] = resumedRun.detail.dagState.revisions;
+    expect(resumeRevision?.preservedCompletedNodeIds).toEqual(["trigger"]);
+    expect(replayRevision?.focusNodeIds).toEqual(expect.arrayContaining([
+      "claim-task",
+      "acquire-worktree",
+      "run-agent-plan",
+      "run-agent-implement",
+    ]));
+  });
+
   it("resumes interrupted runs with replan_from_failed when issue-advisor requests replanning", async () => {
     const wf = makeSimpleWorkflow(
       [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
@@ -10361,6 +10477,71 @@ describe("Session chaining - action.run_agent", () => {
     }
   });
 
+  it("does not clear the silent launch guard for usage-only events", async () => {
+    vi.useFakeTimers();
+    try {
+      const handler = getNodeType("action.run_agent");
+      expect(handler).toBeDefined();
+
+      const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+      let capturedAbortController = null;
+      const launchEphemeralThread = vi.fn().mockImplementation(
+        async (_prompt, _cwd, _timeoutMs, extra) => {
+          capturedAbortController = extra?.abortController || null;
+          extra?.onSlotAcquired?.({
+            slotId: "agent-slot-usage-only",
+            ownerKey: "slot-owner-usage-only",
+            activeSlots: 1,
+            queuedSlots: 0,
+            maxParallel: 1,
+            waitedMs: 0,
+          });
+          extra?.onEvent?.({
+            type: "assistant.usage",
+            data: {
+              model: "claude-sonnet-4.6",
+              inputTokens: 5170,
+              outputTokens: 484,
+              duration: 7899,
+            },
+          });
+          return await new Promise(() => {});
+        },
+      );
+      const mockEngine = {
+        services: {
+          agentPool: {
+            launchEphemeralThread,
+          },
+        },
+      };
+
+      const pending = handler.execute({
+        id: "a-usage-only-launch",
+        type: "action.run_agent",
+        config: {
+          prompt: "Test prompt",
+          autoRecover: false,
+          failOnError: false,
+          firstEventTimeoutMs: 25,
+          idleEventTimeoutMs: 25,
+        },
+      }, ctx, mockEngine);
+
+      await vi.advanceTimersByTimeAsync(30);
+      const result = await pending;
+
+      expect(result.success).toBe(false);
+      expect(String(result.error || "")).toMatch(/first_event_timeout/i);
+      expect(capturedAbortController?.signal?.aborted).toBe(true);
+      expect(capturedAbortController?.signal?.reason).toBe("first_event_timeout");
+      const runLogText = ctx.logs.map((entry) => String(entry?.message || "")).join("\n");
+      expect(runLogText).toMatch(/no events within 25ms; aborting run/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not let workflow heartbeats mask a missing first agent event", async () => {
     vi.useFakeTimers();
     try {
@@ -10915,6 +11096,169 @@ describe("Session chaining - action.run_agent", () => {
     expect(result.blockedReason).toBe("implementation_done_commit_blocked");
     expect(result.implementationState).toBe("implementation_done_commit_blocked");
     expect(String(result.error || "")).toMatch(/push attempt failed due to timeout/i);
+  });
+
+  it("treats push-only plan handoffs as implementation_done_commit_blocked", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const planHandoff = [
+      "## Architect Handoff",
+      "",
+      "Current state:",
+      "- Working tree is empty.",
+      "- Commits pending push to the remote epic branch.",
+      "",
+      "Next step:",
+      "- Run `git push origin HEAD:refs/heads/bosun/codex-self-improvement-loop-commits`.",
+      "",
+      "Touched files:",
+      "- None — no code changes required. This is a pure git push operation.",
+      "",
+      "**No planning-side code changes were made.**",
+      "",
+      "Completion: Architect plan produced — working tree is empty, local commits need pushing to origin/bosun/codex-self-improvement-loop-commits via git push origin HEAD:refs/heads/bosun/codex-self-improvement-loop-commits.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: planHandoff,
+      summary: planHandoff,
+      narrative: planHandoff,
+      sdk: "copilot",
+      threadId: "thread-plan-push-only",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        mode: "plan",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(String(result.error || "")).toMatch(/git push origin HEAD:refs\/heads/i);
+  });
+
+  it("treats live repo-clean plan handoffs with unpushed epic commits as implementation_done_commit_blocked", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const planHandoff = [
+      "## Architect Handoff Plan",
+      "",
+      "### Current State Assessment",
+      "| `origin/bosun/codex-self-improvement-loop-commits` | `000c4c59` — remote tracking is **4 commits behind** local |",
+      "| Working tree | **Clean** — no uncommitted changes, no conflict markers |",
+      "| Merge conflict status | **Resolved** — merge was completed in the most recent commit |",
+      "",
+      "### Root Cause",
+      "Those commits **were never pushed** to `origin/bosun/codex-self-improvement-loop-commits`.",
+      "",
+      "2. **Push the epic branch to origin**",
+      "- Command: `git push origin bosun/codex-self-improvement-loop-commits`",
+      "",
+      "### Touched Files / Refs",
+      "- **Remote ref only:** `origin/bosun/codex-self-improvement-loop-commits`",
+      "- **No local file edits required** — the working tree is already clean and fully merged",
+      "",
+      "**No code changes made in this planning phase.**",
+      "",
+      "COMPLETED: Architect plan produced. Root cause = 4 local merge-sync commits not yet pushed to `origin/bosun/codex-self-improvement-loop-commits`.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: planHandoff,
+      summary: planHandoff,
+      narrative: planHandoff,
+      sdk: "copilot",
+      threadId: "thread-plan-push-only-live-shape",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        mode: "plan",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(result.blockedReason).toBe("blocked_by_repo");
+    expect(String(result.error || "")).toMatch(/never pushed/i);
+  });
+
+  it("treats detached-head push-only plan handoffs with 'no code changes are needed' wording as implementation_done_commit_blocked", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const planHandoff = [
+      "## Architecture Assessment",
+      "",
+      "The working tree is clean and the remote epic branch is 2 commits behind local HEAD.",
+      "The current branch state is detached HEAD.",
+      "Use `git push origin HEAD:bosun/codex-self-improvement-loop-commits` to publish the existing commits.",
+      "No code changes are needed — the conflict was already resolved locally.",
+      "No code files require changes.",
+      "COMPLETED: Architect plan produced. Epic branch conflict was already resolved locally; only the push remains.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: planHandoff,
+      summary: planHandoff,
+      narrative: planHandoff,
+      sdk: "copilot",
+      threadId: "thread-plan-detached-head-push-only",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        mode: "plan",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(false);
+    expect(result.implementationState).toBe("implementation_done_commit_blocked");
+    expect(result.blockedReason).toBe("implementation_done_commit_blocked");
+    expect(String(result.error || "")).toMatch(/HEAD:bosun\/codex-self-improvement-loop-commits/i);
   });
 
   it("treats failed implement sessions with git push timeouts as implementation_done_commit_blocked", async () => {
@@ -11879,6 +12223,49 @@ Status:
 
     expect(result.success).toBe(true);
     expect(result.blockedReason ?? null).toBeNull();
+  });
+
+  it("does not treat successful push-complete plan summaries as blocked_by_repo", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ worktreePath: "/tmp/test" });
+    const recoveredSummary = [
+      "The push succeeded. The epic branch `bosun/codex-self-improvement-loop-commits` has been updated from `000c4c59` to `d5b41d8b` on `origin`.",
+      "Verified all relevant tests pass.",
+      "Successfully pushed 9 commits ahead of `origin/main` to `origin/bosun/codex-self-improvement-loop-commits`.",
+      "COMPLETED: Epic branch pushed successfully; PR is now up to date with origin/main.",
+    ].join("\n");
+    const launchEphemeralThread = vi.fn().mockResolvedValue({
+      success: true,
+      output: recoveredSummary,
+      summary: recoveredSummary,
+      narrative: recoveredSummary,
+      sdk: "copilot",
+      threadId: "thread-plan-push-recovered",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          launchEphemeralThread,
+        },
+      },
+    };
+
+    const result = await handler.execute({
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: {
+        prompt: "Test prompt",
+        mode: "plan",
+        autoRecover: false,
+        failOnError: false,
+      },
+    }, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.blockedReason ?? null).toBeNull();
+    expect(result.implementationState ?? null).toBeNull();
   });
 
   it("treats active delegated-agent summaries as blocked_by_env", async () => {
@@ -13092,8 +13479,10 @@ Status:
 
     expect(result.success).toBe(true);
     expect(result.threadId).toBe("thread-fresh-1");
-    expect(result.sessionId).toBe("thread-fresh-1");
-    expect(ctx.data.sessionId).toBe("thread-fresh-1");
+    expect(String(result.sessionId || "")).toContain(":fresh-");
+    expect(result.sessionId).not.toBe(result.threadId);
+    expect(result.lineage?.childSessionId).toBe(result.sessionId);
+    expect(String(ctx.data.sessionId || "")).toContain(":fresh-");
     expect(ctx.data.threadId).toBe("thread-fresh-1");
     expect(invalidateThread).toHaveBeenCalledTimes(1);
     expect(invalidateThread).toHaveBeenCalledWith("template-task-lifecycle:retry-run-1:run-agent-plan");
@@ -13112,6 +13501,156 @@ Status:
     expect(invalidateThread.mock.invocationCallOrder[0]).toBeLessThan(
       launchOrResumeThread.mock.invocationCallOrder[1],
     );
+  });
+
+  it("invalidates a silent reused session before retrying run-agent-plan with a fresh managed session", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({
+      _workflowId: "template-task-lifecycle",
+      _workflowName: "Task Lifecycle",
+      worktreePath: "/tmp/test",
+      sessionId: "thread-plan-stale-1",
+      threadId: "thread-plan-stale-1",
+      _agentSessionNodeId: "run-agent-plan",
+    });
+    ctx.id = "retry-run-plan-1";
+
+    const invalidateThread = vi.fn();
+    const continueAbortControllers = [];
+    const execAbortControllers = [];
+    const launchAbortControllers = [];
+    const continueSession = vi.fn().mockImplementation(async (_sessionId, _prompt, options) => {
+      continueAbortControllers.push(options?.abortController || null);
+      options?.abortController?.abort("first_event_timeout");
+      throw new Error("Externally aborted (first_event_timeout)");
+    });
+    const execWithRetry = vi.fn().mockImplementation(async (_prompt, options) => {
+      execAbortControllers.push(options?.abortController || null);
+      return {
+        success: false,
+        error: "Externally aborted (first_event_timeout)",
+        output: "",
+        items: [],
+      };
+    });
+    const launchOrResumeThread = vi.fn().mockImplementation(async (_prompt, _cwd, _timeoutMs, options) => {
+      launchAbortControllers.push(options?.abortController || null);
+      return {
+        success: true,
+        output: "fresh retry succeeded",
+        sdk: "copilot",
+        items: [],
+        threadId: "thread-plan-fresh-1",
+      };
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          invalidateThread,
+          continueSession,
+          execWithRetry,
+          launchOrResumeThread,
+        },
+      },
+    };
+    const node = {
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: { prompt: "Recover the plan", autoRecover: true, continueOnSession: true },
+    };
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.threadId).toBe("thread-plan-fresh-1");
+    expect(String(result.sessionId || "")).toContain(":fresh-");
+    expect(result.sessionId).not.toBe(result.threadId);
+    expect(result.lineage?.childSessionId).toBe(result.sessionId);
+    expect(String(ctx.data.sessionId || "")).toContain(":fresh-");
+    expect(ctx.data.threadId).toBe("thread-plan-fresh-1");
+    expect(continueSession).toHaveBeenCalledTimes(1);
+    expect(execWithRetry).toHaveBeenCalledTimes(1);
+    expect(launchOrResumeThread).toHaveBeenCalledTimes(1);
+    expect(invalidateThread).toHaveBeenCalledTimes(1);
+    expect(invalidateThread).toHaveBeenCalledWith("thread-plan-stale-1");
+    expect(continueAbortControllers).toHaveLength(1);
+    expect(execAbortControllers).toHaveLength(1);
+    expect(launchAbortControllers).toHaveLength(1);
+    expect(continueAbortControllers[0]?.signal?.aborted).toBe(true);
+    expect(execAbortControllers[0]).not.toBe(continueAbortControllers[0]);
+    expect(execAbortControllers[0]?.signal?.aborted).toBe(false);
+    expect(launchAbortControllers[0]).not.toBe(execAbortControllers[0]);
+    expect(launchAbortControllers[0]?.signal?.aborted).toBe(false);
+    expect(String(launchOrResumeThread.mock.calls[0][3]?.sessionId || "")).toContain(":fresh-");
+    expect(invalidateThread.mock.invocationCallOrder[0]).toBeLessThan(
+      launchOrResumeThread.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("tracks fresh managed retries under a new delegate session instead of the stale reused session", async () => {
+    const handler = getNodeType("action.run_agent");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({
+      _workflowId: "template-task-lifecycle",
+      _workflowName: "Task Lifecycle",
+      worktreePath: "/tmp/test",
+      taskId: "TASK-RETRY-SESSION-1",
+      task: { id: "TASK-RETRY-SESSION-1", title: "Retry task", branchName: "feat/retry-session" },
+      sessionId: "thread-plan-stale-2",
+      threadId: "thread-plan-stale-2",
+      _agentSessionNodeId: "run-agent-plan",
+    });
+    ctx.id = "retry-run-plan-2";
+
+    const invalidateThread = vi.fn();
+    const continueSession = vi.fn().mockRejectedValueOnce(new Error("Externally aborted (first_event_timeout)"));
+    const execWithRetry = vi.fn().mockResolvedValueOnce({
+      success: false,
+      error: "Externally aborted (first_event_timeout)",
+      output: "",
+      items: [],
+    });
+    const launchOrResumeThread = vi.fn().mockResolvedValueOnce({
+      success: true,
+      output: "fresh retry succeeded",
+      sdk: "copilot",
+      items: [],
+      threadId: "thread-plan-fresh-2",
+    });
+    const mockEngine = {
+      services: {
+        agentPool: {
+          invalidateThread,
+          continueSession,
+          execWithRetry,
+          launchOrResumeThread,
+        },
+      },
+    };
+    const node = {
+      id: "run-agent-plan",
+      type: "action.run_agent",
+      config: { prompt: "Recover the plan", autoRecover: true, continueOnSession: true },
+    };
+
+    const result = await handler.execute(node, ctx, mockEngine);
+
+    expect(result.success).toBe(true);
+    expect(result.threadId).toBe("thread-plan-fresh-2");
+    expect(String(result.sessionId || "")).toContain(":fresh-");
+    expect(result.lineage?.childSessionId).toBe(result.sessionId);
+    const tracker = getSessionTracker();
+    const delegateSessions = tracker.listAllSessions({ includePersisted: false })
+      .filter((entry) => entry.taskId === "TASK-RETRY-SESSION-1" && entry.type === "delegate");
+    expect(delegateSessions.some((entry) => entry.id === result.sessionId)).toBe(true);
+    expect(
+      (tracker.getSessionById(result.sessionId)?.messages || []).some((message) =>
+        String(message.content || "").includes("fresh retry"),
+      ),
+    ).toBe(true);
   });
 
   it("creates and completes task sessions for task-backed agent runs", async () => {

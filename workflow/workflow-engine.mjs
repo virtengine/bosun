@@ -423,7 +423,10 @@ function sanitizeWorkflowRunIdentityPayload(detail = null) {
     const events = readWorkflowNestedValue(nextDetail, path);
     if (!Array.isArray(events)) continue;
     for (let index = 0; index < events.length; index += 1) {
+      sanitizeWorkflowIdentityField(nextDetail, [...path, index, "id"], issues);
+      sanitizeWorkflowIdentityField(nextDetail, [...path, index, "task_id"], issues);
       sanitizeWorkflowIdentityField(nextDetail, [...path, index, "taskId"], issues);
+      sanitizeWorkflowIdentityField(nextDetail, [...path, index, "title"], issues);
       sanitizeWorkflowIdentityField(nextDetail, [...path, index, "taskTitle"], issues);
       sanitizeWorkflowIdentityField(nextDetail, [...path, index, "branch"], issues);
       sanitizeWorkflowIdentityField(nextDetail, [...path, index, "branchName"], issues);
@@ -2590,6 +2593,7 @@ function collectRunTaskIds(detail = {}, options = {}) {
       if (eventRunId && eventRunId !== currentRunId) continue;
     }
     push(event?.taskId);
+    push(event?.id);
   }
 
   return [...ids];
@@ -2612,7 +2616,7 @@ function resolveRunTaskTitle(detail = {}, options = {}) {
       const eventRunId = normalizeWorkflowIdentityText(event?.runId);
       if (eventRunId && eventRunId !== currentRunId) continue;
     }
-    const title = normalizeWorkflowIdentityText(event?.taskTitle);
+    const title = normalizeWorkflowIdentityText(event?.taskTitle || event?.title);
     if (title) return title;
   }
 
@@ -2730,6 +2734,7 @@ function buildRunDelegationTopology({ runId = null, detail = {}, runGraph = null
   const currentRunId = String(runId || detail?.id || "").trim();
   const taskIds = collectRunTaskIds(detail, {
     currentRunId,
+    includeTopologyIds: false,
   });
   const sessionIds = collectRunSessionIds(detail, {
     currentRunId,
@@ -3731,7 +3736,7 @@ export class WorkflowEngine extends EventEmitter {
     return next;
   }
 
-  _resolveRetryResumeResetStartNodeId(def, data = {}, nodeOutputs = {}, nodeStatuses = {}) {
+  _resolveRetryResumeResetStartNodeId(def, data = {}, nodeOutputs = {}, nodeStatuses = {}, retryMode = "from_failed") {
     const templateId = String(def?.metadata?.installedFrom || "").trim();
     if (templateId !== "template-task-lifecycle") return null;
     const claimTaskOutput =
@@ -3766,13 +3771,26 @@ export class WorkflowEngine extends EventEmitter {
       || String(acquireWorktreeOutput.worktreePath || "").trim(),
     );
     if (!hadClaimOrWorktreeState) return null;
+    const explicitReplanRetry =
+      retryMode === "replan_from_failed"
+      || retryMode === "replan_subgraph";
     const persistedClaimToken = String(
       data?.claimToken
       || data?._claimToken
       || claimTaskOutput?.claimToken
       || "",
     ).trim();
-    if (persistedClaimToken) {
+    const hasCompletedProgressBeyondTaskResources = Object.entries(nodeStatuses || {}).some(
+      ([nodeId, status]) =>
+        status === NodeStatus.COMPLETED
+        && !new Set([
+          "trigger",
+          "claim-task",
+          "claim-ok",
+          "acquire-worktree",
+        ]).has(String(nodeId || "").trim()),
+    );
+    if (persistedClaimToken && !explicitReplanRetry && hasCompletedProgressBeyondTaskResources) {
       return null;
     }
     const taskId = this._sanitizeTaskId(
@@ -5105,6 +5123,7 @@ export class WorkflowEngine extends EventEmitter {
       originalData,
       nodeOutputs,
       nodeStatuses,
+      mode,
     );
     const resumeResetNodeIds = resumeResetStartNodeId
       ? this._collectSubgraph(resumeResetStartNodeId, adjacency)
@@ -8607,6 +8626,7 @@ export class WorkflowEngine extends EventEmitter {
           : null;
     const taskIds = collectRunTaskIds(detail, {
       currentRunId: runId,
+      includeTopologyIds: false,
     });
     const sessionIds = collectRunSessionIds(detail, {
       currentRunId: runId,

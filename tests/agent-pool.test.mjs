@@ -800,6 +800,9 @@ describe("launchEphemeralThread", () => {
       "test prompt",
       process.cwd(),
       5000,
+      {
+        disableFallback: true,
+      },
     );
     expect(result).toHaveProperty("sdk");
     expect(typeof result.sdk).toBe("string");
@@ -2068,6 +2071,37 @@ describe("launchEphemeralThread", () => {
     );
   });
 
+  it("surfaces copilot first-event aborts with the first-event timeout instead of the full task timeout", async () => {
+    process.env.__MOCK_COPILOT_AVAILABLE = "1";
+    process.env.GITHUB_TOKEN = "test-token";
+    process.env.CODEX_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("copilot");
+
+    const externalAbortController = new AbortController();
+    mockCopilotCreateSession.mockImplementation(() => ({
+      send: async () => await new Promise(() => {}),
+      on: () => () => {},
+    }));
+    setTimeout(() => externalAbortController.abort("first_event_timeout"), 25);
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        abortController: externalAbortController,
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("copilot");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(result.error).not.toMatch(/after 5000ms waiting for session\.idle/i);
+  });
+
   it("prefers session.send over sendAndWait when both are available", async () => {
     process.env.__MOCK_COPILOT_AVAILABLE = "1";
     process.env.CODEX_SDK_DISABLED = "1";
@@ -2117,6 +2151,49 @@ describe("launchEphemeralThread", () => {
     expect(sendAndWait).not.toHaveBeenCalled();
   });
 
+  it("accepts Copilot raw-send output after turn end even when session.idle never arrives", async () => {
+    process.env.__MOCK_COPILOT_AVAILABLE = "1";
+    process.env.CODEX_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("copilot");
+
+    let listeners = [];
+    mockCopilotCreateSession.mockImplementation(() => ({
+      send: async () => {
+        setTimeout(() => {
+          for (const cb of listeners) {
+            cb({ type: "assistant.turn_start", data: { turnId: "0" } });
+            cb({
+              type: "assistant.message",
+              data: {
+                content: "",
+                reasoningText: "Done. No additional code changes were required.",
+              },
+            });
+            cb({ type: "assistant.turn_end", data: { turnId: "0" } });
+          }
+        }, 0);
+      },
+      on: (cb) => {
+        listeners.push(cb);
+        return () => {
+          listeners = listeners.filter((x) => x !== cb);
+        };
+      },
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("copilot");
+    expect(result.output).toContain("Done. No additional code changes were required.");
+    expect(result.error).toBeNull();
+  });
+
   it("applies explicit extra.model to Copilot session config", async () => {
     process.env.__MOCK_COPILOT_AVAILABLE = "1";
     process.env.CODEX_SDK_DISABLED = "1";
@@ -2143,6 +2220,32 @@ describe("launchEphemeralThread", () => {
         model: "gpt-5.3-codex",
       }),
     );
+  });
+
+  it("passes PowerShell and convergence guidance in the Copilot system message", async () => {
+    process.env.__MOCK_COPILOT_AVAILABLE = "1";
+    process.env.CODEX_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("copilot");
+
+    mockCopilotCreateSession.mockImplementation(() => ({
+      send: async () => {},
+      on: (cb) => {
+        cb({ type: "assistant.message", data: { content: "ok" } });
+        cb({ type: "session.idle" });
+        return () => {};
+      },
+    }));
+
+    await launchEphemeralThread("test prompt", process.cwd(), 5000, {
+      sdk: "copilot",
+    });
+
+    const [sessionConfig] = mockCopilotCreateSession.mock.calls.at(-1) || [];
+    expect(sessionConfig?.systemMessage?.content).toMatch(/Windows PowerShell/i);
+    expect(sessionConfig?.systemMessage?.content).toMatch(/do not use Unix utilities like head\/tail\/grep/i);
+    expect(sessionConfig?.systemMessage?.content).toMatch(/Git worktrees, `.git` may be a file/i);
+    expect(sessionConfig?.systemMessage?.content).toMatch(/return a compact final status/i);
   });
 
   it("uses COPILOT_MODEL env when extra.model is not provided", async () => {
@@ -3082,6 +3185,21 @@ describe("sdk cooldown heuristics", () => {
         "Why I’m stopping:",
         "- The available file reads are truncated at critical sections.",
       ].join("\n"),
+    })).toBe(true);
+  });
+
+  it("treats raw Copilot assistant payload text as an explicit completion signal", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      items: [
+        {
+          type: "assistant.message",
+          data: {
+            content: "",
+            reasoningText: "Done. Validation run:\n- `node tools/vitest-runner.mjs run tests/workflow-engine.test.mjs`",
+          },
+        },
+      ],
     })).toBe(true);
   });
 });

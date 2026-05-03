@@ -2459,6 +2459,14 @@ function autoRespondToUserInput(request) {
   };
 }
 
+function createAbortReasonError(reason = "timeout") {
+  const message = String(reason || "").trim() || "timeout";
+  const error = new Error(message);
+  error.name = "AbortError";
+  error.abortReason = message;
+  return error;
+}
+
 /**
  * Launch a single ephemeral prompt via the **Copilot SDK**.
  *
@@ -2529,6 +2537,9 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
   let unsubscribe = null;
   let stopCopilotFirstEventWatch = null;
   let finalResponse = "";
+  let currentCopilotTurnText = "";
+  let completedCopilotTurnText = "";
+  let handleCopilotRawSendEvent = null;
   const allItems = [];
   const autoApprovePermissions = shouldAutoApproveCopilotPermissions();
   const clientEnv = autoApprovePermissions
@@ -2602,7 +2613,12 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
         mode: "replace",
         content:
           "You are an ephemeral task agent. Execute the given task immediately. " +
-          "Do NOT ask for confirmation. Produce concise, actionable output.",
+          "Do NOT ask for confirmation. Produce concise, actionable output. " +
+          "You are running in Windows PowerShell, not bash. Use PowerShell-native commands and syntax; " +
+          "do not use Unix utilities like head/tail/grep or shell operators like &&. " +
+          "The working directory is already the target repo/worktree, so prefer commands that run in the current directory instead of nesting git -C <path> calls. " +
+          "In Git worktrees, `.git` may be a file that points at the real gitdir; treat that as normal and run git commands from the current directory instead of trying to inspect `.git` as a standalone repo. " +
+          "After you have enough evidence or have completed the requested work, stop and return a compact final status instead of continuing to explore.",
       },
       infiniteSessions: { enabled: true },
       // Auto-respond to user input requests — agent should never block
@@ -2672,14 +2688,53 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
       unsubscribe = session.on((event) => {
         if (!event) return;
         allItems.push(event);
-        if (event.type === "assistant.message" && event.data?.content) {
-          finalResponse = event.data.content;
+        if (event.type === "assistant.turn_start") {
+          currentCopilotTurnText = "";
+        }
+        if (event.type === "assistant.reasoning" && event.data?.content) {
+          currentCopilotTurnText = mergeAssistantText(currentCopilotTurnText, event.data.content);
         }
         if (
-          event.type === "assistant.message_delta" &&
-          event.data?.deltaContent
+          (event.type === "assistant.reasoning_delta"
+            || event.type === "assistant.message_delta")
+          && event.data?.deltaContent
         ) {
-          finalResponse += event.data.deltaContent;
+          currentCopilotTurnText = mergeAssistantText(
+            currentCopilotTurnText,
+            event.data.deltaContent,
+          );
+        }
+        if (event.type === "assistant.message") {
+          currentCopilotTurnText = mergeAssistantText(
+            currentCopilotTurnText,
+            event.data?.reasoningText || "",
+          );
+          currentCopilotTurnText = mergeAssistantText(
+            currentCopilotTurnText,
+            event.data?.content || "",
+          );
+          if (event.data?.content) {
+            finalResponse = event.data.content;
+          } else if (!finalResponse.trim() && currentCopilotTurnText.trim()) {
+            finalResponse = currentCopilotTurnText.trim();
+          }
+        }
+        if (event.type === "assistant.turn_end") {
+          const settledTurnText = String(currentCopilotTurnText || "").trim();
+          if (settledTurnText) {
+            completedCopilotTurnText = settledTurnText;
+            finalResponse = settledTurnText;
+          }
+        }
+        if (!finalResponse.trim() && completedCopilotTurnText.trim()) {
+          finalResponse = completedCopilotTurnText.trim();
+        }
+        if (typeof handleCopilotRawSendEvent === "function") {
+          try {
+            handleCopilotRawSendEvent(event);
+          } catch {
+            /* best effort */
+          }
         }
         if (typeof onEvent === "function") {
           try {
@@ -2718,12 +2773,36 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
         let settled = false;
         let off = null;
         let idleTimer = null;
+        let turnSettleTimer = null;
+
+        const clearTurnSettleTimer = () => {
+          if (turnSettleTimer) {
+            clearTimeout(turnSettleTimer);
+            turnSettleTimer = null;
+          }
+        };
+
+        const armTurnSettleTimer = () => {
+          const candidateOutput = String(
+            finalResponse || completedCopilotTurnText || currentCopilotTurnText || "",
+          ).trim();
+          if (!candidateOutput) return;
+          clearTurnSettleTimer();
+          turnSettleTimer = setTimeout(() => {
+            finish(resolveP);
+          }, COPILOT_TURN_SETTLE_MS);
+          if (turnSettleTimer && typeof turnSettleTimer.unref === "function") {
+            turnSettleTimer.unref();
+          }
+        };
 
         const finish = (cb) => {
           if (settled) return;
           settled = true;
           if (idleTimer) clearTimeout(idleTimer);
+          clearTurnSettleTimer();
           if (typeof off === "function") off();
+          handleCopilotRawSendEvent = null;
           cb();
         };
 
@@ -2736,11 +2815,33 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
           }
         };
         off = session.on(idleHandler);
+        handleCopilotRawSendEvent = (event) => {
+          const eventType = String(event?.type || "");
+          if (!eventType) return;
+          if (
+            eventType === "assistant.turn_start"
+            || eventType === "assistant.message"
+            || eventType === "assistant.message_delta"
+            || eventType === "assistant.reasoning"
+            || eventType === "assistant.reasoning_delta"
+            || eventType === "assistant.streaming_delta"
+            || eventType === "tool.execution_start"
+            || eventType === "tool.execution_partial_result"
+            || eventType === "permission.requested"
+          ) {
+            clearTurnSettleTimer();
+            return;
+          }
+          if (eventType === "assistant.turn_end") {
+            armTurnSettleTimer();
+          }
+        };
         Promise.resolve(sendPromise).catch((err) => finish(() => rejectP(err)));
 
         // Wire abort signal into this inner promise
         if (controller.signal) {
-          const onAbort = () => finish(() => rejectP(new Error("timeout")));
+          const onAbort = () =>
+            finish(() => rejectP(createAbortReasonError(controller.signal.reason || "timeout")));
           if (controller.signal.aborted) {
             onAbort();
           } else {
@@ -2818,7 +2919,10 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
     }
 
     const output =
-      finalResponse.trim() || "(Agent completed with no text output)";
+      finalResponse.trim()
+      || completedCopilotTurnText.trim()
+      || currentCopilotTurnText.trim()
+      || "(Agent completed with no text output)";
     return {
       success: true,
       output,
@@ -2833,15 +2937,26 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
     };
   } catch (err) {
     const errMsg = String(err?.message || err || "");
+    const abortReason = String(
+      err?.abortReason
+      || (controller.signal?.aborted ? controller.signal.reason : "")
+      || "",
+    ).trim();
     const hasAssistantOutput = !!finalResponse.trim();
     const isIdleWaitTimeout =
       /session\.idle/i.test(errMsg) && /timeout/i.test(errMsg);
+    const isFirstEventTimeout =
+      errMsg === "timeout_no_events"
+      || errMsg === "first_event_timeout"
+      || abortReason === "first_event_timeout";
     const isTimeout =
       err?.name === "AbortError" ||
       errMsg === "timeout" ||
       errMsg === "hard_timeout" ||
       errMsg === "timeout_no_events" ||
       errMsg === "timeout_waiting_for_idle" ||
+      errMsg === "first_event_timeout" ||
+      abortReason === "first_event_timeout" ||
       isIdleWaitTimeout;
 
     // Copilot SDK can occasionally emit the full assistant message but still
@@ -2866,15 +2981,18 @@ async function launchCopilotThread(prompt, cwd, timeoutMs, extra = {}) {
     }
 
     if (isTimeout) {
-      const noEventsSuffix =
-        errMsg === "timeout_no_events"
-          ? ` (no events received within ${getFirstEventTimeoutMs(timeoutMs)}ms)`
-          : "";
+      const firstEventTimeoutMs = getFirstEventTimeoutMs(timeoutMs);
+      const noEventsSuffix = isFirstEventTimeout
+        ? ` (no events received within ${firstEventTimeoutMs}ms)`
+        : "";
+      const timeoutHeadline = isFirstEventTimeout
+        ? `${TAG} copilot first_event_timeout after ${firstEventTimeoutMs}ms`
+        : `${TAG} copilot timeout after ${timeoutMs}ms${isIdleWaitTimeout ? " waiting for session.idle" : ""}`;
       return {
         success: false,
         output: "",
         items: allItems,
-        error: `${TAG} copilot timeout after ${timeoutMs}ms${isIdleWaitTimeout ? " waiting for session.idle" : noEventsSuffix}`,
+        error: `${timeoutHeadline}${noEventsSuffix}`,
         sdk: "copilot",
         threadId: resumeThreadId,
       };
@@ -5415,6 +5533,19 @@ const STRUCTURED_BLOCKED_HANDOFF_PATTERNS = [
   ],
 ];
 
+const COPILOT_TURN_SETTLE_MS = 1500;
+
+function mergeAssistantText(existing, fragment) {
+  const normalizedExisting = String(existing || "").trim();
+  const normalizedFragment = String(fragment || "").trim();
+  if (!normalizedFragment) return normalizedExisting;
+  if (!normalizedExisting) return normalizedFragment;
+  if (normalizedExisting === normalizedFragment) return normalizedExisting;
+  if (normalizedFragment.includes(normalizedExisting)) return normalizedFragment;
+  if (normalizedExisting.includes(normalizedFragment)) return normalizedExisting;
+  return `${normalizedExisting}\n${normalizedFragment}`;
+}
+
 function collectResultText(result = {}) {
   const outputText = [
     result?.output,
@@ -5433,11 +5564,23 @@ function collectResultText(result = {}) {
         const contentText = Array.isArray(item.content)
           ? item.content.map((entry) => String(entry?.text || "")).filter(Boolean).join("\n")
           : String(item.content || "");
+        const eventDataText = item.data && typeof item.data === "object"
+          ? [
+              item.data.content,
+              item.data.deltaContent,
+              item.data.reasoningText,
+              item.data.message,
+            ]
+            .map((fragment) => String(fragment || ""))
+            .filter(Boolean)
+            .join("\n")
+          : "";
         return [
           item.text,
           item.message,
           item.summary,
           contentText,
+          eventDataText,
         ]
           .map((fragment) => String(fragment || ""))
           .filter(Boolean)
