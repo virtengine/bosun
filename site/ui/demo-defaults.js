@@ -18,8 +18,8 @@
         "event-driven",
         "worktree-managed"
       ],
-      "nodeCount": 24,
-      "edgeCount": 29,
+      "nodeCount": 23,
+      "edgeCount": 27,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.workflow_call",
@@ -247,7 +247,7 @@
             "command": "node",
             "args": [
               "-e",
-              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); const repoRoot=String(process.env.REPO_ROOT||'').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const nodeModulesSource=repoRoot?path.join(repoRoot,'node_modules'):''; const nodeModulesTarget=path.join(wt,'node_modules'); let dependenciesLinked=false; let dependenciesLinkError=''; if(nodeModulesSource&&fs.existsSync(nodeModulesSource)){   if(fs.existsSync(nodeModulesTarget)){     dependenciesLinked=true;   }else{     try{       fs.symlinkSync(nodeModulesSource,nodeModulesTarget,process.platform==='win32'?'junction':'dir');       dependenciesLinked=true;     }catch(e){       dependenciesLinkError=String(e?.message||e);     }   } } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused,dependenciesLinked,dependenciesLinkError,dependencySource:dependenciesLinked?nodeModulesSource:''}));"
+              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused}));"
             ],
             "parseJson": true,
             "failOnError": true,
@@ -256,8 +256,7 @@
               "PR_REPO": "{{prParams.repo}}",
               "PR_BRANCH": "{{prParams.branch}}",
               "PR_BASE": "{{prParams.base}}",
-              "PR_NUMBER": "{{prParams.number}}",
-              "REPO_ROOT": "{{repoRoot}}"
+              "PR_NUMBER": "{{prParams.number}}"
             }
           },
           "position": {
@@ -351,7 +350,7 @@
           "type": "action.run_agent",
           "label": "Dispatch Focused Fix Agent",
           "config": {
-            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n9. **Do NOT remove PR labels yourself.** The workflow clears `{{labelNeedsFix}}` after a successful push.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n",
+            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n- After fixing, remove the label:\n  `gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label bosun-needs-fix`\n",
             "sdk": "auto",
             "timeoutMs": 1800000,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
@@ -389,24 +388,6 @@
           "position": {
             "x": 220,
             "y": 1020
-          },
-          "outputs": [
-            "default"
-          ]
-        },
-        {
-          "id": "clear-fix-label",
-          "type": "action.run_command",
-          "label": "Clear bosun-needs-fix",
-          "config": {
-            "command": "gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label {{labelNeedsFix}}",
-            "continueOnError": true,
-            "failOnError": false,
-            "timeoutMs": 60000
-          },
-          "position": {
-            "x": 220,
-            "y": 1040
           },
           "outputs": [
             "default"
@@ -679,22 +660,8 @@
           "sourcePort": "default"
         },
         {
-          "id": "push-pr-fixes->clear-fix-label",
-          "source": "push-pr-fixes",
-          "target": "clear-fix-label",
-          "sourcePort": "default",
-          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed===true;}catch{return false;}})()"
-        },
-        {
           "id": "push-pr-fixes->cleanup-pr-worktree",
           "source": "push-pr-fixes",
-          "target": "cleanup-pr-worktree",
-          "sourcePort": "default",
-          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed!==true;}catch{return true;}})()"
-        },
-        {
-          "id": "clear-fix-label->cleanup-pr-worktree",
-          "source": "clear-fix-label",
           "target": "cleanup-pr-worktree",
           "sourcePort": "default"
         },
@@ -23201,8 +23168,8 @@
         "workflow-first",
         "core"
       ],
-      "nodeCount": 93,
-      "edgeCount": 119,
+      "nodeCount": 92,
+      "edgeCount": 117,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.task_available",
@@ -23596,22 +23563,6 @@
           "position": {
             "x": 380,
             "y": 1740
-          },
-          "outputs": [
-            "yes",
-            "no"
-          ]
-        },
-        {
-          "id": "plan-agent-commit-blocked",
-          "type": "condition.expression",
-          "label": "Plan Commit Blocked?",
-          "config": {
-            "expression": "$ctx.getNodeOutput('run-agent-plan')?.implementationState === 'implementation_done_commit_blocked'"
-          },
-          "position": {
-            "x": 380,
-            "y": 1675
           },
           "outputs": [
             "yes",
@@ -25023,24 +24974,10 @@
           "sourcePort": "default"
         },
         {
-          "id": "run-agent-plan->plan-agent-commit-blocked",
+          "id": "run-agent-plan->plan-agent-ok",
           "source": "run-agent-plan",
-          "target": "plan-agent-commit-blocked",
-          "sourcePort": "default"
-        },
-        {
-          "id": "plan-agent-commit-blocked->claim-stolen",
-          "source": "plan-agent-commit-blocked",
-          "target": "claim-stolen",
-          "sourcePort": "yes",
-          "condition": "$output?.result === true"
-        },
-        {
-          "id": "plan-agent-commit-blocked->plan-agent-ok",
-          "source": "plan-agent-commit-blocked",
           "target": "plan-agent-ok",
-          "sourcePort": "no",
-          "condition": "$output?.result !== true"
+          "sourcePort": "default"
         },
         {
           "id": "plan-agent-ok->run-agent-tests",
@@ -26085,7 +26022,7 @@
       "description": "Direct per-PR progression workflow for bosun-managed tasks. Runs immediately after PR handoff, evaluates a single PR, retries simple CI failures, dispatches focused repair when needed, and performs the first merge-review pass without waiting for the periodic watchdog.",
       "category": "github",
       "enabled": true,
-      "nodeCount": 24,
+      "nodeCount": 23,
       "trigger": "trigger.workflow_call",
       "variables": {
         "mergeMethod": "merge",
@@ -26291,7 +26228,7 @@
             "command": "node",
             "args": [
               "-e",
-              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); const repoRoot=String(process.env.REPO_ROOT||'').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const nodeModulesSource=repoRoot?path.join(repoRoot,'node_modules'):''; const nodeModulesTarget=path.join(wt,'node_modules'); let dependenciesLinked=false; let dependenciesLinkError=''; if(nodeModulesSource&&fs.existsSync(nodeModulesSource)){   if(fs.existsSync(nodeModulesTarget)){     dependenciesLinked=true;   }else{     try{       fs.symlinkSync(nodeModulesSource,nodeModulesTarget,process.platform==='win32'?'junction':'dir');       dependenciesLinked=true;     }catch(e){       dependenciesLinkError=String(e?.message||e);     }   } } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused,dependenciesLinked,dependenciesLinkError,dependencySource:dependenciesLinked?nodeModulesSource:''}));"
+              "const os=require('os'); const path=require('path'); const fs=require('fs'); const {execFileSync}=require('child_process'); const repo=String(process.env.PR_REPO||'').trim(); const branch=String(process.env.PR_BRANCH||'').trim(); const base=String(process.env.PR_BASE||'main').trim(); const num=String(process.env.PR_NUMBER||'0').trim(); if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);} let wt=path.join(os.tmpdir(),'bosun-progfix-'+num.replace(/[^0-9a-z]/gi,'-')); let reused=false; if(fs.existsSync(path.join(wt,'.git'))){   try{     const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();     if(cur===branch){       execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});       execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});       execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});       try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}       reused=true;     }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}   }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}} } if(!reused){   if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}   execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});   execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});   execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});   try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{} } const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim(); if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);} console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused}));"
             ],
             "parseJson": true,
             "failOnError": true,
@@ -26300,8 +26237,7 @@
               "PR_REPO": "{{prParams.repo}}",
               "PR_BRANCH": "{{prParams.branch}}",
               "PR_BASE": "{{prParams.base}}",
-              "PR_NUMBER": "{{prParams.number}}",
-              "REPO_ROOT": "{{repoRoot}}"
+              "PR_NUMBER": "{{prParams.number}}"
             }
           },
           "position": {
@@ -26395,7 +26331,7 @@
           "type": "action.run_agent",
           "label": "Dispatch Focused Fix Agent",
           "config": {
-            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n9. **Do NOT remove PR labels yourself.** The workflow clears `{{labelNeedsFix}}` after a successful push.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n",
+            "prompt": "{{agentPrompt}}\n\n## Workspace\n\nYour working directory is already a git clone of the target repo, checked out on the PR's HEAD branch (`{{setup-pr-worktree.output.branch}}`). The base branch (`origin/{{setup-pr-worktree.output.base}}`) has been fetched.\n\n## CRITICAL RULES — READ BEFORE DOING ANYTHING\n\n1. **Do NOT clone or re-clone the repo** — you are already in it.\n2. **Do NOT create new branches.** Stay on the current branch.\n3. **Do NOT push.** The workflow pushes for you automatically after you finish.\n4. **Do NOT switch branches** with `git checkout` or `git switch`.\n5. **Do NOT run `cd` to change to a different directory.** Stay in the cwd.\n6. Fix ONLY the specific issues listed in the Fix Summary above.\n7. Do NOT merge, approve, or close the PR.\n8. Do NOT touch any other PRs or repos.\n\n## Fix Instructions\n\nUse prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks, failedAnnotations, and any failedLogExcerpt before making changes.\nUse the PR digest (CI diagnostics, log excerpts, annotations, reviews) above to identify the root cause and apply the MINIMAL fix.\n\n- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n- For CI failures: study the error output and apply the MINIMAL code fix.\n- For review feedback: address each comment precisely.\n- After fixing, remove the label:\n  `gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label bosun-needs-fix`\n",
             "sdk": "auto",
             "timeoutMs": 1800000,
             "delegationWatchdogTimeoutMs": "{{delegationWatchdogTimeoutMs}}",
@@ -26433,24 +26369,6 @@
           "position": {
             "x": 220,
             "y": 1020
-          },
-          "outputs": [
-            "default"
-          ]
-        },
-        {
-          "id": "clear-fix-label",
-          "type": "action.run_command",
-          "label": "Clear bosun-needs-fix",
-          "config": {
-            "command": "gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label {{labelNeedsFix}}",
-            "continueOnError": true,
-            "failOnError": false,
-            "timeoutMs": 60000
-          },
-          "position": {
-            "x": 220,
-            "y": 1040
           },
           "outputs": [
             "default"
@@ -26723,22 +26641,8 @@
           "sourcePort": "default"
         },
         {
-          "id": "push-pr-fixes->clear-fix-label",
-          "source": "push-pr-fixes",
-          "target": "clear-fix-label",
-          "sourcePort": "default",
-          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed===true;}catch{return false;}})()"
-        },
-        {
           "id": "push-pr-fixes->cleanup-pr-worktree",
           "source": "push-pr-fixes",
-          "target": "cleanup-pr-worktree",
-          "sourcePort": "default",
-          "condition": "(()=>{try{const d=JSON.parse($ctx.getNodeOutput('push-pr-fixes')?.output||'{}');return d?.pushed!==true;}catch{return true;}})()"
-        },
-        {
-          "id": "clear-fix-label->cleanup-pr-worktree",
-          "source": "clear-fix-label",
           "target": "cleanup-pr-worktree",
           "sourcePort": "default"
         },
@@ -48106,7 +48010,7 @@
       "description": "Complete task execution pipeline: poll for tasks → claim → worktree → agent dispatch → commit detection → PR creation → status transition. Replaces the monolithic TaskExecutor.executeTask() method with a composable workflow DAG.",
       "category": "task-execution",
       "enabled": true,
-      "nodeCount": 93,
+      "nodeCount": 92,
       "trigger": "trigger.task_available",
       "variables": {
         "maxParallel": 3,
@@ -48466,22 +48370,6 @@
           "position": {
             "x": 380,
             "y": 1740
-          },
-          "outputs": [
-            "yes",
-            "no"
-          ]
-        },
-        {
-          "id": "plan-agent-commit-blocked",
-          "type": "condition.expression",
-          "label": "Plan Commit Blocked?",
-          "config": {
-            "expression": "$ctx.getNodeOutput('run-agent-plan')?.implementationState === 'implementation_done_commit_blocked'"
-          },
-          "position": {
-            "x": 380,
-            "y": 1675
           },
           "outputs": [
             "yes",
@@ -49893,24 +49781,10 @@
           "sourcePort": "default"
         },
         {
-          "id": "run-agent-plan->plan-agent-commit-blocked",
+          "id": "run-agent-plan->plan-agent-ok",
           "source": "run-agent-plan",
-          "target": "plan-agent-commit-blocked",
-          "sourcePort": "default"
-        },
-        {
-          "id": "plan-agent-commit-blocked->claim-stolen",
-          "source": "plan-agent-commit-blocked",
-          "target": "claim-stolen",
-          "sourcePort": "yes",
-          "condition": "$output?.result === true"
-        },
-        {
-          "id": "plan-agent-commit-blocked->plan-agent-ok",
-          "source": "plan-agent-commit-blocked",
           "target": "plan-agent-ok",
-          "sourcePort": "no",
-          "condition": "$output?.result !== true"
+          "sourcePort": "default"
         },
         {
           "id": "plan-agent-ok->run-agent-tests",
@@ -50953,7 +50827,7 @@
       "workflowId": "wf-bosun-pr-progressor",
       "workflowName": "Bosun PR Progressor",
       "status": "completed",
-      "nodeCount": 24,
+      "nodeCount": 23,
       "duration": 20000,
       "errorCount": 0,
       "triggerSource": "manual",
@@ -53200,16 +53074,16 @@
       "enabledTools": null,
       "enabledMcpServers": []
     },
-    "background-task-execution": "# Skill: Background Task Execution\r\n\r\n- Send heartbeat updates before work starts, after major milestones, and during long operations.\r\n- Post status notes when a step runs long enough to look stalled.\r\n- Verify the affected code path before marking the task complete.\r\n- Finish only after build, tests, and any required push or PR handoff succeed.\n",
+    "background-task-execution": "# Skill: Background Task Execution\n\n- Send heartbeat updates before work starts, after major milestones, and during long operations.\n- Post status notes when a step runs long enough to look stalled.\n- Verify the affected code path before marking the task complete.\n- Finish only after build, tests, and any required push or PR handoff succeed.\n",
     "pr-workflow": "# Skill: Pull Request Workflow\n\n- Fetch and merge the base branch plus `origin/main` before pushing.\n- Push the task branch and hand off PR lifecycle steps to Bosun.\n- Use a short PR description with Summary, Changes, Testing, and Notes.\n- Never bypass git hooks with `--no-verify`; fix the failing check or note unrelated breakage.\n",
-    "error-recovery": "# Skill: Error Recovery Patterns\r\n\r\n- Classify the failure first: syntax, test, dependency, git, network, config, or resource limits.\r\n- Fix the first real error before chasing downstream noise.\r\n- Prefer the smallest safe change that resolves the root cause.\r\n- If the error is external or flaky, retry with limits and stop rather than papering over it.\n",
-    "tdd-pattern": "# Skill: Test-Driven Development\r\n\r\n- Start with the smallest failing test that proves the target behavior.\r\n- Implement the minimum code required to pass that test.\r\n- Refactor only after the test is green.\r\n- Keep tests deterministic: no real network, random data, or timer-based synchronization.\n",
-    "commit-conventions": "# Skill: Conventional Commits\r\n\r\n- Use Conventional Commits such as `feat:`, `fix:`, `chore:`, or `test:`.\r\n- Keep the subject short, imperative, and scoped to the actual change.\r\n- Mention validation in the handoff or PR notes, not in the subject line.\r\n- Do not bundle unrelated work into the same commit message or commit.\n",
-    "agent-coordination": "# Skill: Multi-Agent Coordination\r\n\r\n- Keep scope ownership clear before editing shared files.\r\n- Prefer small, isolated changes that reduce merge conflict risk.\r\n- Leave concise status notes when handing work to another agent or retry.\r\n- Re-check git status before finalizing so no unrelated edits leak into the task.\n",
-    "bosun-agent-api": "# Skill: Bosun Agent Status API\r\n\r\n- POST `/status` when starting a new phase or when context changes.\r\n- POST `/heartbeat` during active work so Bosun does not requeue the task.\r\n- POST `/error` with concise failure context before aborting.\r\n- POST `/complete` only after verification is done and the task is truly finished.\n",
-    "code-quality-anti-patterns": "# Skill: Code Quality Anti-Patterns\r\n\r\n- Keep caches, lazy singletons, and loaded flags at module scope.\r\n- Await async work or attach `.catch()`; never leave floating promises.\r\n- Wrap hot-path callbacks and handlers in error boundaries.\r\n- Mock external boundaries only; avoid over-mocking the module under test.\r\n- Keep tests deterministic and remove dead branches instead of layering guard code.\n",
-    "skill-codebase-audit": "# Skill: Codebase Annotation Audit\r\n\r\n## Purpose\r\nSystematically audit and annotate a codebase so that *future* AI agents can\r\nnavigate it 4× faster, use 20% fewer tokens, and avoid false-positive changes.\r\nThis skill is **documentation-only** — it MUST NOT fix bugs, refactor code,\r\nor change program behavior.\r\n\r\n## Philosophy — LEAN Annotations\r\n\r\nModern AI coding SDKs (Copilot, Codex, Claude Code) already auto-compact\r\ncontext. Adding a memory/compaction layer on top is wasteful. What *does* help\r\nis **repo-level documentation** that agents read at the start of a session:\r\nsummaries, warnings, architectural notes, and module manifests. These cost zero\r\nruntime tokens and dramatically reduce exploration time.\r\n\r\n## Annotation Format\r\n\r\nUse structured comment headers that agents are trained to recognize:\r\n\r\n```\r\n// CLAUDE:SUMMARY — <module-name>\r\n// <1–3 sentence summary of purpose, key types, and public API>\r\n```\r\n\r\n```\r\n// CLAUDE:WARN — <module-name>\r\n// <non-obvious pitfall, race condition, or constraint agents MUST know>\r\n```\r\n\r\n- Place annotations at the **top of the file**, after imports / shebang.\r\n- Keep each annotation to ≤ 3 lines.\r\n- Do NOT annotate trivial files (configs, lockfiles, generated code).\r\n\r\n## 6-Phase Audit\r\n\r\n### Phase 1 — Inventory\r\nEnumerate every source file. For each file record:\r\n| Field | Value |\r\n|-------|-------|\r\n| path | relative from repo root |\r\n| lang | file extension / language |\r\n| lines | line count |\r\n| has_summary | yes / no |\r\n| has_warn | yes / no |\r\n| category | core / util / test / config / generated |\r\n\r\nOutput: `.bosun/audit/inventory.json`\r\n\r\n### Phase 2 — Summaries\r\nFor every file where `has_summary === false` and `category !== \"generated\"`:\r\n1. Read the file.\r\n2. Write a `CLAUDE:SUMMARY` comment at the top.\r\n3. Stage the file.\r\n\r\n### Phase 3 — Warnings\r\nFor every file, check for non-obvious constraints:\r\n- Singleton/caching requirements (must be module-scope)\r\n- Async fire-and-forget patterns (unhandled rejections)\r\n- Order-dependent initialization\r\n- Platform-specific behavior (Windows paths, etc.)\r\n\r\nAdd `CLAUDE:WARN` comments where found.\r\n\r\n### Phase 4 — Manifest Audit\r\nEnsure `AGENTS.md` (or equivalent) at repo root is accurate:\r\n- Lists all top-level modules with 1-line descriptions.\r\n- Documents build / test / lint commands.\r\n- Documents environment variables.\r\n- Documents commit conventions.\r\n- Lists known constraints or gotchas.\r\n\r\nIf the file is outdated or missing sections, append corrections.\r\n\r\n### Phase 5 — Conformity Check\r\nRe-scan all annotations and validate:\r\n- `CLAUDE:SUMMARY` is present in every non-trivial source file.\r\n- `CLAUDE:WARN` exists for files with known pitfalls.\r\n- No stale annotations reference symbols/functions that no longer exist.\r\n\r\nOutput: `.bosun/audit/conformity-report.json`\r\n\r\n### Phase 6 — Regeneration Schedule\r\nAnnotations rot. Add a `.bosun/audit/schedule.json` with:\r\n```json\r\n{\r\n  \"lastFullAudit\": \"<ISO timestamp>\",\r\n  \"nextRecommendedAudit\": \"<ISO timestamp + 30 days>\",\r\n  \"filesAudited\": <count>,\r\n  \"summariesAdded\": <count>,\r\n  \"warningsAdded\": <count>,\r\n  \"conformityScore\": <0-100>\r\n}\r\n```\r\n\r\n## Hard Rules\r\n\r\n1. **Do NOT change program behavior.** Only add/update comments and documentation.\r\n2. **Do NOT refactor, fix bugs, or rename symbols.** Documentation only.\r\n3. **Do NOT annotate generated files** (lockfiles, build output, `.min.js`, etc.).\r\n4. **Keep summaries ≤ 3 lines.** Agents need density, not essays.\r\n5. **Keep warnings actionable.** \"This is complex\" is useless.\r\n   \"Must call init() before query() — throws otherwise\" is helpful.\r\n6. **Stage files individually** — never `git add .`.\r\n7. **Commit with** `docs(audit): annotate <module>` — not `feat`/`fix`.\r\n\r\n## Success Metrics\r\n- A/B tested: annotated repos show 4× faster agent navigation.\r\n- 20% fewer tokens consumed per task.\r\n- Zero false-positive code changes from confused agents.\n",
-    "custom-tool-creation": "# Skill: Custom Tool Creation & Reuse\r\n\r\n- Reuse an existing tool before writing repetitive inline code.\r\n- Extract durable helpers when the same manual sequence appears more than once.\r\n- Store workspace tools in `.bosun/tools/` with clear titles, tags, and a narrow purpose.\r\n- Promote high-value helpers to global scope only when they are stable and broadly reusable.\n"
+    "error-recovery": "# Skill: Error Recovery Patterns\n\n- Classify the failure first: syntax, test, dependency, git, network, config, or resource limits.\n- Fix the first real error before chasing downstream noise.\n- Prefer the smallest safe change that resolves the root cause.\n- If the error is external or flaky, retry with limits and stop rather than papering over it.\n",
+    "tdd-pattern": "# Skill: Test-Driven Development\n\n- Start with the smallest failing test that proves the target behavior.\n- Implement the minimum code required to pass that test.\n- Refactor only after the test is green.\n- Keep tests deterministic: no real network, random data, or timer-based synchronization.\n",
+    "commit-conventions": "# Skill: Conventional Commits\n\n- Use Conventional Commits such as `feat:`, `fix:`, `chore:`, or `test:`.\n- Keep the subject short, imperative, and scoped to the actual change.\n- Mention validation in the handoff or PR notes, not in the subject line.\n- Do not bundle unrelated work into the same commit message or commit.\n",
+    "agent-coordination": "# Skill: Multi-Agent Coordination\n\n- Keep scope ownership clear before editing shared files.\n- Prefer small, isolated changes that reduce merge conflict risk.\n- Leave concise status notes when handing work to another agent or retry.\n- Re-check git status before finalizing so no unrelated edits leak into the task.\n",
+    "bosun-agent-api": "# Skill: Bosun Agent Status API\n\n- POST `/status` when starting a new phase or when context changes.\n- POST `/heartbeat` during active work so Bosun does not requeue the task.\n- POST `/error` with concise failure context before aborting.\n- POST `/complete` only after verification is done and the task is truly finished.\n",
+    "code-quality-anti-patterns": "# Skill: Code Quality Anti-Patterns\n\n- Keep caches, lazy singletons, and loaded flags at module scope.\n- Await async work or attach `.catch()`; never leave floating promises.\n- Wrap hot-path callbacks and handlers in error boundaries.\n- Mock external boundaries only; avoid over-mocking the module under test.\n- Keep tests deterministic and remove dead branches instead of layering guard code.\n",
+    "skill-codebase-audit": "# Skill: Codebase Annotation Audit\n\n## Purpose\nSystematically audit and annotate a codebase so that *future* AI agents can\nnavigate it 4× faster, use 20% fewer tokens, and avoid false-positive changes.\nThis skill is **documentation-only** — it MUST NOT fix bugs, refactor code,\nor change program behavior.\n\n## Philosophy — LEAN Annotations\n\nModern AI coding SDKs (Copilot, Codex, Claude Code) already auto-compact\ncontext. Adding a memory/compaction layer on top is wasteful. What *does* help\nis **repo-level documentation** that agents read at the start of a session:\nsummaries, warnings, architectural notes, and module manifests. These cost zero\nruntime tokens and dramatically reduce exploration time.\n\n## Annotation Format\n\nUse structured comment headers that agents are trained to recognize:\n\n```\n// CLAUDE:SUMMARY — <module-name>\n// <1–3 sentence summary of purpose, key types, and public API>\n```\n\n```\n// CLAUDE:WARN — <module-name>\n// <non-obvious pitfall, race condition, or constraint agents MUST know>\n```\n\n- Place annotations at the **top of the file**, after imports / shebang.\n- Keep each annotation to ≤ 3 lines.\n- Do NOT annotate trivial files (configs, lockfiles, generated code).\n\n## 6-Phase Audit\n\n### Phase 1 — Inventory\nEnumerate every source file. For each file record:\n| Field | Value |\n|-------|-------|\n| path | relative from repo root |\n| lang | file extension / language |\n| lines | line count |\n| has_summary | yes / no |\n| has_warn | yes / no |\n| category | core / util / test / config / generated |\n\nOutput: `.bosun/audit/inventory.json`\n\n### Phase 2 — Summaries\nFor every file where `has_summary === false` and `category !== \"generated\"`:\n1. Read the file.\n2. Write a `CLAUDE:SUMMARY` comment at the top.\n3. Stage the file.\n\n### Phase 3 — Warnings\nFor every file, check for non-obvious constraints:\n- Singleton/caching requirements (must be module-scope)\n- Async fire-and-forget patterns (unhandled rejections)\n- Order-dependent initialization\n- Platform-specific behavior (Windows paths, etc.)\n\nAdd `CLAUDE:WARN` comments where found.\n\n### Phase 4 — Manifest Audit\nEnsure `AGENTS.md` (or equivalent) at repo root is accurate:\n- Lists all top-level modules with 1-line descriptions.\n- Documents build / test / lint commands.\n- Documents environment variables.\n- Documents commit conventions.\n- Lists known constraints or gotchas.\n\nIf the file is outdated or missing sections, append corrections.\n\n### Phase 5 — Conformity Check\nRe-scan all annotations and validate:\n- `CLAUDE:SUMMARY` is present in every non-trivial source file.\n- `CLAUDE:WARN` exists for files with known pitfalls.\n- No stale annotations reference symbols/functions that no longer exist.\n\nOutput: `.bosun/audit/conformity-report.json`\n\n### Phase 6 — Regeneration Schedule\nAnnotations rot. Add a `.bosun/audit/schedule.json` with:\n```json\n{\n  \"lastFullAudit\": \"<ISO timestamp>\",\n  \"nextRecommendedAudit\": \"<ISO timestamp + 30 days>\",\n  \"filesAudited\": <count>,\n  \"summariesAdded\": <count>,\n  \"warningsAdded\": <count>,\n  \"conformityScore\": <0-100>\n}\n```\n\n## Hard Rules\n\n1. **Do NOT change program behavior.** Only add/update comments and documentation.\n2. **Do NOT refactor, fix bugs, or rename symbols.** Documentation only.\n3. **Do NOT annotate generated files** (lockfiles, build output, `.min.js`, etc.).\n4. **Keep summaries ≤ 3 lines.** Agents need density, not essays.\n5. **Keep warnings actionable.** \"This is complex\" is useless.\n   \"Must call init() before query() — throws otherwise\" is helpful.\n6. **Stage files individually** — never `git add .`.\n7. **Commit with** `docs(audit): annotate <module>` — not `feat`/`fix`.\n\n## Success Metrics\n- A/B tested: annotated repos show 4× faster agent navigation.\n- 20% fewer tokens consumed per task.\n- Zero false-positive code changes from confused agents.\n",
+    "custom-tool-creation": "# Skill: Custom Tool Creation & Reuse\n\n- Reuse an existing tool before writing repetitive inline code.\n- Extract durable helpers when the same manual sequence appears more than once.\n- Store workspace tools in `.bosun/tools/` with clear titles, tags, and a narrow purpose.\n- Promote high-value helpers to global scope only when they are stable and broadly reusable.\n"
   }
 };
 })();
