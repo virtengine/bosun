@@ -11137,6 +11137,15 @@ registerNodeType("action.acquire_worktree", {
           const normalized = String(issue || "").trim();
           if (normalized) recoveryState.detectedIssues.add(normalized);
         }
+        if (
+          /^post-pull/i.test(String(phaseLabel || ""))
+          && (
+            recoveryState.detectedIssues.has("rebase-merge")
+            || recoveryState.detectedIssues.has("unmerged_index")
+          )
+        ) {
+          recoveryState.detectedIssues.add("refresh_conflict");
+        }
         resetManagedWorktree(repoRoot, candidatePath, state.gitDir);
         return true;
       };
@@ -11327,6 +11336,62 @@ registerNodeType("action.acquire_worktree", {
           return false;
         }
       };
+      const canAutoRecoverOwnedTaskBranchRefreshConflict = () => {
+        if (!taskId || !branch) return false;
+        if (!baseBranch || baseBranch === branch) return false;
+        if (taskHasPrReference(currentTaskSnapshot)) return false;
+        const prNumber = Number.parseInt(String(
+          ctx.data?.prNumber || ctx.data?.task?.prNumber || ctx.data?.taskDetail?.prNumber || "",
+        ), 10);
+        if (Number.isFinite(prNumber) && prNumber > 0) return false;
+        if (
+          String(ctx.data?.prUrl || ctx.data?.task?.prUrl || ctx.data?.taskDetail?.prUrl || "").trim()
+        ) {
+          return false;
+        }
+        const canonicalBranchName = deriveTaskBranch({
+          id: taskId,
+          title: pickTaskString(
+            currentTaskSnapshot?.title,
+            ctx.data?.task?.title,
+            ctx.data?.taskDetail?.title,
+            ctx.data?.taskInfo?.title,
+            "",
+          ),
+        });
+        const normalizedBranch = String(branch || "").trim().toLowerCase();
+        return normalizedBranch.startsWith("task/")
+          || branchMatchesTaskOwnership(branch, taskId, canonicalBranchName);
+      };
+      const tryRecoverRefreshConflictByMergingBase = (targetWorktreePath, phaseLabel = "post-pull-merge-recovery") => {
+        if (!canAutoRecoverOwnedTaskBranchRefreshConflict()) return false;
+        try {
+          execGitArgsSync(["merge", "--no-edit", "-X", "ours", baseBranch], {
+            cwd: targetWorktreePath,
+            encoding: "utf8",
+            timeout: fetchTimeout,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          recoveryState.detectedIssues.add("refresh_conflict");
+          ctx.log(
+            node.id,
+            `Recovered stale managed task branch refresh conflict (${phaseLabel}) by merging ${baseBranch} with -X ours: ${targetWorktreePath}`,
+          );
+          return true;
+        } catch {
+          try {
+            execGitArgsSync(["merge", "--abort"], {
+              cwd: targetWorktreePath,
+              encoding: "utf8",
+              timeout: 5000,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+          } catch {
+            // Best-effort cleanup for a failed conflict-recovery merge.
+          }
+          return false;
+        }
+      };
 
       const ensureWorktreeContainsBaseBranch = (targetWorktreePath, phaseLabel = "post-pull") => {
         if (!baseBranch || baseBranch === branch) {
@@ -11366,6 +11431,27 @@ registerNodeType("action.acquire_worktree", {
           return true;
         }
         return false;
+      };
+      const worktreeContainsBaseBranch = (targetWorktreePath) => {
+        if (!baseBranch || baseBranch === branch) {
+          return true;
+        }
+        try {
+          execGitArgsSync(["rev-parse", "--verify", baseBranch], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          execGitArgsSync(["merge-base", "--is-ancestor", baseBranch, "HEAD"], {
+            cwd: targetWorktreePath,
+            timeout: 5000,
+            stdio: ["ignore", "ignore", "ignore"],
+          });
+          return true;
+        } catch {
+          return false;
+        }
       };
 
       const fastForwardDetachedWorktreeToBranchTip = (targetWorktreePath, phaseLabel = "detached-branch-tip") => {
@@ -11418,9 +11504,16 @@ registerNodeType("action.acquire_worktree", {
         }
       };
 
-      const syncReusableWorktreeToBaseBranch = (targetWorktreePath) => {
+      const syncReusableWorktreeToBaseBranch = (
+        targetWorktreePath,
+        { allowConflictMergeRecovery = false } = {},
+      ) => {
         fastForwardDetachedWorktreeToBranchTip(targetWorktreePath);
+        if (worktreeContainsBaseBranch(targetWorktreePath)) {
+          return invalidateStaleReusableTaskBranch(targetWorktreePath, "post-pull-stale-branch");
+        }
         if (shouldSyncFromOrigin()) {
+          let recoveredRefreshConflict = false;
           try {
             execGitArgsSync(["pull", "--rebase", "origin", baseBranchShort], {
               cwd: targetWorktreePath,
@@ -11429,7 +11522,29 @@ registerNodeType("action.acquire_worktree", {
               stdio: ["ignore", "pipe", "pipe"],
             });
           } catch {
-            /* rebase failures are non-fatal only if the worktree remains reusable */
+            if (allowConflictMergeRecovery) {
+              try {
+                execGitArgsSync(["rebase", "--abort"], {
+                  cwd: targetWorktreePath,
+                  encoding: "utf8",
+                  timeout: 5000,
+                  stdio: ["ignore", "pipe", "pipe"],
+                });
+              } catch {
+                // Best-effort cleanup for a failed origin/base rebase.
+              }
+              recoveredRefreshConflict = tryRecoverRefreshConflictByMergingBase(
+                targetWorktreePath,
+                "post-pull-origin-recovery",
+              );
+            }
+          }
+          if (invalidateBrokenReusableWorktree(targetWorktreePath, "post-pull-origin")) {
+            return true;
+          }
+          if (recoveredRefreshConflict) {
+            return ensureWorktreeContainsBaseBranch(targetWorktreePath)
+              || invalidateBrokenReusableWorktree(targetWorktreePath, "post-pull-origin-recovery");
           }
           return ensureWorktreeContainsBaseBranch(targetWorktreePath)
             || invalidateStaleReusableTaskBranch(targetWorktreePath, "post-pull-stale-branch");
@@ -11447,6 +11562,7 @@ registerNodeType("action.acquire_worktree", {
         } catch {
           return false;
         }
+        let recoveredRefreshConflict = false;
         try {
           execGitArgsSync(["rebase", baseBranch], {
             cwd: targetWorktreePath,
@@ -11465,6 +11581,19 @@ registerNodeType("action.acquire_worktree", {
           } catch {
             // Best-effort cleanup for a failed local-base rebase.
           }
+          if (allowConflictMergeRecovery) {
+            recoveredRefreshConflict = tryRecoverRefreshConflictByMergingBase(
+              targetWorktreePath,
+              "post-pull-local-recovery",
+            );
+          }
+        }
+        if (invalidateBrokenReusableWorktree(targetWorktreePath, "post-pull-local")) {
+          return true;
+        }
+        if (recoveredRefreshConflict) {
+          return ensureWorktreeContainsBaseBranch(targetWorktreePath)
+            || invalidateBrokenReusableWorktree(targetWorktreePath, "post-pull-local-recovery");
         }
         return ensureWorktreeContainsBaseBranch(targetWorktreePath)
           || invalidateStaleReusableTaskBranch(targetWorktreePath, "post-pull-stale-branch");
@@ -11555,10 +11684,14 @@ registerNodeType("action.acquire_worktree", {
         if (!isManagedBosunWorktree(worktreePath, repoRoot)) {
           throw new Error(`Worktree creation failed: ${worktreePath} is not an attached managed worktree`);
         }
+        const previousRecoveryPhase = recoveryState.phase;
         recoveryState.recreated = true;
         recoveryState.phase = phaseLabel;
         recoveryState.worktreePath = worktreePath;
         recoveryState.detectedIssues.add("missing_git_metadata");
+        if (/^post-pull/i.test(String(previousRecoveryPhase || ""))) {
+          recoveryState.detectedIssues.add("refresh_conflict");
+        }
         resetManagedWorktree(repoRoot, worktreePath, gitDir);
         fixGitConfigCorruption(repoRoot);
         if (existsSync(worktreePath)) {
@@ -11882,7 +12015,10 @@ registerNodeType("action.acquire_worktree", {
         }
       }
       if (createdFromExistingBranch && !skipInitialBaseSync) {
-        const recreatedFreshWorktree = syncReusableWorktreeToBaseBranch(worktreePath);
+        const recreatedFreshWorktree = syncReusableWorktreeToBaseBranch(
+          worktreePath,
+          { allowConflictMergeRecovery: true },
+        );
         if (recreatedFreshWorktree) {
           createdFromExistingBranch = false;
         }

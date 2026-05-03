@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, extname, relative, resolve } from "node:path";
 import { describe, it, expect } from "vitest";
@@ -61,6 +62,31 @@ function collectSourceFiles(dir, out = []) {
   return out;
 }
 
+function listTrackedSourceFiles() {
+  try {
+    const tracked = execFileSync("git", ["ls-files", "-z"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return tracked
+      .split("\0")
+      .filter(Boolean)
+      .map((file) => resolve(REPO_ROOT, file))
+      .filter((file) => SOURCE_EXTENSIONS.has(extname(file)))
+      .filter((file) => {
+        const relFile = relative(REPO_ROOT, file);
+        if (!relFile || relFile.startsWith("..")) return false;
+        const segments = relFile.split(/[\\/]/).filter(Boolean);
+        if (segments.length === 1) return true;
+        if (segments.some((segment) => EXCLUDED_DIRS.has(segment))) return false;
+        return INCLUDED_ROOTS.has(segments[0]);
+      });
+  } catch {
+    return collectSourceFiles(REPO_ROOT);
+  }
+}
+
 function findStaticRelativeUrlRefs(source) {
   const refs = [];
   const regex = /new\s+URL\(\s*(["'`])((?:\.\.\/|\.\/)[^"'`]+)\1\s*,\s*import\.meta\.url\s*\)/g;
@@ -73,7 +99,7 @@ function findStaticRelativeUrlRefs(source) {
 
 describe("static relative URL paths", () => {
   it("resolves all new URL('./...|../...', import.meta.url) targets", () => {
-    const files = collectSourceFiles(REPO_ROOT);
+    const files = listTrackedSourceFiles();
 
     const missing = [];
 
