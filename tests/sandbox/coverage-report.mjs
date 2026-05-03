@@ -21,6 +21,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
+import {
+  createCoverageStubResult,
+  shouldExecuteOriginalForCoverage,
+} from "./coverage-report-helpers.mjs";
 
 // Parse arguments
 const args = process.argv.slice(2);
@@ -172,6 +176,9 @@ function instrumentForTemplate(templateId) {
     const orig = originalExecutors.get(type);
     nt.execute = async function (...args) {
       nodeTypeCoverage.get(type)?.add(templateId);
+      if (!shouldExecuteOriginalForCoverage(type)) {
+        return createCoverageStubResult(type);
+      }
       return orig(...args);
     };
   }
