@@ -4042,7 +4042,23 @@ describe("execWithRetry", () => {
           },
         };
       }
-      return makeCodexMockThread("timeout-thread-second", "recovered-output");
+      return {
+        id: "timeout-thread-second",
+        runStreamed: async () => ({
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "agent_message",
+                  text: "recovered-output",
+                  meta: { lifecycle: "session_turn_complete" },
+                },
+              };
+            },
+          },
+        }),
+      };
     });
 
     const result = await execWithRetry("recover after timeout", {

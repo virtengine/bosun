@@ -1363,6 +1363,9 @@ function hasSdkPrerequisites(name, runtimeEnv = process.env) {
       || runtimeEnv.AZURE_OPENAI_API_KEY
       || runtimeEnv.AZURE_API_KEY
       || runtimeEnv.AZURE_SWEDEN_OPENAI_API_KEY;
+    if (!hasKey && resolveHarnessNativeSelectionId(runtimeEnv)) {
+      return { ok: true, reason: null };
+    }
     if (!hasKey) {
       return { ok: false, reason: "no OPENAI_API_KEY / AZURE_OPENAI_API_KEY" };
     }
@@ -1454,6 +1457,18 @@ async function withTemporaryEnv(overrides, fn) {
   }
 }
 
+function isAzureOpenAIBaseUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "openai.azure.com"
+      || host.endsWith(".openai.azure.com")
+      || host.endsWith(".cognitiveservices.azure.com");
+  } catch {
+    return false;
+  }
+}
+
 function injectProviderConfigCredentialEnv(baseEnv, providerConfig = null, providerId = "") {
   const env = { ...(baseEnv || {}) };
   const config =
@@ -1528,16 +1543,6 @@ function buildCodexSdkOptions(envInput = process.env, options = {}) {
   const resolved = resolveCodexProfileRuntime(envInput);
   const { env: resolvedEnv, configProvider } = resolved;
   const baseUrl = resolvedEnv.OPENAI_BASE_URL || "";
-  /** @param {string} url */
-  const isAzureOpenAIBaseUrl = (url) => {
-    try {
-      const parsed = new URL(url);
-      const host = String(parsed.hostname || "").toLowerCase();
-      return host === "openai.azure.com" || host.endsWith(".openai.azure.com") || host.endsWith(".cognitiveservices.azure.com");
-    } catch {
-      return false;
-    }
-  };
   const getAzureProviderEndpointEnvKeys = (sectionName) => {
     const normalizedName = String(sectionName || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
     const keys = ["AZURE_OPENAI_ENDPOINT"];
@@ -2009,12 +2014,9 @@ export function resolvePoolSdkName() {
         && SDK_ADAPTERS["openai-native"]
         && !isDisabled("openai-native")
       ) {
-        const prereq = hasSdkPrerequisites("openai-native", process.env);
-        if (prereq.ok) {
-          resolvedSdkName = "openai-native";
-          logResolution("openai-native", `harness primary executor "${harnessSelectionId}"`);
-          return resolvedSdkName;
-        }
+        resolvedSdkName = "openai-native";
+        logResolution("openai-native", `harness primary executor "${harnessSelectionId}"`);
+        return resolvedSdkName;
       }
     }
     const configSdk = normalizePoolSdkName(
