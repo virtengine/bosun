@@ -38,6 +38,20 @@ function runRefreshMirroredUiGitIndex(args) {
   return JSON.parse(output);
 }
 
+function runIsPathWithinRoot(rootPath, candidatePath) {
+  const script = [
+    `const { isPathWithinRoot } = await import(${JSON.stringify(toolModuleUrl)});`,
+    `console.log(JSON.stringify(isPathWithinRoot(${JSON.stringify(rootPath)}, ${JSON.stringify(candidatePath)})));`,
+  ].join("\n");
+  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: "pipe",
+    env: sanitizeGitEnv(),
+  }).trim();
+  return JSON.parse(output);
+}
+
 beforeEach(() => {
   tempDirs.length = 0;
 });
@@ -92,5 +106,26 @@ describe("sync-demo-ui", () => {
     const source = readFileSync(resolve(repoRoot, "tools", "sync-demo-ui.mjs"), "utf8");
 
     expect(source).toContain("refreshMirroredUiGitIndex();");
+  });
+
+  it("treats source-root descendants as in-tree on both Windows and POSIX path forms", () => {
+    expect(
+      runIsPathWithinRoot(
+        "D:\\source\\repos\\virtengine-gh\\bosun\\ui",
+        "D:\\source\\repos\\virtengine-gh\\bosun\\ui\\tabs\\tasks.js",
+      ),
+    ).toBe(true);
+    expect(
+      runIsPathWithinRoot(
+        "/home/runner/work/bosun/bosun/ui",
+        "/home/runner/work/bosun/bosun/ui/tabs/tasks.js",
+      ),
+    ).toBe(true);
+    expect(
+      runIsPathWithinRoot(
+        "/home/runner/work/bosun/bosun/ui",
+        "/home/runner/work/bosun/bosun/site/ui/app.js",
+      ),
+    ).toBe(false);
   });
 });

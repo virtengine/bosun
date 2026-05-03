@@ -41,6 +41,12 @@ function toPosixPath(filePath) {
   return String(filePath || "").replace(/\\/g, "/");
 }
 
+export function isPathWithinRoot(rootPath, candidatePath) {
+  const normalizedRoot = toPosixPath(resolve(rootPath));
+  const normalizedCandidate = toPosixPath(resolve(candidatePath));
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`);
+}
+
 function extractExecFileErrorText(error) {
   return [error?.stdout, error?.stderr, error?.message]
     .map((value) => {
@@ -99,7 +105,7 @@ function rewriteMirroredUiImports(sourceText, sourcePath, targetPath) {
 
   return sourceText.replace(/(\bfrom\s*|\bimport\s*\()\s*(['"])(\.[^'"]+)\2/g, (match, prefix, quote, specifier) => {
     const resolvedImport = resolve(sourceDir, specifier);
-    if (resolvedImport === SOURCE_ROOT || resolvedImport.startsWith(SOURCE_ROOT + "\\")) {
+    if (isPathWithinRoot(SOURCE_ROOT, resolvedImport)) {
       return match;
     }
 
