@@ -400,7 +400,8 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('tests/ui-server.test.mjs');
     expect(prePushHook).toContain('deferring heavyweight local suites to CI/default full runs');
     expect(prePushHook).toContain('tests/*workflow*e2e*.test.mjs)');
-    expect(prePushHook).toContain('tests/bosun-mcp-server.test.mjs|tests/ui-server.test.mjs)');
+    expect(prePushHook).toContain('tests/ui-server.test.mjs)');
+    expect(prePushHook).not.toContain('tests/bosun-mcp-server.test.mjs|tests/ui-server.test.mjs)');
     expect(prePushHook).not.toContain('tests/ui-server*.test.mjs');
     expect(prePushHook).toContain('local -a slice=("${regular_tests[@]:$offset:$batch_size}")');
     expect(prePushHook).toContain('local -a slice=("${tests[@]:$offset:$batch_size}")');

@@ -467,7 +467,7 @@ run_vitest_batches() {
       tests/*workflow*e2e*.test.mjs)
         standalone_serialized_tests+=("$test_file")
         ;;
-      tests/bosun-mcp-server.test.mjs|tests/ui-server.test.mjs)
+      tests/ui-server.test.mjs)
         serialized_tests+=("$test_file")
         ;;
       *)
