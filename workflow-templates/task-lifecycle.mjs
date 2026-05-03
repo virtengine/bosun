@@ -185,7 +185,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     // ── Execute agent (phase 1: planning) ───────────────────────────────
     agentPhase("run-agent-plan", "Agent Plan",
       "{{_taskPrompt}}\n\nExecution phase: planning. Produce a concrete implementation plan and identify required tests. Do not make code changes in this phase. If inspection shows the requested behavior is already present, stop after a concise architect handoff for the next phase, explicitly note that no planning-side code changes were made, and include the required completion signal instead of widening scope.",
-      { mode: "plan", requireTaskPromptCompleteness: true, requireCompletionSignal: true, delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1740 }),
+      { mode: "plan", continueOnSession: false, requireTaskPromptCompleteness: true, requireCompletionSignal: true, delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1740 }),
 
     // ── Execute agent (phase 2: tests-first) ────────────────────────────
     agentPhase("run-agent-tests", "Agent Tests",
@@ -200,6 +200,10 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     node("plan-agent-ok", "condition.expression", "Plan Agent Succeeded?", {
       expression: "$ctx.getNodeOutput('run-agent-plan')?.success === true",
     }, { x: 380, y: 1740, outputs: ["yes", "no"] }),
+
+    node("plan-agent-commit-blocked", "condition.expression", "Plan Commit Blocked?", {
+      expression: "$ctx.getNodeOutput('run-agent-plan')?.implementationState === 'implementation_done_commit_blocked'",
+    }, { x: 380, y: 1675, outputs: ["yes", "no"] }),
 
     node("tests-agent-ok", "condition.expression", "Tests Agent Succeeded?", {
       expression: "$ctx.getNodeOutput('run-agent-tests')?.success === true",
@@ -700,7 +704,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     edge("read-workflow-contract", "workflow-contract-validation"),
     edge("workflow-contract-validation", "build-prompt"),
     edge("build-prompt", "run-agent-plan"),
-    edge("run-agent-plan", "plan-agent-ok"),
+    edge("run-agent-plan", "plan-agent-commit-blocked"),
+    edge("plan-agent-commit-blocked", "claim-stolen", { condition: "$output?.result === true", port: "yes" }),
+    edge("plan-agent-commit-blocked", "plan-agent-ok", { condition: "$output?.result !== true", port: "no" }),
     edge("plan-agent-ok", "run-agent-tests", { condition: "$output?.result === true", port: "yes" }),
     edge("plan-agent-ok", "plan-agent-worktree-reacquire-needed", { condition: "$output?.result !== true", port: "no" }),
     edge("plan-agent-worktree-reacquire-needed", "recover-worktree", { condition: "$output?.result === true", port: "yes" }),

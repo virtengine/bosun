@@ -7492,12 +7492,13 @@ registerNodeType("action.continue_session", {
       ctx.data.sessionId = threadId;
       ctx.data.threadId = threadId;
 
+      const workflowManagedSessionId = workflowSessionLink?.binding?.sessionId || sessionId || threadId || null;
       return {
         ...finalizeWorkflowLinkedSessionExecution(workflowSessionLink, {
           ...result,
           success: result.success,
           status: result.success ? "completed" : "failed",
-          sessionId: threadId,
+          sessionId: workflowManagedSessionId,
           threadId,
           output: result.output,
           error: result.success ? null : result.error,
@@ -7532,12 +7533,13 @@ registerNodeType("action.continue_session", {
         ctx.data.threadId = threadId;
       }
 
+      const workflowManagedSessionId = workflowSessionLink?.binding?.sessionId || sessionId || threadId || null;
       return {
         ...finalizeWorkflowLinkedSessionExecution(workflowSessionLink, {
           ...result,
           success: result.success,
           status: result.success ? "completed" : "failed",
-          sessionId: threadId,
+          sessionId: workflowManagedSessionId,
           threadId,
           output: result.output,
           error: result.success ? null : result.error,
@@ -7660,12 +7662,13 @@ registerNodeType("action.restart_agent", {
         ctx.data.threadId = newThreadId;
       }
 
+      const workflowManagedSessionId = workflowSessionLink?.binding?.sessionId || sessionId || newThreadId || null;
       return {
         ...finalizeWorkflowLinkedSessionExecution(workflowSessionLink, {
           ...result,
           success: result.success,
           status: result.success ? "completed" : "failed",
-          sessionId: newThreadId || workflowSessionLink?.binding?.sessionId || null,
+          sessionId: workflowManagedSessionId,
           threadId: newThreadId || workflowSessionLink?.binding?.threadId || null,
           output: result.output,
           error: result.success ? null : result.error,
