@@ -8,7 +8,7 @@ describe("workflow runtime regression guards", () => {
 
   it("retries agent workflow runs with a fresh session when stale session state crashes", () => {
     expect(actionSource).toContain("function isNullSessionIdCrash");
-    expect(actionSource).toContain("stale session state detected, retrying with a fresh managed session");
+    expect(actionSource).toContain('retryWithFreshManagedSession("stale session state detected")');
     expect(actionSource).toContain("sessionId: freshSessionId");
     expect(actionSource).toContain("autoRecover: false");
   });
