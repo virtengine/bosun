@@ -454,7 +454,13 @@ describe("vitest-runner", () => {
   });
 
   it("adds the runner config loader by default", () => {
-    expect(resolveVitestArgs(["run"])).toEqual([
+    const root = createFixture();
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0" }),
+    );
+
+    expect(resolveVitestArgs(["run"], { startDir: root, packageRoot: root })).toEqual([
       "run",
       "--configLoader",
       "runner",
