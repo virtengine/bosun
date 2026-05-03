@@ -7644,6 +7644,139 @@ describe("WorkflowEngine - run history details", () => {
     ]));
   });
 
+  it("resets from claim-task when from_failed sees a missing retried worktree path", async () => {
+    const executedNodes = [];
+    registerNodeType("test.retry_resume_missing_retried_worktree", {
+      describe: () => "Records retry execution when from_failed must discard stale retry-acquire-wt output",
+      schema: { type: "object", properties: {} },
+      async execute(node, ctx) {
+        executedNodes.push(node.id);
+        if (node.id === "claim-task") {
+          ctx.data._claimToken = "claim-refreshed";
+          return { success: true, taskId: "task-missing-retried-worktree-1", claimToken: "claim-refreshed" };
+        }
+        if (node.id === "acquire-worktree" || node.id === "retry-acquire-wt") {
+          const worktreePath = join(tmpDir, `${node.id}-fresh-worktree`);
+          ctx.data.worktreePath = worktreePath;
+          return { success: true, worktreePath };
+        }
+        return { ok: true, nodeId: node.id };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "claim-task", type: "test.retry_resume_missing_retried_worktree", label: "Claim Task", config: {} },
+        { id: "acquire-worktree", type: "test.retry_resume_missing_retried_worktree", label: "Acquire Worktree", config: {} },
+        { id: "run-agent-plan", type: "test.retry_resume_missing_retried_worktree", label: "Plan", config: {} },
+        { id: "retry-acquire-wt", type: "test.retry_resume_missing_retried_worktree", label: "Retry Acquire WT", config: {} },
+        { id: "run-agent-tests", type: "test.retry_resume_missing_retried_worktree", label: "Agent Tests", config: {} },
+        { id: "run-agent-implement", type: "test.retry_resume_missing_retried_worktree", label: "Implement", config: {} },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "claim-task" },
+        { id: "e2", source: "claim-task", target: "acquire-worktree" },
+        { id: "e3", source: "acquire-worktree", target: "run-agent-plan" },
+        { id: "e4", source: "run-agent-plan", target: "retry-acquire-wt" },
+        { id: "e5", source: "retry-acquire-wt", target: "run-agent-tests" },
+        { id: "e6", source: "run-agent-tests", target: "run-agent-implement" },
+      ],
+      {
+        id: "wf-retry-resume-missing-retried-worktree",
+        name: "Retry Resume Missing Retried Worktree Workflow",
+        metadata: { installedFrom: "template-task-lifecycle" },
+      },
+    );
+    engine.save(wf);
+
+    const runsDir = join(tmpDir, "runs");
+    const interruptedRunId = "run-retry-resume-missing-retried-worktree";
+    const staleRetryWorktreePath = join(tmpDir, "missing-retried-worktree");
+
+    writeFileSync(
+      join(runsDir, "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: 1000,
+            endedAt: null,
+            resumable: true,
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(runsDir, `${interruptedRunId}.json`),
+      JSON.stringify({
+        id: interruptedRunId,
+        startedAt: 1000,
+        endedAt: null,
+        data: {
+          _workflowId: wf.id,
+          _workflowName: wf.name,
+          taskId: "task-missing-retried-worktree-1",
+          _claimToken: "claim-persisted-token",
+          _claimInstanceId: "wf-persisted-claim",
+          worktreePath: staleRetryWorktreePath,
+        },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "claim-task": NodeStatus.COMPLETED,
+          "acquire-worktree": NodeStatus.COMPLETED,
+          "run-agent-plan": NodeStatus.COMPLETED,
+          "retry-acquire-wt": NodeStatus.COMPLETED,
+          "run-agent-tests": NodeStatus.RUNNING,
+          "run-agent-implement": NodeStatus.PENDING,
+        },
+        nodeOutputs: {
+          trigger: { triggered: true },
+          "claim-task": {
+            success: true,
+            taskId: "task-missing-retried-worktree-1",
+            claimToken: "claim-persisted-token",
+            instanceId: "wf-persisted-claim",
+          },
+          "acquire-worktree": { success: true, worktreePath: join(tmpDir, "older-worktree") },
+          "run-agent-plan": { success: true, nodeId: "run-agent-plan" },
+          "retry-acquire-wt": { success: true, worktreePath: staleRetryWorktreePath },
+        },
+        nodeStatusEvents: [],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(runsDir, "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed" });
+
+    expect(executedNodes).toEqual([
+      "claim-task",
+      "acquire-worktree",
+      "run-agent-plan",
+      "retry-acquire-wt",
+      "run-agent-tests",
+      "run-agent-implement",
+    ]);
+    const resumedRun = engine.getRunDetail(retryRunId);
+    const [resumeRevision, replayRevision] = resumedRun.detail.dagState.revisions;
+    expect(resumeRevision?.preservedCompletedNodeIds).toEqual(["trigger"]);
+    expect(replayRevision?.focusNodeIds).toEqual(expect.arrayContaining([
+      "claim-task",
+      "acquire-worktree",
+      "run-agent-plan",
+      "retry-acquire-wt",
+      "run-agent-tests",
+      "run-agent-implement",
+    ]));
+  });
+
   it("resumes interrupted runs with replan_from_failed when issue-advisor requests replanning", async () => {
     const wf = makeSimpleWorkflow(
       [{ id: "trigger", type: "trigger.manual", label: "Start", config: {} }],
@@ -10007,8 +10140,9 @@ describe("Session chaining - action.run_agent", () => {
     const result = await handler.execute(node, ctx, mockEngine);
 
     expect(result.threadId).toBe("thread-abc-123");
-    expect(result.sessionId).toBe("thread-abc-123");
-    expect(ctx.data.sessionId).toBe("thread-abc-123");
+    expect(result.sessionId).toMatch(/:agent:.*:a1:turn$/);
+    expect(result.sessionId).not.toBe(result.threadId);
+    expect(ctx.data.sessionId).toBe(result.sessionId);
     expect(ctx.data.threadId).toBe("thread-abc-123");
     expect(launchEphemeralThread).toHaveBeenCalledTimes(1);
     expect(launchEphemeralThread.mock.calls[0][3]).toEqual(
@@ -13417,8 +13551,9 @@ Status:
     const result = await handler.execute(node, ctx, mockEngine);
 
     expect(result.threadId).toBe("thread-abc-123");
-    expect(result.sessionId).toBe("thread-abc-123");
-    expect(ctx.data.sessionId).toBe("thread-abc-123");
+    expect(result.sessionId).toMatch(/:agent:.*:a1b:turn$/);
+    expect(result.sessionId).not.toBe(result.threadId);
+    expect(ctx.data.sessionId).toBe(result.sessionId);
     expect(ctx.data.threadId).toBe("thread-abc-123");
     expect(result.attempts).toBe(2);
     expect(mockEngine.services.agentPool.execWithRetry).toHaveBeenCalledTimes(1);
@@ -18028,14 +18163,20 @@ describe("WorkflowEngine.getTaskTraceEvents", () => {
       completedTaskCount: 1,
       messageCount: 1,
     }));
-    expect(detail?.detail?.data?._workflowTeamState?.tasks?.[0]).toEqual(
+    const completedTask = detail?.detail?.data?._workflowTeamState?.tasks?.find((task) =>
+      task?.status === "completed" && task?.claimedBy === "dev-1" && task?.completedBy === "dev-1",
+    );
+    expect(completedTask).toEqual(
       expect.objectContaining({
         status: "completed",
         claimedBy: "dev-1",
         completedBy: "dev-1",
       }),
     );
-    expect(detail?.detail?.data?._workflowTeamState?.messages?.[0]).toEqual(
+    const directMessage = detail?.detail?.data?._workflowTeamState?.messages?.find((message) =>
+      message?.kind === "direct" && message?.fromMemberId === "dev-1",
+    );
+    expect(directMessage).toEqual(
       expect.objectContaining({
         kind: "direct",
         fromMemberId: "dev-1",

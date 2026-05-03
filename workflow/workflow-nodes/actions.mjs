@@ -873,6 +873,29 @@ function hasWorkflowAgentPlanHandoffText(text = "") {
   );
 }
 
+function hasWorkflowAgentArchitectPlanningDisclaimer(text = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  const isArchitectPlanningContext =
+    /\barchitect(?:\/planning|\s+planning|\s+handoff|\s+phase)?\b/i.test(normalized)
+    && (
+      /\beditor phase\b/i.test(normalized)
+      || /\beditor to execute\b/i.test(normalized)
+      || /\bimplementation remains pending\b/i.test(normalized)
+      || /\bplanning mode\b/i.test(normalized)
+    );
+  if (!isArchitectPlanningContext) return false;
+  const noImplementationClaim =
+    /cannot truthfully claim implementation is complete/i.test(normalized)
+    || /phase explicitly forbids code changes/i.test(normalized)
+    || /do not implement code changes in this phase/i.test(normalized);
+  const explicitHandoff =
+    /\barchitect handoff\b/i.test(normalized)
+    || /\btask complete:\s*architect handoff/i.test(normalized)
+    || /\bimplementation remains pending for editor phase\b/i.test(normalized);
+  return noImplementationClaim && explicitHandoff;
+}
+
 const WORKFLOW_AGENT_ENV_BLOCK_PATTERNS = [
   /prompt[_ ]quality/i,
   /missing task (description|url)/i,
@@ -1394,6 +1417,66 @@ function normalizeWorkflowAgentImplementationCommitBlock(result = {}, digest = {
   };
 }
 
+function hasWorkflowAgentVerifiedExistingCommitEvidence(ctx) {
+  const readNodeOutput = (nodeId) => {
+    if (typeof ctx?.getNodeOutput === "function") {
+      return ctx.getNodeOutput(nodeId);
+    }
+    return ctx?.nodeOutputs?.get?.(nodeId);
+  };
+  for (const nodeId of ["run-agent-tests", "run-agent-plan"]) {
+    const output = readNodeOutput(nodeId);
+    const text = collectWorkflowAgentResultFragments(output).join("\n").trim();
+    if (!text) continue;
+    const hasCommitEvidence =
+      /already implemented in commit/i.test(text)
+      || /task was already implemented in commit/i.test(text)
+      || /commit [`'"]?[0-9a-f]{7,40}/i.test(text);
+    const hasVerificationEvidence =
+      /focused .*tests pass/i.test(text)
+      || /build succeeds/i.test(text)
+      || /build completed successfully/i.test(text);
+    if (hasCommitEvidence && hasVerificationEvidence) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shouldPromoteNoDiffImplementRetryToCommitBlocked(text = "", ctx = null) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  const reportsNoDiff =
+    /no actual diff/i.test(normalized)
+    || /nothing new to commit/i.test(normalized)
+    || /no diff in [`'"][^`'"]+[`'"]/i.test(normalized);
+  return reportsNoDiff && hasWorkflowAgentVerifiedExistingCommitEvidence(ctx);
+}
+
+function normalizeWorkflowAgentImplementResult(result = {}, digest = {}, ctx = null) {
+  const normalized = normalizeWorkflowAgentImplementationCommitBlock(result, digest);
+  if (String(normalized?.implementationState || "").trim() === "implementation_done_commit_blocked") {
+    return normalized;
+  }
+  const text = [
+    ...collectWorkflowAgentResultFragments(normalized),
+    ...collectWorkflowAgentDigestFragments(digest),
+  ].join("\n");
+  if (!shouldPromoteNoDiffImplementRetryToCommitBlocked(text, ctx)) {
+    return normalized;
+  }
+  const preferredError = /no actual diff|nothing new to commit/i.test(text)
+    ? text
+    : String(normalized?.error || "").trim() || text || "implementation_done_commit_blocked";
+  return {
+    ...normalized,
+    success: false,
+    blockedReason: "implementation_done_commit_blocked",
+    implementationState: "implementation_done_commit_blocked",
+    error: preferredError,
+  };
+}
+
 function isWorkflowAgentDelegationInspectionStall(text = "") {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalized) return false;
@@ -1541,6 +1624,35 @@ function appendWorkflowAgentCompletionContract(prompt) {
     return nextPrompt;
   }
   return `${nextPrompt}\n\n## Completion Contract\nStop once the current workflow phase is complete. Do not begin later workflow phases in this run.\nEnd your final response with one explicit completion signal line, for example:\n- Completion: <summary>\n- Completion message: <summary>\n- Task complete: <summary>\n- DONE: <summary>\n- COMPLETED: <summary>\n- task_complete`;
+}
+
+function buildWorkflowStepAwareContinuePrompt(node, result = {}, attempt = 1) {
+  const stepLabel = String(node?.label || node?.id || "workflow step").trim() || "workflow step";
+  if (result?._awaitingCompletionSignal === true || result?.error === "completion_signal_missing") {
+    return [
+      "# CONTINUE WORK — WORKFLOW STEP NOT COMPLETE",
+      "",
+      `Continue the current workflow step: ${stepLabel}.`,
+      "The overall task is not the completion target for this prompt; downstream workflow steps remain and Bosun will handle them separately.",
+      "If prior transcript context is compressed or missing, reopen the relevant files or rerun the narrowest focused checks you need instead of claiming you cannot continue.",
+      "Return only when this workflow step is fully complete and end your final response with one explicit completion signal line such as:",
+      "- Completion: <summary>",
+      "- Completion message: <summary>",
+      "- Task complete: <summary>",
+      "- DONE: <summary>",
+      "- COMPLETED: <summary>",
+      "- task_complete",
+      `Continuation attempt: ${attempt}`,
+    ].join("\n");
+  }
+  return [
+    "# CONTINUE WORK — RESUME CURRENT WORKFLOW STEP",
+    "",
+    `Continue the current workflow step: ${stepLabel}.`,
+    "Resume exactly where you left off, avoid redoing completed work, and finish the assigned work for this workflow step before returning.",
+    "Downstream workflow steps remain and Bosun will handle them separately after this step succeeds.",
+    `Continuation attempt: ${attempt}`,
+  ].join("\n");
 }
 
 const ZERO_GIT_SHA = "0000000000000000000000000000000000000000";
@@ -2285,6 +2397,9 @@ function classifyWorkflowAgentBlockedStatus(result = {}, options = {}) {
   const isPlanMode = String(options?.mode || "").trim().toLowerCase() === "plan"
     || String(options?.nodeId || "").trim() === "run-agent-plan";
   const isPlanHandoff = isPlanMode && hasWorkflowAgentPlanHandoffText(text);
+  if (result?.success === true && hasWorkflowAgentArchitectPlanningDisclaimer(text)) {
+    return null;
+  }
   if (isPlanMode && isWorkflowAgentPlanPushOnlyHandoffText(text)) {
     return "implementation_done_commit_blocked";
   }
@@ -2299,6 +2414,17 @@ function classifyWorkflowAgentBlockedStatus(result = {}, options = {}) {
     return "blocked_by_repo";
   }
   if (isWorkflowAgentDelegationInspectionStall(text)) {
+    return "blocked_by_env";
+  }
+  if (
+    /missing explicit completion signal/i.test(text)
+    && (
+      /delegated session\(s\) still running/i.test(text)
+      || /multiple delegated coding sessions/i.test(text)
+      || /zero transcript output/i.test(text)
+      || /no verifiable completion output yet/i.test(text)
+    )
+  ) {
     return "blocked_by_env";
   }
   if (WORKFLOW_AGENT_ENV_BLOCK_PATTERNS.some((pattern) => pattern.test(text))) {
@@ -2369,10 +2495,16 @@ function normalizeWorkflowAgentBlockedResult(result = {}, options = {}) {
     if (!String(normalized.implementationState || "").trim()) {
       normalized.implementationState = "implementation_done_commit_blocked";
     }
-    if (!String(normalized.blockedReason || "").trim()) {
+    if (
+      !String(normalized.blockedReason || "").trim()
+      || String(normalized.blockedReason || "").trim() === "incomplete_no_completion_signal"
+    ) {
       normalized.blockedReason = "implementation_done_commit_blocked";
     }
-  } else if (!String(normalized.blockedReason || "").trim()) {
+  } else if (
+    !String(normalized.blockedReason || "").trim()
+    || String(normalized.blockedReason || "").trim() === "incomplete_no_completion_signal"
+  ) {
     normalized.blockedReason = blockedStatus;
   }
 
@@ -3101,7 +3233,7 @@ registerNodeType("action.run_agent", {
         );
       }
     };
-    const toolContract = buildWorkflowAgentToolContract(cwd, agentProfileId);
+    const toolContract = buildWorkflowAgentToolContract(cwd, agentProfileId, { effectiveMode });
     const effectiveSystemPrompt = String(configuredSystemPrompt || "").trim();
     assertStableSystemPrompt(effectiveSystemPrompt);
     const trackedRepoAreas = [
@@ -3197,13 +3329,42 @@ registerNodeType("action.run_agent", {
       finalPrompt = appendWorkflowTaskPromptContext(finalPrompt, promptCompleteness);
     }
 
+    const inferManagedWorktreeRepoRoot = (candidate) => {
+      let current = String(candidate || "").trim();
+      if (!current) return "";
+      try {
+        current = resolve(current);
+      } catch {
+        return "";
+      }
+      while (current) {
+        const parent = dirname(current);
+        const grandparent = dirname(parent);
+        if (
+          basename(parent).toLowerCase() === "worktrees"
+          && basename(grandparent).toLowerCase() === ".bosun"
+        ) {
+          const repoRootCandidate = dirname(grandparent);
+          const topLevel = resolveGitTopLevelRoot(repoRootCandidate);
+          if (topLevel || hasGitMetadata(repoRootCandidate)) {
+            return resolve(topLevel || repoRootCandidate);
+          }
+        }
+        if (!parent || parent === current) break;
+        current = parent;
+      }
+      return "";
+    };
     const agentRepoRootCandidate = String(
       ctx.data?.repoRoot ||
       ctx.data?.task?.repoRoot ||
       ctx.data?.taskDetail?.repoRoot ||
       cwd,
     ).trim() || cwd;
-    const agentRepoRoot = findContainingGitRepoRoot(agentRepoRootCandidate) || agentRepoRootCandidate;
+    const agentRepoRoot =
+      inferManagedWorktreeRepoRoot(cwd)
+      || findContainingGitRepoRoot(agentRepoRootCandidate)
+      || agentRepoRootCandidate;
     if (isManagedBosunWorktree(cwd, agentRepoRoot)) {
       const worktreeState = inspectManagedWorktreeState(cwd);
       if (worktreeState.invalid) {
@@ -4325,17 +4486,19 @@ registerNodeType("action.run_agent", {
               node.id,
               `${passLabel} Recovery: harness-agent-service taskKey=${recoveryTaskKey} retries=${sessionRetries} continues=${maxContinues}`.trim(),
             );
-            const buildRunTaskOptions = (overrides = {}) => ({
-              autoRecover,
-              taskKey: recoveryTaskKey,
-              cwd,
-              timeoutMs,
-              maxRetries: sessionRetries,
-              maxContinues,
-              requireCompletionSignal,
-              sessionType: trackedSessionType,
-              ...(managedSessionId ? { sessionId: managedSessionId } : {}),
-              ...(managedSessionScope ? { sessionScope: managedSessionScope } : {}),
+             const buildRunTaskOptions = (overrides = {}) => ({
+               autoRecover,
+               taskKey: recoveryTaskKey,
+               cwd,
+               timeoutMs,
+               maxRetries: sessionRetries,
+               maxContinues,
+               requireCompletionSignal,
+               buildContinuePrompt: (previousResult, attempt) =>
+                 buildWorkflowStepAwareContinuePrompt(node, previousResult, attempt),
+               sessionType: trackedSessionType,
+               ...(managedSessionId ? { sessionId: managedSessionId } : {}),
+               ...(managedSessionScope ? { sessionScope: managedSessionScope } : {}),
               ...(workflowParentSessionId ? { parentSessionId: workflowParentSessionId } : {}),
               ...(workflowRootSessionId ? { rootSessionId: workflowRootSessionId } : {}),
               metadata: launchExtra.metadata,
@@ -4623,7 +4786,7 @@ registerNodeType("action.run_agent", {
           items: normalizedItems,
         }, { mode: effectiveMode, nodeId: node.id });
         if (node.id === "run-agent-implement") {
-          result = normalizeWorkflowAgentImplementationCommitBlock(result, digest);
+          result = normalizeWorkflowAgentImplementResult(result, digest, ctx);
         }
         success = result?.success === true;
         ctx.log(node.id, `${passLabel || "Agent"} completed: success=${success} streamEvents=${streamEventCount}`);
@@ -4813,7 +4976,7 @@ registerNodeType("action.run_agent", {
 
         if (!success) {
           const finalResult = node.id === "run-agent-implement"
-            ? normalizeWorkflowAgentImplementationCommitBlock(result, digest)
+            ? normalizeWorkflowAgentImplementResult(result, digest, ctx)
             : result;
           return {
             ...finalizedSession,
@@ -6301,6 +6464,7 @@ registerNodeType("action.create_pr", {
           existing: true,
           prUrl: String(existing?.url || "").trim(),
           prNumber,
+          repoSlug: repoSlug || null,
           title,
           body,
           base: base || String(existing?.baseRefName || "").trim() || null,
@@ -6390,6 +6554,7 @@ registerNodeType("action.create_pr", {
         success: true,
         prUrl,
         prNumber,
+        repoSlug: repoSlug || null,
         title,
         body,
         base,
@@ -6427,6 +6592,7 @@ registerNodeType("action.create_pr", {
         labels,
         reviewers,
         cwd,
+        repoSlug: repoSlug || null,
         ghError: errorMsg,
         createdByBosun: true,
       });

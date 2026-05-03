@@ -1678,6 +1678,24 @@ function summarizePersistedTaskMeta(meta = {}) {
 
 function isTaskLikePersistedValue(value, { key = "" } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const normalizedKey = String(key || "").trim().toLowerCase();
+  if (
+    normalizedKey.includes("workflowevents")
+    || normalizedKey.includes("traceevents")
+    || value?.eventType
+    || (
+      normalizedKey === "tasks" &&
+      (
+        value?.claimedBy != null ||
+        value?.completedBy != null ||
+        value?.assignee != null ||
+        value?.memberId != null ||
+        value?.channelId != null
+      )
+    )
+  ) {
+    return false;
+  }
   if (
     Array.isArray(value?.nodes) ||
     Array.isArray(value?.edges) ||
@@ -1693,7 +1711,6 @@ function isTaskLikePersistedValue(value, { key = "" } = {}) {
   ) {
     return false;
   }
-  const normalizedKey = String(key || "").trim().toLowerCase();
   const keySignalsTask =
     normalizedKey === "task" ||
     normalizedKey === "taskinfo" ||
@@ -3751,6 +3768,10 @@ export class WorkflowEngine extends EventEmitter {
       nodeOutputs?.["acquire-worktree"] && typeof nodeOutputs["acquire-worktree"] === "object"
         ? nodeOutputs["acquire-worktree"]
         : {};
+    const retryAcquireWorktreeOutput =
+      nodeOutputs?.["retry-acquire-wt"] && typeof nodeOutputs["retry-acquire-wt"] === "object"
+        ? nodeOutputs["retry-acquire-wt"]
+        : {};
     const claimTaskFailedBeforeWorktree =
       nodeStatuses?.["claim-task"] === NodeStatus.COMPLETED &&
       (
@@ -3768,9 +3789,22 @@ export class WorkflowEngine extends EventEmitter {
       String(data?.claimToken || data?._claimToken || "").trim()
       || String(data?.worktreePath || "").trim()
       || String(claimTaskOutput.claimToken || claimTaskOutput.id || claimTaskOutput.taskId || "").trim()
+      || String(retryAcquireWorktreeOutput.worktreePath || "").trim()
       || String(acquireWorktreeOutput.worktreePath || "").trim(),
     );
     if (!hadClaimOrWorktreeState) return null;
+    const latestRetriedWorktreePath = String(retryAcquireWorktreeOutput.worktreePath || "").trim();
+    if (
+      latestRetriedWorktreePath
+      && (
+        !existsSync(latestRetriedWorktreePath)
+        || !existsSync(join(latestRetriedWorktreePath, ".git"))
+      )
+    ) {
+      return Array.isArray(def?.nodes) && def.nodes.some((node) => String(node?.id || "").trim() === "claim-task")
+        ? "claim-task"
+        : null;
+    }
     const explicitReplanRetry =
       retryMode === "replan_from_failed"
       || retryMode === "replan_subgraph";
