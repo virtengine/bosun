@@ -1,10 +1,14 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const indexSource = readFileSync(resolve(process.cwd(), "ui", "index.html"), "utf8");
-const appSource = readFileSync(resolve(process.cwd(), "ui", "app.js"), "utf8");
-const siteAppSource = readFileSync(resolve(process.cwd(), "site", "ui", "app.js"), "utf8");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const indexSource = readFileSync(resolve(repoRoot, "ui", "index.html"), "utf8");
+const appSource = readFileSync(resolve(repoRoot, "ui", "app.js"), "utf8");
+const siteAppSource = readFileSync(resolve(repoRoot, "site", "ui", "app.js"), "utf8");
+const lazyTasksImportPattern = /\(\)\s*=>\s*import\((["'])\.\/tabs\/tasks\.js\1\)/;
+const lazyAgentsImportPattern = /\(\)\s*=>\s*import\((["'])\.\/tabs\/agents\.js\1\)/;
 
 describe("ui index module boot", () => {
   it("registers the import map before booting app.js", () => {
@@ -31,8 +35,8 @@ describe("ui index module boot", () => {
       expect(source).not.toContain('Function("u", "return import(u)")');
       expect(source).toContain('window.importShim(tabPath)');
       expect(source).toContain('nativeLoader()');
-      expect(source).toContain('() => import("./tabs/tasks.js")');
-      expect(source).toContain('() => import("./tabs/agents.js")');
+      expect(source).toMatch(lazyTasksImportPattern);
+      expect(source).toMatch(lazyAgentsImportPattern);
       expect(source).toContain('resolveLazyTabComponent');
       expect(source).toContain('loader.key = `${tabPath}::${exportName || "default"}`');
     }

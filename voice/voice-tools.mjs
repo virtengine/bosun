@@ -959,6 +959,14 @@ function shouldUseWorkspaceCommandShell(commandName) {
   return process.platform === "win32" && commandName === "npm";
 }
 
+function hasUnsafeWorkspaceShellMetacharacters(rawCmd) {
+  const value = String(rawCmd || "");
+  return /&&|\|\||[|;\x60]/.test(value)
+    || /\$\(/.test(value)
+    || /(?:^|\s)\d*>(?=\s|$)/.test(value)
+    || /(?:^|\s)[<>](?=\s|$)/.test(value);
+}
+
 function resolveWorkspaceCommandTimeoutMs(commandName, args = []) {
   const normalizedArgs = args.map((arg) => String(arg || "").toLowerCase());
   if (commandName === "npm") {
@@ -2955,8 +2963,8 @@ const TOOL_HANDLERS = {
       const cmdArgs = tokens.slice(1);
       const executable = resolveWorkspaceCommandExecutable(safeCmd);
       const useShell = shouldUseWorkspaceCommandShell(safeCmd);
-      const hasShellMeta = /[|&;<>\x60$]/.test(effectiveCmd);
-      if (useShell && hasShellMeta) {
+      const hasShellMeta = hasUnsafeWorkspaceShellMetacharacters(effectiveCmd);
+      if (hasShellMeta) {
         return "{RESPONSE}: Shell metacharacters are not allowed in direct workspace commands. Run one command per tool call without &&, |, ;, >, $, or backticks.";
       }
       const timeoutMs = resolveWorkspaceCommandTimeoutMs(safeCmd, cmdArgs);

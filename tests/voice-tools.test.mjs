@@ -1299,21 +1299,32 @@ describe("voice-tools", () => {
     });
 
     it("run_workspace_command explains shell-metacharacter rejections with one-command guidance", async () => {
-      const result = await executeToolCall(
-        "run_workspace_command",
-        { command: "npm test && npm run build" },
-        {
-          sessionId: "delegate-session-1",
-          surface: "bosun-builtin",
-          sessionType: "tool-bridge-delegate",
-        },
-      );
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      try {
+        for (const platform of ["win32", "linux"]) {
+          mockSpawnSync.mockReset();
+          Object.defineProperty(process, "platform", { value: platform });
+          const result = await executeToolCall(
+            "run_workspace_command",
+            { command: "npm test && npm run build" },
+            {
+              sessionId: "delegate-session-1",
+              surface: "bosun-builtin",
+              sessionType: "tool-bridge-delegate",
+            },
+          );
 
-      expect(result.error).toBeUndefined();
-      expect(result.result).toMatch(/shell metacharacters are not allowed/i);
-      expect(result.result).toMatch(/one command per tool call/i);
-      expect(result.result).toMatch(/&&/);
-      expect(mockSpawnSync).not.toHaveBeenCalled();
+          expect(result.error).toBeUndefined();
+          expect(result.result).toMatch(/shell metacharacters are not allowed/i);
+          expect(result.result).toMatch(/one command per tool call/i);
+          expect(result.result).toMatch(/&&/);
+          expect(mockSpawnSync).not.toHaveBeenCalled();
+        }
+      } finally {
+        if (originalPlatform) {
+          Object.defineProperty(process, "platform", originalPlatform);
+        }
+      }
     });
 
     it("run_workspace_command explains empty git diff output as a clean diff", async () => {
