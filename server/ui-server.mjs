@@ -26580,25 +26580,34 @@ if (path === "/api/agent-logs/context") {
           retryOptions?.guardedState?.code === "create_tasks_pending" &&
           retryOptions?.guardedState?.safeResume === true &&
           retryOptions?.recommendedMode === "from_failed";
+        const safeInterruptedResumeResolution = safeInterruptedResume
+          ? {
+              mode,
+              operatorAction: "resume",
+              decisionReason: retryOptions?.recommendedReason || "create_tasks_pending.resume_only",
+              guardedState: retryOptions?.guardedState || null,
+            }
+          : null;
         const resolvedRetry =
-          !safeInterruptedResume && createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+          createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
             ? await engine.resolveOperatorRetry(runId, mode)
             : null;
-        if (resolvedRetry?.blocked) {
+        const effectiveRetryResolution = resolvedRetry || safeInterruptedResumeResolution;
+        if (effectiveRetryResolution?.blocked) {
           jsonResponse(res, 409, {
             ok: false,
-            error: resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.",
+            error: effectiveRetryResolution.blockedMessage || "Workflow retry is blocked for this run state.",
             runId,
             status: run.status,
-            mode: resolvedRetry.mode || mode,
-            operatorAction: resolvedRetry.operatorAction || null,
-            decisionReason: resolvedRetry.decisionReason || null,
-            guardedState: resolvedRetry.guardedState || retryOptions?.guardedState || null,
+            mode: effectiveRetryResolution.mode || mode,
+            operatorAction: effectiveRetryResolution.operatorAction || null,
+            decisionReason: effectiveRetryResolution.decisionReason || null,
+            guardedState: effectiveRetryResolution.guardedState || retryOptions?.guardedState || null,
             retryOptions,
           });
           return;
         }
-        const retryArgs = resolvedRetry?.retryArgs || { mode };
+        const retryArgs = effectiveRetryResolution?.retryArgs || { mode };
         if (safeInterruptedResume) {
           retryArgs._resumeInterrupted = true;
           if (retryOptions?.recommendedReason) {
@@ -26614,9 +26623,9 @@ if (path === "/api/agent-logs/context") {
           mode: result.mode,
           status: retryStatus,
           operatorAction:
-            resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
-          decisionReason: resolvedRetry?.decisionReason || null,
-          guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
+            effectiveRetryResolution?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+          decisionReason: effectiveRetryResolution?.decisionReason || null,
+          guardedState: effectiveRetryResolution?.guardedState || retryOptions?.guardedState || null,
         });
         return;
       }
