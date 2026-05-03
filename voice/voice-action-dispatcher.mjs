@@ -868,15 +868,31 @@ registerAction("workflow.retry", async (params) => {
   if (mode === "from_failed" && currentStatus !== "failed" && !createTasksPendingGuard) {
     throw new Error(`retry mode "from_failed" requires a failed run (current=${currentRun?.status || "unknown"})`);
   }
-  const resolvedRetry =
-    !safeInterruptedResume && createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
-      ? engine.resolveOperatorRetry(runId, mode)
-      : null;
+  const resolvedRetry = safeInterruptedResume
+    ? {
+        mode,
+        operatorAction: "resume",
+        decisionReason: retryOptions?.recommendedReason || "create_tasks_pending.resume_only",
+        blocked: false,
+        guardedState: retryOptions?.guardedState || null,
+        retryArgs: {
+          mode,
+          _resumeInterrupted: true,
+          ...(retryOptions?.recommendedReason
+            ? { _decisionReason: retryOptions.recommendedReason }
+            : {}),
+        },
+      }
+    : (
+        createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+          ? engine.resolveOperatorRetry(runId, mode)
+          : null
+      );
   if (resolvedRetry?.blocked) {
     throw new Error(resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.");
   }
   const retryArgs = resolvedRetry?.retryArgs || { mode };
-  if (safeInterruptedResume) {
+  if (safeInterruptedResume && !resolvedRetry?.retryArgs) {
     retryArgs._resumeInterrupted = true;
     if (retryOptions?.recommendedReason) retryArgs._decisionReason = retryOptions.recommendedReason;
   }
@@ -1271,4 +1287,3 @@ export function getVoiceActionPromptSection() {
   lines.push("");
   return lines.join("\n");
 }
-

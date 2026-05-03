@@ -370,7 +370,7 @@ should_include_deferred_local_suites() {
   return 1
 }
 
-is_deferred_local_suite() {
+is_isolated_project_suite() {
   local test_file="$1"
   case "$test_file" in
     tests/ui-server.test.mjs|\
@@ -380,11 +380,17 @@ is_deferred_local_suite() {
     tests/workflow-templates.test.mjs|\
     tests/agent-pool.test.mjs|\
     tests/bosun-native-workflow-nodes.test.mjs|\
-    tests/workflow-templates-e2e.test.mjs)
+    tests/workflow-templates-e2e.test.mjs|\
+    tests/session-manager.test.mjs|\
+    tests/primary-agent.runtime.test.mjs)
       return 0
       ;;
   esac
   return 1
+}
+
+is_deferred_local_suite() {
+  is_isolated_project_suite "$1"
 }
 
 declare -a DEFERRED_LOCAL_TESTS=()
@@ -465,9 +471,13 @@ run_vitest_batches() {
         serialized_tests+=("$test_file")
         ;;
       *)
-        regular_tests+=("$test_file")
+        if is_isolated_project_suite "$test_file"; then
+          serialized_tests+=("$test_file")
+        else
+          regular_tests+=("$test_file")
+        fi
         ;;
-      esac
+    esac
   done
 
   if [ "$batching_enabled" != "1" ]; then

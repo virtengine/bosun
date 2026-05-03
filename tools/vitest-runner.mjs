@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { sanitizeGitEnv } from "../git/git-safety.mjs";
 
 const requireModule = createRequire(import.meta.url);
 
@@ -108,7 +109,7 @@ export function ensureVitestEntry(
     ],
     {
       cwd: packageRoot,
-      env: process.env,
+      env: sanitizeGitEnv(process.env),
       stdio: installStdio,
     },
   );
@@ -548,7 +549,7 @@ export function runVitest(
   });
   const vitestArgsWithOverride = injectVitestConfigOverride(vitestArgs, configOverridePath);
   const esbuildBinaryPath = resolveWindowsEsbuildBinary({ startDir });
-  const env = {
+  const env = sanitizeGitEnv({
     ...baseEnv,
     NODE_OPTIONS: mergeNodeOptions(baseEnv.NODE_OPTIONS, heapMb),
     BOSUN_TEST_CHILD_SPAWN_BLOCKED: detectChildSpawnBlocked() ? "1" : "0",
@@ -556,7 +557,7 @@ export function runVitest(
     ...(esbuildBinaryPath && !process.env.ESBUILD_BINARY_PATH
       ? { ESBUILD_BINARY_PATH: esbuildBinaryPath }
       : {}),
-  };
+  });
   mkdirSync(env.VITEST_EXPERIMENTAL_CACHE, { recursive: true });
   mkdirSync(viteCacheDir, { recursive: true });
 

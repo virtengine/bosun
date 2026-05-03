@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -395,7 +395,7 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('BOSUN_PREPUSH_RUN_PACKED_SMOKE');
     expect(prePushHook).toContain('BOSUN_PREPUSH_INCLUDE_HEAVY');
     expect(prePushHook).toContain('BOSUN_RUN_HEAVY_TESTS');
-    expect(prePushHook).toContain('tests/workflow-templates-e2e.test.mjs)');
+    expect(prePushHook).toContain('tests/workflow-templates-e2e.test.mjs|\\');
     expect(prePushHook).toContain('tests/workflow-guaranteed.test.mjs');
     expect(prePushHook).toContain('tests/ui-server.test.mjs');
     expect(prePushHook).toContain('deferring heavyweight local suites to CI/default full runs');
@@ -529,9 +529,41 @@ describe("vitest-runner", () => {
     const overridePath = spawnCalls[0].args[configIndex + 1];
     expect(existsSync(overridePath)).toBe(true);
     const overrideSource = readFileSync(overridePath, "utf8");
-    expect(overrideSource).toContain(resolve(root, ".cache", "vitest", "experimental-cache"));
-    expect(overrideSource).toContain(resolve(root, ".cache", "vitest", "vite"));
+    expect(overrideSource).toContain(JSON.stringify(resolve(root, ".cache", "vitest", "experimental-cache")));
+    expect(overrideSource).toContain(JSON.stringify(resolve(root, ".cache", "vitest", "vite")));
     expect(overrideSource).toContain('fsModuleCachePath');
+  });
+
+  it("strips inherited git worktree plumbing from the vitest child env", () => {
+    const root = createFixture();
+    const nestedWorktree = resolve(root, ".bosun", "worktrees", "task-1001");
+    const spawnCalls = [];
+
+    mkdirSync(nestedWorktree, { recursive: true });
+    writeFileSync(
+      resolve(root, "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0" }),
+    );
+
+    const exitCode = runVitest(["run"], {
+      startDir: nestedWorktree,
+      env: {
+        GIT_DIR: "/tmp/bad-dir",
+        GIT_WORK_TREE: "/tmp/bad-tree",
+        GIT_COMMON_DIR: "/tmp/bad-common",
+      },
+      ensureVitest: () => resolve(root, "node_modules", "vitest", "vitest.mjs"),
+      spawn(command, args, options) {
+        spawnCalls.push({ command, args, options });
+        return { status: 0 };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].options.env.GIT_DIR).toBeUndefined();
+    expect(spawnCalls[0].options.env.GIT_WORK_TREE).toBeUndefined();
+    expect(spawnCalls[0].options.env.GIT_COMMON_DIR).toBeUndefined();
   });
 
   it("finds the default vitest config from the package root", () => {
@@ -565,9 +597,9 @@ describe("vitest-runner", () => {
       experimentalCacheDir: "/repo/.cache/vitest/experimental-cache",
     });
 
-    expect(source).toContain('await import("file:///repo/vitest.config.mjs")');
-    expect(source).toContain('cacheDir: "/repo/.cache/vitest/vite"');
-    expect(source).toContain('fsModuleCachePath: "/repo/.cache/vitest/experimental-cache"');
+    expect(source).toContain(`await import(${JSON.stringify(pathToFileURL("/repo/vitest.config.mjs").href)})`);
+    expect(source).toContain(`cacheDir: ${JSON.stringify("/repo/.cache/vitest/vite")}`);
+    expect(source).toContain(`fsModuleCachePath: ${JSON.stringify("/repo/.cache/vitest/experimental-cache")}`);
     expect(source).toContain("mergeConfig");
   });
 
