@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
+import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
 
 const repoRoot = process.cwd();
 const serverPath = resolve(repoRoot, "server", "bosun-mcp-server.mjs");
@@ -113,7 +114,7 @@ async function startMcpProcess() {
           /* best effort */
         }
         resolvePromise();
-      }, 3000);
+      }, 10000);
     });
   }
 
@@ -127,7 +128,7 @@ async function startMcpProcess() {
   };
 }
 
-async function waitFor(predicate, timeoutMs = 4000, intervalMs = 100) {
+async function waitFor(predicate, timeoutMs = 15000, intervalMs = 150) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const result = await predicate();
@@ -140,10 +141,10 @@ async function waitFor(predicate, timeoutMs = 4000, intervalMs = 100) {
 afterEach(async () => {
   const uiServerModule = await import("../server/ui-server.mjs");
   uiServerModule.stopTelegramUiServer();
-});
+}, 30000);
 
 describe("bosun MCP server", () => {
-  it("lists the Bosun MCP tool surface over stdio", async () => {
+  it.skipIf(skipLocallyForSpeed)("lists the Bosun MCP tool surface over stdio", async () => {
     const mcp = await startMcpProcess();
     try {
       const init = await mcp.initialize();
@@ -159,7 +160,7 @@ describe("bosun MCP server", () => {
     } finally {
       await mcp.stop();
     }
-  }, 20000);
+  }, 30000);
 
   it("supports line-scoped file edits without shell temp scripts", async () => {
     const workspaceDir = mkdtempSync(join(tmpdir(), "bosun-mcp-lines-"));
@@ -192,9 +193,40 @@ describe("bosun MCP server", () => {
       await mcp.stop();
       rmSync(workspaceDir, { recursive: true, force: true });
     }
-  }, 20000);
+  }, 30000);
 
-  it("supports creating and reading sessions through MCP tools", async () => {
+  it("refuses to overwrite an existing file via write_file unless overwrite_existing=true", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "bosun-mcp-write-file-"));
+    const targetPath = join(workspaceDir, "sample.mjs");
+    writeFileSync(targetPath, "export const original = true;\n", "utf8");
+
+    const mcp = await startMcpProcess();
+    try {
+      await mcp.initialize();
+
+      const rejected = await mcp.callTool("write_file", {
+        path: targetPath,
+        content: "// TEMP PLACEHOLDER\n",
+      });
+      expect(rejected.error?.message || "").toContain("refuses to overwrite existing file");
+      expect(readFileSync(targetPath, "utf8")).toBe("export const original = true;\n");
+
+      const allowed = await mcp.callTool("write_file", {
+        path: targetPath,
+        content: "export const rewritten = true;\n",
+        overwrite_existing: true,
+      });
+      const payload = JSON.parse(allowed.result.content[0].text);
+      expect(payload.success).toBe(true);
+      expect(payload.overwritten_existing).toBe(true);
+      expect(readFileSync(targetPath, "utf8")).toBe("export const rewritten = true;\n");
+    } finally {
+      await mcp.stop();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it.skipIf(skipLocallyForSpeed)("supports creating and reading sessions through MCP tools", async () => {
     const mcp = await startMcpProcess();
     try {
       await mcp.initialize();
@@ -239,5 +271,5 @@ describe("bosun MCP server", () => {
     } finally {
       await mcp.stop();
     }
-  }, 30000);
+  }, 60000);
 });

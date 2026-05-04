@@ -95,8 +95,14 @@ describe("research-evidence-sidecar pdf ingestion", () => {
     expect(result.success).toBe(true);
     expect(existsSync(result.artifactPath)).toBe(true);
     expect(result.bundle.metrics.corpusSourceCount).toBe(1);
+    expect(result.bundle.metrics.runtimeLogSourceCount).toBe(0);
     expect(result.bundle.metrics.retainedSourceCount).toBe(1);
     expect(result.citationsMarkdown).toContain("[E1]");
+    expect(result.researchToolBundle?.id).toBe("scientific-evidence");
+    expect(result.toolBundleBrief).toContain("recommended MCP");
+    expect(result.researchToolBundle?.recommendedServerIds).toEqual(
+      expect.arrayContaining(["fetch", "filesystem", "context7"]),
+    );
 
     const [source] = result.bundle.sources;
     expect(source.citation).toBe("docs/evidence.pdf");
@@ -117,6 +123,7 @@ describe("research-evidence-sidecar pdf ingestion", () => {
     expect(artifact.bundle.sources[0].metadata.sourceKind).toBe("pdf");
     expect(artifact.bundle.sources[0].metadata.contentType).toBe("application/pdf");
     expect(artifact.bundle.sources[0].metadata.relativePath).toBe("docs/evidence.pdf");
+    expect(artifact.bundle.researchToolBundle?.id).toBe("scientific-evidence");
   });
 
   it("keeps running and records a warning when a PDF corpus file is unreadable", async () => {
@@ -181,6 +188,38 @@ describe("research-evidence-sidecar pdf ingestion", () => {
     expect(result.evidenceBrief).toContain("Mode: answer");
     expect(result.evidenceBrief).toContain("[E1] Study A");
     expect(typeof result.bundle.uncertaintySummary).toBe("string");
+  });
+
+  it("pulls bounded runtime log evidence into the bundle when logs match the research problem", async () => {
+    const repoRoot = makeTempRepoRoot();
+    tempRoots.push(repoRoot);
+    mkdirSync(join(repoRoot, ".bosun", "logs"), { recursive: true });
+    writeFileSync(
+      join(repoRoot, ".bosun", "logs", "monitor.log"),
+      [
+        "scheduler started",
+        "retrieval hallucination mitigation enabled for literature synthesis",
+        "grounded citations reduce unsupported claims in retrieval workflows",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await runResearchEvidenceSidecar({
+      repoRoot,
+      problem: "How do grounded citations reduce hallucination in retrieval workflows?",
+      domain: "computer-science",
+      searchLiterature: false,
+      corpusPaths: [],
+      includeRuntimeLogEvidence: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.bundle.metrics.runtimeLogSourceCount).toBe(1);
+    const runtimeSource = result.bundle.sources.find((source) => source.metadata?.sourceKind === "runtime-log");
+    expect(runtimeSource).toBeTruthy();
+    expect(runtimeSource.citation).toBe(".bosun/logs/monitor.log");
+    expect(runtimeSource.excerpt.toLowerCase()).toContain("grounded citations");
+    expect(runtimeSource.metadata.ingestionMethod).toBe("tail-line-query");
   });
 
   it("builds contradiction-focused summaries and conflict records when sources disagree", async () => {

@@ -9,11 +9,16 @@ vi.mock("../config/config.mjs", () => ({
   })),
 }));
 
-vi.mock("../agent/primary-agent.mjs", () => ({
-  execPrimaryPrompt: vi.fn(async () => "mock response"),
-  getPrimaryAgentName: vi.fn(() => "codex-sdk"),
-  setPrimaryAgent: vi.fn(),
-}));
+vi.mock("../agent/primary-agent.mjs", () => {
+  let mode = "agent";
+  return {
+    execPrimaryPrompt: vi.fn(async (msg) => `Agent response to: ${msg}`),
+    getPrimaryAgentName: vi.fn(() => "codex-sdk"),
+    setPrimaryAgent: vi.fn(),
+    getAgentMode: vi.fn(() => mode),
+    setAgentMode: vi.fn((next) => { mode = next; }),
+  };
+});
 
 vi.mock("../voice/voice-tools.mjs", () => ({
   executeToolCall: vi.fn(async (name) => ({ result: `mock result for ${name}` })),
@@ -23,14 +28,15 @@ vi.mock("../voice/voice-tools.mjs", () => ({
   ]),
 }));
 
-// Prevent real OAuth tokens on disk from leaking into tests
-vi.mock("../voice/voice-auth-manager.mjs", () => ({
-  resolveVoiceOAuthToken: vi.fn(() => null),
-  saveVoiceOAuthToken: vi.fn(),
-  getOpenAILoginStatus: vi.fn(() => ({ status: "idle", hasToken: false })),
-  getClaudeLoginStatus: vi.fn(() => ({ status: "idle", hasToken: false })),
-  getGeminiLoginStatus: vi.fn(() => ({ status: "idle", hasToken: false })),
-}));
+// Prevent real shared auth state on disk from leaking into tests
+vi.mock("../agent/provider-auth-state.mjs", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    resolveSharedOAuthToken: vi.fn(() => null),
+    saveSharedOAuthToken: vi.fn(),
+  };
+});
 
 vi.mock("../infra/session-tracker.mjs", () => ({
   getSessionById: vi.fn(() => null),
@@ -58,28 +64,26 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// ── Lazy import (after mocks are set up) ─────────────────────────────────────
+// ── Fresh imports per test (avoid cross-file module cache leaks) ────────────
 
-const { loadConfig } = await import("../config/config.mjs");
-const { resolveVoiceOAuthToken } = await import("../voice/voice-auth-manager.mjs");
-const {
-  beginVoiceTurnTrace,
-  completeVoiceTurnTrace,
-  abortVoiceTurnTrace,
-  getVoiceTurnTrace,
-  renderVoiceTurnTrace,
-  formatVoiceTurnTrace,
-  getVoiceConfig,
-  isVoiceAvailable,
-  createEphemeralToken,
-  getVoiceToolDefinitions,
-  getSessionAllowedTools,
-  executeVoiceTool,
-  getRealtimeConnectionInfo,
-  analyzeVisionFrame,
-  dispatchVoiceActionIntent,
-} = await import("../voice/voice-relay.mjs");
-const { clearVisionSessionState } = await import("../voice/vision-session-state.mjs");
+let loadConfig;
+let resolveSharedOAuthToken;
+let beginVoiceTurnTrace;
+let completeVoiceTurnTrace;
+let abortVoiceTurnTrace;
+let getVoiceTurnTrace;
+let renderVoiceTurnTrace;
+let formatVoiceTurnTrace;
+let getVoiceConfig;
+let isVoiceAvailable;
+let createEphemeralToken;
+let getVoiceToolDefinitions;
+let getSessionAllowedTools;
+let executeVoiceTool;
+let getRealtimeConnectionInfo;
+let analyzeVisionFrame;
+let dispatchVoiceActionIntent;
+let clearVisionSessionState;
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -108,11 +112,35 @@ describe("voice-relay", () => {
   ];
   const savedEnv = {};
 
-  beforeEach(() => {
+  beforeEach(async () => {
     for (const k of envKeys) {
       savedEnv[k] = process.env[k];
       delete process.env[k];
     }
+
+    vi.resetModules();
+
+    ({ loadConfig } = await import("../config/config.mjs"));
+    ({ resolveSharedOAuthToken } = await import("../agent/provider-auth-state.mjs"));
+    ({
+      beginVoiceTurnTrace,
+      completeVoiceTurnTrace,
+      abortVoiceTurnTrace,
+      getVoiceTurnTrace,
+      renderVoiceTurnTrace,
+      formatVoiceTurnTrace,
+      getVoiceConfig,
+      isVoiceAvailable,
+      createEphemeralToken,
+      getVoiceToolDefinitions,
+      getSessionAllowedTools,
+      executeVoiceTool,
+      getRealtimeConnectionInfo,
+      analyzeVisionFrame,
+      dispatchVoiceActionIntent,
+    } = await import("../voice/voice-relay.mjs"));
+    ({ clearVisionSessionState } = await import("../voice/vision-session-state.mjs"));
+
     // Reset config mock to default
     vi.mocked(loadConfig).mockReturnValue({
       voice: {},
@@ -121,6 +149,9 @@ describe("voice-relay", () => {
   });
 
   afterEach(() => {
+    clearVisionSessionState?.("primary-1");
+    clearVisionSessionState?.("primary-claude-1");
+    clearVisionSessionState?.("primary-gemini-1");
     for (const k of envKeys) {
       if (savedEnv[k] === undefined) delete process.env[k];
       else process.env[k] = savedEnv[k];
@@ -505,7 +536,7 @@ describe("voice-relay", () => {
     });
 
     it("prefers OpenAI OAuth token over API key when both are present", async () => {
-      vi.mocked(resolveVoiceOAuthToken).mockImplementation((provider) =>
+      vi.mocked(resolveSharedOAuthToken).mockImplementation((provider) =>
         provider === "openai" ? { token: "oauth-openai-token" } : null,
       );
       vi.mocked(loadConfig).mockReturnValue({

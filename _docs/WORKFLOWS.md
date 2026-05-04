@@ -52,16 +52,16 @@ Planner-heavy workflows now expose structured proof surfaces in run detail and t
 
 Operators should treat these surfaces as the canonical review payload for planner workflows instead of reconstructing proof from raw logs.
 
-## GNAP Projection Contract
+## RepoMirror Projection Contract
 
-Bosun can project shared kanban state into a GNAP-style repository layout when GNAP is explicitly enabled in Settings.
+Bosun can project shared kanban state into a RepoMirror repository layout when RepoMirror is explicitly enabled in Settings.
 
-- `KANBAN_BACKEND=gnap` is valid only when `GNAP_ENABLED=true`, `GNAP_REPO_PATH` is set, and `GNAP_SYNC_MODE=projection`.
-- Projected artifacts are written under `.gnap/`, including task state, run summaries, and collaboration messages.
+- `KANBAN_BACKEND=repo-mirror` is valid only when `REPO_MIRROR_ENABLED=true`, `REPO_MIRROR_REPO_PATH` is set, and `REPO_MIRROR_SYNC_MODE=projection`.
+- Projected artifacts are written under `.repo-mirror/`, including task state, run summaries, and collaboration messages.
 - The internal Bosun task store remains authoritative for task creation, status changes, comments, claims, and workflow liveness.
-- GNAP is intended for cross-user visibility and collaboration, not for replacing `task/task-claims.mjs`, shared-state coordination, or fleet heartbeats.
+- RepoMirror is intended for cross-user visibility and collaboration, not for replacing `task/task-claims.mjs`, shared-state coordination, or fleet heartbeats.
 
-Important boundary: projection mode is the only supported GNAP sync mode in this rollout.
+Important boundary: projection mode is the only supported RepoMirror sync mode in this rollout.
 
 ## Self-Improvement Contract
 

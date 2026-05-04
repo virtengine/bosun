@@ -5,6 +5,7 @@ import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
+import { getResearchToolBundle } from "./mcp-registry.mjs";
 
 const SIDECAR_VERSION = "1.2.0";
 const ARTIFACT_DIR = [".bosun", "research-evidence"];
@@ -12,6 +13,12 @@ const DEFAULT_MAX_SOURCES = 6;
 const MAX_TEXT_FILE_BYTES = 256 * 1024;
 const MAX_PDF_FILE_BYTES = 12 * 1024 * 1024;
 const MAX_LOCAL_FILES = 32;
+const MAX_RUNTIME_LOG_BYTES = 256 * 1024;
+const DEFAULT_RUNTIME_LOG_FILES = Object.freeze([
+  ".bosun/logs/monitor.log",
+  ".bosun/logs/error.log",
+  ".bosun/logs/daemon.log",
+]);
 const TEXT_FILE_EXTENSIONS = new Set([
   ".md",
   ".markdown",
@@ -306,6 +313,10 @@ function parseCorpusPaths(value) {
   );
 }
 
+function parsePathList(value) {
+  return parseCorpusPaths(value);
+}
+
 function normalizeLiteratureResult(raw, index) {
   if (!raw || typeof raw !== "object") return null;
   const title = normalizeString(raw.title || raw.name || `Web Result ${index + 1}`);
@@ -378,6 +389,36 @@ function readTextExcerpt(filePath) {
   const raw = readFileSync(filePath, "utf8");
   const normalized = raw.replace(/\0/g, "").trim();
   return truncate(normalized, 1200);
+}
+
+function readTailUtf8(filePath, maxBytes = MAX_RUNTIME_LOG_BYTES) {
+  const buffer = readFileSync(filePath);
+  if (buffer.length <= maxBytes) {
+    return buffer.toString("utf8").replace(/\0/g, "");
+  }
+  return buffer.subarray(buffer.length - maxBytes).toString("utf8").replace(/\0/g, "");
+}
+
+function collectMatchedLogLines(text, problemTokens, maxLines = 8) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+  const matched = [];
+  for (const line of lines) {
+    const haystack = line.toLowerCase();
+    const hits = problemTokens.filter((token) => haystack.includes(token));
+    if (hits.length === 0) continue;
+    matched.push({
+      line,
+      hits,
+      score: hits.length,
+    });
+  }
+  matched.sort((left, right) => right.score - left.score || left.line.localeCompare(right.line));
+  const excerptLines = matched.slice(0, maxLines).map((entry) => entry.line);
+  return dedupeStrings(excerptLines);
 }
 
 function resolveContentType(extension) {
@@ -455,6 +496,51 @@ async function collectCorpusSources(config) {
     }
   }
 
+  return { sources, warnings };
+}
+
+async function collectRuntimeLogSources(config) {
+  if (config.includeRuntimeLogEvidence !== true) {
+    return { sources: [], warnings: [] };
+  }
+  const warnings = [];
+  const problemTokens = tokenize(config.problem);
+  const candidatePaths = dedupeStrings(
+    (config.runtimeLogPaths.length > 0 ? config.runtimeLogPaths : DEFAULT_RUNTIME_LOG_FILES)
+      .map((rawPath) => (isAbsolute(rawPath) ? rawPath : resolve(config.repoRoot, rawPath))),
+  );
+  const sources = [];
+  for (const filePath of candidatePaths) {
+    if (!existsSync(filePath)) continue;
+    try {
+      const stats = statSync(filePath);
+      if (!stats.isFile()) continue;
+      const logText = readTailUtf8(filePath, MAX_RUNTIME_LOG_BYTES);
+      const excerptLines = collectMatchedLogLines(logText, problemTokens);
+      if (excerptLines.length === 0) continue;
+      const relPath = normalizeRepoRelativePath(relative(config.repoRoot, filePath) || basename(filePath));
+      const excerpt = truncate(excerptLines.join("\n"), 1200);
+      sources.push({
+        id: `runtime-log-${makeSourceId(`${filePath}|${excerpt}`)}`,
+        title: relPath,
+        citation: relPath,
+        locator: filePath,
+        origin: "runtime-log",
+        excerpt,
+        score: scoreEvidenceCandidate(problemTokens, `${relPath}\n${excerpt}`),
+        metadata: {
+          relativePath: relPath,
+          sourceKind: "runtime-log",
+          contentType: "text/plain",
+          ingestionMethod: "tail-line-query",
+          fileSizeBytes: stats.size,
+          matchedLineCount: excerptLines.length,
+        },
+      });
+    } catch (error) {
+      warnings.push(`Failed to read runtime log ${filePath}: ${error.message}`);
+    }
+  }
   return { sources, warnings };
 }
 
@@ -707,6 +793,9 @@ function buildEvidenceBrief(bundle) {
     `Mode: ${bundle.mode}`,
     `Evidence sources retained: ${bundle.sources.length}`,
   ];
+  if (bundle.toolBundleBrief) {
+    lines.push(`Tool bundle: ${bundle.toolBundleBrief}`);
+  }
   if (bundle.warnings.length > 0) {
     lines.push(`Warnings: ${bundle.warnings.join(" | ")}`);
   }
@@ -717,6 +806,25 @@ function buildEvidenceBrief(bundle) {
     lines.push(`Excerpt: ${truncate(source.excerpt, 260)}`);
   }
   return lines.join("\n").trim();
+}
+
+function summarizeToolBundle(bundle) {
+  if (!bundle) return "";
+  const recommended = Array.isArray(bundle.recommendedCatalogEntries)
+    ? bundle.recommendedCatalogEntries.map((entry) => entry.id)
+    : [];
+  const optional = Array.isArray(bundle.optionalCatalogEntries)
+    ? bundle.optionalCatalogEntries.map((entry) => entry.id)
+    : [];
+  const nativeCaps = Array.isArray(bundle.nativeCapabilities)
+    ? bundle.nativeCapabilities.map((entry) => entry.id)
+    : [];
+  return [
+    `${bundle.name} (${bundle.id})`,
+    recommended.length > 0 ? `recommended MCP: ${recommended.join(", ")}` : "",
+    optional.length > 0 ? `optional MCP: ${optional.join(", ")}` : "",
+    nativeCaps.length > 0 ? `native: ${nativeCaps.join(", ")}` : "",
+  ].filter(Boolean).join(" | ");
 }
 
 function normalizeExternalBundle(raw, config) {
@@ -813,6 +921,7 @@ function mergeEvidenceBundles(localBundle, externalBundle, config) {
     metrics: {
       literatureSearchSourceCount: localBundle.metrics.literatureSearchSourceCount || 0,
       corpusSourceCount: localBundle.metrics.corpusSourceCount || 0,
+      runtimeLogSourceCount: localBundle.metrics.runtimeLogSourceCount || 0,
       retainedSourceCount: sources.length,
       delegationUsed: externalBundle != null,
       unsupportedCorpusCount: (localBundle.metrics.unsupportedCorpusCount || 0),
@@ -962,11 +1071,14 @@ export function resolveResearchEvidenceSidecarConfig(input = {}) {
     workspaceId: normalizeString(input.workspaceId),
     domain: normalizeString(input.domain || "computer-science") || "computer-science",
     problem,
+    researchToolBundleId: normalizeString(input.researchToolBundleId || input.toolBundleId || "scientific-evidence") || "scientific-evidence",
     evidenceMode: normalizeString(input.evidenceMode || input.mode || "answer") || "answer",
     maxEvidenceSources: parseInteger(input.maxEvidenceSources || input.maxSources, DEFAULT_MAX_SOURCES, 1, 20),
     searchLiterature: parseBoolean(input.searchLiterature, true),
     promoteReviewedFindings: parseBoolean(input.promoteReviewedFindings, true),
+    includeRuntimeLogEvidence: parseBoolean(input.includeRuntimeLogEvidence, true),
     corpusPaths: parseCorpusPaths(input.corpusPaths),
+    runtimeLogPaths: parsePathList(input.runtimeLogPaths),
     literatureResults: asArray(input.literatureResults),
     triggerSource: normalizeString(input.triggerSource || "manual"),
     sidecarCommand: normalizeString(input.sidecarCommand),
@@ -975,17 +1087,22 @@ export function resolveResearchEvidenceSidecarConfig(input = {}) {
 
 export async function runResearchEvidenceSidecar(input = {}) {
   const config = resolveResearchEvidenceSidecarConfig(input);
+  const researchToolBundle = getResearchToolBundle(config.researchToolBundleId, {
+    includeExperimental: true,
+  });
   const literatureSources = config.searchLiterature
     ? config.literatureResults.map((entry, index) => normalizeLiteratureResult(entry, index)).filter(Boolean)
     : [];
   const { sources: corpusSources, warnings: corpusWarnings } = await collectCorpusSources(config);
+  const { sources: runtimeLogSources, warnings: runtimeLogWarnings } = await collectRuntimeLogSources(config);
 
   const localBundle = {
-    sources: [...literatureSources, ...corpusSources],
-    warnings: corpusWarnings,
+    sources: [...literatureSources, ...corpusSources, ...runtimeLogSources],
+    warnings: [...corpusWarnings, ...runtimeLogWarnings],
     metrics: {
       literatureSearchSourceCount: literatureSources.length,
       corpusSourceCount: corpusSources.length,
+      runtimeLogSourceCount: runtimeLogSources.length,
       unsupportedCorpusCount: corpusWarnings.filter((warning) => warning.startsWith("Skipped")).length,
     },
   };
@@ -1004,6 +1121,8 @@ export async function runResearchEvidenceSidecar(input = {}) {
   }
 
   const bundle = mergeEvidenceBundles(localBundle, externalBundle, config);
+  bundle.researchToolBundle = researchToolBundle;
+  bundle.toolBundleBrief = summarizeToolBundle(researchToolBundle);
   bundle.summary = bundle.summary || summarizeEvidenceSupport({
     problem: config.problem,
     mode: config.evidenceMode,
@@ -1033,6 +1152,8 @@ export async function runResearchEvidenceSidecar(input = {}) {
     bundle,
     evidenceBrief: buildEvidenceBrief(bundle),
     citationsMarkdown: bundle.citations.join("\n"),
+    researchToolBundle,
+    toolBundleBrief: bundle.toolBundleBrief,
     delegation: artifactPayload.delegation,
   };
 }

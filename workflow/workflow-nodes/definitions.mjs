@@ -19,7 +19,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { execSync, execFileSync, spawn } from "node:child_process";
+import { execSync, execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { getAgentToolConfig, getEffectiveTools } from "../../agent/agent-tool-config.mjs";
 import { getToolsPromptBlock } from "../../agent/agent-custom-tools.mjs";
@@ -29,6 +29,7 @@ import { fixGitConfigCorruption } from "../../workspace/worktree-manager.mjs";
 import { registerNodeType as registerWorkflowEngineNodeType } from "../workflow-engine.mjs";
 
 const TAG = "[workflow-nodes]";
+const DEFAULT_GIT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 const PORTABLE_WORKTREE_COUNT_COMMAND = "node -e \"const cp=require('node:child_process');const wt=cp.execSync('git worktree list --porcelain',{encoding:'utf8'});const count=(wt.match(/^worktree /gm)||[]).length;process.stdout.write(String(count)+'\\\\n');\"";
 const PORTABLE_PRUNE_AND_COUNT_WORKTREES_COMMAND = "node -e \"const cp=require('node:child_process');cp.execSync('git worktree prune',{stdio:'ignore'});const wt=cp.execSync('git worktree list --porcelain',{encoding:'utf8'});const count=(wt.match(/^worktree /gm)||[]).length;process.stdout.write(String(count)+'\\\\n');\"";
 const WORKFLOW_AGENT_HEARTBEAT_MS = (() => {
@@ -64,8 +65,47 @@ export function listBuiltinNodeDefinitions() {
   }));
 }
 
-function makeIsolatedGitEnv(extra = {}) {
-  const env = { ...process.env, ...extra };
+function appendSafeDirectoryGitConfig(env, safeDirectories = []) {
+  const normalizedDirectories = Array.from(new Set(
+    (Array.isArray(safeDirectories) ? safeDirectories : [safeDirectories])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .map((value) => resolve(value)),
+  ));
+  if (normalizedDirectories.length === 0) return env;
+
+  const nextEnv = { ...env };
+  let configCount = Number.parseInt(String(nextEnv.GIT_CONFIG_COUNT || "0"), 10);
+  if (!Number.isFinite(configCount) || configCount < 0) configCount = 0;
+
+  const existingSafeDirectories = new Set();
+  for (let index = 0; index < configCount; index += 1) {
+    if (String(nextEnv[`GIT_CONFIG_KEY_${index}`] || "").trim() !== "safe.directory") continue;
+    const existingValue = String(nextEnv[`GIT_CONFIG_VALUE_${index}`] || "").trim();
+    if (existingValue) existingSafeDirectories.add(resolve(existingValue));
+  }
+
+  for (const directory of normalizedDirectories) {
+    if (existingSafeDirectories.has(directory)) continue;
+    nextEnv[`GIT_CONFIG_KEY_${configCount}`] = "safe.directory";
+    nextEnv[`GIT_CONFIG_VALUE_${configCount}`] = directory;
+    existingSafeDirectories.add(directory);
+    configCount += 1;
+  }
+
+  nextEnv.GIT_CONFIG_COUNT = String(configCount);
+  return nextEnv;
+}
+
+function makeIsolatedGitEnv(extra = {}, options = {}) {
+  const env = {
+    ...process.env,
+    ...extra,
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+    GH_PAGER: "cat",
+    SYSTEMD_PAGER: "cat",
+  };
   for (const key of [
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -77,7 +117,11 @@ function makeIsolatedGitEnv(extra = {}) {
   ]) {
     delete env[key];
   }
-  return env;
+  const safeDirectories = [
+    ...(Array.isArray(options?.safeDirectories) ? options.safeDirectories : []),
+    options?.cwd,
+  ];
+  return appendSafeDirectoryGitConfig(env, safeDirectories);
 }
 
 function resolveGitCandidates(env = process.env) {
@@ -179,16 +223,34 @@ function execGitArgsSync(args, options = {}) {
   const gitArgs = args.map((arg) => String(arg));
   let lastEnoent = null;
   for (const gitBinary of resolveGitCandidates(env)) {
-
+    const execOptions = {
+      ...options,
+      env: buildGitExecutionEnv(env, gitBinary),
+    };
+    if (execOptions.maxBuffer == null) {
+      execOptions.maxBuffer = DEFAULT_GIT_EXEC_MAX_BUFFER;
+    }
     try {
-      return execFileSync(gitBinary, gitArgs, {
-        ...options,
-        env: buildGitExecutionEnv(env, gitBinary),
-      });
+      return execFileSync(gitBinary, gitArgs, execOptions);
     } catch (error) {
       if (error?.code === "ENOENT") {
         lastEnoent = error;
         continue;
+      }
+      if (process.platform === "win32" && error?.code === "EPERM") {
+        const fallback = spawnSync(gitBinary, gitArgs, execOptions);
+        if (fallback?.error?.code === "ENOENT") {
+          lastEnoent = fallback.error;
+          continue;
+        }
+        if (!fallback?.error && Number(fallback?.status) === 0) {
+          return fallback.stdout;
+        }
+        if (fallback?.error) {
+          fallback.error.stdout = fallback.stdout;
+          fallback.error.stderr = fallback.stderr;
+          throw fallback.error;
+        }
       }
       throw error;
     }
@@ -201,6 +263,20 @@ function trimLogText(value, max = 180) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function trimLogTextPreservingTail(value, max = 180, tailChars = 80) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const safeMax = Number.isFinite(Number(max)) ? Math.max(8, Math.trunc(Number(max))) : 180;
+  if (text.length <= safeMax) return text;
+  const ellipsis = " ... ";
+  const safeTail = Number.isFinite(Number(tailChars))
+    ? Math.max(0, Math.trunc(Number(tailChars)))
+    : 80;
+  const tail = Math.min(safeTail, Math.max(0, safeMax - ellipsis.length - 1));
+  const head = Math.max(1, safeMax - ellipsis.length - tail);
+  return `${text.slice(0, head)}${ellipsis}${text.slice(-tail)}`;
 }
 
 function normalizeLineEndings(value) {
@@ -304,14 +380,38 @@ function evaluateTaskAssignedTriggerConfig(config = {}, eventData = {}) {
   return triggered;
 }
 
+function listManagedBosunWorktreeRoots(repoRoot) {
+  const normalizedRepoRoot = resolve(String(repoRoot || process.cwd()));
+  const roots = new Set([
+    resolve(normalizedRepoRoot, ".bosun", "worktrees"),
+  ]);
+  try {
+    const output = execGitArgsSync(["worktree", "list", "--porcelain"], {
+      cwd: normalizedRepoRoot,
+      encoding: "utf8",
+      timeout: 10000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    for (const line of String(output || "").split(/\r?\n/)) {
+      if (!line.startsWith("worktree ")) continue;
+      const attachedRoot = resolve(line.slice("worktree ".length).trim());
+      if (!attachedRoot) continue;
+      roots.add(resolve(attachedRoot, ".bosun", "worktrees"));
+    }
+  } catch {
+    // Best-effort only. Fall back to the repo-local managed root.
+  }
+  return [...roots];
+}
+
 function isManagedBosunWorktree(worktreePath, repoRoot) {
   const resolvedWorktree = resolve(String(worktreePath || ""));
-  const managedRoot = resolve(String(repoRoot || process.cwd()), ".bosun", "worktrees");
-  return (
+  const managedRoots = listManagedBosunWorktreeRoots(repoRoot);
+  return managedRoots.some((managedRoot) => (
     resolvedWorktree === managedRoot ||
     resolvedWorktree.startsWith(`${managedRoot}\\`) ||
     resolvedWorktree.startsWith(`${managedRoot}/`)
-  );
+  ));
 }
 
 function deriveManagedWorktreeDirName(taskId, branch) {
@@ -642,6 +742,34 @@ function summarizeAssistantMessageData(data = {}) {
   return "";
 }
 
+function summarizeSessionStepToolNames(event = {}, prefix = "Tool call:") {
+  const toolCalls = Array.isArray(event?.toolCalls) ? event.toolCalls : [];
+  const toolResults = Array.isArray(event?.toolResults) ? event.toolResults : [];
+  const callNameById = new Map();
+  for (const toolCall of toolCalls) {
+    const callId = String(toolCall?.callId || toolCall?.id || "").trim();
+    const name = String(toolCall?.name || toolCall?.toolName || "").trim();
+    if (callId && name) callNameById.set(callId, name);
+  }
+  const names = prefix === "Tool result:"
+    ? toolResults
+        .map((toolResult) =>
+          String(
+            callNameById.get(String(toolResult?.callId || toolResult?.id || "").trim()) ||
+              toolResult?.name ||
+              toolResult?.toolName ||
+              "",
+          ).trim()
+        )
+        .filter(Boolean)
+    : toolCalls
+        .map((toolCall) => String(toolCall?.name || toolCall?.toolName || "").trim())
+        .filter(Boolean);
+  if (!names.length) return "";
+  const unique = Array.from(new Set(names)).slice(0, 4).join(", ");
+  return `${prefix} ${unique}`;
+}
+
 function extractStreamText(value) {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -704,6 +832,25 @@ function summarizeAgentStreamEvent(event) {
   if (type === "function_call_output" || type === "tool_output") {
     const name = event?.name || event?.tool_name || event?.data?.tool_name || "unknown";
     return `Tool result: ${name}`;
+  }
+
+  if (type === "session.tool.start" || type === "session.tool.call") {
+    const name = event?.toolName || event?.tool_name || event?.name || event?.data?.toolName || event?.data?.tool_name || "unknown";
+    return `Tool call: ${name}`;
+  }
+
+  if (type === "session.tool.complete" || type === "session.tool.result") {
+    const name = event?.toolName || event?.tool_name || event?.name || event?.data?.toolName || event?.data?.tool_name || "unknown";
+    if (event?.timedOut === true) return `Tool result: ${name} (timed out)`;
+    if (event?.denied === true) return `Tool result: ${name} (denied)`;
+    return `Tool result: ${name}`;
+  }
+
+  if (type === "session.step.finish") {
+    return (
+      summarizeSessionStepToolNames(event, "Tool result:")
+      || summarizeSessionStepToolNames(event, "Agent requested tools:")
+    );
   }
 
   if (type === "error") {
@@ -1173,8 +1320,9 @@ function buildTaskContextBlock(task) {
   return lines.join("\n");
 }
 
-function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
+function buildWorkflowAgentToolContract(rootDir, agentProfileId = "", options = {}) {
   const profileId = String(agentProfileId || "").trim();
+  const effectiveMode = String(options.effectiveMode || "agent").trim().toLowerCase() || "agent";
   const effective = profileId
     ? getEffectiveTools(rootDir, profileId)
     : getEffectiveTools(rootDir, "__default__");
@@ -1203,12 +1351,19 @@ function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
   return [
     "## Tool Capability Contract",
     "Use enabled tools by default before claiming work is blocked.",
+    effectiveMode === "plan"
+      ? "Planning mode is read-only. Do not call edit/write tools, do not run git-mutating commands, and do not leave uncommitted changes behind in this phase."
+      : null,
+    "For large files, prefer targeted read/view calls with explicit line ranges and batch multiple focused reads instead of whole-file reads.",
+    "If shell filtering blocks a compound command, retry as separate single-purpose commands rather than treating the session as blocked.",
+    "Before declaring verification blocked, inspect focused git status/diff output for the target paths and run the narrowest relevant test command you can prove.",
+    "For Node/Vitest repos that include tools/vitest-runner.mjs, prefer `node tools/vitest-runner.mjs run <target-paths>` over `npm test -- <target-paths>` for focused worktree verification.",
     "Enabled tools JSON:",
     "```json",
     JSON.stringify(manifest, null, 2),
     "```",
     "When uncertain about arguments, call get_admin_help via executeToolCall.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1231,6 +1386,7 @@ export {
   buildGitExecutionEnv,
   buildTaskContextBlock,
   buildWorkflowAgentToolContract,
+  appendSafeDirectoryGitConfig,
   collectWakePhraseCandidates,
   condenseAgentItems,
   createKanbanTaskWithProject,
@@ -1265,4 +1421,5 @@ export {
   summarizeAssistantUsage,
   summarizePathListingBlock,
   trimLogText,
+  trimLogTextPreservingTail,
 };

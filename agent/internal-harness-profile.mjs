@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+const MAX_SLUG_INPUT_LENGTH = 200;
 const SECRET_KEY_RE = /(api[_-]?key|token|secret|password|client[_-]?secret|pat)/i;
 const SECRET_PLACEHOLDER_ENV_RE = /^(?:\$?\{?[A-Z0-9_:-]+\}?|<[^>]+>)$/;
 const SECRET_PLACEHOLDER_TEXT_RE = /^(?:changeme|replace[-_ ]?me|your[-_ ]?key|your[-_ ]?token)$/i;
@@ -30,11 +31,21 @@ function toTrimmedString(value) {
 }
 
 function slugify(value) {
-  return toTrimmedString(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-/, "")
-    .replace(/-$/, "") || "harness";
+  const lower = toTrimmedString(value).slice(0, MAX_SLUG_INPUT_LENGTH).toLowerCase();
+  let slug = "";
+  let prevDash = true; // suppress leading dash
+  for (const ch of lower) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) {
+      slug += ch;
+      prevDash = false;
+    } else if (!prevDash) {
+      slug += "-";
+      prevDash = true;
+    }
+  }
+  // Remove trailing dash
+  if (slug.endsWith("-")) slug = slug.slice(0, -1);
+  return slug || "harness";
 }
 
 function safeClone(value) {
@@ -74,9 +85,17 @@ function parseSourceObject(source) {
   try {
     return JSON.parse(raw);
   } catch {
-    const fenceMatch = raw.match(/```(?:json)?[ \t]*\r?\n([\s\S]*?)```/i);
-    if (fenceMatch?.[1]) {
-      return JSON.parse(fenceMatch[1]);
+    // Extract JSON from a markdown fenced code block using string operations
+    // to avoid ReDoS from regex with [\s\S]*? on adversarial input.
+    const fenceOpen = raw.indexOf("```");
+    if (fenceOpen !== -1) {
+      const lineEnd = raw.indexOf("\n", fenceOpen);
+      const contentStart = lineEnd !== -1 ? lineEnd + 1 : fenceOpen + 3;
+      const fenceClose = raw.indexOf("\n```", contentStart);
+      if (fenceClose !== -1) {
+        const content = raw.slice(contentStart, fenceClose).trim();
+        if (content) return JSON.parse(content);
+      }
     }
   }
   throw new Error("Harness source must be a JSON object or markdown fenced JSON block");

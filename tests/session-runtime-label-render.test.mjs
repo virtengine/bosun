@@ -33,10 +33,10 @@ for (const relPath of sessionListFiles) {
       expect(source).toContain("getSessionRecencyTimestamp");
     });
 
-    it("distinguishes lifecycle-active filters from runtime display", () => {
-      expect(source).toContain("Lifecycle Active (${activeCount})");
-      expect(source).toContain("Lifecycle Active");
-      expect(source).not.toContain("Active Sessions");
+    it("distinguishes in-progress filters from lifecycle/runtime display", () => {
+      expect(source).toContain("In Progress (${activeCount})");
+      expect(source).toContain("In Progress");
+      expect(source).not.toContain("Lifecycle Active");
     });
   });
 }

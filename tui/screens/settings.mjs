@@ -12,6 +12,7 @@ import {
   getSelectableSettingRows,
   toggleBooleanValue,
 } from "./settings-screen-helpers.mjs";
+import { buildTuiHttpUrl } from "../lib/ws-bridge.mjs";
 
 const Box = ink.Box ?? ink.default?.Box;
 const Text = ink.Text ?? ink.default?.Text;
@@ -27,7 +28,19 @@ function truncateText(value, width) {
 }
 
 function createSettingsService(wsBridge, settingsState = {}) {
-  const fallbackBaseUrl = `http://${settingsState.host || "127.0.0.1"}:${settingsState.port || 3080}`;
+  const buildFallbackUrl = (path) => buildTuiHttpUrl({
+    host: settingsState.host || "127.0.0.1",
+    port: settingsState.port || 3080,
+    path,
+    protocol: settingsState.protocol || "ws",
+  });
+  const buildFallbackHeaders = (headers = {}) => {
+    const next = { ...headers };
+    if (settingsState.apiKey && !next["x-api-key"] && !next["X-API-Key"]) {
+      next["x-api-key"] = settingsState.apiKey;
+    }
+    return next;
+  };
   return {
     async load() {
       if (typeof wsBridge?.getConfigTree === "function") {
@@ -36,7 +49,9 @@ function createSettingsService(wsBridge, settingsState = {}) {
       if (typeof wsBridge?.requestJson === "function") {
         return wsBridge.requestJson("/api/tui/config");
       }
-      const response = await fetch(`${fallbackBaseUrl}/api/tui/config`);
+      const response = await fetch(buildFallbackUrl("/api/tui/config"), {
+        headers: buildFallbackHeaders(),
+      });
       return response.json();
     },
     async save(path, value) {
@@ -49,9 +64,9 @@ function createSettingsService(wsBridge, settingsState = {}) {
           body: { path, value },
         });
       }
-      const response = await fetch(`${fallbackBaseUrl}/api/tui/config`, {
+      const response = await fetch(buildFallbackUrl("/api/tui/config"), {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: buildFallbackHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ path, value }),
       });
       const payload = await response.json();
@@ -95,6 +110,7 @@ export default function SettingsScreen({
   onInputCaptureChange,
   onFooterHintsChange,
   settingsService,
+  onOpenConnectionManager,
 }) {
   const { stdout } = useStdout();
   const service = React.useMemo(
@@ -181,6 +197,19 @@ export default function SettingsScreen({
 
   useInput((input, key) => {
     if (loading || saving) return;
+
+    if (input?.toLowerCase() === "c") {
+      if (typeof onOpenConnectionManager === "function") {
+        onOpenConnectionManager();
+      }
+      return;
+    }
+
+    if (input?.toLowerCase() === "r") {
+      void loadModel({ keepStatus: true });
+      return;
+    }
+
     if (!selectedField && !editingPath) return;
 
     if (editingPath) {
@@ -221,11 +250,6 @@ export default function SettingsScreen({
       return;
     }
 
-    if (input.toLowerCase() === "r") {
-      void loadModel({ keepStatus: true });
-      return;
-    }
-
     if (input.toLowerCase() === "u" && selectedField?.masked) {
       setUnmaskedPaths((current) => {
         const next = new Set(current);
@@ -255,6 +279,12 @@ export default function SettingsScreen({
   );
 
   const contentWidth = Math.max(40, (stdout?.columns || 120) - 4);
+  const resolvedConnectionEndpoint = settingsState.connectionEndpoint || buildTuiHttpUrl({
+    host: settingsState?.host || "127.0.0.1",
+    port: settingsState?.port || 3080,
+    path: "/",
+    protocol: settingsState?.protocol || "ws",
+  }).replace(/\/$/, "");
 
   return html`
     <${Box} flexDirection="column" paddingY=${1} paddingX=${1}>
@@ -262,6 +292,26 @@ export default function SettingsScreen({
         <${Text} bold>bosun.config.json<//>
         <${Text} dimColor>${meta.configPath || settingsState.configDir || "-" }<//>
         <${Text} dimColor>Schema-backed inline editor. Env-sourced values are read-only.<//>
+      <//>
+
+      <${Box} marginTop=${1} flexDirection="column" borderStyle="single" paddingX=${1}>
+        <${Text} bold>Backend Connections<//>
+        <${Text}>Endpoint: ${resolvedConnectionEndpoint}<//>
+        <${Text}>Source: ${settingsState.connectionSource || "default-local"}<//>
+        <${Text}>Auth: ${settingsState.authMode === "api-key" ? "API key" : "local token"}<//>
+        <${Text}>State: ${settingsState.connectionState || "offline"}<//>
+        ${settingsState.localConnection?.endpoint
+          ? html`<${Text}>Local Default: ${settingsState.localConnection.endpoint}<//>`
+          : null}
+        <${Text}>Saved Targets: ${Array.isArray(settingsState.remoteConnections) ? settingsState.remoteConnections.length : 0}<//>
+        ${Array.isArray(settingsState.remoteConnections) && settingsState.remoteConnections.length
+          ? settingsState.remoteConnections.slice(0, 4).map((connection) => html`
+              <${Text} key=${connection.id} dimColor=${connection.id !== settingsState.activeConnectionId}>
+                ${connection.id === settingsState.activeConnectionId ? "> " : "  "}${connection.name} -> ${connection.endpoint}
+              <//>
+            `)
+          : null}
+        <${Text} dimColor>[C] Manage connections<//>
       <//>
 
       ${errorMessage

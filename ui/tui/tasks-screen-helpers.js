@@ -272,6 +272,58 @@ export function buildFormStateFromTask(task = {}) {
   };
 }
 
+export function createTaskApiFromRequestJson(requestJson) {
+  if (typeof requestJson !== "function") {
+    return {
+      list: taskList,
+      create: taskCreate,
+      update: (taskId, payload) => taskUpdate(taskId, payload),
+      delete: taskDelete,
+    };
+  }
+
+  return {
+    async list(filters = {}) {
+      const params = new URLSearchParams();
+      if (filters && typeof filters === "object") {
+        for (const [key, value] of Object.entries(filters)) {
+          if (value == null || value === "") continue;
+          params.set(key, String(value));
+        }
+      }
+      const query = params.toString();
+      const payload = await requestJson(`/api/tasks${query ? `?${query}` : ""}`);
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload?.data)) return payload.data;
+      return [];
+    },
+    async create(payload = {}) {
+      const response = await requestJson("/api/tasks/create", {
+        method: "POST",
+        body: payload,
+      });
+      return response?.data || response;
+    },
+    async update(taskId, payload = {}) {
+      const response = await requestJson("/api/tasks/update", {
+        method: "POST",
+        body: {
+          id: taskId,
+          taskId,
+          ...payload,
+        },
+      });
+      return response?.data || response;
+    },
+    async delete(taskId) {
+      const response = await requestJson(`/api/tasks/${encodeURIComponent(taskId)}`, {
+        method: "DELETE",
+      });
+      return response?.deleted === true || response?.ok === true || response === true;
+    },
+  };
+}
+
 export async function listTasksFromApi(filters = {}, taskApi = { list: taskList }) {
   return taskApi.list(filters);
 }

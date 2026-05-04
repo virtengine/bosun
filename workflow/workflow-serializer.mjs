@@ -3,8 +3,41 @@
  *
  * Converts between the internal workflow graph format (nodes/edges/variables)
  * and a clean, human-readable JSON representation for code editing.
+ *
+ * Browser-safe flowchart helpers (used by both the UI and the Node-side
+ * serializer) live in `lib/workflow-flowchart-utils.mjs`. Importing them from
+ * a single source keeps the UI free of `node:*` dependencies while preserving
+ * the public surface of this module.
  */
 import { createHash } from "node:crypto";
+import {
+  cloneJsonValue,
+  normalizeText,
+  uniqueStrings,
+  buildWorkflowDraftFlowchart,
+  normalizeWorkflowFlowchartMetadata,
+} from "../lib/workflow-flowchart-utils.mjs";
+
+export {
+  buildWorkflowDraftFlowchart,
+  normalizeWorkflowFlowchartMetadata,
+};
+
+function buildSerializableWorkflowMetadata(workflow = {}) {
+  const preservedMetadata = workflow?.metadata && typeof workflow.metadata === "object"
+    ? cloneJsonValue(workflow.metadata)
+    : {};
+  const flowchart = buildWorkflowDraftFlowchart(workflow);
+  if (flowchart?.steps?.length) {
+    preservedMetadata.flowchart = flowchart;
+  } else {
+    delete preservedMetadata.flowchart;
+  }
+  if (preservedMetadata && Object.keys(preservedMetadata).length > 0) {
+    return preservedMetadata;
+  }
+  return undefined;
+}
 
 /**
  * Serialize a workflow object into a clean, human-readable JSON structure.
@@ -23,6 +56,7 @@ export function serializeWorkflowToCode(workflow) {
     category: workflow.category || "custom",
     enabled: workflow.enabled !== false,
     variables: workflow.variables || {},
+    ...(buildSerializableWorkflowMetadata(workflow) ? { metadata: buildSerializableWorkflowMetadata(workflow) } : {}),
     nodes: (workflow.nodes || []).map(n => ({
       id: n.id,
       type: n.type,
@@ -158,6 +192,14 @@ export function deserializeCodeToWorkflow(code) {
       category: parsed.category || "custom",
       enabled: parsed.enabled !== false,
       variables: parsed.variables || {},
+      metadata: buildSerializableWorkflowMetadata({
+        nodes: parsed.nodes,
+        edges,
+        groups: parsed.groups || [],
+        metadata: parsed.metadata && typeof parsed.metadata === "object" && !Array.isArray(parsed.metadata)
+          ? parsed.metadata
+          : {},
+      }) || {},
       nodes: parsed.nodes,
       edges,
     },

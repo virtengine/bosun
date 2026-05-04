@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 describe("ui-server fallback auth", () => {
   const ENV_KEYS = [
     "TELEGRAM_UI_ALLOW_UNSAFE",
@@ -19,6 +20,7 @@ describe("ui-server fallback auth", () => {
   ];
   let envSnapshot = {};
   let tempDir = "";
+  let activeServer = null;
 
   beforeEach(() => {
     envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -36,6 +38,11 @@ describe("ui-server fallback auth", () => {
   afterEach(async () => {
     const mod = await import("../server/ui-server.mjs");
     mod.stopTelegramUiServer();
+    if (activeServer && typeof activeServer.close === "function") {
+      await new Promise((resolve) => activeServer.close(resolve));
+    }
+    activeServer = null;
+    resetStateLedgerCache();
     for (const key of ENV_KEYS) {
       if (envSnapshot[key] === undefined) delete process.env[key];
       else process.env[key] = envSnapshot[key];
@@ -51,6 +58,7 @@ describe("ui-server fallback auth", () => {
       skipInstanceLock: true,
       skipAutoOpen: true,
     });
+    activeServer = server;
     const port = server.address().port;
 
     const setRes = await fetch(`http://127.0.0.1:${port}/api/auth/fallback/set`, {
@@ -95,6 +103,7 @@ describe("ui-server fallback auth", () => {
       skipInstanceLock: true,
       skipAutoOpen: true,
     });
+    activeServer = server;
     const port = server.address().port;
 
     await fetch(`http://127.0.0.1:${port}/api/auth/fallback/set`, {

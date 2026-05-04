@@ -6,6 +6,7 @@ import { WebSocket } from "ws";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureTestRuntimeSandbox } from "../infra/test-runtime.mjs";
 import { resolveTuiAuthToken, TUI_EVENT_SCHEMAS } from "../infra/tui-bridge.mjs";
+import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
 
 function waitFor(condition, { timeoutMs = 3000, intervalMs = 25 } = {}) {
   return new Promise((resolve, reject) => {
@@ -122,7 +123,7 @@ describe("ui-server TUI websocket bridge", () => {
     vi.resetModules();
   });
 
-  it("persists a shared auth token and emits canonical snapshot events", async () => {
+  it.skipIf(skipLocallyForSpeed)("persists a shared auth token and emits canonical snapshot events", async () => {
     const mod = await import("../server/ui-server.mjs");
     mod.injectUiDependencies({
       configDir,
@@ -181,9 +182,9 @@ describe("ui-server TUI websocket bridge", () => {
     expect(validateStats(secondMonitorStats.payload), JSON.stringify(validateStats.errors || [])).toBe(true);
 
     ws.close();
-  }, 10000);
+  }, 20000);
 
-  it("emits canonical session snapshots for message activity", async () => {
+  it.skipIf(skipLocallyForSpeed)("emits canonical session snapshots for message activity", async () => {
     const mod = await import("../server/ui-server.mjs");
     mod.injectUiDependencies({ configDir });
 

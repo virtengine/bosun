@@ -1,21 +1,48 @@
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
-import { buildRepoCodexConfig, ensureRepoConfigs } from "../config/repo-config.mjs";
-import {
-  buildCommonMcpBlocks,
-  buildSandboxPermissions,
-  ensureAgentMaxThreads,
-  ensureFeatureFlags,
-  ensureModelProviderSectionsFromEnv,
-  ensureSandboxWorkspaceWrite,
-  ensureTrustedProjects,
-  ensureTopLevelSandboxPermissions,
-} from "../shell/codex-config.mjs";
-import { resolveCodexProfileRuntime } from "../shell/codex-model-profiles.mjs";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+let buildRepoCodexConfig;
+let ensureRepoConfigs;
+let buildCommonMcpBlocks;
+let buildSandboxPermissions;
+let ensureAgentMaxThreads;
+let ensureFeatureFlags;
+let ensureModelProviderSectionsFromEnv;
+let ensureSandboxWorkspaceWrite;
+let ensureTrustedProjects;
+let ensureTopLevelSandboxPermissions;
+let resolveCodexProfileRuntime;
+
+async function loadFreshCodexConfigModules() {
+  vi.resetModules();
+  vi.unmock("../config/repo-config.mjs");
+  vi.unmock("../shell/codex-config.mjs");
+  vi.unmock("../shell/codex-model-profiles.mjs");
+
+  const repoConfigModule = await import("../config/repo-config.mjs");
+  const codexConfigModule = await import("../shell/codex-config.mjs");
+  const profileModule = await import("../shell/codex-model-profiles.mjs");
+
+  buildRepoCodexConfig = repoConfigModule.buildRepoCodexConfig;
+  ensureRepoConfigs = repoConfigModule.ensureRepoConfigs;
+  buildCommonMcpBlocks = codexConfigModule.buildCommonMcpBlocks;
+  buildSandboxPermissions = codexConfigModule.buildSandboxPermissions;
+  ensureAgentMaxThreads = codexConfigModule.ensureAgentMaxThreads;
+  ensureFeatureFlags = codexConfigModule.ensureFeatureFlags;
+  ensureModelProviderSectionsFromEnv = codexConfigModule.ensureModelProviderSectionsFromEnv;
+  ensureSandboxWorkspaceWrite = codexConfigModule.ensureSandboxWorkspaceWrite;
+  ensureTrustedProjects = codexConfigModule.ensureTrustedProjects;
+  ensureTopLevelSandboxPermissions = codexConfigModule.ensureTopLevelSandboxPermissions;
+  resolveCodexProfileRuntime = profileModule.resolveCodexProfileRuntime;
+}
 
 describe("codex-config defaults", () => {
+  beforeEach(async () => {
+    await loadFreshCodexConfigModules();
+  });
+
   it("omits default MCP server blocks unless explicitly enabled", () => {
     const block = buildCommonMcpBlocks();
     expect(block).toBe("");
@@ -352,6 +379,57 @@ describe("codex-config defaults", () => {
     expect(result.toml).toContain('base_url = "https://example-resource.openai.azure.com/openai/v1"');
     expect(result.toml).not.toContain('/openai/deployments/gpt-5/chat/completions');
   });
+
+  it("ignores ambient Codex home config when explicit env selects an Azure runtime", () => {
+    const home = mkdtempSync(join(tmpdir(), "codex-home-ambient-"));
+    const codexDir = join(home, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      join(codexDir, "config.toml"),
+      [
+        '[model_providers.openai-direct]',
+        'name = "OpenAI Direct"',
+        'base_url = "https://api.openai.com/v1"',
+        'env_key = "OPENAI_API_KEY"',
+        'wire_api = "responses"',
+        '',
+      ].join("\n"),
+      "utf8",
+    );
+
+    const azureEnv = {
+      HOME: home,
+      OPENAI_BASE_URL: "https://example-resource.openai.azure.com/openai/v1",
+      OPENAI_API_KEY: "azure-key",
+      CODEX_MODEL: "gpt-5-deployment",
+    };
+    const explicitAzureEnv = {
+      OPENAI_BASE_URL: azureEnv.OPENAI_BASE_URL,
+      OPENAI_API_KEY: azureEnv.OPENAI_API_KEY,
+      CODEX_MODEL: azureEnv.CODEX_MODEL,
+    };
+
+    const runtimeWithHome = resolveCodexProfileRuntime(azureEnv);
+    expect(runtimeWithHome.provider).toBe("azure");
+
+    const features = ensureFeatureFlags("[features]\nremote_models = true\n", explicitAzureEnv);
+    expect(features.toml).toContain("remote_models = false");
+
+    const providers = ensureModelProviderSectionsFromEnv(
+      [
+        "[model_providers.azure]",
+        'name = "Azure OpenAI"',
+        'base_url = "https://example-resource.openai.azure.com/openai/deployments/gpt-5/chat/completions?api-version=2024-10-21"',
+        'env_key = "AZURE_OPENAI_API_KEY"',
+        'wire_api = "responses"',
+        "",
+      ].join("\n"),
+      explicitAzureEnv,
+    );
+    expect(providers.updated).toContain("azure.base_url");
+    expect(providers.toml).toContain('base_url = "https://example-resource.openai.azure.com/openai/v1"');
+  });
+
   it("selects the Azure provider whose endpoint matches OPENAI_BASE_URL", () => {
     const home = mkdtempSync(join(tmpdir(), "codex-home-"));
     const codexDir = join(home, ".codex");

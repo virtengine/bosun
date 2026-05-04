@@ -48,10 +48,15 @@ npm run syntax:check
 # or install failures.
 node tools/prepublish-check.mjs
 
-# Prove the packed npm artifact can still start after install. This catches
-# regressions where the repo works locally but the published tarball is missing
-# a runtime file required by the CLI or main package export.
-npm run smoke:packed-cli
+# The full packed-artifact smoke test currently costs well over a minute on
+# Windows, which delays actual test execution past the point where the hook is
+# useful for local iteration. Keep it opt-in locally and rely on explicit
+# `npm run prepush:check` / CI for the full packaging gate.
+if [ "${BOSUN_PREPUSH_RUN_PACKED_SMOKE:-0}" = "1" ]; then
+  npm run smoke:packed-cli
+else
+  echo "[hooks] skipping packed CLI smoke locally; run with BOSUN_PREPUSH_RUN_PACKED_SMOKE=1 or use prepush:check for the full packaging gate"
+fi
 
 # ── Module adjacency map ────────────────────────────────────────────────────
 # Maps source directory prefixes to glob patterns of tests that MUST run
@@ -63,26 +68,36 @@ npm run smoke:packed-cli
 # Format: "source_prefix|test_glob_1|test_glob_2|..."
 # Globs are matched against tests/*.test.mjs filenames (basename only).
 ADJACENCY_MAP=(
+  "package.json|prepublish-check|vitest-runner|cli-*|config-validation*"
+  "package-lock.json|prepublish-check|vitest-runner"
+  "pnpm-lock.yaml|prepublish-check|vitest-runner"
+  "yarn.lock|prepublish-check|vitest-runner"
+  "npm-shrinkwrap.json|prepublish-check|vitest-runner"
+  "vitest.config.mjs|vitest-runner"
+  "tests/setup.mjs|vitest-runner|ui-server*|workflow-engine*|task-store*|kanban-adapter*"
+  "tests/harness-surface-clients.test.mjs|harness-surface-clients*"
+  ".githooks/pre-push|prepublish-check|vitest-runner"
   "workflow/|workflow-*|workflow-task-lifecycle*|workflow-write-file-encoding*|workflow-pipeline-primitives*|workflow-research-evidence-sidecar*|manual-flows*|mcp-workflow-adapter*|bosun-native-workflow-nodes*|meeting-workflow*|run-evaluator*|state-ledger-sqlite*|webhook-gateway*|credential-store*|cron-scheduler*"
   "workflow-templates/|workflow-templates*|workflow-new-templates*|workflow-engine*|manual-flows*"
   "task/|task-*|workflow-task-lifecycle*|kanban-*|state-ledger-sqlite*|ve-orchestrator*|vk-api*|ve-kanban*"
   "kanban/|kanban-*|task-store*|task-claims*|ve-kanban*|ve-orchestrator*|vk-api*"
   "workspace/|workspace-*|shared-state*|worktree-*|worktree-recovery-regression*|sync-engine*"
-  "infra/|monitor-*|heartbeat-monitor*|daemon-*|restart-*|startup-*|maintenance-*|anomaly-*|preflight*|tracing*|tui-bridge*|windows-hidden-child-processes*|weekly-agent-work-report*|workflow-task-lifecycle*|workflow-engine*"
-  "agent/|agent-*|primary-agent*|fleet-*|review-agent*|analyze-agent*|autofix*|streaming-agent*|hook-library*|weekly-agent-work-report*|internal-harness*"
-  "bench/|bench-swebench*|benchmark-*|task-*"
+  "infra/|monitor-*|heartbeat-monitor*|daemon-*|restart-*|startup-*|maintenance-*|anomaly-*|preflight*|tracing*|tui-bridge*|windows-hidden-child-processes*|weekly-agent-work-report*|workflow-task-lifecycle*|workflow-engine*|session-telemetry*"
+  "agent/|agent-*|primary-agent*|fleet-*|review-agent*|analyze-agent*|autofix*|streaming-agent*|hook-library*|weekly-agent-work-report*|internal-harness*|harness-runtime*|harness-surface-integration*|provider-kernel*|provider-kernel-support*|session-manager*|tool-governance-support*|tool-orchestrator*"
+  "bench/|bench-swebench*|benchmark-*|harness-*|task-*"
   "config/|config-*|workspace-health*|bosun-skills*|codex-config*"
-  "telegram/|telegram-*|whatsapp-*|weekly-agent-work-report*"
+  "telegram/|telegram-*|harness-surface-integration*|whatsapp-*|weekly-agent-work-report*|harness-surface-clients*"
   "voice/|voice-*|mic-*|native-call*"
-  "tui/|tui-*|task-*|tui-events*|tui-bridge*|ui-server-tui-events*"
-  "ui/|ui-*|tui-*|stream-timeline*|workflow-canvas-utils*|static-relative*|mui-theme*|tab-swipe*|session-theme*|session-history*|demo-*|fleet-tab*|portal-ui-smoke*"
+  "tui/|tui-*|harness-surface-integration*|task-*|tui-events*|tui-bridge*|ui-server-tui-events*|harness-surface-clients*"
+  "ui/|ui-*|tui-*|stream-timeline*|workflow-canvas-utils*|static-relative*|mui-theme*|tab-swipe*|session-theme*|session-history*|demo-*|fleet-tab*|portal-ui-smoke*|harness-surface-clients*"
   "site/|ui-*|stream-timeline*|static-relative*|demo-*|portal-ui-smoke*"
-  "server/|ui-server*|setup-web*|bosun-mcp-server*|tunnel-*|ui-realtime*|presence*|portal-ui-smoke*|guardrails*"
+  "server/|ui-server*|harness-surface-integration*|setup-web*|bosun-mcp-server*|tunnel-*|ui-realtime*|presence*|portal-ui-smoke*|guardrails*|harness-surface-clients*"
   "github/|github-*|hook-profiles*"
   "git/|git-*|branch-*|diff-stats*|conflict-*"
-  "shell/|*-shell*|codex-shell*|gemini-shell*|opencode-shell*|sdk-shell*|continue-detection*"
-  "tools/|apply-pr-suggestions*|demo-defaults-sync*|prepublish-check*|vitest-runner*"
-  "lib/|logger*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*"
+  "shell/|*-shell*|codex-shell*|gemini-shell*|opencode-shell*|shell-session-compat*|sdk-shell*|continue-detection*"
+  "tools/|apply-pr-suggestions*|demo-defaults-sync*|sync-demo-ui*|prepublish-check*|vitest-runner*"
+  "plugins/|windows-desktop-mcp-server*"
+  "lib/|logger*|log-tail*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*|hot-path-runtime*"
   # Top-level runtime files that don't live in a subdirectory.
   "cli.mjs|cli-*|tui-*|smoke*"
   "bosun-tui.mjs|tui-*|cli-*"
@@ -91,29 +106,26 @@ ADJACENCY_MAP=(
 )
 
 declare -A CHANGED_MAP=()
-RUN_ALL=false
-RUN_ALL_REASON=""
+declare -A BROAD_IMPACT_MAP=()
 
 is_zero_sha() {
   [ "$1" = "0000000000000000000000000000000000000000" ]
 }
 
-should_force_full_suite() {
+is_broad_impact_file() {
   local path="$1"
   case "$path" in
-    # Dependency manifest changes can affect any module.
+    # These files can influence many modules, but local pre-push remains
+    # targeted and defers full-suite coverage to CI.
     package.json|package-lock.json|pnpm-lock.yaml|yarn.lock|npm-shrinkwrap.json)
       return 0
       ;;
-    # Test infrastructure changes affect all tests.
     vitest.config.*|tests/setup.mjs)
       return 0
       ;;
-    # Hook changes → re-validate with full suite for safety.
     .githooks/pre-push|.githooks/pre-commit)
       return 0
       ;;
-    # Top-level setup bootstraps the entire runtime.
     preflight.mjs|setup.mjs)
       return 0
       ;;
@@ -121,11 +133,27 @@ should_force_full_suite() {
   return 1
 }
 
+has_broad_impact_path() {
+  local path="$1"
+  [ -n "${BROAD_IMPACT_MAP["$path"]+x}" ]
+}
+
 merge_base_for_new_branch() {
   local local_sha="$1"
   git merge-base "$local_sha" origin/main 2>/dev/null \
     || git merge-base "$local_sha" origin/master 2>/dev/null \
     || true
+}
+
+add_changed_paths_from_range() {
+  local range="$1"
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    CHANGED_MAP["$path"]=1
+    if is_broad_impact_file "$path"; then
+      BROAD_IMPACT_MAP["$path"]=1
+    fi
+  done < <(git diff --name-only "$range" 2>/dev/null || true)
 }
 
 while IFS= read -r line; do
@@ -139,32 +167,33 @@ while IFS= read -r line; do
   if is_zero_sha "$REMOTE_SHA"; then
     BASE="$(merge_base_for_new_branch "$LOCAL_SHA")"
     if [ -z "$BASE" ]; then
-      RUN_ALL=true
-      RUN_ALL_REASON="new branch with unknown merge-base"
-      break
+      while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        CHANGED_MAP["$path"]=1
+      done < <(git diff --name-only "$LOCAL_SHA" 2>/dev/null || true)
+      continue
     fi
     RANGE="${BASE}..${LOCAL_SHA}"
   else
     RANGE="${REMOTE_SHA}..${LOCAL_SHA}"
   fi
 
-  while IFS= read -r path; do
-    [ -z "$path" ] && continue
-    CHANGED_MAP["$path"]=1
-    if should_force_full_suite "$path"; then
-      RUN_ALL=true
-      RUN_ALL_REASON="high-risk file changed: $path"
-      break
-    fi
-  done < <(git diff --name-only "$RANGE" 2>/dev/null || true)
-
-  $RUN_ALL && break
+  add_changed_paths_from_range "$RANGE"
 done <<< "$PUSH_INPUT"
 
-if $RUN_ALL; then
-  echo "[hooks] running full suite (${RUN_ALL_REASON})"
-  npm test
-  exit 0
+if [ "${#CHANGED_MAP[@]}" -eq 0 ]; then
+  TRACKING_BRANCH="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [ -n "$TRACKING_BRANCH" ]; then
+    add_changed_paths_from_range "${TRACKING_BRANCH}..HEAD"
+  fi
+fi
+
+if [ "${#CHANGED_MAP[@]}" -eq 0 ] && git rev-parse --verify origin/main >/dev/null 2>&1; then
+  add_changed_paths_from_range "$(git merge-base HEAD origin/main 2>/dev/null || printf 'origin/main')..HEAD"
+fi
+
+if [ "${#CHANGED_MAP[@]}" -eq 0 ] && git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+  add_changed_paths_from_range "HEAD~1..HEAD"
 fi
 
 # ── Classify changed files ──────────────────────────────────────────────────
@@ -186,15 +215,44 @@ for file in "${!CHANGED_MAP[@]}"; do
   esac
 done
 
-if [ "${#CHANGED_FILES[@]}" -gt 120 ]; then
-  echo "[hooks] running full suite (large push: ${#CHANGED_FILES[@]} files)"
-  npm test
-  exit 0
-fi
-
 if [ "${#CHANGED_RUNTIME[@]}" -eq 0 ] && [ "${#CHANGED_TESTS[@]}" -eq 0 ]; then
   echo "[hooks] no runtime/test files changed — pre-push passed ✓"
   exit 0
+fi
+
+should_fast_run_full_suite() {
+  local runtime_count="${#CHANGED_RUNTIME[@]}"
+  local changed_count="${#CHANGED_FILES[@]}"
+  local changed_test_count="${#CHANGED_TESTS[@]}"
+  local runtime_limit="${BOSUN_PREPUSH_FULL_SUITE_RUNTIME_THRESHOLD:-40}"
+  local changed_limit="${BOSUN_PREPUSH_FULL_SUITE_FILE_THRESHOLD:-120}"
+  local test_limit="${BOSUN_PREPUSH_FULL_SUITE_TEST_THRESHOLD:-30}"
+
+  [ "$runtime_count" -ge "$runtime_limit" ] && return 0
+  [ "$changed_count" -ge "$changed_limit" ] && return 0
+  [ "$changed_test_count" -ge "$test_limit" ] && return 0
+  return 1
+}
+
+if should_fast_run_full_suite; then
+  echo "[hooks] large diff detected (${#CHANGED_FILES[@]} files, ${#CHANGED_RUNTIME[@]} runtime, ${#CHANGED_TESTS[@]} tests) — skipping discovery and running the full suite immediately"
+  echo "[hooks] heavy isolated suites (workflow-engine, ui-server, session-manager, etc.) are deferred to CI; set BOSUN_PREPUSH_INCLUDE_HEAVY=1 to include them locally"
+  export BOSUN_VITEST_HEAP_MB="${BOSUN_PREPUSH_FULL_SUITE_VITEST_HEAP_MB:-6144}"
+  export BOSUN_VITEST_MAX_WORKERS="${BOSUN_PREPUSH_FULL_SUITE_VITEST_MAX_WORKERS:-4}"
+  export BOSUN_VITEST_MIN_WORKERS="${BOSUN_PREPUSH_FULL_SUITE_VITEST_MIN_WORKERS:-2}"
+  export BOSUN_VITEST_GROUP_BATCH_SIZE="${BOSUN_PREPUSH_FULL_SUITE_GROUP_BATCH_SIZE:-50}"
+  if [ "${BOSUN_PREPUSH_INCLUDE_HEAVY:-0}" = "1" ] || [ "${BOSUN_RUN_HEAVY_TESTS:-0}" = "1" ]; then
+    export BOSUN_VITEST_INCLUDE_HEAVY=1
+  else
+    export BOSUN_VITEST_INCLUDE_HEAVY=0
+  fi
+  npm run test:all
+  echo "[hooks] pre-push checks passed ✓"
+  exit 0
+fi
+
+if [ "${#BROAD_IMPACT_MAP[@]}" -gt 0 ]; then
+  echo "[hooks] broad-impact files changed; running targeted local coverage only and deferring full-suite coverage to CI"
 fi
 
 # ── Collect all targeted test files into a single set ────────────────────────
@@ -289,35 +347,235 @@ collect_linked_static_tests() {
 }
 
 for file in "${CHANGED_RUNTIME[@]}"; do
-  collect_import_linked_tests "$file"
   collect_adjacent_tests "$file"
-  collect_linked_static_tests "$file"
+  if ! has_broad_impact_path "$file"; then
+    collect_import_linked_tests "$file"
+    collect_linked_static_tests "$file"
+  fi
 done
 
-# ── Smart escalation: if we selected too many tests, just run everything ─────
-TOTAL_TESTS="$(find tests -maxdepth 1 -name '*.test.mjs' 2>/dev/null | wc -l | tr -d ' ')"
+# ── Split targeted tests by runner and keep memory bounded ───────────────────
+TOTAL_TESTS="$(find tests -maxdepth 1 \( -name '*.test.mjs' -o -name '*.node.test.mjs' \) 2>/dev/null | wc -l | tr -d ' ')"
 [ "$TOTAL_TESTS" -eq 0 ] && TOTAL_TESTS=187  # fallback
-SELECTED="${#TARGET_TESTS[@]}"
-ESCALATION_THRESHOLD=$(( TOTAL_TESTS * 60 / 100 ))
 
-if [ "$SELECTED" -gt "$ESCALATION_THRESHOLD" ]; then
-  echo "[hooks] targeted set is ${SELECTED}/${TOTAL_TESTS} tests (>${ESCALATION_THRESHOLD}) — running full suite"
-  npm test
-  exit 0
+declare -a SORTED_TARGET_TESTS=()
+while IFS= read -r test_file; do
+  [ -z "$test_file" ] && continue
+  SORTED_TARGET_TESTS+=("$test_file")
+done < <(printf '%s\n' "${!TARGET_TESTS[@]}" | sort)
+
+should_include_deferred_local_suites() {
+  [ "${BOSUN_PREPUSH_INCLUDE_HEAVY:-0}" = "1" ] && return 0
+  [ "${BOSUN_RUN_HEAVY_TESTS:-0}" = "1" ] && return 0
+  return 1
+}
+
+is_isolated_project_suite() {
+  local test_file="$1"
+  case "$test_file" in
+    tests/ui-server.test.mjs|\
+    tests/workflow-engine.test.mjs|\
+    tests/workflow-guaranteed.test.mjs|\
+    tests/workflow-task-lifecycle.test.mjs|\
+    tests/workflow-templates.test.mjs|\
+    tests/agent-pool.test.mjs|\
+    tests/bosun-native-workflow-nodes.test.mjs|\
+    tests/workflow-templates-e2e.test.mjs|\
+    tests/session-manager.test.mjs|\
+    tests/primary-agent.runtime.test.mjs)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_deferred_local_suite() {
+  is_isolated_project_suite "$1"
+}
+
+declare -a DEFERRED_LOCAL_TESTS=()
+if ! should_include_deferred_local_suites; then
+  declare -a FILTERED_TARGET_TESTS=()
+  for test_file in "${SORTED_TARGET_TESTS[@]}"; do
+    if is_deferred_local_suite "$test_file"; then
+      DEFERRED_LOCAL_TESTS+=("$test_file")
+      continue
+    fi
+    FILTERED_TARGET_TESTS+=("$test_file")
+  done
+  SORTED_TARGET_TESTS=("${FILTERED_TARGET_TESTS[@]}")
 fi
 
-# ── Single vitest invocation with all targeted tests ─────────────────────────
-declare -a FINAL_TEST_LIST=()
-for test_file in "${!TARGET_TESTS[@]}"; do
-  FINAL_TEST_LIST+=("$test_file")
-done
-
-if [ "${#FINAL_TEST_LIST[@]}" -eq 0 ]; then
+if [ "${#SORTED_TARGET_TESTS[@]}" -eq 0 ]; then
+  if [ "${#DEFERRED_LOCAL_TESTS[@]}" -gt 0 ]; then
+    echo "[hooks] only heavyweight local suites matched; deferring to CI/default full runs (set BOSUN_PREPUSH_INCLUDE_HEAVY=1 or BOSUN_RUN_HEAVY_TESTS=1 to include them locally)"
+  fi
   echo "[hooks] no related tests found — pre-push passed ✓"
   exit 0
 fi
 
-echo "[hooks] running ${#FINAL_TEST_LIST[@]}/${TOTAL_TESTS} targeted tests…"
-node tools/vitest-runner.mjs run --config vitest.config.mjs "${FINAL_TEST_LIST[@]}"
+declare -a FINAL_VITEST_LIST=()
+declare -a FINAL_NODE_TEST_LIST=()
+for test_file in "${SORTED_TARGET_TESTS[@]}"; do
+  case "$test_file" in
+    *.node.test.mjs)
+      FINAL_NODE_TEST_LIST+=("$test_file")
+      ;;
+    *)
+      FINAL_VITEST_LIST+=("$test_file")
+      ;;
+  esac
+done
+
+if [ "${#DEFERRED_LOCAL_TESTS[@]}" -gt 0 ]; then
+  echo "[hooks] deferring heavyweight local suites to CI/default full runs:"
+  printf '  - %s\n' "${DEFERRED_LOCAL_TESTS[@]}"
+fi
+
+echo "[hooks] running ${#SORTED_TARGET_TESTS[@]}/${TOTAL_TESTS} targeted tests…"
+
+vitest_supports_named_projects() {
+  local config_path="vitest.config.mjs"
+  local project_name="$1"
+  [ -n "$project_name" ] || return 1
+  [ -f "$config_path" ] || return 1
+  rg -q "name:\s*['\"]${project_name}['\"]" "$config_path" 2>/dev/null
+}
+
+run_vitest_batches() {
+  local -a tests=("$@")
+  [ "${#tests[@]}" -eq 0 ] && return 0
+
+  local -a runner_args=(run --config vitest.config.mjs)
+  local -a serialized_runner_args=("${runner_args[@]}" --maxWorkers 1)
+  local -a regular_runner_args=("${runner_args[@]}")
+  if vitest_supports_named_projects "fast" && vitest_supports_named_projects "isolated"; then
+    serialized_runner_args+=(--project isolated)
+    regular_runner_args+=(--project fast)
+  else
+    echo "[hooks] vitest config has no named fast/isolated projects; falling back to default project execution"
+  fi
+  local -a standalone_serialized_tests=()
+  local -a serialized_tests=()
+  local -a regular_tests=()
+  local batching_enabled="${BOSUN_PREPUSH_ENABLE_BATCHING:-0}"
+  local serialized_batch_size="${BOSUN_PREPUSH_SERIAL_BATCH_SIZE:-4}"
+  local batch_size="${BOSUN_PREPUSH_BATCH_SIZE:-50}"
+  local test_file
+  for test_file in "${tests[@]}"; do
+    case "$test_file" in
+      tests/*workflow*e2e*.test.mjs)
+        standalone_serialized_tests+=("$test_file")
+        ;;
+      tests/ui-server.test.mjs)
+        serialized_tests+=("$test_file")
+        ;;
+      *)
+        if is_isolated_project_suite "$test_file"; then
+          serialized_tests+=("$test_file")
+        else
+          regular_tests+=("$test_file")
+        fi
+        ;;
+    esac
+  done
+
+  if [ "$batching_enabled" != "1" ]; then
+    if [ "${#serialized_tests[@]}" -gt "$serialized_batch_size" ] || [ "${#regular_tests[@]}" -gt "$batch_size" ]; then
+      echo "[hooks] auto-enabling Vitest batching for large targeted set"
+      batching_enabled=1
+    fi
+  fi
+
+  if [ "$batching_enabled" != "1" ]; then
+    if [ "${#serialized_tests[@]}" -gt 0 ]; then
+      echo "[hooks] serialized vitest run: ${#serialized_tests[@]} file(s)"
+      node tools/vitest-runner.mjs "${serialized_runner_args[@]}" "${serialized_tests[@]}" || return $?
+    fi
+
+    local standalone_serialized
+    for standalone_serialized in "${standalone_serialized_tests[@]}"; do
+      echo "[hooks] standalone serialized vitest file: ${standalone_serialized}"
+      node tools/vitest-runner.mjs "${serialized_runner_args[@]}" "$standalone_serialized" || return $?
+    done
+
+    if [ "${#regular_tests[@]}" -gt 0 ]; then
+      echo "[hooks] vitest run: ${#regular_tests[@]} file(s)"
+      node tools/vitest-runner.mjs "${regular_runner_args[@]}" "${regular_tests[@]}" || return $?
+    fi
+    return 0
+  fi
+
+  if [ "${#serialized_tests[@]}" -gt 0 ]; then
+    if [ "${#serialized_tests[@]}" -le "$serialized_batch_size" ]; then
+      echo "[hooks] serialized vitest batch: ${#serialized_tests[@]} file(s)"
+      node tools/vitest-runner.mjs "${serialized_runner_args[@]}" "${serialized_tests[@]}" || return $?
+    else
+      echo "[hooks] splitting serialized vitest tests into batches to reduce process churn"
+      local serialized_total="${#serialized_tests[@]}"
+      local serialized_offset=0
+      local serialized_batch_index=1
+      while [ "$serialized_offset" -lt "$serialized_total" ]; do
+        local -a serialized_slice=("${serialized_tests[@]:$serialized_offset:$serialized_batch_size}")
+        echo "[hooks] serialized vitest batch ${serialized_batch_index}: ${#serialized_slice[@]} files"
+        node tools/vitest-runner.mjs "${serialized_runner_args[@]}" "${serialized_slice[@]}" || return $?
+        serialized_offset=$((serialized_offset + serialized_batch_size))
+        serialized_batch_index=$((serialized_batch_index + 1))
+      done
+    fi
+  fi
+
+  local standalone_serialized
+  for standalone_serialized in "${standalone_serialized_tests[@]}"; do
+    echo "[hooks] standalone serialized vitest file: ${standalone_serialized}"
+    node tools/vitest-runner.mjs "${serialized_runner_args[@]}" "$standalone_serialized" || return $?
+  done
+
+  [ "${#regular_tests[@]}" -eq 0 ] && return 0
+
+  if [ "${#regular_tests[@]}" -le "$batch_size" ]; then
+    node tools/vitest-runner.mjs "${regular_runner_args[@]}" "${regular_tests[@]}"
+    return $?
+  fi
+
+  echo "[hooks] splitting vitest target set into batches to keep local memory bounded"
+  local total="${#regular_tests[@]}"
+  local offset=0
+  local batch_index=1
+  while [ "$offset" -lt "$total" ]; do
+    local -a slice=("${regular_tests[@]:$offset:$batch_size}")
+    echo "[hooks] vitest batch ${batch_index}: ${#slice[@]} files"
+    node tools/vitest-runner.mjs "${regular_runner_args[@]}" "${slice[@]}" || return $?
+    offset=$((offset + batch_size))
+    batch_index=$((batch_index + 1))
+  done
+}
+
+run_node_test_batches() {
+  local -a tests=("$@")
+  [ "${#tests[@]}" -eq 0 ] && return 0
+
+  local batching_enabled="${BOSUN_PREPUSH_ENABLE_BATCHING:-0}"
+  if [ "$batching_enabled" != "1" ]; then
+    echo "[hooks] node-test run: ${#tests[@]} file(s)"
+    node --no-warnings=ExperimentalWarning --import ./tests/node-test-bootstrap.mjs --test "${tests[@]}" || return $?
+    return 0
+  fi
+
+  local batch_size="${BOSUN_PREPUSH_NODE_BATCH_SIZE:-50}"
+  local total="${#tests[@]}"
+  local offset=0
+  local node_batch_index=1
+  while [ "$offset" -lt "$total" ]; do
+    local -a slice=("${tests[@]:$offset:$batch_size}")
+    echo "[hooks] node-test batch ${node_batch_index}: ${#slice[@]} files"
+    node --no-warnings=ExperimentalWarning --import ./tests/node-test-bootstrap.mjs --test "${slice[@]}" || return $?
+    offset=$((offset + batch_size))
+    node_batch_index=$((node_batch_index + 1))
+  done
+}
+
+run_vitest_batches "${FINAL_VITEST_LIST[@]}"
+run_node_test_batches "${FINAL_NODE_TEST_LIST[@]}"
 
 echo "[hooks] pre-push checks passed ✓"

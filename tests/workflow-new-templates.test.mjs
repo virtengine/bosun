@@ -38,8 +38,12 @@ describe("template-health-check self-improvement loop", () => {
     const template = getTemplate("template-health-check");
     expect(template).toBeDefined();
     expect(template.variables.maxBenchmarkRuns).toBe(12);
-    expect(findNode(template, "collect-recent-runs")?.type).toBe("action.run_command");
-    expect(findNode(template, "evaluate-latest-run")?.type).toBe("action.evaluate_run");
+    const collectNode = findNode(template, "collect-recent-runs");
+    const evaluateNode = findNode(template, "evaluate-latest-run");
+    expect(collectNode?.type).toBe("action.run_command");
+    expect(collectNode?.config?.parseJson).toBe(true);
+    expect(evaluateNode?.type).toBe("action.evaluate_run");
+    expect(evaluateNode?.config?.runId).toBe("{{collect-recent-runs.output.latestRunId}}");
     expect(findNode(template, "apply-ratchet")?.type).toBe("action.apply_self_improvement_ratchet");
     expect(findNode(template, "ratchet-applied")?.type).toBe("condition.expression");
     expect(findNode(template, "ratchet-reverted")?.type).toBe("condition.expression");

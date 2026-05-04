@@ -67,7 +67,7 @@ test("workspace manager pull failure prefers stderr/stdout details", () => {
   assert.match(src, /const stdout = normalizeSingleLine\(err\?\.stdout \|\| ""\)/);
   assert.match(src, /const message = normalizeSingleLine\(err\?\.message \|\| err \|\| ""\)/);
   assert.match(src, /err\?\.stderr \|\| err\?\.stdout \|\| err\?\.message/);
-  assert.match(src, /git pull --rebase failed/);
+  assert.match(src, /git pull --no-rebase failed/);
   assert.match(src, /function buildGitPullFailureDetails\(err, repoPath, childProcess\)/);
   assert.match(src, /status=\$\{err\.status\}/);
   assert.match(src, /signal=\$\{err\.signal\}/);

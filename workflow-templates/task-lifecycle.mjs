@@ -69,12 +69,13 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     defaultSdk: "auto",
     defaultTargetBranch: "origin/main",
     taskTimeoutMs: 21600000, // 6 hours
-    delegationWatchdogTimeoutMs: 300000,
-    delegationWatchdogMaxRecoveries: 1,
     prePrValidationEnabled: true,
     prePrValidationCommand: "auto",
     autoMergeOnCreate: false,
     autoMergeMethod: "squash",
+    prBody: "Task-ID: {{taskId}}\n\nAutomated PR for task {{taskId}}",
+    delegationWatchdogTimeoutMs: 300000,
+    delegationWatchdogMaxRecoveries: 1,
     maxRetries: 2,
     maxContinues: 3,
     protectedBranches: ["main", "master", "develop", "production"],
@@ -84,8 +85,9 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     node("trigger", "trigger.task_available", "Poll for Tasks", {
       maxParallel: "{{maxParallel}}",
       pollIntervalMs: "{{pollIntervalMs}}",
-      statuses: ["inreview", "todo"],
+      statuses: ["todo"],
       filterCodexScoped: true,
+      requireTaskPromptCompleteness: true,
       filterDrafts: true,
     }, { x: 400, y: 50 }),
 
@@ -182,18 +184,72 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     }, { x: 200, y: 1610 }),
     // ── Execute agent (phase 1: planning) ───────────────────────────────
     agentPhase("run-agent-plan", "Agent Plan",
-      "{{_taskPrompt}}\n\nExecution phase: planning. Produce a concrete implementation plan and identify required tests. Do not make code changes in this phase.",
-      { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1740 }),
+      "{{_taskPrompt}}\n\nExecution phase: planning. Produce a concrete implementation plan and identify required tests. Do not make code changes in this phase. If inspection shows the requested behavior is already present, stop after a concise architect handoff for the next phase, explicitly note that no planning-side code changes were made, and include the required completion signal instead of widening scope.",
+      { mode: "plan", continueOnSession: false, requireTaskPromptCompleteness: true, requireCompletionSignal: true, delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1740 }),
 
     // ── Execute agent (phase 2: tests-first) ────────────────────────────
     agentPhase("run-agent-tests", "Agent Tests",
-      "{{_taskPrompt}}\n\nExecution phase: tests. Write or update tests first for the target behavior, then validate failures/pass criteria before implementation changes.",
-      { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1545 }),
+      "{{_taskPrompt}}\n\nExecution phase: tests. Write or update tests first for the target behavior, then validate failures/pass criteria before implementation changes. Start with the narrowest reproducible test for the target seam (prefer a focused `npm run test:quick -- <file> -t <name>` or equivalent file/test filter) before widening to broader file or suite coverage. If broader runs fail in unrelated pre-existing areas, note that boundary explicitly and keep the task scoped to the targeted seam instead of widening further. If the focused target-seam tests already pass and inspection shows the requested tests-side behavior is already present, return a concise tester handoff that explicitly notes no tests-side code changes were needed, summarizes the passing verification, and tells the implementation phase what remains. Treat that as a successful phase completion rather than a blocker, and include the required completion signal instead of continuing to widen scope.",
+      { continueOnSession: false, requireTaskPromptCompleteness: true, delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1545 }),
 
     // ── Execute agent (phase 3: implementation + verification) ──────────
     agentPhase("run-agent-implement", "Agent Implement",
-      "{{_taskPrompt}}\n\nExecution phase: implementation. Start with the narrowest verification that proves the changed surface. If unrelated baseline reds appear, keep the task scoped to the touched surface instead of thrashing on unrelated reds; note the blocker and say `commit blocked` when required verification for your changes cannot complete because of unrelated failures. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
-      { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1610 }),
+      "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist. Start with the narrowest verification that proves the changed surface (prefer focused file/test filters and adjacent checks), then widen to broader validation only as needed. If broader validation fails in unrelated pre-existing areas, record that boundary explicitly, keep the task scoped to the touched surface instead of thrashing on unrelated reds, and if implementation is otherwise complete say `commit blocked` with the unrelated validation blocker before stopping. Then commit, push, and create/update PR when the relevant verification path is green.",
+      { continueOnSession: false, requireTaskPromptCompleteness: true, delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1610 }),
+
+    node("plan-agent-ok", "condition.expression", "Plan Agent Succeeded?", {
+      expression: "$ctx.getNodeOutput('run-agent-plan')?.success === true",
+    }, { x: 380, y: 1740, outputs: ["yes", "no"] }),
+
+    node("plan-agent-commit-blocked", "condition.expression", "Plan Commit Blocked?", {
+      expression: "$ctx.getNodeOutput('run-agent-plan')?.implementationState === 'implementation_done_commit_blocked'",
+    }, { x: 380, y: 1675, outputs: ["yes", "no"] }),
+
+    node("tests-agent-ok", "condition.expression", "Tests Agent Succeeded?", {
+      expression: "$ctx.getNodeOutput('run-agent-tests')?.success === true",
+    }, { x: 380, y: 1545, outputs: ["yes", "no"] }),
+
+    node("implement-agent-ok", "condition.expression", "Implement Agent Succeeded?", {
+      expression:
+        "$ctx.getNodeOutput('run-agent-implement')?.success === true"
+        + " || $ctx.getNodeOutput('run-agent-implement')?.implementationState === 'implementation_done_commit_blocked'",
+    }, { x: 380, y: 1610, outputs: ["yes", "no"] }),
+
+    node("plan-agent-worktree-reacquire-needed", "condition.expression", "Plan Needs WT Reacquire?", {
+      expression:
+        "(() => { const out = $ctx.getNodeOutput('run-agent-plan') || {}; return out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); })()",
+    }, { x: 650, y: 1740, outputs: ["yes", "no"] }),
+
+    node("tests-agent-worktree-reacquire-needed", "condition.expression", "Tests Needs WT Reacquire?", {
+      expression:
+        "(() => { const out = $ctx.getNodeOutput('run-agent-tests') || {}; return out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); })()",
+    }, { x: 650, y: 1545, outputs: ["yes", "no"] }),
+
+    node("implement-agent-worktree-reacquire-needed", "condition.expression", "Implement Needs WT Reacquire?", {
+      expression:
+        "(() => { const out = $ctx.getNodeOutput('run-agent-implement') || {}; return out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); })()",
+    }, { x: 650, y: 1610, outputs: ["yes", "no"] }),
+
+    node("set-blocked-agent-plan-failed", "action.update_task_status", "Set Blocked (Plan Fail)", {
+      taskId: "{{taskId}}",
+      status: "blocked",
+      taskTitle: "{{taskTitle}}",
+      blockedReason: "{{$ctx.getNodeOutput('run-agent-plan')?.blockedReason || $ctx.getNodeOutput('run-agent-plan')?.failureKind || $ctx.getNodeOutput('run-agent-plan')?.error || 'agent_plan_failed'}}",
+    }, { x: 560, y: 1740 }),
+
+    node("set-blocked-agent-tests-failed", "action.update_task_status", "Set Blocked (Tests Fail)", {
+      taskId: "{{taskId}}",
+      status: "blocked",
+      taskTitle: "{{taskTitle}}",
+      blockedReason: "{{$ctx.getNodeOutput('run-agent-tests')?.blockedReason || $ctx.getNodeOutput('run-agent-tests')?.failureKind || $ctx.getNodeOutput('run-agent-tests')?.error || 'agent_tests_failed'}}",
+    }, { x: 560, y: 1545 }),
+
+    node("set-blocked-agent-implement-failed", "action.update_task_status", "Set Blocked (Implement Fail)", {
+      taskId: "{{taskId}}",
+      status: "blocked",
+      taskTitle: "{{taskTitle}}",
+      blockedReason: "{{$ctx.getNodeOutput('run-agent-implement')?.blockedReason || $ctx.getNodeOutput('run-agent-implement')?.failureKind || $ctx.getNodeOutput('run-agent-implement')?.error || 'agent_implement_failed'}}",
+    }, { x: 560, y: 1610 }),
 
     // ── Check if claim was stolen during agent execution ─────────────────
     node("claim-stolen", "condition.expression", "Claim Stolen?", {
@@ -217,6 +273,10 @@ export const TASK_LIFECYCLE_TEMPLATE = {
       expression: "$ctx.getNodeOutput('detect-commits')?.hasCommits === true",
     }, { x: 120, y: 1870, outputs: ["yes", "no"] }),
 
+    node("no-commit-retries-exhausted", "condition.expression", "No-Commit Retries Exhausted?", {
+      expression: "$ctx.getNodeOutput('detect-commits')?.retryExhausted === true",
+    }, { x: 350, y: 1870, outputs: ["yes", "no"] }),
+
     // ── SUCCESS PATH: Local quality gate before push/PR ──────────────────
     node("pre-pr-validation", "action.run_command", "Pre-PR Validation", {
       command: "{{prePrValidationCommand}}",
@@ -238,200 +298,107 @@ export const TASK_LIFECYCLE_TEMPLATE = {
         "})()",
     }, { x: -120, y: 2060, outputs: ["yes", "no"] }),
 
-    // ── REMEDIATION PATH: auto-fix validation failures (2-pass) ──────────
-    node("set-fix-summary", "action.set_variable", "Summarize Validation Output", {
-      key: "fixSummary",
-      value: [
-        "(() => {",
-        "const out = $ctx.getNodeOutput('pre-pr-validation') || {};",
-        "const diag = out.outputDiagnostics || {};",
-        "const sections = [];",
-        // Header: exit code and runner family
-        "sections.push('## Validation Result');",
-        "sections.push('- Exit code: ' + (out.exitCode ?? 'unknown'));",
-        "sections.push('- Runner: ' + (diag.family || diag.runner || 'unknown'));",
-        "if (diag.summary) sections.push('- Summary: ' + diag.summary);",
-        // Failed targets (specific test names / files / packages)
-        "const targets = diag.failedTargets || [];",
-        "if (targets.length) {",
-        "  sections.push('');",
-        "  sections.push('## Failed Targets (' + targets.length + ')');",
-        "  targets.slice(0, 30).forEach(t => sections.push('  - ' + t));",
-        "  if (targets.length > 30) sections.push('  ... and ' + (targets.length - 30) + ' more');",
-        "}",
-        // Suggested rerun command
-        "const rerun = out.outputSuggestedRerun || diag.suggestedRerun || '';",
-        "if (rerun) {",
-        "  sections.push('');",
-        "  sections.push('## Suggested Rerun Command');",
-        "  sections.push('```');",
-        "  sections.push(rerun);",
-        "  sections.push('```');",
-        "}",
-        // Hint from diagnostics
-        "const hint = out.outputHint || diag.hint || '';",
-        "if (hint) sections.push('\\nHint: ' + hint);",
-        // Full output (truncated)
-        "sections.push('');",
-        "sections.push('## Full Command Output');",
-        "sections.push(String(out.output || '').slice(0, 12000));",
-        "return sections.join('\\n');",
-        "})()",
-      ].join(" "),
-      isExpression: true,
-    }, { x: 300, y: 2000 }),
+    node("set-fix-summary", "action.set_variable", "Set Fix Summary", {
+      variable: "validationFixSummary",
+      value: "Pre-PR validation failed for task {{taskId}}. Apply the smallest viable fix and rerun validation.",
+    }, { x: 160, y: 1940 }),
 
-    agentPhase("auto-fix-validation", "Auto-Fix Validation (Pass 1)",
-      `# Fix Pre-PR Validation Failures — Pass 1
+    agentPhase("auto-fix-validation", "Auto Fix Validation",
+      "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 1. The previous pre-PR validation failed. Fix only the reported validation issue below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('pre-pr-validation')?.stderr || $ctx.getNodeOutput('pre-pr-validation')?.output || $ctx.getNodeOutput('pre-pr-validation')?.error || 'Validation output unavailable.'}}",
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 160, y: 2060 }),
 
-Task: **{{taskTitle}}**
-
-The pre-PR validation command failed. Your job is to fix EVERY error so validation passes.
-
-{{fixSummary}}
-
-STRATEGY:
-1. Start from the **Failed Targets** list above — these are the exact files/tests/packages that broke.
-2. Fix compilation and syntax errors FIRST (missing imports, typos, type errors).
-3. Then fix test failures — open each failing test file, read what it asserts, and fix your code or the test expectation.
-4. If a **Suggested Rerun Command** is shown above, use it to re-run only the failing targets and iterate faster.
-5. Once targeted failures are fixed, run the full validation command to confirm everything passes.
-
-RULES:
-- Do NOT weaken, remove, or skip tests. Do NOT add --force or --no-verify flags.
-- Keep the original task scope — do not revert the feature.
-- Create a descriptive commit: "fix: <concrete failure resolved>"`,
-      {}, { x: 300, y: 2080 }),
+    node("validation-fix1-worktree-ok", "condition.expression", "Validation Fix 1 Worktree OK?", {
+      expression:
+        "(() => { const out = $ctx.getNodeOutput('auto-fix-validation'); if (!out) return false; return out.needsReacquire !== true && out.blockedReason !== 'worktree_failure'; })()",
+    }, { x: 160, y: 2180, outputs: ["yes", "no"] }),
 
     node("retry-pre-pr-validation", "action.run_command", "Retry Pre-PR Validation", {
       command: "{{prePrValidationCommand}}",
       commandType: "qualityGate",
       cwd: "{{worktreePath}}",
       failOnError: false,
-    }, { x: 300, y: 2160 }),
+    }, { x: 160, y: 2180 }),
 
     node("retry-validation-ok", "condition.expression", "Retry Validation Passed?", {
       expression:
-        "(() => {" +
-        "const enabled = $data?.prePrValidationEnabled !== false;" +
-        "if (!enabled) return true;" +
-        "const out = $ctx.getNodeOutput('retry-pre-pr-validation');" +
-        "if (!out) return false;" +
-        "if (out.success === true) return true;" +
-        "const code = Number(out.exitCode);" +
-        "return Number.isFinite(code) && code === 0;" +
-        "})()",
-    }, { x: 300, y: 2240, outputs: ["yes", "no"] }),
+        "(() => { const out = $ctx.getNodeOutput('retry-pre-pr-validation'); if (!out) return false; if (out.success === true) return true; const code = Number(out.exitCode); return Number.isFinite(code) && code === 0; })()",
+    }, { x: 160, y: 2300, outputs: ["yes", "no"] }),
 
-    // ── REMEDIATION PASS 2: escalated auto-fix with both outputs ─────────
-    node("set-fix2-summary", "action.set_variable", "Summarize Both Validation Outputs", {
-      key: "fix2Summary",
-      value: [
-        "(() => {",
-        "function summarizeRun(label, out) {",
-        "  const diag = out.outputDiagnostics || {};",
-        "  const lines = ['### ' + label];",
-        "  lines.push('- Exit code: ' + (out.exitCode ?? 'unknown'));",
-        "  lines.push('- Runner: ' + (diag.family || diag.runner || 'unknown'));",
-        "  if (diag.summary) lines.push('- Summary: ' + diag.summary);",
-        "  const targets = diag.failedTargets || [];",
-        "  if (targets.length) {",
-        "    lines.push('- Failed targets (' + targets.length + '):');",
-        "    targets.slice(0, 20).forEach(t => lines.push('    - ' + t));",
-        "    if (targets.length > 20) lines.push('    ... and ' + (targets.length - 20) + ' more');",
-        "  }",
-        "  const rerun = out.outputSuggestedRerun || diag.suggestedRerun || '';",
-        "  if (rerun) lines.push('- Rerun: `' + rerun + '`');",
-        "  const hint = out.outputHint || diag.hint || '';",
-        "  if (hint) lines.push('- Hint: ' + hint);",
-        "  if (diag.deltaSummary) lines.push('- Delta: ' + diag.deltaSummary);",
-        "  lines.push('');",
-        "  lines.push('Full output:');",
-        "  lines.push(String(out.output || '').slice(0, 8000));",
-        "  return lines.join('\\n');",
-        "}",
-        "const v1 = $ctx.getNodeOutput('pre-pr-validation') || {};",
-        "const v2 = $ctx.getNodeOutput('retry-pre-pr-validation') || {};",
-        "return [",
-        "  '## Validation History (both passes failed)',",
-        "  '',",
-        "  summarizeRun('Pass 1 — Original Validation', v1),",
-        "  '',",
-        "  summarizeRun('Pass 2 — After First Auto-Fix', v2),",
-        "].join('\\n');",
-        "})()",
-      ].join(" "),
-      isExpression: true,
-    }, { x: 500, y: 2300 }),
+    node("set-fix2-summary", "action.set_variable", "Set Fix Summary 2", {
+      variable: "validationFixSummary2",
+      value: "Validation retry still failed for task {{taskId}}. Attempt one final focused repair before blocking the task.",
+    }, { x: 320, y: 2060 }),
 
-    agentPhase("auto-fix-validation-2", "Auto-Fix Validation (Pass 2 — Escalated)",
-      `# Fix Validation Failures — FINAL AUTOMATED ATTEMPT
+    agentPhase("auto-fix-validation-2", "Auto Fix Validation 2",
+      "{{_taskPrompt}}\n\nExecution phase: validation autofix pass 2. Retry only the remaining reported validation failures below, then stop.\n\nValidation failure details:\n{{$ctx.getNodeOutput('retry-pre-pr-validation')?.stderr || $ctx.getNodeOutput('retry-pre-pr-validation')?.output || $ctx.getNodeOutput('retry-pre-pr-validation')?.error || 'Validation output unavailable.'}}",
+      { delegateTaskWorkflow: false, delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 320, y: 2180 }),
 
-This is the SECOND and LAST automated remediation pass for task **{{taskTitle}}**.
-The first auto-fix attempt DID NOT resolve all issues. You MUST take a different approach.
+    node("validation-fix2-worktree-ok", "condition.expression", "Validation Fix 2 Worktree OK?", {
+      expression:
+        "(() => { const out = $ctx.getNodeOutput('auto-fix-validation-2'); if (!out) return false; return out.needsReacquire !== true && out.blockedReason !== 'worktree_failure'; })()",
+    }, { x: 320, y: 2300, outputs: ["yes", "no"] }),
 
-{{fix2Summary}}
-
-ANALYSIS STEPS:
-1. Compare the **Failed Targets** between Pass 1 and Pass 2.
-   - If the SAME targets still fail → your previous fix was wrong. Revert it and try a different approach.
-   - If NEW targets appeared → your fix broke something else. Fix both.
-   - If some targets were RESOLVED → the approach was partially right. Focus on the remaining ones.
-2. Use the **Delta** field (if present) to see exactly what changed between runs.
-3. Use the **Suggested Rerun Command** to iterate on just the failing targets.
-
-CRITICAL RULES:
-- Do NOT repeat the same fix that already failed.
-- If a test is genuinely wrong or testing stale behavior your change invalidated, fix the test AND the code.
-- If the build/lint/test commands are misconfigured for your changes, fix the config.
-- Do NOT weaken, remove, or skip tests. Do NOT add --force or --no-verify flags.
-- Keep the original task scope — do not revert the feature.
-
-Run the full validation command locally and confirm ALL checks pass before finishing.
-Create a descriptive commit: "fix: <concrete failure resolved>"`,
-      {}, { x: 500, y: 2380 }),
-
-    node("retry2-pre-pr-validation", "action.run_command", "Retry-2 Pre-PR Validation", {
+    node("retry2-pre-pr-validation", "action.run_command", "Retry Pre-PR Validation 2", {
       command: "{{prePrValidationCommand}}",
       commandType: "qualityGate",
       cwd: "{{worktreePath}}",
       failOnError: false,
-    }, { x: 500, y: 2460 }),
+    }, { x: 320, y: 2300 }),
 
-    node("retry2-validation-ok", "condition.expression", "Retry-2 Validation Passed?", {
+    node("retry2-validation-ok", "condition.expression", "Retry Validation 2 Passed?", {
       expression:
-        "(() => {" +
-        "const enabled = $data?.prePrValidationEnabled !== false;" +
-        "if (!enabled) return true;" +
-        "const out = $ctx.getNodeOutput('retry2-pre-pr-validation');" +
-        "if (!out) return false;" +
-        "if (out.success === true) return true;" +
-        "const code = Number(out.exitCode);" +
-        "return Number.isFinite(code) && code === 0;" +
-        "})()",
-    }, { x: 500, y: 2540, outputs: ["yes", "no"] }),
+        "(() => { const out = $ctx.getNodeOutput('retry2-pre-pr-validation'); if (!out) return false; if (out.success === true) return true; const code = Number(out.exitCode); return Number.isFinite(code) && code === 0; })()",
+    }, { x: 320, y: 2420, outputs: ["yes", "no"] }),
 
     node("log-validation-failed", "notify.log", "Log Validation Failed", {
-      message: "Task \"{{taskTitle}}\" ({{taskId}}) — pre-PR validation failed after 2 auto-fix remediation passes, blocking task",
+      message: "Task \"{{taskTitle}}\" ({{taskId}}) — pre-PR validation failed after two autofix attempts, blocking task",
       level: "warn",
-    }, { x: 700, y: 2600 }),
+    }, { x: 460, y: 2180 }),
 
-    node("set-blocked-validation-failed", "action.update_task_status", "Block Task (Validation Fail)", {
+    node("set-blocked-validation-failed", "action.update_task_status", "Set Blocked (Validation Fail)", {
       taskId: "{{taskId}}",
       status: "blocked",
       taskTitle: "{{taskTitle}}",
-      blockedReason: "Pre-PR validation failed after 2 automated remediation passes",
-    }, { x: 700, y: 2680 }),
+      blockedReason: "pre_pr_validation_failed",
+    }, { x: 460, y: 2300 }),
+
+    node("log-validation-worktree-failed", "notify.log", "Log Validation WT Failed", {
+      message: "Task \"{{taskTitle}}\" ({{taskId}}) — validation autofix lost a valid worktree, blocking for worktree recovery",
+      level: "warn",
+    }, { x: 540, y: 2060 }),
+
+    node("set-blocked-validation-worktree-failed", "action.update_task_status", "Set Blocked (Validation WT Fail)", {
+      taskId: "{{taskId}}",
+      status: "blocked",
+      taskTitle: "{{taskTitle}}",
+      blockedReason: "{{(() => { const out = $ctx.getNodeOutput('auto-fix-validation-2') || $ctx.getNodeOutput('auto-fix-validation') || {}; return out.blockedReason || out.error || 'worktree_failure'; })()}}",
+    }, { x: 620, y: 2180 }),
+
+    node("annotate-blocked-validation-worktree-failed", "action.bosun_function", "Annotate Blocked (Validation WT Fail)", {
+      function: "tasks.update",
+      args: {
+        taskId: "{{taskId}}",
+        fields: {
+          cooldownUntil: "{{(() => { const out = $ctx.getNodeOutput('auto-fix-validation-2') || $ctx.getNodeOutput('auto-fix-validation') || {}; return out.retryAt || null; })()}}",
+          blockedReason: "{{(() => { const out = $ctx.getNodeOutput('auto-fix-validation-2') || $ctx.getNodeOutput('auto-fix-validation') || {}; return out.blockedReason || out.error || 'worktree_failure'; })()}}",
+          meta: "{{(() => { const current = ($data.meta && typeof $data.meta === 'object') ? $data.meta : (($data.taskMeta && typeof $data.taskMeta === 'object') ? $data.taskMeta : {}); const out = $ctx.getNodeOutput('auto-fix-validation-2') || $ctx.getNodeOutput('auto-fix-validation') || {}; const failure = (out.worktreeFailure && typeof out.worktreeFailure === 'object') ? out.worktreeFailure : {}; const worktreePath = failure.worktreePath || out.worktreePath || $data.worktreePath || ''; const repoRoot = failure.repoRoot || $data.repoRoot || $data.workspace || current.repoRoot || current.workspace || ''; const branch = failure.branch || $data.branch || $data.branchName || current.branch || current.branchName || ''; const baseBranch = failure.baseBranch || $data.baseBranch || current.baseBranch || ''; const defaultTargetBranch = failure.defaultTargetBranch || $data.defaultTargetBranch || current.defaultTargetBranch || ''; const detectedIssues = Array.isArray(failure.detectedIssues) ? failure.detectedIssues : (Array.isArray(out.detectedIssues) ? out.detectedIssues : []); return { ...current, autoRecovery: { active: true, reason: 'worktree_failure', failureKind: failure.failureKind || out.failureKind || 'validation_worktree_failure', retryAt: out.retryAt || null, recoveryDelayMs: out.autoRecoverDelayMs || null, error: out.error || '', recordedAt: out.recordedAt || null }, worktreeFailure: { failureKind: failure.failureKind || out.failureKind || 'validation_worktree_failure', retryable: out.retryable === true, retryAt: out.retryAt || null, blockedReason: out.blockedReason || out.error || 'worktree_failure', error: out.error || '', recordedAt: out.recordedAt || null, repairArtifacts: out.repairArtifacts || null, branch, repoRoot, baseBranch, defaultTargetBranch, worktreePath, detectedIssues, phase: failure.phase || out.phase || 'validation_autofix' } }; })()}}",
+        },
+      },
+    }, { x: 620, y: 2300, outputs: ["default", "error"] }),
 
     node("notify-validation-blocked", "notify.telegram", "Notify Validation Blocked", {
-      message: ":alert: Task \"{{taskTitle}}\" blocked — pre-PR validation failed after 2 automated remediation attempts. Manual review needed.",
-    }, { x: 700, y: 2760 }),
-    // ── SUCCESS PATH: Push branch (with rebase + empty-diff guard) ───────
+      message: "⚠️ Task \"{{taskTitle}}\" ({{taskId}}) blocked after repeated pre-PR validation failures.",
+    }, { x: 460, y: 2420 }),
+    node("auto-commit-pre-push", "action.auto_commit_dirty", "Auto Commit Before Push", {
+      worktreePath: "{{worktreePath}}",
+      taskId: "{{taskId}}",
+    }, { x: 0, y: 1940 }),
+    // ── SUCCESS PATH: Push branch (with merge-base refresh + empty-diff guard) ───────
     node("push-branch", "action.push_branch", "Push Branch", {
       worktreePath: "{{worktreePath}}",
       branch: "{{branch}}",
       baseBranch: "{{baseBranch}}",
-      rebaseBeforePush: true,
+      rebaseBeforePush: false,
       mergeBaseBeforePush: true,
       autoResolveMergeConflicts: true,
       conflictResolverSdk: "auto",
@@ -444,48 +411,9 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
       expression: "$ctx.getNodeOutput('push-branch')?.pushed === true",
     }, { x: 0, y: 2130, outputs: ["yes", "no"] }),
 
-    // ── SUCCESS PATH: Build rich PR description ──────────────────────────
-    node("build-pr-body", "action.set_variable", "Build PR Description", {
-      key: "prBody",
-      value: [
-        "(() => {",
-        "const title = $data.taskTitle || 'Untitled Task';",
-        "const desc = String($data.taskDescription || '').trim();",
-        "const taskId = $data.taskId || '';",
-        "const dc = $ctx.getNodeOutput('detect-commits') || {};",
-        "const stats = dc.diffStats || {};",
-        "const msgs = Array.isArray(dc.commitMessages) ? dc.commitMessages : [];",
-        "const files = Array.isArray(dc.changedFiles) ? dc.changedFiles : [];",
-        "const s = [];",
-        "s.push('## Summary');",
-        "s.push('');",
-        "if (desc) { s.push(desc); } else { s.push(title); }",
-        "if (msgs.length) {",
-        "  s.push('');",
-        "  s.push('## Changes');",
-        "  s.push('');",
-        "  msgs.forEach(m => s.push('- ' + m));",
-        "}",
-        "if (stats.filesChanged) {",
-        "  s.push('');",
-        "  s.push('**' + stats.filesChanged + ' file' + (stats.filesChanged === 1 ? '' : 's') + ' changed, ' + (stats.insertions || 0) + ' insertion' + ((stats.insertions || 0) === 1 ? '' : 's') + '(+), ' + (stats.deletions || 0) + ' deletion' + ((stats.deletions || 0) === 1 ? '' : 's') + '(-)**');",
-        "}",
-        "if (files.length) {",
-        "  s.push('');",
-        "  s.push('<details><summary>Files touched (' + files.length + ')</summary>');",
-        "  s.push('');",
-        "  files.slice(0, 80).forEach(f => s.push('- `' + f + '`'));",
-        "  if (files.length > 80) s.push('- ... and ' + (files.length - 80) + ' more');",
-        "  s.push('');",
-        "  s.push('</details>');",
-        "}",
-        "s.push('');",
-        "s.push('---');",
-        "s.push('Task-ID: ' + taskId);",
-        "return s.join('\\n');",
-        "})()",
-      ].join(" "),
-      isExpression: true,
+    node("build-pr-body", "action.set_variable", "Build PR Body", {
+      variable: "prBody",
+      value: "{{prBody}}",
     }, { x: 0, y: 2195 }),
 
     // ── SUCCESS PATH: Create PR ──────────────────────────────────────────
@@ -512,21 +440,21 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
 
     node("handoff-pr-progressor", "action.execute_workflow", "Handoff PR Progressor", {
       workflowId: "template-bosun-pr-progressor",
-      mode: "dispatch",
+      mode: "sync",
       input: {
         taskId: "{{taskId}}",
         taskTitle: "{{taskTitle}}",
         branch: "{{branch}}",
         baseBranch: "{{baseBranch}}",
-        prNumber: "{{$ctx.getNodeOutput('create-pr')?.prNumber ?? $data?.prNumber ?? null}}",
-        prUrl: "{{$ctx.getNodeOutput('create-pr')?.prUrl || $data?.prUrl || ''}}",
-        repo: "{{$ctx.getNodeOutput('create-pr')?.repoSlug || $data?.repo || $data?.repoSlug || $data?.repository || ''}}",
+        prNumber: "{{$ctx.getNodeOutput('create-pr')?.prNumber ?? $data?.prNumber ?? $data?.task?.prNumber ?? null}}",
+        prUrl: "{{$ctx.getNodeOutput('create-pr')?.prUrl || $data?.prUrl || $data?.task?.prUrl || ''}}",
+        repo: "{{$ctx.getNodeOutput('create-pr')?.repoSlug || $data?.repo || $data?.repoSlug || $data?.repository || $data?.task?.repo || $data?.task?.repoSlug || $data?.task?.repository || ''}}",
       },
     }, { x: -120, y: 2520 }),
 
     // ── SUCCESS PATH: Log success ────────────────────────────────────────
     node("log-success", "notify.log", "Log Success", {
-      message: "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR created",
+      message: "Task \"{{taskTitle}}\" ({{taskId}}) completed — PR linked",
       level: "info",
     }, { x: -120, y: 2650 }),
 
@@ -535,6 +463,18 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
       message: "Task \"{{taskTitle}}\" ({{taskId}}) — no new commits, returning to todo",
       level: "warn",
     }, { x: 350, y: 2000 }),
+
+    node("log-no-commits-exhausted", "notify.log", "Log No Commits Exhausted", {
+      message: "Task \"{{taskTitle}}\" ({{taskId}}) — repeated no-commit runs exhausted retries, blocking task",
+      level: "warn",
+    }, { x: 520, y: 2000 }),
+
+    node("set-blocked-no-commits", "action.update_task_status", "Set Blocked (No Commits)", {
+      taskId: "{{taskId}}",
+      status: "blocked",
+      taskTitle: "{{taskTitle}}",
+      blockedReason: "{{$ctx.getNodeOutput('detect-commits')?.blockedReason || 'repeated_no_commit_runs'}}",
+    }, { x: 520, y: 2130 }),
 
     // ── NO COMMITS PATH: Set status → todo (cooldown) ────────────────────
     node("set-todo-cooldown", "action.update_task_status", "Set Todo (Cooldown)", {
@@ -554,6 +494,10 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
       expression: "$ctx.getNodeOutput('push-branch')?.implementationDone === true",
     }, { x: 360, y: 2195, outputs: ["yes", "no"] }),
 
+    node("push-pr-linked", "condition.expression", "Existing PR Linked?", {
+      expression: "Boolean($data?.prNumber || $data?.prUrl || $data?.task?.prNumber || $data?.task?.prUrl)",
+    }, { x: 180, y: 2325, outputs: ["yes", "no"] }),
+
     node("set-blocked-push-failed", "action.update_task_status", "Set Blocked (Push Fail)", {
       taskId: "{{taskId}}",
       status: "blocked",
@@ -561,27 +505,10 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
       blockedReason: "{{$ctx.getNodeOutput('push-branch')?.blockedReason || $ctx.getNodeOutput('push-branch')?.error || 'implementation_done_commit_blocked'}}",
     }, { x: 360, y: 2325 }),
 
-    // ── CLAIM STOLEN PATH: Build PR body and recover ────────────────────
-    node("build-pr-body-stolen", "action.set_variable", "Build PR Description (Recovered)", {
-      key: "prBody",
-      value: [
-        "(() => {",
-        "const title = $data.taskTitle || 'Untitled Task';",
-        "const desc = String($data.taskDescription || '').trim();",
-        "const taskId = $data.taskId || '';",
-        "const s = [];",
-        "s.push('## Summary');",
-        "s.push('');",
-        "if (desc) { s.push(desc); } else { s.push(title); }",
-        "s.push('');",
-        "s.push('> Claim was lost during agent execution — PR recovered.');",
-        "s.push('');",
-        "s.push('---');",
-        "s.push('Task-ID: ' + taskId);",
-        "return s.join('\\n');",
-        "})()",
-      ].join(" "),
-      isExpression: true,
+    // ── CLAIM STOLEN PATH: Log ───────────────────────────────────────────
+    node("build-pr-body-stolen", "action.set_variable", "Build PR Body (Recovered)", {
+      variable: "prBody",
+      value: "{{prBody}}",
     }, { x: 400, y: 1680 }),
 
     node("create-pr-retry", "action.create_pr", "Recover PR Link", {
@@ -607,7 +534,7 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
 
     node("handoff-pr-progressor-stolen", "action.execute_workflow", "Handoff PR Progressor (Recovered)", {
       workflowId: "template-bosun-pr-progressor",
-      mode: "dispatch",
+      mode: "sync",
       input: {
         taskId: "{{taskId}}",
         taskTitle: "{{taskTitle}}",
@@ -638,7 +565,7 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
 
     node("join-outcomes", "flow.join", "Join Outcome Paths", {
       mode: "all",
-      sourceNodeIds: ["log-success", "set-todo-push-failed", "set-blocked-push-failed", "set-todo-cooldown", "notify-validation-blocked", "set-todo-stolen", "log-claim-stolen-recovered"],
+      sourceNodeIds: ["log-success", "set-todo-push-failed", "set-blocked-push-failed", "set-todo-cooldown", "set-blocked-no-commits", "notify-validation-blocked", "set-todo-stolen", "log-claim-stolen-recovered"],
       includeSkipped: true,
     }, { x: 200, y: 2560 }),
 
@@ -696,12 +623,13 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
           meta: "{{(() => { const current = ($data.meta && typeof $data.meta === 'object') ? $data.meta : (($data.taskMeta && typeof $data.taskMeta === 'object') ? $data.taskMeta : {}); const retry = $ctx.getNodeOutput('retry-acquire-wt'); const output = retry && retry.success === false ? retry : ($ctx.getNodeOutput('acquire-worktree') || {}); const worktreePath = output.worktreePath || $data.worktreePath || ''; const repoRoot = $data.repoRoot || $data.workspace || current.repoRoot || current.workspace || ''; const branch = $data.branch || $data.branchName || current.branch || current.branchName || ''; const baseBranch = $data.baseBranch || current.baseBranch || ''; const defaultTargetBranch = $data.defaultTargetBranch || current.defaultTargetBranch || ''; return { ...current, autoRecovery: { active: true, reason: 'worktree_failure', failureKind: output.failureKind || 'branch_refresh_conflict', retryAt: output.retryAt || null, recoveryDelayMs: output.autoRecoverDelayMs || null, error: output.error || '', recordedAt: output.recordedAt || null }, worktreeFailure: { failureKind: output.failureKind || 'branch_refresh_conflict', retryable: output.retryable !== false, retryAt: output.retryAt || null, blockedReason: output.blockedReason || output.error || '', error: output.error || '', recordedAt: output.recordedAt || null, repairArtifacts: output.repairArtifacts || null, branch, repoRoot, baseBranch, defaultTargetBranch, worktreePath } }; })()}}",
         },
       },
-    }, { x: 470, y: 1480 }),
+    }, { x: 470, y: 1480, outputs: ["default", "error"] }),
 
     node("dispatch-wt-repair", "action.execute_workflow", "Dispatch WT Repair", {
       workflowId: "template-task-repair-worktree",
-      mode: "dispatch",
+      mode: "{{ $data?._simulation === true ? 'sync' : 'dispatch' }}",
       input: {
+        eventType: "task.failed",
         taskId: "{{taskId}}",
         taskTitle: "{{taskTitle}}",
         repoRoot: "{{repoRoot}}",
@@ -731,7 +659,7 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
 
     // ── AUTO-RECOVERY: Retry worktree acquisition once after cleanup ─────
     node("wt-retry-eligible", "condition.expression", "Retryable WT Failure?", {
-      expression: "$ctx.getNodeOutput('acquire-worktree')?.retryable !== false",
+      expression: "$ctx.getNodeOutput('acquire-worktree')?.retryable === true",
     }, { x: 850, y: 960, outputs: ["yes", "no"] }),
 
     node("recover-worktree", "action.recover_worktree", "Clean Broken WT", {
@@ -776,9 +704,26 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
     edge("read-workflow-contract", "workflow-contract-validation"),
     edge("workflow-contract-validation", "build-prompt"),
     edge("build-prompt", "run-agent-plan"),
-    edge("run-agent-plan", "run-agent-tests"),
-    edge("run-agent-tests", "run-agent-implement"),
-    edge("run-agent-implement", "claim-stolen"),
+    edge("run-agent-plan", "plan-agent-commit-blocked"),
+    edge("plan-agent-commit-blocked", "claim-stolen", { condition: "$output?.result === true", port: "yes" }),
+    edge("plan-agent-commit-blocked", "plan-agent-ok", { condition: "$output?.result !== true", port: "no" }),
+    edge("plan-agent-ok", "run-agent-tests", { condition: "$output?.result === true", port: "yes" }),
+    edge("plan-agent-ok", "plan-agent-worktree-reacquire-needed", { condition: "$output?.result !== true", port: "no" }),
+    edge("plan-agent-worktree-reacquire-needed", "recover-worktree", { condition: "$output?.result === true", port: "yes" }),
+    edge("plan-agent-worktree-reacquire-needed", "set-blocked-agent-plan-failed", { condition: "$output?.result !== true", port: "no" }),
+    edge("set-blocked-agent-plan-failed", "join-outcomes"),
+    edge("run-agent-tests", "tests-agent-ok"),
+    edge("tests-agent-ok", "run-agent-implement", { condition: "$output?.result === true", port: "yes" }),
+    edge("tests-agent-ok", "tests-agent-worktree-reacquire-needed", { condition: "$output?.result !== true", port: "no" }),
+    edge("tests-agent-worktree-reacquire-needed", "recover-worktree", { condition: "$output?.result === true", port: "yes" }),
+    edge("tests-agent-worktree-reacquire-needed", "set-blocked-agent-tests-failed", { condition: "$output?.result !== true", port: "no" }),
+    edge("set-blocked-agent-tests-failed", "join-outcomes"),
+    edge("run-agent-implement", "implement-agent-ok"),
+    edge("implement-agent-ok", "claim-stolen", { condition: "$output?.result === true", port: "yes" }),
+    edge("implement-agent-ok", "implement-agent-worktree-reacquire-needed", { condition: "$output?.result !== true", port: "no" }),
+    edge("implement-agent-worktree-reacquire-needed", "recover-worktree", { condition: "$output?.result === true", port: "yes" }),
+    edge("implement-agent-worktree-reacquire-needed", "set-blocked-agent-implement-failed", { condition: "$output?.result !== true", port: "no" }),
+    edge("set-blocked-agent-implement-failed", "join-outcomes"),
 
     // Post-agent: check claim
     edge("claim-stolen", "auto-commit-dirty", { condition: "$output?.result !== true", port: "no" }),
@@ -788,24 +733,29 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
     // Success path (has commits)
     edge("has-commits", "pre-pr-validation", { condition: "$output?.result === true", port: "yes" }),
     edge("pre-pr-validation", "pre-pr-validation-ok"),
-    edge("pre-pr-validation-ok", "push-branch", { condition: "$output?.result === true", port: "yes" }),
-
-    // Validation failed → auto-fix remediation → retry
+    edge("pre-pr-validation-ok", "auto-commit-pre-push", { condition: "$output?.result === true", port: "yes" }),
     edge("pre-pr-validation-ok", "set-fix-summary", { condition: "$output?.result !== true", port: "no" }),
     edge("set-fix-summary", "auto-fix-validation"),
-    edge("auto-fix-validation", "retry-pre-pr-validation"),
+    edge("auto-fix-validation", "validation-fix1-worktree-ok"),
+    edge("validation-fix1-worktree-ok", "retry-pre-pr-validation", { condition: "$output?.result === true", port: "yes" }),
+    edge("validation-fix1-worktree-ok", "log-validation-worktree-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("retry-pre-pr-validation", "retry-validation-ok"),
-    edge("retry-validation-ok", "push-branch", { condition: "$output?.result === true", port: "yes" }),
-    // Validation pass 1 failed → escalated pass 2
+    edge("retry-validation-ok", "auto-commit-pre-push", { condition: "$output?.result === true", port: "yes" }),
     edge("retry-validation-ok", "set-fix2-summary", { condition: "$output?.result !== true", port: "no" }),
     edge("set-fix2-summary", "auto-fix-validation-2"),
-    edge("auto-fix-validation-2", "retry2-pre-pr-validation"),
+    edge("auto-fix-validation-2", "validation-fix2-worktree-ok"),
+    edge("validation-fix2-worktree-ok", "retry2-pre-pr-validation", { condition: "$output?.result === true", port: "yes" }),
+    edge("validation-fix2-worktree-ok", "log-validation-worktree-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("retry2-pre-pr-validation", "retry2-validation-ok"),
-    edge("retry2-validation-ok", "push-branch", { condition: "$output?.result === true", port: "yes" }),
+    edge("retry2-validation-ok", "auto-commit-pre-push", { condition: "$output?.result === true", port: "yes" }),
     edge("retry2-validation-ok", "log-validation-failed", { condition: "$output?.result !== true", port: "no" }),
+    edge("log-validation-worktree-failed", "set-blocked-validation-worktree-failed"),
+    edge("set-blocked-validation-worktree-failed", "annotate-blocked-validation-worktree-failed"),
+    edge("annotate-blocked-validation-worktree-failed", "join-outcomes"),
     edge("log-validation-failed", "set-blocked-validation-failed"),
     edge("set-blocked-validation-failed", "notify-validation-blocked"),
     edge("notify-validation-blocked", "join-outcomes"),
+    edge("auto-commit-pre-push", "push-branch"),
     edge("push-branch", "push-ok"),
     edge("push-ok", "build-pr-body", { condition: "$output?.result === true", port: "yes" }),
     edge("build-pr-body", "create-pr"),
@@ -818,13 +768,19 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
 
     // Push failed path
     edge("push-ok", "push-failure-blocking", { condition: "$output?.result !== true", port: "no" }),
-    edge("push-failure-blocking", "set-blocked-push-failed", { condition: "$output?.result === true", port: "yes" }),
+    edge("push-failure-blocking", "push-pr-linked", { condition: "$output?.result === true", port: "yes" }),
+    edge("push-pr-linked", "set-inreview", { condition: "$output?.result === true", port: "yes" }),
+    edge("push-pr-linked", "set-blocked-push-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("push-failure-blocking", "set-todo-push-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("set-blocked-push-failed", "join-outcomes"),
     edge("set-todo-push-failed", "join-outcomes"),
 
     // No-commits path
-    edge("has-commits", "log-no-commits", { condition: "$output?.result !== true", port: "no" }),
+    edge("has-commits", "no-commit-retries-exhausted", { condition: "$output?.result !== true", port: "no" }),
+    edge("no-commit-retries-exhausted", "log-no-commits-exhausted", { condition: "$output?.result === true", port: "yes" }),
+    edge("log-no-commits-exhausted", "set-blocked-no-commits"),
+    edge("set-blocked-no-commits", "join-outcomes"),
+    edge("no-commit-retries-exhausted", "log-no-commits", { condition: "$output?.result !== true", port: "no" }),
     edge("log-no-commits", "set-todo-cooldown"),
     edge("set-todo-cooldown", "join-outcomes"),
 
@@ -857,8 +813,31 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
     edge("wt-retry-eligible", "recover-worktree", { condition: "$output?.result === true", port: "yes" }),
     edge("recover-worktree", "retry-acquire-wt"),
     edge("retry-acquire-wt", "retry-wt-ok"),
-    // Retry succeeded — rejoin main flow at resolve-executor
-    edge("retry-wt-ok", "resolve-executor", { condition: "$output?.result === true", port: "yes" }),
+    // Retry succeeded — rejoin the phase that failed, otherwise continue the main flow.
+    edge("retry-wt-ok", "run-agent-plan", {
+      condition: "(() => { if ($output?.result !== true) return false; const out = $ctx.getNodeOutput('run-agent-plan') || {}; return out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); })()",
+      port: "yes",
+      backEdge: true,
+      maxIterations: 1,
+    }),
+    edge("retry-wt-ok", "run-agent-tests", {
+      condition: "(() => { if ($output?.result !== true) return false; const out = $ctx.getNodeOutput('run-agent-tests') || {}; return out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); })()",
+      port: "yes",
+      backEdge: true,
+      maxIterations: 1,
+    }),
+    edge("retry-wt-ok", "run-agent-implement", {
+      condition: "(() => { if ($output?.result !== true) return false; const out = $ctx.getNodeOutput('run-agent-implement') || {}; return out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); })()",
+      port: "yes",
+      backEdge: true,
+      maxIterations: 1,
+    }),
+    edge("retry-wt-ok", "resolve-executor", {
+      condition:
+        "(() => { if ($output?.result !== true) return false; const plan = $ctx.getNodeOutput('run-agent-plan') || {}; const tests = $ctx.getNodeOutput('run-agent-tests') || {}; const implement = $ctx.getNodeOutput('run-agent-implement') || {}; const isRecoverable = (out) => out.blockedReason === 'worktree_failure' && (out.needsReacquire === true || out.removed === true); return !isRecoverable(plan) && !isRecoverable(tests) && !isRecoverable(implement); })()",
+      port: "yes",
+      backEdge: true,
+    }),
     // Retry failed — fall through to original failure path
     edge("retry-wt-ok", "release-claim-wt-failed", { condition: "$output?.result !== true", port: "no" }),
 
@@ -869,6 +848,10 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
     edge("wt-failure-blocking", "set-todo-wt-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("set-blocked-wt-failed", "annotate-blocked-wt-failed"),
     edge("annotate-blocked-wt-failed", "dispatch-wt-repair"),
+    edge("annotate-blocked-wt-failed", "dispatch-wt-repair", {
+      id: "annotate-blocked-wt-failed->dispatch-wt-repair#error",
+      port: "error",
+    }),
     edge("dispatch-wt-repair", "release-slot-wt-failed"),
     edge("set-todo-wt-failed", "release-slot-wt-failed"),
     edge("release-slot-wt-failed", "notify-wt-failed"),
@@ -877,8 +860,8 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
     author: "bosun",
     version: 5,
     createdAt: "2026-03-01T00:00:00Z",
-    templateVersion: "4.1.0",
-    tags: ["task", "lifecycle", "executor", "workflow-first", "core", "multi-remediation"],
+    templateVersion: "2.1.0",
+    tags: ["task", "lifecycle", "executor", "workflow-first", "core"],
     requiredTemplates: ["template-bosun-pr-progressor", "template-task-repair-worktree"],
     replaces: {
       module: "task-executor.mjs",

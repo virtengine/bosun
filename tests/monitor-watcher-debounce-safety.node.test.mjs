@@ -13,3 +13,10 @@ test("watcher debounce timers use safeSetTimeout wrappers", () => {
   assert.doesNotMatch(src, /watcherDebounce = setTimeout\(/);
   assert.doesNotMatch(src, /envWatcherDebounce = setTimeout\(/);
 });
+
+test("self restart quiet period defaults to 180 seconds and preserves a 90-second floor", () => {
+  assert.match(
+    src,
+    /const SELF_RESTART_QUIET_MS = Math\.max\(\s*90_000,\s*Number\(process\.env\.SELF_RESTART_QUIET_MS \|\| "180000"\),/s,
+  );
+});

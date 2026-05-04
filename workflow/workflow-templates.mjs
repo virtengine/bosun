@@ -355,6 +355,11 @@ const _TEMPLATE_BY_ID = new Map(
 );
 function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
   const templateStateVersion = 1;
+  const STARTUP_CRITICAL_TEMPLATE_IDS = new Set([
+    "template-task-lifecycle",
+    "template-bosun-pr-watchdog",
+    "template-github-kanban-sync",
+  ]);
 
   function toFingerprintNode(node = {}) {
     if (!node || typeof node !== "object") return node;
@@ -410,6 +415,15 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
       category: def.category || "custom",
       trigger: def.trigger || "",
       variables: def.variables || {},
+      nodes: Array.isArray(def.nodes) ? def.nodes.map((node) => toFingerprintNode(node)) : [],
+      edges: Array.isArray(def.edges) ? def.edges.map((edgeDef) => toFingerprintEdge(edgeDef)) : [],
+    };
+  }
+
+  function toWorkflowStructureFingerprintPayload(def = {}) {
+    return {
+      category: def.category || "custom",
+      trigger: def.trigger || "",
       nodes: Array.isArray(def.nodes) ? def.nodes.map((node) => toFingerprintNode(node)) : [],
       edges: Array.isArray(def.edges) ? def.edges.map((edgeDef) => toFingerprintEdge(edgeDef)) : [],
     };
@@ -508,8 +522,123 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
     return repaired;
   }
 
+  function hasEdge(def = {}, source, target, port = null) {
+    return (Array.isArray(def?.edges) ? def.edges : []).some((edgeDef) => (
+      String(edgeDef?.source || "").trim() === source
+      && String(edgeDef?.target || "").trim() === target
+      && (port == null || String(edgeDef?.sourcePort || "default").trim() === port)
+    ));
+  }
+
+  function getNodeById(def = {}, nodeId = "") {
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!normalizedNodeId) return null;
+    return (Array.isArray(def?.nodes) ? def.nodes : []).find(
+      (node) => String(node?.id || "").trim() === normalizedNodeId,
+    ) || null;
+  }
+
+  function readNodeStringArrayConfig(node, key) {
+    const raw = node?.config?.[key];
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+  }
+
+  function hasTaskLifecyclePollingStatuses(def = {}) {
+    const triggerNode = getNodeById(def, "trigger");
+    if (!triggerNode || String(triggerNode?.type || "").trim() !== "trigger.task_available") {
+      return false;
+    }
+    const statuses = readNodeStringArrayConfig(triggerNode, "statuses");
+    return statuses.length === 1 && statuses[0] === "todo";
+  }
+
+  function hasDeterministicTaskLifecycleWorktreeRouting(def = {}) {
+    const templateId = String(def?.metadata?.installedFrom || "").trim();
+    if (templateId !== "template-task-lifecycle") return true;
+
+    const nodesById = new Map(
+      (Array.isArray(def?.nodes) ? def.nodes : [])
+        .map((node) => [String(node?.id || "").trim(), node])
+        .filter(([id]) => Boolean(id)),
+    );
+    const retryGate = nodesById.get("wt-retry-eligible");
+    if (!retryGate || String(retryGate?.type || "").trim() !== "condition.expression") return false;
+    if (String(retryGate?.config?.expression || "").trim() !== "$ctx.getNodeOutput('acquire-worktree')?.retryable === true") {
+      return false;
+    }
+
+    return hasEdge(def, "worktree-ok", "wt-retry-eligible", "no")
+      && hasEdge(def, "wt-retry-eligible", "recover-worktree", "yes")
+      && hasEdge(def, "wt-retry-eligible", "release-claim-wt-failed", "no")
+      && hasEdge(def, "recover-worktree", "retry-acquire-wt")
+      && hasEdge(def, "retry-acquire-wt", "retry-wt-ok")
+      && hasEdge(def, "retry-wt-ok", "resolve-executor", "yes")
+      && hasEdge(def, "retry-wt-ok", "release-claim-wt-failed", "no");
+  }
+
+  function hasDeterministicTaskLifecyclePrCreationRouting(def = {}) {
+    const templateId = String(def?.metadata?.installedFrom || "").trim();
+    if (templateId !== "template-task-lifecycle") return true;
+    return hasEdge(def, "push-ok", "build-pr-body", "yes")
+      && hasEdge(def, "build-pr-body", "create-pr")
+      && hasEdge(def, "create-pr", "pr-created")
+      && hasEdge(def, "pr-created", "set-inreview", "yes")
+      && hasEdge(def, "pr-created", "set-todo-push-failed", "no")
+      && hasEdge(def, "claim-stolen", "build-pr-body-stolen", "yes")
+      && hasEdge(def, "build-pr-body-stolen", "create-pr-retry")
+      && hasEdge(def, "create-pr-retry", "pr-created-stolen")
+      && hasEdge(def, "pr-created-stolen", "set-inreview-stolen", "yes");
+  }
+
   function computeWorkflowFingerprint(def = {}) {
     return hashContent(toWorkflowFingerprintPayload(def));
+  }
+
+  function computeWorkflowStructureFingerprint(def = {}) {
+    return hashContent(toWorkflowStructureFingerprintPayload(def));
+  }
+
+  function collectStartupCriticalTemplateIssues(def = {}) {
+    const templateId = String(def?.metadata?.installedFrom || "").trim();
+    if (!STARTUP_CRITICAL_TEMPLATE_IDS.has(templateId)) return [];
+    const template = getTemplate(templateId);
+    if (!template) return [];
+
+    const issues = [];
+    if (computeWorkflowStructureFingerprint(def) !== computeWorkflowStructureFingerprint(template)) {
+      issues.push({
+        code: "fingerprint_mismatch",
+        templateId,
+        message: `Installed workflow structure differs from source template for ${templateId}`,
+      });
+    }
+    if (templateId === "template-task-lifecycle") {
+      if (!hasTaskLifecyclePollingStatuses(def)) {
+        issues.push({
+          code: "task_lifecycle_trigger_statuses",
+          templateId,
+          message: "Task Lifecycle trigger statuses must be exactly ['todo']",
+        });
+      }
+      if (!hasDeterministicTaskLifecycleWorktreeRouting(def)) {
+        issues.push({
+          code: "task_lifecycle_worktree_routing",
+          templateId,
+          message: "Task Lifecycle worktree recovery routing is missing required deterministic edges",
+        });
+      }
+      if (!hasDeterministicTaskLifecyclePrCreationRouting(def)) {
+        issues.push({
+          code: "task_lifecycle_pr_creation_routing",
+          templateId,
+          message: "Task Lifecycle PR creation routing is missing required handoff edges",
+        });
+      }
+    }
+    return issues;
   }
 
   function deriveTemplateState(def, template) {
@@ -650,6 +779,8 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
       updateAvailable: [],
       customized: [],
       updatedWorkflowIds: [],
+      criticalMismatches: [],
+      criticalRemaining: [],
       errors: [],
     };
 
@@ -697,7 +828,19 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
         }
 
         const templateId = String(state.templateId || "").trim();
-        const shouldForceUpdate = templateId && forceUpdateTemplateIds.has(templateId);
+        const criticalIssues = collectStartupCriticalTemplateIssues(def);
+        if (criticalIssues.length > 0) {
+          result.criticalMismatches.push({
+            workflowId: def.id,
+            name: def.name,
+            templateId,
+            issues: criticalIssues,
+          });
+        }
+        const shouldForceUpdate = (
+          (templateId && forceUpdateTemplateIds.has(templateId))
+          || criticalIssues.length > 0
+        );
         const assumeUncustomized = previousState?.isCustomized !== true;
         if (shouldForceUpdate) {
           const saved = updateWorkflowFromTemplate(engine, def.id, {
@@ -708,6 +851,15 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
           result.autoUpdated += 1;
           result.updatedWorkflowIds.push(saved.id);
           result.forceUpdated.push(saved.id);
+          const remainingCriticalIssues = collectStartupCriticalTemplateIssues(saved);
+          if (remainingCriticalIssues.length > 0) {
+            result.criticalRemaining.push({
+              workflowId: saved.id,
+              name: saved.name,
+              templateId: String(saved?.metadata?.installedFrom || templateId || "").trim(),
+              issues: remainingCriticalIssues,
+            });
+          }
           continue;
         }
 
@@ -722,6 +874,15 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
           result.updatedWorkflowIds.push(saved.id);
         }
       } catch (err) {
+        const criticalIssues = collectStartupCriticalTemplateIssues(def);
+        if (criticalIssues.length > 0) {
+          result.criticalRemaining.push({
+            workflowId: def?.id || wfId,
+            name: def?.name || summary?.name || wfId,
+            templateId: String(def?.metadata?.installedFrom || "").trim() || null,
+            issues: criticalIssues,
+          });
+        }
         result.errors.push({
           workflowId: wfId,
           error: err.message,
@@ -1541,4 +1702,3 @@ export function installRecommendedTemplates(engine, overridesById = {}) {
     .map((template) => template.id);
   return installTemplateSet(engine, recommendedIds, overridesById);
 }
-

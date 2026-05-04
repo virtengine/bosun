@@ -2,9 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const execFileMock = vi.hoisted(() => vi.fn());
 
-vi.mock("node:child_process", () => ({
-  execFile: execFileMock,
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    execFile: execFileMock,
+  };
+});
 
 describe("github-shared-state", () => {
   let adapter;
@@ -68,6 +72,7 @@ describe("github-shared-state", () => {
     } else {
       process.env.GITHUB_PROJECT_MODE = envSnapshot.GITHUB_PROJECT_MODE;
     }
+    vi.resetModules();
   });
 
   function mockGh(stdout, stderr = "") {

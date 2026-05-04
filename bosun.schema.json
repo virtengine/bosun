@@ -154,6 +154,90 @@
           "type": "string",
           "description": "Path to the internal harness profile source file. Supports JSON or markdown fenced JSON."
         },
+        "primaryExecutor": {
+          "type": "string",
+          "description": "Named Harness executor ID to use as the default interactive/runtime selection."
+        },
+        "routingMode": {
+          "type": "string",
+          "enum": ["default-only", "fallback", "spread"],
+          "default": "default-only",
+          "description": "How the Harness runtime should route across named executors."
+        },
+        "executors": {
+          "type": "array",
+          "description": "Named Harness executor instances. These are the Bosun-native runtime selections exposed to chat, workflow, TUI, web UI, and Telegram when Harness is primary.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "providerId"],
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "providerId": {
+                "type": "string",
+                "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"]
+              },
+              "enabled": { "type": "boolean", "default": true },
+              "weight": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Optional routing weight used when the Harness runtime spreads work across multiple executor instances."
+              },
+              "defaultModel": { "type": "string" },
+              "models": {
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        { "type": "string" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["id"],
+                          "properties": {
+                            "id": { "type": "string" },
+                            "label": { "type": "string" },
+                            "enabled": { "type": "boolean", "default": true },
+                            "apiStyle": {
+                              "type": "string",
+                              "enum": ["provider-default", "responses", "chat-completions"]
+                            },
+                            "reasoningEffort": { "type": "string" },
+                            "contextWindow": { "type": "number" }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  { "type": "string" }
+                ]
+              },
+              "authMode": { "type": "string" },
+              "endpoint": { "type": "string" },
+              "baseUrl": { "type": "string" },
+              "deployment": { "type": "string" },
+              "apiVersion": { "type": "string" },
+              "workspace": { "type": "string" },
+              "organization": { "type": "string" },
+              "project": { "type": "string" },
+              "authBindings": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "apiKeyEnv": { "type": "string" },
+                  "oauthTokenEnv": { "type": "string" },
+                  "subscriptionEnv": { "type": "string" }
+                }
+              },
+              "apiStyle": {
+                "type": "string",
+                "enum": ["provider-default", "responses", "chat-completions"]
+              }
+            }
+          }
+        },
         "validation": {
           "type": "object",
           "additionalProperties": true,
@@ -796,7 +880,7 @@
       "properties": {
         "backend": {
           "type": "string",
-          "enum": ["internal", "github", "jira", "gnap"]
+          "enum": ["internal", "github", "jira", "repo-mirror"]
         },
         "syncPolicy": {
           "type": "string",
@@ -1013,41 +1097,41 @@
             }
           }
         },
-        "gnap": {
+        "repoMirror": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Enable the optional GNAP projection backend. Must be true before selecting KANBAN_BACKEND=gnap."
+              "description": "Enable the optional RepoMirror projection backend. Must be true before selecting KANBAN_BACKEND=repo-mirror."
             },
             "repoPath": {
               "type": "string",
-              "description": "Absolute path to the repo or clone that will host GNAP projection data."
+              "description": "Absolute path to the repo or clone that will host RepoMirror projection data."
             },
             "syncMode": {
               "type": "string",
               "enum": ["projection"],
               "default": "projection",
-              "description": "Projection-only GNAP synchronization mode. Bosun keeps live runtime state in private storage."
+              "description": "Projection-only RepoMirror synchronization mode. Bosun keeps live runtime state in private storage."
             },
             "runStorage": {
               "type": "string",
               "enum": ["git", "local"],
               "default": "git",
-              "description": "Where GNAP run metadata is stored when projection export is enabled."
+              "description": "Where RepoMirror run metadata is stored when projection export is enabled."
             },
             "messageStorage": {
               "type": "string",
               "enum": ["off", "git", "local"],
               "default": "off",
-              "description": "Where GNAP message projections are stored. 'off' keeps agent-to-agent traffic private by default."
+              "description": "Where RepoMirror message projections are stored. 'off' keeps agent-to-agent traffic private by default."
             },
             "publicRoadmapEnabled": {
               "type": "boolean",
               "default": false,
-              "description": "Allow sanitized public GNAP roadmap projection when explicitly enabled."
+              "description": "Allow sanitized public RepoMirror roadmap projection when explicitly enabled."
             }
           }
         }
@@ -1337,6 +1421,211 @@
               "type": "number",
               "description": "Maximum characters retained per string field in stored stream items"
             }
+          }
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Unified provider-kernel settings for auth mode, enablement, and model selection across chat, workflow, TUI, and Telegram surfaces.",
+      "properties": {
+        "defaultProvider": {
+          "type": "string",
+          "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"],
+          "default": "openai-responses"
+        },
+        "defaultModel": {
+          "type": "string"
+        },
+        "openai": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "defaultModel": { "type": "string" }
+          }
+        },
+        "chatgptCodex": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "mode": {
+              "type": "string",
+              "enum": ["subscription", "oauth", "apiKey"],
+              "default": "subscription"
+            },
+            "defaultModel": { "type": "string" },
+            "workspace": { "type": "string" }
+          }
+        },
+        "azureOpenai": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "mode": {
+              "type": "string",
+              "enum": ["apiKey", "oauth"],
+              "default": "apiKey"
+            },
+            "defaultModel": { "type": "string" },
+            "endpoint": { "type": "string" },
+            "deployment": { "type": "string" },
+            "apiVersion": { "type": "string" }
+          }
+        },
+        "anthropic": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "defaultModel": { "type": "string" }
+          }
+        },
+        "claudeSubscription": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "mode": {
+              "type": "string",
+              "enum": ["subscription", "oauth"],
+              "default": "subscription"
+            },
+            "defaultModel": { "type": "string" },
+            "workspace": { "type": "string" }
+          }
+        },
+        "openaiCompatible": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "mode": {
+              "type": "string",
+              "enum": ["apiKey", "local"],
+              "default": "apiKey"
+            },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "ollama": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "copilot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" }
+          }
+        },
+        "openrouter": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "perplexity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "deepinfra": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "groq": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "together": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "xai": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "fireworks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "cerebras": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "sambanova": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "nebius": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "gemini": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
           }
         }
       }

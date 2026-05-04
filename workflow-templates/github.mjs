@@ -948,6 +948,10 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         prNumber: { type: "number", required: false },
         prUrl: { type: "string", required: false },
         repo: { type: "string", required: false },
+        reviewIssues: { type: "array", required: false },
+        reviewIssueCount: { type: "number", required: false },
+        reviewFixDispatchMode: { type: "string", required: false },
+        reviewFixRequestedAt: { type: "string", required: false },
       },
     }, { x: 400, y: 50 }),
 
@@ -969,6 +973,10 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "    baseBranch: String($data?.baseBranch || prOut?.base || 'main').trim() || 'main'," +
         "    prNumber: Number.isFinite(parsedPrNumber) && parsedPrNumber > 0 ? parsedPrNumber : null," +
         "    prUrl: prUrl || null," +
+        "    reviewIssues: Array.isArray($data?.reviewIssues) ? $data.reviewIssues : []," +
+        "    reviewIssueCount: Number($data?.reviewIssueCount || 0) || 0," +
+        "    reviewFixDispatchMode: String($data?.reviewFixDispatchMode || '').trim() || null," +
+        "    reviewFixRequestedAt: String($data?.reviewFixRequestedAt || '').trim() || null," +
         "  };" +
         "})()",
       isExpression: true,
@@ -1003,7 +1011,7 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "function compactReviewComment(comment){return {id:Number(comment?.id||0)||null,author:compactUser(comment?.user||comment?.author),path:String(comment?.path||'').trim()||null,line:Number(comment?.line||0)||Number(comment?.original_line||0)||null,startLine:Number(comment?.start_line||0)||null,side:String(comment?.side||'').trim()||null,url:String(comment?.html_url||comment?.url||'').trim()||null,createdAt:String(comment?.created_at||comment?.createdAt||'').trim()||null,body:truncateText(comment?.body,1200)};}",
         "function compactFile(file){const path=String(file?.filename||file?.path||'').trim();return path?{path,status:String(file?.status||'').trim()||null,additions:Number(file?.additions||0)||0,deletions:Number(file?.deletions||0)||0,changes:Number(file?.changes||0)||0}:null;}",
         "function collectPrDigest(fallback){",
-        "  const pr=safeGhJson(['pr','view',String(prNumber),'--repo',repo,'--json','number,title,body,url,headRefName,baseRefName,isDraft,mergeable,statusCheckRollup,author,labels,reviewDecision'],{});",
+        "  const pr=safeGhJson(['pr','view',String(prNumber),'--repo',repo,'--json','number,title,body,url,headRefName,baseRefName,isDraft,mergeable,statusCheckRollup,author,labels,reviewDecision,state,mergedAt'],{});",
         "  const issueComments=safeGhJson(['api','repos/'+repo+'/issues/'+prNumber+'/comments?per_page=100'],[]).map(compactIssueComment).slice(0,40);",
         "  const reviews=safeGhJson(['api','repos/'+repo+'/pulls/'+prNumber+'/reviews?per_page=100'],[]).map(compactReview).slice(0,40);",
         "  const reviewComments=safeGhJson(['api','repos/'+repo+'/pulls/'+prNumber+'/comments?per_page=100'],[]).map(compactReviewComment).slice(0,60);",
@@ -1015,15 +1023,17 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "  const passingChecks=checks.filter((check)=>check.state==='SUCCESS' || check.bucket==='PASS');",
         "  const failingChecks=checks.filter((check)=>['FAILURE','ERROR','TIMED_OUT','CANCELLED','STARTUP_FAILURE'].includes(check.state)||check.bucket==='FAIL');",
         "  const pendingChecks=checks.filter((check)=>['QUEUED','IN_PROGRESS','PENDING','WAITING','REQUESTED'].includes(check.state));",
+        "  const prState=String(pr?.state||'').trim().toUpperCase();",
+        "  const mergedAt=String(pr?.mergedAt||'').trim()||null;",
         "  const digestSummary=[",
         "    'PR #'+String(pr?.number||prNumber)+' '+String(pr?.title||fallback?.taskTitle||''),",
         "    'repo='+repo+' branch='+(String(pr?.headRefName||branch||'').trim()||'unknown')+' base='+(String(pr?.baseRefName||baseBranch||'main').trim()||'main'),",
-        "    'mergeable='+(String(pr?.mergeable||'').trim()||'unknown')+' reviewDecision='+(String(pr?.reviewDecision||'').trim()||'none'),",
+        "    'state='+(prState||'unknown')+' mergeable='+(String(pr?.mergeable||'').trim()||'unknown')+' reviewDecision='+(String(pr?.reviewDecision||'').trim()||'none'),",
         "    'checks='+checks.length+' pass='+passingChecks.length+' fail='+failingChecks.length+' pending='+pendingChecks.length,",
         "    'comments='+issueComments.length+' reviews='+reviews.length+' reviewComments='+reviewComments.length+' files='+files.length,",
         "    labels.length?'labels='+labels.join(', '):'',",
         "  ].filter(Boolean).join('\\n');",
-        "  return {core:{number:Number(pr?.number||prNumber)||prNumber,title:String(pr?.title||fallback?.taskTitle||''),url:String(pr?.url||ctx.prUrl||fallback?.prUrl||'').trim()||null,body:truncateText(pr?.body,4000),branch:String(pr?.headRefName||branch||'').trim()||null,baseBranch:String(pr?.baseRefName||baseBranch||'main').trim()||'main',isDraft:pr?.isDraft===true,mergeable:String(pr?.mergeable||'').trim()||null,author:compactUser(pr?.author),reviewDecision:String(pr?.reviewDecision||'').trim()||null},labels,requestedReviewers,checks,ciSummary:{total:checks.length,passing:passingChecks.length,failing:failingChecks.length,pending:pendingChecks.length},issueComments,reviews,reviewComments,files,digestSummary};",
+        "  return {core:{number:Number(pr?.number||prNumber)||prNumber,title:String(pr?.title||fallback?.taskTitle||''),url:String(pr?.url||ctx.prUrl||fallback?.prUrl||'').trim()||null,body:truncateText(pr?.body,4000),branch:String(pr?.headRefName||branch||'').trim()||null,baseBranch:String(pr?.baseRefName||baseBranch||'main').trim()||'main',state:prState||null,mergedAt,isDraft:pr?.isDraft===true,mergeable:String(pr?.mergeable||'').trim()||null,author:compactUser(pr?.author),reviewDecision:String(pr?.reviewDecision||'').trim()||null},labels,requestedReviewers,checks,ciSummary:{total:checks.length,passing:passingChecks.length,failing:failingChecks.length,pending:pendingChecks.length},issueComments,reviews,reviewComments,files,digestSummary};",
         "}",
         "const prDigest=collectPrDigest(ctx||{});",
         "const pr=prDigest.core||{};",
@@ -1037,7 +1047,11 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "let classification='ready';",
         "let reason='ready_for_review';",
         "let ciKicked=false;",
-        "if(pr?.isDraft===true){classification='draft';reason='draft_pr';}",
+        "const prState=String(pr?.state||'').trim().toUpperCase();",
+        "const mergedAt=String(pr?.mergedAt||'').trim()||null;",
+        "if(mergedAt||prState==='MERGED'){classification='merged';reason='pr_merged';}",
+        "else if(prState==='CLOSED'){classification='closed';reason='pr_closed';}",
+        "else if(pr?.isDraft===true){classification='draft';reason='draft_pr';}",
         "else if(conflictMergeables.has(String(pr?.mergeable||'').toUpperCase())){classification='conflict';reason='merge_conflict';}",
         "else if(hasFailure){classification='ci_failure';reason='ci_failed';}",
         "else if(hasPending){classification='pending';reason='ci_pending';}",
@@ -1288,6 +1302,10 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "  const issueComments = Array.isArray(prDigest.issueComments) ? prDigest.issueComments : [];\n" +
         "  const allChecks = Array.isArray(prDigest.checks) ? prDigest.checks : [];\n" +
         "  const detectedConflictFiles = Array.isArray(conflictDetection?.conflictFiles) ? conflictDetection.conflictFiles : [];\n" +
+        "  const persistedReviewIssues = Array.isArray($data?.prProgressContext?.reviewIssues) ? $data.prProgressContext.reviewIssues : [];\n" +
+        "  const persistedReviewIssueCount = Number($data?.prProgressContext?.reviewIssueCount || persistedReviewIssues.length || 0) || 0;\n" +
+        "  const reviewFixDispatchMode = String($data?.prProgressContext?.reviewFixDispatchMode || '').trim();\n" +
+        "  const reviewFixRequestedAt = String($data?.prProgressContext?.reviewFixRequestedAt || '').trim();\n" +
         "  let p = 'You are a Bosun PR repair agent. Your ONLY job is to fix this single PR.\\n\\n';\n" +
         "  p += '## PR Identity\\n\\n';\n" +
         "  p += '- **Repo**: ' + repo + '\\n';\n" +
@@ -1299,6 +1317,8 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "  p += '- **Fix Reason**: `' + reason + '`\\n';\n" +
         "  if (mergeable) p += '- **Merge State**: ' + mergeable + '\\n';\n" +
         "  if (fix.error) p += '- **Error**: ' + fix.error + '\\n';\n" +
+        "  if (reviewFixDispatchMode) p += '- **Review Fix Dispatch Mode**: `' + reviewFixDispatchMode + '`\\n';\n" +
+        "  if (reviewFixRequestedAt) p += '- **Review Fix Requested At**: ' + reviewFixRequestedAt + '\\n';\n" +
         "  p += '\\n';\n" +
         "  /* --- Fix Summary --- */\n" +
         "  const changesRequestedReviews = reviews.filter(r => String(r.state||'').toUpperCase() === 'CHANGES_REQUESTED');\n" +
@@ -1308,9 +1328,24 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "  if (mergeable.toUpperCase() === 'CONFLICTING' || mergeable.toUpperCase() === 'DIRTY' || detectedConflictFiles.length > 0) fixItems.push('**Merge conflicts** — ' + (detectedConflictFiles.length > 0 ? detectedConflictFiles.length + ' files: ' + detectedConflictFiles.map(f => '`' + f + '`').join(', ') : 'resolve all conflicts with base `' + base + '`'));\n" +
         "  if (failedChecks.length > 0 || logExcerpt) fixItems.push('**CI/CD failures** — ' + (failedChecks.length > 0 ? failedChecks.length + ' failing checks: ' + failedChecks.map(n => '`' + n + '`').join(', ') : 'see log excerpt below'));\n" +
         "  if (changesRequestedReviews.length > 0 || actionableInlineComments.length > 0 || actionableIssueComments.length > 0) fixItems.push('**Review feedback** — ' + [changesRequestedReviews.length > 0 ? changesRequestedReviews.length + ' change request(s)' : '', actionableInlineComments.length > 0 ? actionableInlineComments.length + ' inline comment(s)' : '', actionableIssueComments.length > 0 ? actionableIssueComments.length + ' issue comment(s)' : ''].filter(Boolean).join(', '));\n" +
+        "  if (persistedReviewIssueCount > 0) fixItems.push('**Persisted review issues** — ' + persistedReviewIssueCount + ' issue(s) preserved from supervisor redispatch');\n" +
         "  if (fixItems.length > 0) {\n" +
         "    p += '## Fix Summary\\n\\nThis PR needs the following fixes:\\n';\n" +
         "    fixItems.forEach((item, i) => { p += (i+1) + '. ' + item + '\\n'; });\n" +
+        "    p += '\\n';\n" +
+        "  }\n" +
+        "  if (persistedReviewIssues.length > 0) {\n" +
+        "    p += '## Persisted Review Issues\\n\\n';\n" +
+        "    persistedReviewIssues.slice(0, 12).forEach((issue, index) => {\n" +
+        "      const severity = String(issue?.severity || 'major');\n" +
+        "      const category = String(issue?.category || 'review');\n" +
+        "      const file = String(issue?.file || '(unknown)');\n" +
+        "      const line = Number(issue?.line || 0) > 0 ? ':' + String(issue.line) : '';\n" +
+        "      const description = String(issue?.description || issue?.message || '').trim();\n" +
+        "      p += (index + 1) + '. [' + severity + '/' + category + '] `' + file + line + '`';\n" +
+        "      if (description) p += ' - ' + description;\n" +
+        "      p += '\\n';\n" +
+        "    });\n" +
         "    p += '\\n';\n" +
         "  }\n" +
         "  if (mergeable.toUpperCase() === 'CONFLICTING' || mergeable.toUpperCase() === 'DIRTY' || detectedConflictFiles.length > 0) {\n" +
@@ -1536,6 +1571,7 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
       command: "node",
       args: ["-e", [
         "const {execFileSync}=require('child_process');",
+        GH_CLI_RESILIENCE_SNIPPET,
         "const pr=(()=>{try{return JSON.parse(String(process.env.BOSUN_PR_INSPECT||'{}'))}catch{return {}}})();",
         "const repo=String(pr.repo||'').trim();",
         "const n=String(pr.prNumber||'').trim();",
@@ -1543,11 +1579,9 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "const minDel=Number('{{minDestructiveDeletions}}')||500;",
         "const labelReview=String('{{labelNeedsReview}}'||'bosun-needs-human-review');",
         "const method=String('{{mergeMethod}}'||'merge').toLowerCase();",
-        "function gh(args){return execFileSync('gh',args,{encoding:'utf8',stdio:['pipe','pipe','pipe']}).trim();}",
         "if(!repo||!n){console.log(JSON.stringify({mergedCount:0,heldCount:0,skippedCount:1,skipped:[{repo,number:n,reason:'missing_repo_or_pr'}]}));process.exit(0);}",
         "try{",
-        "  const viewRaw=gh(['pr','view',n,'--repo',repo,'--json','number,title,additions,deletions,changedFiles,isDraft']);",
-        "  const view=(()=>{try{return JSON.parse(viewRaw||'{}')}catch{return {}}})();",
+        "  const view=safeGhJson(['pr','view',n,'--repo',repo,'--json','number,title,additions,deletions,changedFiles,isDraft'],{});",
         "  if(view?.isDraft===true){console.log(JSON.stringify({mergedCount:0,heldCount:0,skippedCount:1,skipped:[{repo,number:n,reason:'draft'}]}));process.exit(0);}",
         "  const add=Number(view?.additions||0);",
         "  const del=Number(view?.deletions||0);",
@@ -1555,13 +1589,12 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "  const destructive=(del>(add*ratio))&&(del>minDel);",
         "  const tooWide=changed>250;",
         "  if(destructive||tooWide){",
-        "    gh(['pr','edit',n,'--repo',repo,'--add-label',labelReview]);",
-        "    gh(['pr','comment',n,'--repo',repo,'--body',':warning: Bosun held this PR for human review due to suspicious diff footprint.']);",
+        "    runGh(['pr','edit',n,'--repo',repo,'--add-label',labelReview]);",
+        "    runGh(['pr','comment',n,'--repo',repo,'--body',':warning: Bosun held this PR for human review due to suspicious diff footprint.']);",
         "    console.log(JSON.stringify({mergedCount:0,heldCount:1,skippedCount:0,held:[{repo,number:n,reason:destructive?'destructive_diff':'changed_files_too_large',additions:add,deletions:del,changedFiles:changed}]}));",
         "    process.exit(0);",
         "  }",
-        "  const checksRaw=gh(['pr','checks',n,'--repo',repo,'--json','name,state,bucket']);",
-        "  const checks=(()=>{try{return JSON.parse(checksRaw||'[]')}catch{return []}})();",
+        "  const checks=safeGhJson(['pr','checks',n,'--repo',repo,'--json','name,state,bucket'],[]);",
         "  const hasFailure=(Array.isArray(checks)?checks:[]).some((x)=>{const s=String(x?.state||'').toUpperCase();const b=String(x?.bucket||'').toUpperCase();return ['FAILURE','ERROR','TIMED_OUT','CANCELLED','STARTUP_FAILURE'].includes(s)||b==='FAIL';});",
         "  const hasPending=(Array.isArray(checks)?checks:[]).some((x)=>['QUEUED','IN_PROGRESS','PENDING','WAITING','REQUESTED'].includes(String(x?.state||'').toUpperCase()));",
         "  if(hasFailure){console.log(JSON.stringify({mergedCount:0,heldCount:0,skippedCount:1,skipped:[{repo,number:n,reason:'ci_failed'}]}));process.exit(0);}",
@@ -1570,7 +1603,7 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "  if(method==='rebase') mergeArgs.push('--rebase');",
         "  else if(method==='merge') mergeArgs.push('--merge');",
         "  else mergeArgs.push('--squash');",
-        "  try{gh(mergeArgs);}catch(directErr){mergeArgs.push('--auto');gh(mergeArgs);}",
+        "  try{runGh(mergeArgs);}catch(directErr){mergeArgs.push('--auto');runGh(mergeArgs);}",
         "  console.log(JSON.stringify({mergedCount:1,heldCount:0,skippedCount:0,merged:[{repo,number:n,title:String(view?.title||'')}] }));",
         "}catch(e){",
         "  console.log(JSON.stringify({mergedCount:0,heldCount:1,skippedCount:0,held:[{repo,number:n,reason:'merge_attempt_failed',error:String(e?.message||e)}]}));",
@@ -1583,6 +1616,12 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
           "{{$ctx.getNodeOutput('inspect-pr')?.output || '{}'}}",
       },
     }, { x: 620, y: 690 }),
+
+    node("mark-done-merged", "action.update_task_status", "Mark Task Done (Merged PR)", {
+      taskId: "{{taskId}}",
+      status: "done",
+      taskTitle: "{{taskTitle}}",
+    }, { x: 780, y: 820 }),
 
     node("log-deferred", "notify.log", "Deferred", {
       message:
@@ -1623,7 +1662,15 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
     edge("cleanup-pr-worktree", "update-sibling-branches"),
     edge("update-sibling-branches", "notify-complete"),
     edge("review-needed", "programmatic-review", { condition: "$output?.result === true" }),
-    edge("review-needed", "log-deferred", { condition: "$output?.result !== true" }),
+    edge("review-needed", "mark-done-merged", {
+      condition:
+        "$output?.result !== true && (()=>{try{const d=JSON.parse($ctx.getNodeOutput('inspect-pr')?.output||'{}');return d?.classification==='merged';}catch{return false;}})()",
+    }),
+    edge("review-needed", "log-deferred", {
+      condition:
+        "$output?.result !== true && (()=>{try{const d=JSON.parse($ctx.getNodeOutput('inspect-pr')?.output||'{}');return d?.classification!=='merged';}catch{return true;}})()",
+    }),
+    edge("mark-done-merged", "notify-complete"),
     edge("programmatic-review", "notify-complete"),
     edge("log-deferred", "notify-complete"),
     edge("log-missing", "notify-complete"),
@@ -1905,6 +1952,10 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
         "    if(!hasFixLabel){",
         "      try{const editArgs=['pr','edit',String(pr.number),'--add-label',LABEL_FIX];if(repo)editArgs.push('--repo',repo);execFileSync('gh',editArgs,{encoding:'utf8',stdio:['pipe','pipe','pipe']});newlyLabeled++;}",
         "      catch(e){process.stderr.write('label err '+(repo?repo+' ':'')+'#'+pr.number+': '+(e?.message||e)+'\\n');}",
+        "    }",
+        "    const nonSecurityFailedChecks=failedCheckNames.filter(n=>!isSecurityCheckName(n));",
+        "    if(nonSecurityFailedChecks.length>0){",
+        "      ciFailures.push({n:pr.number,repo,branch:pr.headRefName,url:pr.url,failedCheckNames:nonSecurityFailedChecks,alsoInSecurityFailures:true});",
         "    }",
         "  } else if(hasFail){",
         "    if(isSharedFailure){",
@@ -2643,6 +2694,147 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
 //     watchdog cycle can resume rather than restart from scratch.
 // ═══════════════════════════════════════════════════════════════════════════
 
+const PR_STATE_VIEW_FIELDS = "state,isDraft,headRefName,baseRefName,url,mergedAt,closedAt";
+
+function makeValidatePrStateScript() {
+  return [
+    "const {execFileSync}=require('child_process');",
+    "const repo=String(process.env.PR_REPO||'').trim();",
+    "const num=String(process.env.PR_NUMBER||'0').trim();",
+    "const fallbackBranch=String(process.env.PR_BRANCH||'').trim();",
+    "const fallbackBase=String(process.env.PR_BASE||'main').trim();",
+    "if(!repo||!num){console.log(JSON.stringify({ok:false,open:false,skip:true,reason:'missing_repo_or_number',repo,number:num,branch:fallbackBranch,base:fallbackBase}));process.exit(0);}",
+    "try{",
+    `  const raw=execFileSync('gh',['pr','view',num,'--repo',repo,'--json','${PR_STATE_VIEW_FIELDS}'],{encoding:'utf8',stdio:['pipe','pipe','pipe'],timeout:30000}).trim();`,
+    "  const view=JSON.parse(raw||'{}');",
+    "  const state=String(view?.state||'').trim().toUpperCase();",
+    "  const isDraft=view?.isDraft===true;",
+    "  const mergedAt=String(view?.mergedAt||'').trim()||null;",
+    "  const closedAt=String(view?.closedAt||'').trim()||null;",
+    "  const merged=state==='MERGED'||Boolean(mergedAt);",
+    "  const open=state==='OPEN'&&!isDraft;",
+    "  const branch=String(view?.headRefName||fallbackBranch||'').trim();",
+    "  const base=String(view?.baseRefName||fallbackBase||'main').trim()||'main';",
+    "  const targetTaskStatus=merged?'done':(state==='CLOSED'?'cancelled':null);",
+    "  const shouldResolveTask=Boolean(targetTaskStatus);",
+    "  const reason=open?'open':(merged?'pr_merged':(state==='CLOSED'?'pr_closed':(isDraft?'draft_pr':'pr_not_open')));",
+    "  console.log(JSON.stringify({ok:open,open,skip:!open,reason,state,isDraft,merged,mergedAt,closedAt,shouldResolveTask,targetTaskStatus,repo,number:num,branch,base,url:String(view?.url||'').trim()||null}));",
+    "}catch(err){",
+    "  console.log(JSON.stringify({ok:false,open:false,skip:true,reason:'pr_view_failed',error:String(err?.message||err),repo,number:num,branch:fallbackBranch,base:fallbackBase}));",
+    "}",
+  ];
+}
+
+function makeResolvePrTaskScript() {
+  return [
+    "const fs=require('fs');",
+    "const path=require('path');",
+    "const {execFileSync}=require('child_process');",
+    "const taskId=String(process.env.TASK_ID||'').trim();",
+    "const repo=String(process.env.PR_REPO||'').trim();",
+    "const num=String(process.env.PR_NUMBER||'').trim();",
+    "const branch=String(process.env.PR_BRANCH||'').trim();",
+    "const url=String(process.env.PR_URL||'').trim();",
+    "const state=String(process.env.PR_STATE||'').trim().toUpperCase();",
+    "const mergedAt=String(process.env.PR_MERGED_AT||'').trim()||null;",
+    "const closedAt=String(process.env.PR_CLOSED_AT||'').trim()||null;",
+    "const reason=String(process.env.PR_REASON||'').trim();",
+    "const explicitStatus=String(process.env.TARGET_TASK_STATUS||'').trim().toLowerCase();",
+    "const targetTaskStatus=explicitStatus||(state==='MERGED'||mergedAt?'done':(state==='CLOSED'?'cancelled':''));",
+    "const cliPath=fs.existsSync('cli.mjs')?'cli.mjs':'';",
+    "const taskCli=['task/task-cli.mjs','task-cli.mjs'].find(p=>fs.existsSync(p))||'';",
+    "const taskRunner=cliPath?'cli':(taskCli?'task-cli':'');",
+    "const maxBuffer=25*1024*1024;",
+    "function parseJson(raw,fallback){try{return JSON.parse(String(raw||''));}catch{return fallback;}}",
+    "function runTask(args){const cmdArgs=taskRunner==='cli'?['cli.mjs','task',...args,'--config-dir','.bosun','--repo-root','.']:[taskCli,...args];return execFileSync('node',cmdArgs,{encoding:'utf8',stdio:['pipe','pipe','pipe'],maxBuffer}).trim();}",
+    "if(!taskRunner){console.log(JSON.stringify({resolved:false,skipped:true,reason:'task_command_missing',taskId,targetTaskStatus,repo,number:num}));process.exit(0);}",
+    "if(!taskId||!targetTaskStatus){console.log(JSON.stringify({resolved:false,skipped:true,reason:'missing_task_or_status',taskId,targetTaskStatus,repo,number:num}));process.exit(0);}",
+    "let snapshot=null;",
+    "try{snapshot=parseJson(runTask(['get',taskId,'--json']),null);}catch(err){console.log(JSON.stringify({resolved:false,skipped:true,reason:'task_lookup_failed',taskId,targetTaskStatus,error:String(err?.message||err)}));process.exit(0);}",
+    "if(!snapshot||typeof snapshot!=='object'){console.log(JSON.stringify({resolved:false,skipped:true,reason:'task_not_found',taskId,targetTaskStatus}));process.exit(0);}",
+    "const previousStatus=String(snapshot?.status||'').trim().toLowerCase()||null;",
+    "const existingComments=Array.isArray(snapshot?.comments)?snapshot.comments:(Array.isArray(snapshot?.meta?.comments)?snapshot.meta.comments:[]);",
+    "const resolutionKey='pr-resolution:'+repo+'#'+num+':'+targetTaskStatus;",
+    "const alreadyCommented=existingComments.some((comment)=>String(comment?.meta?.resolutionKey||'').trim()===resolutionKey);",
+    "const timestamp=new Date().toISOString();",
+    "const prLabel=num?'PR #'+num:'associated PR';",
+    "let message='';",
+    "if(targetTaskStatus==='done'){message=prLabel+(url?' ('+url+')':'')+' was merged'+(mergedAt?' at '+mergedAt:'')+'. Bosun marked this task done because head branch `'+(branch||'?')+'` is no longer available on GitHub.';}",
+    "else if(targetTaskStatus==='cancelled'){message=prLabel+(url?' ('+url+')':'')+' was closed without merge'+(closedAt?' at '+closedAt:'')+'. Bosun cancelled this task because head branch `'+(branch||'?')+'` is no longer available on GitHub.';}",
+    "else{message=prLabel+(url?' ('+url+')':'')+' changed state to '+(state||'unknown')+'.';}",
+    "if(reason) message+=' Resolution trigger: '+reason+'.';",
+    "const nextComments=alreadyCommented?existingComments:[...existingComments,{body:message,author:'bosun',source:'workflow',kind:'pr-resolution',createdAt:timestamp,meta:{resolutionKey,repo,number:num||null,url:url||null,state:state||null,targetTaskStatus,branch:branch||null,reason:reason||null}}];",
+    "const existingMeta=snapshot?.meta&&typeof snapshot.meta==='object'?snapshot.meta:{};",
+    "const patch={status:targetTaskStatus,comments:nextComments,meta:{...existingMeta,lastPrResolution:{repo:repo||null,number:num||null,url:url||null,state:state||null,targetTaskStatus,branch:branch||null,reason:reason||null,mergedAt,closedAt,resolvedAt:timestamp}}};",
+    "runTask(['update',taskId,JSON.stringify(patch)]);",
+    "console.log(JSON.stringify({resolved:true,taskId,targetTaskStatus,previousStatus,commentAdded:!alreadyCommented,repo,number:num,url:url||null,state:state||null,reason:reason||null}));",
+  ];
+}
+
+function makeSetupWorktreeScript(tempPrefix) {
+  return [
+    "const os=require('os');",
+    "const path=require('path');",
+    "const fs=require('fs');",
+    "const {execFileSync}=require('child_process');",
+    "const repo=String(process.env.PR_REPO||'').trim();",
+    "const branch=String(process.env.PR_BRANCH||'').trim();",
+    "const base=String(process.env.PR_BASE||'main').trim();",
+    "const num=String(process.env.PR_NUMBER||'0').trim();",
+    "if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);}",
+    `let wt=path.join(os.tmpdir(),'${tempPrefix}-'+num.replace(/[^0-9a-z]/gi,'-'));`,
+    "function readErr(err){return [String(err?.message||''),String(err?.stderr||''),String(err?.stdout||'')].filter(Boolean).join(' ');}",
+    "function isMissingBranchError(err){const text=readErr(err);return /remote branch .* not found|couldn't find remote ref|remote ref does not exist|invalid reference: origin\\//i.test(text);}",
+    "function viewPrState(){",
+    "  try{",
+    `    const raw=execFileSync('gh',['pr','view',num,'--repo',repo,'--json','${PR_STATE_VIEW_FIELDS}'],{encoding:'utf8',stdio:['pipe','pipe','pipe'],timeout:30000}).trim();`,
+    "    const view=JSON.parse(raw||'{}');",
+    "    const state=String(view?.state||'').trim().toUpperCase();",
+    "    const mergedAt=String(view?.mergedAt||'').trim()||null;",
+    "    const closedAt=String(view?.closedAt||'').trim()||null;",
+    "    const merged=state==='MERGED'||Boolean(mergedAt);",
+    "    const targetTaskStatus=merged?'done':(state==='CLOSED'?'cancelled':null);",
+    "    return {state,merged,mergedAt,closedAt,targetTaskStatus,shouldResolveTask:Boolean(targetTaskStatus),url:String(view?.url||'').trim()||null,branch:String(view?.headRefName||branch||'').trim()||branch,base:String(view?.baseRefName||base||'main').trim()||base||'main'};",
+    "  }catch(err){",
+    "    return {state:null,merged:false,mergedAt:null,closedAt:null,targetTaskStatus:null,shouldResolveTask:false,url:null,branch,base,error:String(err?.message||err)};",
+    "  }",
+    "}",
+    "try{",
+    "  let reused=false;",
+    "  if(fs.existsSync(path.join(wt,'.git'))){",
+    "    try{",
+    "      const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();",
+    "      if(cur===branch){",
+    "        execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});",
+    "        execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});",
+    "        execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});",
+    "        try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}",
+    "        reused=true;",
+    "      }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}",
+    "    }catch(err){",
+    "      if(isMissingBranchError(err)){const prState=viewPrState();if(prState.shouldResolveTask){console.log(JSON.stringify({skip:true,reason:'head_branch_missing_after_pr_resolution',repo,number:num,...prState}));process.exit(0);}}",
+    "      try{fs.rmSync(wt,{recursive:true,force:true});}catch{}",
+    "      throw err;",
+    "    }",
+    "  }",
+    "  if(!reused){",
+    "    if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}",
+    "    execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});",
+    "    execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});",
+    "    execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});",
+    "    try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}",
+    "  }",
+    "  const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();",
+    "  if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);}",
+    "  console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused,skip:false}));",
+    "}catch(err){",
+    "  if(isMissingBranchError(err)){const prState=viewPrState();if(prState.shouldResolveTask){console.log(JSON.stringify({skip:true,reason:'head_branch_missing_after_pr_resolution',repo,number:num,...prState}));process.exit(0);}}",
+    "  console.error(readErr(err)||String(err?.message||err));",
+    "  process.exit(1);",
+    "}",
+  ];
+}
+
 resetLayout();
 
 export const PR_FIX_SINGLE_TEMPLATE = {
@@ -2697,13 +2889,49 @@ export const PR_FIX_SINGLE_TEMPLATE = {
       value:
         "({" +
         "repo: String($data?.item?.repo || $data?.item?.prDigest?.core?.repo || ''), " +
-        "branch: String($data?.item?.branch || $data?.item?.prDigest?.core?.branch || ''), " +
+        "branch: String($data?.item?.prDigest?.core?.branch || $data?.item?.branch || ''), " +
         "base: String($data?.item?.base || $data?.item?.baseBranch || $data?.item?.prDigest?.core?.baseBranch || 'main'), " +
         "number: String($data?.item?.number || $data?.item?.n || '0'), " +
         "reason: String($data?.item?.reason || ''), " +
         "mergeable: String($data?.item?.mergeable || $data?.item?.prDigest?.core?.mergeable || '')" +
         "})",
       isExpression: true,
+      }),
+
+    node("validate-pr-state", "action.run_command", "Validate PR Is Still Open", {
+      command: "node",
+      args: ["-e", makeValidatePrStateScript().join(" ")],
+      parseJson: true,
+      continueOnError: true,
+      failOnError: false,
+      timeoutMs: 60_000,
+      env: {
+        PR_REPO:   "{{prParams.repo}}",
+        PR_BRANCH: "{{prParams.branch}}",
+        PR_BASE:   "{{prParams.base}}",
+        PR_NUMBER: "{{prParams.number}}",
+      },
+    }),
+
+    node("resolve-pr-task", "action.run_command", "Resolve Task For Closed or Merged PR", {
+      command: "node",
+      args: ["-e", makeResolvePrTaskScript().join(" ")],
+      parseJson: true,
+      continueOnError: true,
+      failOnError: false,
+      timeoutMs: 60_000,
+      env: {
+        TASK_ID: "{{taskId}}",
+        PR_REPO: "{{setup-worktree.output.repo || validate-pr-state.output.repo || prParams.repo}}",
+        PR_NUMBER: "{{setup-worktree.output.number || validate-pr-state.output.number || prParams.number}}",
+        PR_BRANCH: "{{setup-worktree.output.branch || validate-pr-state.output.branch || prParams.branch}}",
+        PR_URL: "{{setup-worktree.output.url || validate-pr-state.output.url || data.item.url || data.item.prDigest.core.url || ''}}",
+        PR_STATE: "{{setup-worktree.output.state || validate-pr-state.output.state || ''}}",
+        PR_MERGED_AT: "{{setup-worktree.output.mergedAt || validate-pr-state.output.mergedAt || ''}}",
+        PR_CLOSED_AT: "{{setup-worktree.output.closedAt || validate-pr-state.output.closedAt || ''}}",
+        TARGET_TASK_STATUS: "{{setup-worktree.output.targetTaskStatus || validate-pr-state.output.targetTaskStatus || ''}}",
+        PR_REASON: "{{setup-worktree.output.reason || validate-pr-state.output.reason || ''}}",
+      },
     }),
 
     // ── 2. Programmatic worktree setup ───────────────────────────────────────
@@ -2711,52 +2939,15 @@ export const PR_FIX_SINGLE_TEMPLATE = {
     // needs to clone, checkout, or manage git state — it just fixes code.
     node("setup-worktree", "action.run_command", "Clone & Checkout PR Branch", {
       command: "node",
-      args: ["-e", [
-        "const os=require('os');",
-        "const path=require('path');",
-        "const fs=require('fs');",
-        "const {execFileSync}=require('child_process');",
-        "const repo=String(process.env.PR_REPO||'').trim();",
-        "const branch=String(process.env.PR_BRANCH||'').trim();",
-        "const base=String(process.env.PR_BASE||'main').trim();",
-        "const num=String(process.env.PR_NUMBER||'0').trim();",
-        "if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);}",
-        "let wt=path.join(os.tmpdir(),'bosun-prfix-'+num.replace(/[^0-9a-z]/gi,'-'));",
-        // Attempt to reuse existing clone if it is on the correct branch
-        "let reused=false;",
-        "if(fs.existsSync(path.join(wt,'.git'))){",
-        "  try{",
-        "    const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();",
-        "    if(cur===branch){",
-        "      execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});",
-        "      execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});",
-        "      execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});",
-        "      try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}",
-        "      reused=true;",
-        "    }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}",
-        "  }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}",
-        "}",
-        // Fresh clone if not reused
-        "if(!reused){",
-        "  if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}",
-        "  execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});",
-        "  execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});",
-        "  execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});",
-        "  try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}",
-        "}",
-        // Verify correct branch is checked out
-        "const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();",
-        "if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);}",
-        "console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused}));",
-      ].join(" ")],
+      args: ["-e", makeSetupWorktreeScript("bosun-prfix").join(" ")],
       parseJson: true,
       failOnError: true,
       timeoutMs: 600_000,   // 10 min for clone
       env: {
-        PR_REPO:   "{{prParams.repo}}",
-        PR_BRANCH: "{{prParams.branch}}",
-        PR_BASE:   "{{prParams.base}}",
-        PR_NUMBER: "{{prParams.number}}",
+        PR_REPO:   "{{validate-pr-state.output.repo || prParams.repo}}",
+        PR_BRANCH: "{{validate-pr-state.output.branch || prParams.branch}}",
+        PR_BASE:   "{{validate-pr-state.output.base || prParams.base}}",
+        PR_NUMBER: "{{validate-pr-state.output.number || prParams.number}}",
       },
     }),
 
@@ -3159,8 +3350,12 @@ export const PR_FIX_SINGLE_TEMPLATE = {
     edge("setup-task",         "setup-title"),
     edge("setup-title",        "setup-claim-key"),
     edge("setup-claim-key",    "resolve-pr-params"),
-    edge("resolve-pr-params",  "setup-worktree"),
-    edge("setup-worktree",     "set-worktree-path"),
+    edge("resolve-pr-params",  "validate-pr-state"),
+    edge("validate-pr-state",  "setup-worktree", { condition: "$output?.open === true" }),
+    edge("validate-pr-state",  "resolve-pr-task", { condition: "$output?.open !== true && $output?.shouldResolveTask === true" }),
+    edge("validate-pr-state",  "release-claim", { condition: "$output?.open !== true && $output?.shouldResolveTask !== true" }),
+    edge("setup-worktree",     "resolve-pr-task", { condition: "$output?.skip === true && $output?.shouldResolveTask === true" }),
+    edge("setup-worktree",     "set-worktree-path", { condition: "$output?.skip !== true" }),
     edge("set-worktree-path",  "detect-conflicts"),
     edge("detect-conflicts",   "setup-prompt"),
     edge("setup-prompt",       "mark-active"),
@@ -3168,6 +3363,7 @@ export const PR_FIX_SINGLE_TEMPLATE = {
     edge("fix-agent",          "push-fixes"),
     edge("push-fixes",         "cleanup-worktree"),
     edge("cleanup-worktree",   "update-sibling-branches"),
+    edge("resolve-pr-task",    "release-claim"),
     edge("update-sibling-branches", "release-claim"),
   ],
   metadata: {
@@ -3241,59 +3437,61 @@ export const PR_SECURITY_FIX_SINGLE_TEMPLATE = {
       value:
         "({" +
         "repo: String($data?.item?.repo || $data?.item?.prDigest?.core?.repo || ''), " +
-        "branch: String($data?.item?.branch || $data?.item?.prDigest?.core?.branch || ''), " +
+        "branch: String($data?.item?.prDigest?.core?.branch || $data?.item?.branch || ''), " +
         "base: String($data?.item?.base || $data?.item?.baseBranch || $data?.item?.prDigest?.core?.baseBranch || 'main'), " +
         "number: String($data?.item?.number || $data?.item?.n || '0')" +
         "})",
       isExpression: true,
     }),
 
-    // ── Programmatic worktree setup ──────────────────────────────────────────
-    node("setup-worktree", "action.run_command", "Clone & Checkout PR Branch", {
+    node("validate-pr-state", "action.run_command", "Validate PR Is Still Open", {
       command: "node",
-      args: ["-e", [
-        "const os=require('os');",
-        "const path=require('path');",
-        "const fs=require('fs');",
-        "const {execFileSync}=require('child_process');",
-        "const repo=String(process.env.PR_REPO||'').trim();",
-        "const branch=String(process.env.PR_BRANCH||'').trim();",
-        "const base=String(process.env.PR_BASE||'main').trim();",
-        "const num=String(process.env.PR_NUMBER||'0').trim();",
-        "if(!repo||!branch){console.log(JSON.stringify({error:'missing repo or branch',repo,branch}));process.exit(1);}",
-        "let wt=path.join(os.tmpdir(),'bosun-secfix-'+num.replace(/[^0-9a-z]/gi,'-'));",
-        "let reused=false;",
-        "if(fs.existsSync(path.join(wt,'.git'))){",
-        "  try{",
-        "    const cur=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();",
-        "    if(cur===branch){",
-        "      execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});",
-        "      execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});",
-        "      execFileSync('git',['clean','-fd','-e','.bosun/'],{cwd:wt,encoding:'utf8',timeout:30000});",
-        "      try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}",
-        "      reused=true;",
-        "    }else{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}",
-        "  }catch{try{fs.rmSync(wt,{recursive:true,force:true});}catch{}}",
-        "}",
-        "if(!reused){",
-        "  if(fs.existsSync(wt)){try{fs.rmSync(wt,{recursive:true,force:true});}catch{wt=wt+'-'+Date.now().toString(36);}}",
-        "  execFileSync('gh',['repo','clone',repo,wt,'--','--branch',branch],{encoding:'utf8',timeout:300000,stdio:'inherit'});",
-        "  execFileSync('git',['fetch','origin',branch],{cwd:wt,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe']});",
-        "  execFileSync('git',['reset','--hard','origin/'+branch],{cwd:wt,encoding:'utf8',timeout:30000});",
-        "  try{execFileSync('git',['fetch','origin',base],{cwd:wt,encoding:'utf8',timeout:60000,stdio:['ignore','pipe','pipe']});}catch{}",
-        "}",
-        "const finalBranch=execFileSync('git',['rev-parse','--abbrev-ref','HEAD'],{cwd:wt,encoding:'utf8',timeout:10000}).trim();",
-        "if(finalBranch!==branch){console.error('Branch mismatch: expected '+branch+' got '+finalBranch);process.exit(1);}",
-        "console.log(JSON.stringify({worktreePath:wt,branch:finalBranch,base,repo,number:num,reused}));",
-      ].join(" ")],
+      args: ["-e", makeValidatePrStateScript().join(" ")],
       parseJson: true,
-      failOnError: true,
-      timeoutMs: 600_000,
+      continueOnError: true,
+      failOnError: false,
+      timeoutMs: 60_000,
       env: {
         PR_REPO:   "{{prParams.repo}}",
         PR_BRANCH: "{{prParams.branch}}",
         PR_BASE:   "{{prParams.base}}",
         PR_NUMBER: "{{prParams.number}}",
+      },
+    }),
+
+    node("resolve-pr-task", "action.run_command", "Resolve Task For Closed or Merged PR", {
+      command: "node",
+      args: ["-e", makeResolvePrTaskScript().join(" ")],
+      parseJson: true,
+      continueOnError: true,
+      failOnError: false,
+      timeoutMs: 60_000,
+      env: {
+        TASK_ID: "{{taskId}}",
+        PR_REPO: "{{setup-worktree.output.repo || validate-pr-state.output.repo || prParams.repo}}",
+        PR_NUMBER: "{{setup-worktree.output.number || validate-pr-state.output.number || prParams.number}}",
+        PR_BRANCH: "{{setup-worktree.output.branch || validate-pr-state.output.branch || prParams.branch}}",
+        PR_URL: "{{setup-worktree.output.url || validate-pr-state.output.url || data.item.url || data.item.prDigest.core.url || ''}}",
+        PR_STATE: "{{setup-worktree.output.state || validate-pr-state.output.state || ''}}",
+        PR_MERGED_AT: "{{setup-worktree.output.mergedAt || validate-pr-state.output.mergedAt || ''}}",
+        PR_CLOSED_AT: "{{setup-worktree.output.closedAt || validate-pr-state.output.closedAt || ''}}",
+        TARGET_TASK_STATUS: "{{setup-worktree.output.targetTaskStatus || validate-pr-state.output.targetTaskStatus || ''}}",
+        PR_REASON: "{{setup-worktree.output.reason || validate-pr-state.output.reason || ''}}",
+      },
+    }),
+
+    // ── Programmatic worktree setup ──────────────────────────────────────────
+    node("setup-worktree", "action.run_command", "Clone & Checkout PR Branch", {
+      command: "node",
+      args: ["-e", makeSetupWorktreeScript("bosun-secfix").join(" ")],
+      parseJson: true,
+      failOnError: true,
+      timeoutMs: 600_000,
+      env: {
+        PR_REPO:   "{{validate-pr-state.output.repo || prParams.repo}}",
+        PR_BRANCH: "{{validate-pr-state.output.branch || prParams.branch}}",
+        PR_BASE:   "{{validate-pr-state.output.base || prParams.base}}",
+        PR_NUMBER: "{{validate-pr-state.output.number || prParams.number}}",
       },
     }),
 
@@ -3497,13 +3695,18 @@ export const PR_SECURITY_FIX_SINGLE_TEMPLATE = {
     edge("setup-task",         "setup-title"),
     edge("setup-title",        "setup-claim-key"),
     edge("setup-claim-key",    "resolve-pr-params"),
-    edge("resolve-pr-params",  "setup-worktree"),
-    edge("setup-worktree",     "set-worktree-path"),
+    edge("resolve-pr-params",  "validate-pr-state"),
+    edge("validate-pr-state",  "setup-worktree", { condition: "$output?.open === true" }),
+    edge("validate-pr-state",  "resolve-pr-task", { condition: "$output?.open !== true && $output?.shouldResolveTask === true" }),
+    edge("validate-pr-state",  "release-claim", { condition: "$output?.open !== true && $output?.shouldResolveTask !== true" }),
+    edge("setup-worktree",     "resolve-pr-task", { condition: "$output?.skip === true && $output?.shouldResolveTask === true" }),
+    edge("setup-worktree",     "set-worktree-path", { condition: "$output?.skip !== true" }),
     edge("set-worktree-path",  "setup-prompt"),
     edge("setup-prompt",       "mark-active"),
     edge("mark-active",        "fix-agent"),
     edge("fix-agent",          "push-fixes"),
     edge("push-fixes",         "cleanup-worktree"),
+    edge("resolve-pr-task",    "release-claim"),
     edge("cleanup-worktree",   "release-claim"),
   ],
   metadata: {

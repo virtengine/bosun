@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -195,7 +195,9 @@ async function loadWorkflowTemplates() {
     .sort();
   const templates = [];
   for (const file of files) {
-    const mod = await import(pathToFileURL(resolve(WORKFLOW_TEMPLATES_DIR, file)).href);
+    const moduleUrl = pathToFileURL(resolve(WORKFLOW_TEMPLATES_DIR, file));
+    moduleUrl.searchParams.set("demoDefaultsCacheBust", `${Date.now()}-${Math.random()}`);
+    const mod = await import(moduleUrl.href);
     for (const value of Object.values(mod)) {
       if (!value || typeof value !== "object") continue;
       if (!value.id || !value.name || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) continue;
@@ -248,14 +250,31 @@ export function renderDefaultsScript(data) {
   ].join("\n");
 }
 
-export async function writeDemoDefaults() {
+export async function syncDemoDefaults({ silent = false } = {}) {
   const data = await buildDemoDefaultsData();
   const content = renderDefaultsScript(data);
+  const updatedPaths = [];
   for (const filePath of OUTPUT_PATHS) {
     mkdirSync(dirname(filePath), { recursive: true });
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
+    if (current === content) continue;
     writeFileSync(filePath, content, "utf8");
+    updatedPaths.push(filePath);
   }
-  return { data, content, outputPaths: OUTPUT_PATHS };
+  if (!silent && updatedPaths.length > 0) {
+    console.log(`[demo-defaults] synced ${updatedPaths.length} file(s)`);
+  }
+  return {
+    data,
+    content,
+    outputPaths: OUTPUT_PATHS,
+    updatedPaths,
+    updated: updatedPaths.length > 0,
+  };
+}
+
+export async function writeDemoDefaults() {
+  return syncDemoDefaults();
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {

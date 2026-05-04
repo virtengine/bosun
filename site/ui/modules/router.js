@@ -4,8 +4,8 @@
  * ────────────────────────────────────────────────────────────── */
 
 import { signal } from "@preact/signals";
-import { haptic, showBackButton, hideBackButton } from "../../../ui/modules/telegram.js";
-import { refreshTab, hasPendingChanges } from "../../../ui/modules/state.js";
+import { haptic, showBackButton, hideBackButton } from "./telegram.js";
+import { refreshTab, hasPendingChanges } from "./state.js";
 
 /** Currently active tab ID */
 export const activeTab = signal("dashboard");
@@ -30,6 +30,7 @@ const ROUTE_TABS = new Set([
   "marketplace",
   "telemetry",
   "settings",
+  "guardrails",
 ]);
 
 function getParentTab(tabId) {
@@ -263,6 +264,7 @@ export const TAB_CONFIG = [
   { id: "manual-flows", label: "Run Flows", icon: "zap" },
   { id: "telemetry", label: "Telemetry", icon: "chart" },
   { id: "benchmarks", label: "Bench", icon: "chart" },
+  { id: "guardrails", label: "Guardrails", icon: "shield" },
   { id: "settings", label: "Settings", icon: "settings" },
 ];
 

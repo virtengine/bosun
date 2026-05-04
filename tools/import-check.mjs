@@ -20,10 +20,22 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 const JS_EXTENSIONS = new Set([".mjs", ".js", ".cjs"]);
 
+function toErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildSyntaxError(rootDir, absPath, error) {
+  const moduleFile = relative(rootDir, absPath);
+  const syntaxError = new Error(`Syntax error in ${moduleFile}: ${toErrorMessage(error)}`);
+  syntaxError.code = "module_syntax_error";
+  syntaxError.moduleFile = moduleFile;
+  return syntaxError;
+}
+
 /**
  * Discover all .mjs source modules via git, excluding test/bench/site/desktop.
  */
-function discoverModules(rootDir) {
+export function discoverSourceModules(rootDir) {
   try {
     const output = execSync("git ls-files --cached", {
       encoding: "utf8",
@@ -68,9 +80,20 @@ export async function validateImports({ rootDir, files } = {}) {
   const context = vm.createContext({});
   const moduleCache = new Map(); // absolute path → SourceTextModule | SyntheticModule
   const externalCache = new Map(); // specifier → SyntheticModule
+  const unresolvedExternals = new Set(); // specifiers that couldn't be dynamically imported
   const errors = [];
+  const parseErrors = new Map(); // absolute path → Error
 
-  const moduleFiles = files ?? discoverModules(rootDir);
+  const moduleFiles = files ?? discoverSourceModules(rootDir);
+  const seenErrors = new Set();
+
+  function recordError(file, error) {
+    const message = toErrorMessage(error);
+    const key = `${file}\n${message}`;
+    if (seenErrors.has(key)) return;
+    seenErrors.add(key);
+    errors.push({ file, error: message });
+  }
 
   // Phase 1: Parse all source modules into SourceTextModules.
   for (const file of moduleFiles) {
@@ -83,8 +106,8 @@ export async function validateImports({ rootDir, files } = {}) {
         context,
       });
       moduleCache.set(absPath, mod);
-    } catch {
-      // Syntax errors are caught by syntax-check.mjs — skip silently.
+    } catch (error) {
+      parseErrors.set(absPath, buildSyntaxError(rootDir, absPath, error));
     }
   }
 
@@ -101,7 +124,10 @@ export async function validateImports({ rootDir, files } = {}) {
       exportNames = Object.keys(real);
       if (!exportNames.includes("default")) exportNames.push("default");
     } catch {
-      // Cannot import (optional dep, missing, etc.) — stub with default only.
+      // Cannot import (optional dep, missing from node_modules, etc.).
+      // Track as unresolved so we can suppress false-positive named-export
+      // errors that occur when running from a worktree without node_modules.
+      unresolvedExternals.add(specifier);
     }
 
     const synth = new vm.SyntheticModule(
@@ -151,6 +177,7 @@ export async function validateImports({ rootDir, files } = {}) {
 
     // Already parsed / stubbed
     if (moduleCache.has(resolved)) return moduleCache.get(resolved);
+    if (parseErrors.has(resolved)) throw parseErrors.get(resolved);
 
     // Non-JS file (.json, .node, .wasm, etc.)
     if (!JS_EXTENSIONS.has(extname(resolved))) {
@@ -167,9 +194,10 @@ export async function validateImports({ rootDir, files } = {}) {
         });
         moduleCache.set(resolved, mod);
         return mod;
-      } catch {
-        // Parse error — syntax-check.mjs will report it.
-        return stubNonJs(resolved);
+      } catch (error) {
+        const syntaxError = buildSyntaxError(rootDir, resolved, error);
+        parseErrors.set(resolved, syntaxError);
+        throw syntaxError;
       }
     }
 
@@ -180,18 +208,35 @@ export async function validateImports({ rootDir, files } = {}) {
   }
 
   // Phase 2: Link all modules — this validates named export bindings.
+  for (const [absPath, syntaxError] of parseErrors) {
+    recordError(relative(rootDir, absPath), syntaxError);
+  }
+
   for (const [absPath, mod] of moduleCache) {
     // Already linked (as a transitive dependency of a previously linked module).
     if (mod.status !== "unlinked") continue;
     try {
       await mod.link(linker);
     } catch (err) {
-      const rel = relative(rootDir, absPath);
-      errors.push({ file: rel, error: err.message });
+      const rel = typeof err?.moduleFile === "string" && err.moduleFile
+        ? err.moduleFile
+        : relative(rootDir, absPath);
+      recordError(rel, err);
     }
   }
 
-  return { errors, moduleCount: moduleCache.size };
+  // Suppress errors caused by unresolvable external packages (e.g. missing
+  // node_modules when running from a git worktree).  The pattern emitted by
+  // vm.SourceTextModule is: "The requested module '<spec>' does not provide
+  // an export named '<name>'".
+  const filteredErrors = errors.filter(({ error }) => {
+    for (const spec of unresolvedExternals) {
+      if (error.includes(`'${spec}'`)) return false;
+    }
+    return true;
+  });
+
+  return { errors: filteredErrors, moduleCount: moduleCache.size };
 }
 
 // ── CLI entrypoint ──────────────────────────────────────────────────────────

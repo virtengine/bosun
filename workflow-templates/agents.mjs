@@ -534,11 +534,15 @@ export const BACKEND_AGENT_TEMPLATE = (() => {
       node("trigger", "trigger.task_assigned", "Task Assigned", {
       }, { x: 400, y: 50 }),
 
-      node("plan-work", "agent.run_planner", "Plan Implementation", {
+      node("plan-work", "action.run_agent", "Plan Implementation", {
         prompt: "Analyze the task requirements and create a step-by-step implementation plan. Identify which files need to be modified, what tests need to be written, and any API contracts to maintain.",
         outputVariable: "plan",
+        mode: "plan",
+        executionRole: "architect",
         repoMapQuery: "{{taskTitle}} {{taskDescription}}",
         repoMapFileLimit: 8,
+        sdk: "{{agentSdk}}",
+        timeoutMs: "{{timeoutMs}}",
       }, { x: 400, y: 180 }),
 
       node("write-tests", "action.run_agent", "Write Tests First", {
@@ -556,7 +560,7 @@ Use the project's test command: {{testCommand}}
 Create a descriptive test commit message that names the behavior or surface covered.
 Example: "test: cover portal login validation"`,
         sdk: "{{agentSdk}}",
-        timeoutMs: "{{testTimeoutMs}}",
+  timeoutMs: "{{testTimeoutMs}}",
       }, { x: 400, y: 330 }),
 
       node("implement", "action.run_agent", "Implement Feature", {
@@ -587,7 +591,7 @@ Example: "feat: add portal login rate limiting"`,
         worktreePath: "{{worktreePath}}",
         branch: "{{branch}}",
         baseBranch: "{{baseBranch}}",
-        rebaseBeforePush: true,
+        rebaseBeforePush: false,
         mergeBaseBeforePush: true,
         autoResolveMergeConflicts: true,
         conflictResolverSdk: "{{agentSdk}}",
@@ -699,7 +703,7 @@ RULES:
         worktreePath: "{{worktreePath}}",
         branch: "{{branch}}",
         baseBranch: "{{baseBranch}}",
-        rebaseBeforePush: true,
+        rebaseBeforePush: false,
         mergeBaseBeforePush: true,
         autoResolveMergeConflicts: true,
         conflictResolverSdk: "{{agentSdk}}",
@@ -816,7 +820,7 @@ Create a descriptive commit: "fix: <concrete failure resolved>"`,
         worktreePath: "{{worktreePath}}",
         branch: "{{branch}}",
         baseBranch: "{{baseBranch}}",
-        rebaseBeforePush: true,
+        rebaseBeforePush: false,
         mergeBaseBeforePush: true,
         autoResolveMergeConflicts: true,
         conflictResolverSdk: "{{agentSdk}}",

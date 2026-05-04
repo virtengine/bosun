@@ -145,4 +145,58 @@ describe("workflow pipeline primitives", () => {
     expect(prompts[0]).toContain("implementation stage");
     expect(prompts[1]).toContain("Previous stage output");
   });
+
+  it("passes managed harness session lineage into configured Bosun pipeline agents", async () => {
+    const mockExecWithRetry = async (_prompt, options) => {
+      mockExecWithRetry.calls.push(options);
+      return {
+        success: true,
+        output: `output-${mockExecWithRetry.calls.length}`,
+        usage: { totalTokens: 1 },
+      };
+    };
+    mockExecWithRetry.calls = [];
+
+    const result = await runConfiguredWorkflow(
+      "code-review",
+      {
+        taskId: "TASK-PIPE-1",
+        title: "Add harness session lineage",
+        prompt: "Keep pipeline runs visible in the harness.",
+      },
+      {
+        createHub: false,
+        workflows: {
+          "code-review": {
+            type: "sequential",
+            stages: ["implement", "review"],
+          },
+        },
+        services: {
+          agentPool: {
+            execWithRetry: mockExecWithRetry,
+          },
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(mockExecWithRetry.calls).toHaveLength(2);
+    expect(mockExecWithRetry.calls[0]).toEqual(
+      expect.objectContaining({
+        sessionId: expect.stringContaining("TASK-PIPE-1:pipeline:implement"),
+        sessionScope: "pipeline-task",
+        parentSessionId: "TASK-PIPE-1",
+        rootSessionId: "TASK-PIPE-1",
+        metadata: expect.objectContaining({
+          source: "workflow-pipeline-agent",
+          pipelineName: "code-review",
+          pipelineKind: "sequential",
+          taskId: "TASK-PIPE-1",
+          taskTitle: "Add harness session lineage",
+          stageName: "implement",
+        }),
+      }),
+    );
+  });
 });

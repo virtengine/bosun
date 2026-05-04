@@ -7,7 +7,7 @@ function toText(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
 }
 
-function uniqueStrings(values = []) {
+export function uniqueStrings(values = []) {
   return [...new Set(
     (Array.isArray(values) ? values : [values])
       .map((value) => String(value || "").trim())
@@ -329,6 +329,11 @@ function summarizeTaskForContext(task = {}) {
   };
 }
 
+function hasBatchTag(task = {}) {
+  const tags = uniqueStrings(task.tags || task.meta?.tags || []).map((value) => value.toLowerCase());
+  return tags.some((tag) => ["batch", "sweep", "research", "audit", "migration"].includes(tag));
+}
+
 export function buildTaskReplanContext(task = {}, options = {}) {
   const mode = normalizeTaskPlanningMode(options.mode || "replan");
   const childTasks = Array.isArray(options.childTasks) ? options.childTasks : [];
@@ -364,6 +369,115 @@ export function buildTaskReplanContext(task = {}, options = {}) {
       workflowRunCount: Number(auditSummary.workflowRunCount || 0),
     },
   };
+}
+
+function normalizeProtocolEntry(entry = {}) {
+  const tags = uniqueStrings(entry.tags || []);
+  return {
+    id: toText(entry.id || ""),
+    title: normalizeParagraph(entry.title || "", "Operational Protocol"),
+    description: normalizeParagraph(entry.description || "", ""),
+    tags,
+    important: entry.important === true,
+    content: normalizeParagraph(entry.content || "", ""),
+    sourceKind: "runtime-protocol",
+    sourcePath: `runtime://${toText(entry.id || "protocol") || "protocol"}`,
+    trusted: true,
+    trustState: "trusted",
+    trustReason: "runtime-protocol",
+    catalogOnly: false,
+  };
+}
+
+export function buildTaskReplanOperationalProtocols(context = {}, options = {}) {
+  const parentTask = context?.parentTask && typeof context.parentTask === "object" ? context.parentTask : {};
+  const childTasks = Array.isArray(context?.childTasks) ? context.childTasks : [];
+  const relatedTasks = Array.isArray(context?.relatedTasks) ? context.relatedTasks : [];
+  const workflowRuns = Array.isArray(context?.workflowRuns) ? context.workflowRuns : [];
+  const recentTimeline = Array.isArray(context?.recentTimeline) ? context.recentTimeline : [];
+  const auditSummary = context?.auditSummary && typeof context.auditSummary === "object" ? context.auditSummary : {};
+  const tags = uniqueStrings([
+    ...(Array.isArray(options.labels) ? options.labels : []),
+    ...(Array.isArray(parentTask.tags) ? parentTask.tags : []),
+  ]).map((value) => value.toLowerCase());
+
+  const protocols = [];
+  const mode = normalizeTaskPlanningMode(context?.mode || options.mode || "replan");
+  const broadTask =
+    childTasks.length === 0
+    && (
+      String(parentTask.description || "").length >= 180
+      || relatedTasks.length >= 2
+      || workflowRuns.some((run) => ["failed", "blocked"].includes(String(run?.status || "").toLowerCase()))
+      || hasBatchTag(parentTask)
+    );
+  if (mode === "decompose" || broadTask) {
+    protocols.push(normalizeProtocolEntry({
+      id: "runtime-task-decomposition",
+      title: "Task Decomposition Protocol",
+      description: "Split broad or blocked work into executable child steps before pushing forward.",
+      tags: ["task", "decompose", "replan", "planning"],
+      important: true,
+      content: [
+        "# Skill: Task Decomposition Protocol",
+        "",
+        `- Parent Task: ${toText(parentTask.title || parentTask.id || "current task")}`,
+        `- Trigger: ${mode === "decompose" ? "explicit decomposition request" : "broad or blocked task shape detected"}`,
+        `- Child Tasks Present: ${childTasks.length}`,
+        `- Related Tasks Considered: ${relatedTasks.length}`,
+        "- Runtime Primitive: create 2-6 executable subtasks, wire dependencies explicitly, and block the parent when execution should flow through the child graph.",
+        "- Stop Rule: stop expanding once the next agent-facing step is concrete and independently verifiable.",
+      ].join("\n"),
+    }));
+  }
+
+  const contextSignal =
+    workflowRuns.length > 0
+    || recentTimeline.length >= 3
+    || Number(auditSummary.eventCount || 0) >= 4
+    || Number(auditSummary.toolCallCount || 0) >= 4;
+  if (contextSignal) {
+    protocols.push(normalizeProtocolEntry({
+      id: "runtime-context-preservation",
+      title: "Context Preservation Protocol",
+      description: "Preserve the current run state so long patch cycles can resume cleanly.",
+      tags: ["context", "resume", "checkpoint", "notes"],
+      important: true,
+      content: [
+        "# Skill: Context Preservation Protocol",
+        "",
+        `- Workflow Runs In Context: ${workflowRuns.length}`,
+        `- Timeline Events Tracked: ${recentTimeline.length}`,
+        `- Audit Summary: events=${Number(auditSummary.eventCount || 0)}, artifacts=${Number(auditSummary.artifactCount || 0)}, toolCalls=${Number(auditSummary.toolCallCount || 0)}`,
+        "- Runtime Primitive: record the current plan step, explicit stop reason, and the smallest next action before handing off or retrying.",
+        "- Resume Rule: keep operator-facing notes short, concrete, and tied to the current task graph rather than free-form narration.",
+      ].join("\n"),
+    }));
+  }
+
+  const batchSignal =
+    hasBatchTag(parentTask)
+    || tags.some((tag) => ["batch", "sweep", "research", "audit"].includes(tag))
+    || childTasks.length + relatedTasks.length >= 4;
+  if (batchSignal) {
+    protocols.push(normalizeProtocolEntry({
+      id: "runtime-batch-ledger",
+      title: "Batch Ledger Protocol",
+      description: "Track multi-item progress explicitly during sweeps, audits, and long task batches.",
+      tags: ["batch", "ledger", "research", "audit", "tracking"],
+      important: true,
+      content: [
+        "# Skill: Batch Ledger Protocol",
+        "",
+        `- Child Tasks Tracked: ${childTasks.length}`,
+        `- Related Tasks Tracked: ${relatedTasks.length}`,
+        "- Runtime Primitive: maintain an explicit done / next / blocked ledger for each item instead of relying on one rolling summary.",
+        "- Reporting Rule: when the batch is partial, say exactly which items are complete, which remain, and what blocker pattern is repeating.",
+      ].join("\n"),
+    }));
+  }
+
+  return protocols;
 }
 
 export function buildTaskReplanPrompt(context = {}) {

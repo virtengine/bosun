@@ -5,9 +5,13 @@ import { resolve } from "node:path";
 
 const execFileMock = vi.hoisted(() => vi.fn());
 
-vi.mock("node:child_process", () => ({
-  execFile: execFileMock,
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    execFile: execFileMock,
+  };
+});
 
 describe("shared-state-integration", () => {
   let tempRoot = null;

@@ -7,13 +7,14 @@ import { h } from "preact";
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
 import { signal, computed, effect } from "@preact/signals";
-import { apiFetch, onWsMessage } from "../../../ui/modules/api.js";
+import { apiFetch, onWsMessage } from "../modules/api.js";
 import {
   buildSessionApiPath,
   classifySessionRequestError,
   createSessionLoadMeta,
   deriveSessionStaleReason,
   formatSessionFreshnessTimestamp,
+  getSessionHistoryState,
   getSessionLifecycleState,
   getSessionManualRetryState,
   getSessionListState,
@@ -23,14 +24,17 @@ import {
   markSessionLoadSuccess,
   resolveSessionWorkspaceHint,
   shouldFallbackToAllSessions,
-} from "../../../ui/modules/session-api.js";
-import { formatDate, formatRelative, truncate } from "../../../ui/modules/utils.js";
-import { resolveIcon } from "../../../ui/modules/icon-utils.js";
+} from "../modules/session-api.js";
+import { formatDate, formatRelative, truncate } from "../modules/utils.js";
+import { resolveIcon } from "../modules/icon-utils.js";
+import { clearAgentStatus } from "../modules/streaming.js";
+import { showToast } from "../modules/state.js";
+import { AppContextMenu, useContextMenuState } from "./context-menu.js";
 import {
   List, ListItem, ListItemButton, ListItemText, ListItemIcon,
   ListItemSecondaryAction, Typography, Box, Stack, IconButton,
   Chip, Divider, TextField, InputAdornment, CircularProgress,
-  Tooltip, Menu, MenuItem, Paper, Skeleton, Button, Alert,
+  Tooltip, Paper, Skeleton, Button, Alert,
 } from "@mui/material";
 
 const html = htm.bind(h);
@@ -107,6 +111,54 @@ function sessionPath(id, action = "") {
   return buildSessionApiPath(id, action, { workspace });
 }
 
+function clearUnavailableSelectedSession(targetSessionId) {
+  const normalizedTargetSessionId = String(targetSessionId || "").trim();
+  if (!normalizedTargetSessionId) return;
+  if (String(selectedSessionId.peek() || "").trim() === normalizedTargetSessionId) {
+    selectedSessionId.value = null;
+  }
+  if (String(sessionMessagesSessionId.peek() || "").trim() === normalizedTargetSessionId) {
+    sessionMessagesSessionId.value = "";
+    sessionMessages.value = [];
+    sessionPagination.value = null;
+  }
+}
+
+function sessionLooksLikeTestLeak(session) {
+  if (!session || typeof session !== "object") return true;
+  const metadata =
+    session.metadata && typeof session.metadata === "object"
+      ? session.metadata
+      : {};
+  const identifiers = [
+    session.id,
+    session.taskId,
+    session.title,
+    session.taskTitle,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const hasWorkspaceAssignment = Boolean(
+    String(session?.workspaceId || session?.workspace || metadata?.workspaceId || "").trim()
+      || String(metadata?.workspaceDir || "").trim()
+      || String(metadata?.workspaceRoot || "").trim(),
+  );
+  const normalizedSource = String(metadata?.source || "").trim().toLowerCase();
+  if (metadata?.hiddenInLists === true || metadata?.hidden === true || metadata?.testSession === true) {
+    return true;
+  }
+  if (normalizedSource === "voice-http" || normalizedSource === "voice-http-tool" || normalizedSource === "vision-http") {
+    return true;
+  }
+  if (identifiers.some((value) => /^(?:null|undefined|\(null\)|session|null session)$/i.test(value))) {
+    return true;
+  }
+  if (!hasWorkspaceAssignment && (Number(session?.turnCount || 0) <= 0) && !String(session?.preview || session?.lastMessage || "").trim()) {
+    return true;
+  }
+  return false;
+}
+
 /* ─── Data loaders ─── */
 export async function loadSessions(filter = {}, _opts = {}) {
   const normalizedFilter = {
@@ -124,6 +176,9 @@ export async function loadSessions(filter = {}, _opts = {}) {
       params.set(key, String(value));
     }
     const currentSelectedSessionId = String(selectedSessionId.value || "").trim();
+    const previousSessionIds = new Set(
+      (sessionsData.peek() || []).map((session) => String(session?.id || "")).filter(Boolean),
+    );
     const res = await apiFetch(`/api/sessions?${params}`, { _silent: true });
     if (res?.sessions) {
       sessionsData.value = res.sessions;
@@ -134,6 +189,7 @@ export async function loadSessions(filter = {}, _opts = {}) {
       const shouldRetainScopedSelection =
         Boolean(currentSelectedSessionId) &&
         workspaceScope !== "all" &&
+        previousSessionIds.has(currentSelectedSessionId) &&
         !sessionIds.has(currentSelectedSessionId);
       const selectedSessionStillExists =
         !currentSelectedSessionId ||
@@ -151,6 +207,7 @@ export async function loadSessions(filter = {}, _opts = {}) {
       responseMeta.lastSuccessAt || Date.now(),
     );
     sessionsError.value = null;
+    return Array.isArray(res?.sessions) ? res.sessions : [];
   } catch (error) {
     const nextMeta = markSessionLoadFailure(sessionLoadMeta.peek(), Date.now(), {
       staleReason: deriveSessionStaleReason(error),
@@ -160,6 +217,7 @@ export async function loadSessions(filter = {}, _opts = {}) {
     const nextErrorState = classifySessionRequestError(error);
     const hasCachedData = Array.isArray(sessionsData.peek()) && sessionsData.peek().length > 0;
     sessionsError.value = hasCachedData ? null : nextErrorState;
+    return null;
   } finally {
     sessionsLoading.value = false;
   }
@@ -232,12 +290,16 @@ export async function loadSessionMessages(id, opts = {}) {
       sessionMessagesSessionId.value = targetSessionId;
     }
     return { ok: false, error: "empty" };
-  } catch {
+  } catch (error) {
+    const errorState = classifySessionRequestError(error);
+    if (errorState.isNotFound) {
+      clearUnavailableSelectedSession(targetSessionId);
+    }
     if (!opts.prepend) {
       _bindSessionStore(targetSessionId, [], null);
       sessionMessagesSessionId.value = targetSessionId;
     }
-    return { ok: false, error: "unavailable" };
+    return { ok: false, error: errorState.isNotFound ? "not_found" : "unavailable" };
   }
 }
 
@@ -506,16 +568,39 @@ export async function createSession(options = {}) {
   // Duplicate prevention: if a fresh empty session of same type exists, reuse it
   const existing = sessionsData.value || [];
   if (allowReuseFresh) {
-    const fresh = existing.find(
-      (s) =>
+    const freshCandidates = existing
+      .filter(
+        (s) =>
         s.type === type &&
         getSessionLifecycleState(s).isActive &&
+        !sessionLooksLikeTestLeak(s) &&
         (s.turnCount || 0) === 0 &&
         (!s.preview || s.preview.trim() === ""),
-    );
-    if (fresh) {
-      selectedSessionId.value = fresh.id;
-      return { ok: true, session: fresh };
+      )
+      .sort((left, right) => {
+        const leftTs = Date.parse(String(left?.lastActiveAt || left?.createdAt || "")) || 0;
+        const rightTs = Date.parse(String(right?.lastActiveAt || right?.createdAt || "")) || 0;
+        return rightTs - leftTs;
+      });
+    for (const fresh of freshCandidates) {
+      try {
+        const reusePath = buildSessionApiPath(fresh.id, "", {
+          workspace: resolveSessionWorkspaceHint(
+            fresh,
+            String(_lastLoadFilter?.workspace || "").trim() || "active",
+          ),
+          query: { limit: "1" },
+        });
+        const reuseCheck = reusePath
+          ? await apiFetch(reusePath, { _silent: true })
+          : null;
+        if (reuseCheck?.session?.id === fresh.id) {
+          selectedSessionId.value = fresh.id;
+          return { ok: true, session: fresh, reused: true };
+        }
+      } catch {
+        // Stale/orphan session shells should not block creating a real session.
+      }
     }
   }
 
@@ -542,7 +627,8 @@ export async function archiveSession(id) {
     const url = sessionPath(id, "archive");
     if (!url) return false;
     await apiFetch(url, { method: "POST" });
-    if (selectedSessionId.value === id) selectedSessionId.value = null;
+    clearAgentStatus(id);
+    clearUnavailableSelectedSession(id);
     await loadSessions(_lastLoadFilter);
     return true;
   } catch {
@@ -555,7 +641,24 @@ export async function deleteSession(id) {
     const url = sessionPath(id, "delete");
     if (!url) return false;
     await apiFetch(url, { method: "POST" });
-    if (selectedSessionId.value === id) selectedSessionId.value = null;
+    clearAgentStatus(id);
+    clearUnavailableSelectedSession(id);
+    await loadSessions(_lastLoadFilter);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function deleteSessionHistory(id) {
+  try {
+    const historyUrl = sessionPath(id, "delete-history");
+    const fallbackUrl = sessionPath(id, "delete");
+    const url = historyUrl || fallbackUrl;
+    if (!url) return false;
+    await apiFetch(url, { method: "POST" });
+    clearAgentStatus(id);
+    clearUnavailableSelectedSession(id);
     await loadSessions(_lastLoadFilter);
     return true;
   } catch {
@@ -573,6 +676,27 @@ export async function resumeSession(id) {
   } catch {
     return false;
   }
+}
+
+export async function revealSessionFolder(id) {
+  try {
+    const url = sessionPath(id, "reveal");
+    if (!url) return null;
+    const response = await apiFetch(url, { method: "POST" });
+    return response?.path || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function reopenSessionHistory(id, opts = {}) {
+  const normalizedId = String(id || "").trim();
+  if (!normalizedId) return false;
+  selectedSessionId.value = normalizedId;
+  const loadResult = await loadSessionMessages(normalizedId, {
+    limit: Number.isFinite(Number(opts?.limit)) ? Number(opts.limit) : DEFAULT_SESSION_PAGE_SIZE,
+  });
+  return loadResult?.ok !== false;
 }
 
 /* ─── Helpers ─── */
@@ -601,12 +725,15 @@ function getSessionStatusKey(session) {
   return getSessionLifecycleState(session).key;
 }
 
-function isActiveSession(session) {
-  return getSessionLifecycleState(session).isActive;
+function isInProgressSession(session) {
+  const lifecycle = getSessionLifecycleState(session);
+  if (!lifecycle.isActive) return false;
+  const runtime = getSessionRuntimeState(session);
+  return runtime.isLive || runtime.key === "running" || runtime.key === "queued";
 }
 
 function isHistoricSession(session) {
-  return !isActiveSession(session);
+  return !isInProgressSession(session);
 }
 
 /* ─── Swipeable Session Item ─── */
@@ -637,17 +764,28 @@ function SwipeableSessionItem({
 
   const lifecycleState = getSessionLifecycleState(s);
   const runtimeState = getSessionRuntimeState(s);
+  const historyState = getSessionHistoryState(s);
   const recencyAt = getSessionRecencyTimestamp(s);
   const typeLabel = String(s.type || "session").trim().replace(/[-_]+/g, " ");
   const typeSummary = typeLabel
     ? typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)
     : "Session";
+  const workspaceLabel = String(
+    s?.surface?.repository?.selected?.displayName
+    || s?.surface?.repository?.selected?.name
+    || s?.metadata?.selectedRepoName
+    || s?.metadata?.workspaceDir
+    || s?.workspaceDir
+    || "",
+  ).trim();
   const dotColor = STATUS_TONE_COLOR_MAP[runtimeState.tone] || STATUS_TONE_COLOR_MAP[lifecycleState.tone] || "var(--text-hint)";
   const preview = s.lastMessage && !isArchived ? truncate(s.lastMessage, 36) : "";
   const metaSummary = [
     `Type: ${typeSummary}`,
     `Lifecycle: ${lifecycleState.label}`,
     `Runtime: ${runtimeState.label}`,
+    historyState.isHistoric ? `History: ${historyState.label}` : "",
+    workspaceLabel ? `Folder: ${truncate(workspaceLabel, 28)}` : "",
     preview || "",
   ]
     .filter(Boolean)
@@ -909,7 +1047,11 @@ export function SessionList({
 }) {
   const [search, setSearch] = useState("");
   const [revealedActions, setRevealedActions] = useState(null);
-  const [contextMenu, setContextMenu] = useState(null);
+  const {
+    contextMenu,
+    openContextMenu,
+    closeContextMenu,
+  } = useContextMenuState();
   const [uncontrolledSessionView, setUncontrolledSessionView] = useState(
     normalizeSessionViewFilter(sessionView),
   );
@@ -979,7 +1121,7 @@ export function SessionList({
 
   const viewFiltered = archivedFiltered.filter((s) => {
     if (resolvedSessionView === SESSION_VIEW_FILTER.active) {
-      return isActiveSession(s);
+      return isInProgressSession(s);
     }
     if (resolvedSessionView === SESSION_VIEW_FILTER.historic) {
       return isHistoricSession(s);
@@ -995,26 +1137,28 @@ export function SessionList({
       )
     : viewFiltered;
 
-  const active = filtered.filter((s) => isActiveSession(s));
+  const active = filtered.filter((s) => isInProgressSession(s));
   const archived = filtered.filter((s) => getSessionStatusKey(s) === "archived");
   const recent = filtered.filter(
     (s) =>
-      !isActiveSession(s) && getSessionStatusKey(s) !== "archived",
+      !isInProgressSession(s) && getSessionStatusKey(s) !== "archived",
   );
 
   const archivedCount = typeFiltered.filter((s) => getSessionStatusKey(s) === "archived").length;
   const allCount = archivedFiltered.length;
-  const activeCount = archivedFiltered.filter((s) => isActiveSession(s)).length;
+  const activeCount = archivedFiltered.filter((s) => isInProgressSession(s)).length;
   const historicCount = archivedFiltered.filter((s) => isHistoricSession(s)).length;
+  const reopenableHistoryCount = archivedFiltered.filter((s) => getSessionHistoryState(s).canReopenTranscript).length;
+  const revealableHistoryCount = archivedFiltered.filter((s) => getSessionHistoryState(s).canRevealFolder).length;
 
   const handleSelect = useCallback(
     (id) => {
       selectedSessionId.value = id;
       setRevealedActions(null);
-      setContextMenu(null);
+      closeContextMenu();
       if (onSelect) onSelect(id);
     },
-    [onSelect],
+    [onSelect, closeContextMenu],
   );
 
   const handleRetry = useCallback(() => {
@@ -1037,34 +1181,61 @@ export function SessionList({
 
   const handleArchive = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     await archiveSession(id);
-  }, []);
+  }, [closeContextMenu]);
 
   const handleDelete = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     await deleteSession(id);
-  }, []);
+  }, [closeContextMenu]);
 
   const handleResume = useCallback(async (id) => {
     setRevealedActions(null);
-    setContextMenu(null);
+    closeContextMenu();
     await resumeSession(id);
-  }, []);
+  }, [closeContextMenu]);
+
+  const handleReopenHistory = useCallback(async (id) => {
+    setRevealedActions(null);
+    closeContextMenu();
+    const reopened = await reopenSessionHistory(id);
+    if (!reopened) {
+      showToast("Could not reopen session history", "error");
+      return;
+    }
+    if (onSelect) onSelect(id);
+  }, [closeContextMenu, onSelect]);
+
+  const handleRevealFolder = useCallback(async (id) => {
+    setRevealedActions(null);
+    closeContextMenu();
+    const revealedPath = await revealSessionFolder(id);
+    if (!revealedPath) {
+      showToast("Session folder is not available", "error");
+      return;
+    }
+    showToast("Opened session folder", "success");
+  }, [closeContextMenu]);
+
+  const handleDeleteHistory = useCallback(async (id) => {
+    setRevealedActions(null);
+    closeContextMenu();
+    const deleted = await deleteSessionHistory(id);
+    if (!deleted) {
+      showToast("Could not delete session history", "error");
+      return;
+    }
+    showToast("Session history deleted", "success");
+  }, [closeContextMenu]);
 
   const handleContextMenu = useCallback((id, event) => {
     setRevealedActions(null);
-    setContextMenu({
+    openContextMenu({
       id,
-      mouseX: event.clientX + 2,
-      mouseY: event.clientY - 6,
-    });
-  }, []);
-
-  const closeContextMenu = useCallback(() => {
-    setContextMenu(null);
-  }, []);
+    }, event);
+  }, [openContextMenu]);
 
   const handleContextAction = useCallback(async (action) => {
     const targetId = contextMenu?.id;
@@ -1073,9 +1244,15 @@ export function SessionList({
       return;
     }
     const currentSession = (sessionsData.value || []).find((item) => item.id === targetId);
+    const historyState = getSessionHistoryState(currentSession);
     if (action === "open") {
       handleSelect(targetId);
       closeContextMenu();
+      return;
+    }
+    if (action === "reopen") {
+      closeContextMenu();
+      await handleReopenHistory(targetId);
       return;
     }
     if (action === "rename") {
@@ -1097,6 +1274,16 @@ export function SessionList({
       await handleDelete(targetId);
       return;
     }
+    if (action === "reveal") {
+      closeContextMenu();
+      await handleRevealFolder(targetId);
+      return;
+    }
+    if (action === "delete-history") {
+      closeContextMenu();
+      await handleDeleteHistory(targetId);
+      return;
+    }
     if (action === "copy-id") {
       closeContextMenu();
       try {
@@ -1112,6 +1299,9 @@ export function SessionList({
     contextMenu?.id,
     handleArchive,
     handleDelete,
+    handleDeleteHistory,
+    handleRevealFolder,
+    handleReopenHistory,
     handleResume,
     handleSelect,
     onStartRename,
@@ -1121,20 +1311,20 @@ export function SessionList({
   const handleListClick = useCallback((e) => {
     if (e.target.closest(".session-item-wrapper")) return;
     setRevealedActions(null);
-    setContextMenu(null);
-  }, []);
+    closeContextMenu();
+  }, [closeContextMenu]);
 
   const emptyTitle = hasSearch
     ? "No matching sessions"
     : resolvedSessionView === SESSION_VIEW_FILTER.active
-      ? "No lifecycle-active sessions"
+      ? "No in-progress sessions"
       : resolvedSessionView === SESSION_VIEW_FILTER.historic
         ? "No historic sessions"
         : "No sessions yet";
   const emptyHint = hasSearch
     ? "Try a different keyword or clear the search."
     : resolvedSessionView === SESSION_VIEW_FILTER.active
-      ? "Start a new session or switch to All lifecycle states."
+      ? "Sessions with live work appear here."
       : resolvedSessionView === SESSION_VIEW_FILTER.historic
         ? "Historic sessions appear after they finish."
         : "Create a session to get started.";
@@ -1324,7 +1514,7 @@ export function SessionList({
           clickable
         />
         <${Chip}
-          label=${`Lifecycle Active (${activeCount})`}
+          label=${`In Progress (${activeCount})`}
           size="small"
           variant=${resolvedSessionView === SESSION_VIEW_FILTER.active ? "filled" : "outlined"}
           color=${resolvedSessionView === SESSION_VIEW_FILTER.active ? "primary" : "default"}
@@ -1341,6 +1531,12 @@ export function SessionList({
         />
       </${Stack}>
 
+      <${Box} sx=${{ px: 1.5, pb: 1 }}>
+        <${Typography} variant="caption" color="text.secondary">
+          History ready: ${reopenableHistoryCount} reopenable sessions · ${revealableHistoryCount} folders available
+        </${Typography}>
+      </${Box}>
+
       <${Divider} />
 
       <!-- Session list scroll area -->
@@ -1350,7 +1546,7 @@ export function SessionList({
           html`
             <${ListItem} disablePadding sx=${{ px: 1.5, pt: 1.5, pb: 0.5 }}>
               <${Typography} variant="overline" color="text.secondary" sx=${{ fontSize: "0.65rem", letterSpacing: 1 }}>
-                Lifecycle Active
+                In Progress
               </${Typography}>
             </${ListItem}>
             ${active.map(renderSessionItem)}
@@ -1422,30 +1618,61 @@ export function SessionList({
         </${Box}>
       `}
 
-      <${Menu}
-        open=${Boolean(contextMenu)}
+      <${AppContextMenu}
+        menu=${contextMenu}
         onClose=${closeContextMenu}
-        anchorReference="anchorPosition"
-        anchorPosition=${contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
-      >
-        <${MenuItem} onClick=${() => handleContextAction("open")}>${resolveIcon(":chat:")} Open</${MenuItem}>
-        <${MenuItem} onClick=${() => handleContextAction("rename")}>${resolveIcon(":edit:")} Edit title</${MenuItem}>
-        <${MenuItem} onClick=${() => handleContextAction("archive")}>
-          ${(() => {
-            const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
-            return target?.status === "archived"
-              ? html`${resolveIcon(":workflow:")} Unarchive`
-              : html`${resolveIcon(":box:")} Archive`;
-          })()}
-        </${MenuItem}>
-        <${MenuItem} onClick=${() => handleContextAction("copy-id")}>${resolveIcon(":copy:")} Copy ID</${MenuItem}>
-        <${Divider} />
-        <${MenuItem} onClick=${() => handleContextAction("delete")} sx=${{ color: "error.main" }}>
-          ${resolveIcon(":trash:")} Delete
-        </${MenuItem}>
-      </${Menu}>
+        items=${(() => {
+          const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
+          const historyState = getSessionHistoryState(target);
+          return [
+            {
+              key: "open",
+              label: historyState.isHistoric ? "Open transcript" : "Open",
+              icon: ":chat:",
+              onClick: () => handleContextAction("open"),
+            },
+            {
+              key: "reopen",
+              label: historyState.reopenLabel,
+              icon: ":history:",
+              hidden: !historyState.isHistoric,
+              onClick: () => handleContextAction("reopen"),
+            },
+            { key: "rename", label: "Edit title", icon: ":edit:", onClick: () => handleContextAction("rename") },
+            {
+              key: "archive",
+              label: target?.status === "archived" ? "Resume work" : "Archive",
+              icon: target?.status === "archived" ? ":workflow:" : ":box:",
+              onClick: () => handleContextAction("archive"),
+            },
+            {
+              key: "reveal",
+              label: "Reveal folder",
+              icon: ":folder:",
+              hidden: !historyState.canRevealFolder,
+              onClick: () => handleContextAction("reveal"),
+            },
+            { key: "copy-id", label: "Copy ID", icon: ":copy:", onClick: () => handleContextAction("copy-id") },
+            { kind: "divider", key: "danger-divider" },
+            {
+              key: "delete-history",
+              label: historyState.deleteLabel,
+              icon: ":trash:",
+              danger: true,
+              hidden: !historyState.canDeleteHistory,
+              onClick: () => handleContextAction("delete-history"),
+            },
+            {
+              key: "delete",
+              label: "Delete session",
+              icon: ":trash:",
+              danger: true,
+              hidden: historyState.canDeleteHistory,
+              onClick: () => handleContextAction("delete"),
+            },
+          ];
+        })()}
+      />
     </${Paper}>
   `;
 }
-
-

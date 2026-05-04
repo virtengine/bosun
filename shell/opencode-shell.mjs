@@ -28,6 +28,7 @@ import {
   discoverProviders,
 } from "./opencode-providers.mjs";
 import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
+import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 
@@ -57,6 +58,10 @@ const _sessionMap = new Map();
 let _activeServerSessionId = null;
 
 let agentSdk = resolveAgentSdkConfig();
+const opencodeSessionCompat = createShellSessionCompat({
+  adapterName: "opencode",
+  providerSelection: "opencode",
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,6 +72,21 @@ function timestamp() {
 function envFlagEnabled(value) {
   const raw = String(value ?? "").trim().toLowerCase();
   return ["1", "true", "yes", "on", "y"].includes(raw);
+}
+
+function normalizePrimaryExpectation(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw.includes("opencode")) return "opencode";
+  if (raw.includes("codex") || raw.includes("gpt")) return "codex";
+  if (raw.includes("copilot")) return "copilot";
+  if (raw.includes("claude")) return "claude";
+  if (raw.includes("gemini")) return "gemini";
+  return raw;
+}
+
+function shouldBypassAgentSdkPrimaryGuard(expectedPrimary = null) {
+  return normalizePrimaryExpectation(expectedPrimary) === "opencode";
 }
 
 /**
@@ -262,10 +282,21 @@ async function loadState() {
     console.log(
       `[opencode-shell] loaded state: named=${activeNamedSessionId}, turns=${turnCount}, sessions=${_sessionMap.size}`,
     );
+    opencodeSessionCompat.hydrate({
+      sessionId: activeNamedSessionId,
+      threadId: _activeServerSessionId,
+      status: _activeServerSessionId ? "active" : "idle",
+      metadata: {
+        providerThreadId: _activeServerSessionId,
+        sessionCount: _sessionMap.size,
+        turnCount,
+      },
+    });
   } catch {
     activeNamedSessionId = null;
     turnCount = 0;
     _activeServerSessionId = null;
+    opencodeSessionCompat.reset({ keepManagedRecord: false });
   }
 }
 
@@ -509,6 +540,7 @@ function sanitizeAndTruncatePrompt(text) {
  * @param {AbortController} [options.abortController] - External abort signal
  * @param {object}  [options.providerConfig]  - Per-executor provider config from bosun.config.json
  * @param {string}  [options.provider]        - Provider name for this executor
+ * @param {string}  [options.expectedPrimary] - Bosun-selected primary adapter name, when known
  * @returns {Promise<{finalResponse: string, items: Array, usage: null}>}
  */
 export async function execOpencodePrompt(userMessage, options = {}) {
@@ -523,6 +555,7 @@ export async function execOpencodePrompt(userMessage, options = {}) {
     mode = null,
     providerConfig = null,
     provider = null,
+    expectedPrimary = null,
   } = options;
 
   // Build executor-level overrides from provider config
@@ -532,7 +565,10 @@ export async function execOpencodePrompt(userMessage, options = {}) {
 
   // Re-read config in case it changed hot
   agentSdk = resolveAgentSdkConfig({ reload: true });
-  if (agentSdk.primary !== "opencode") {
+  if (
+    agentSdk.primary !== "opencode" &&
+    !shouldBypassAgentSdkPrimaryGuard(expectedPrimary)
+  ) {
     return {
       finalResponse: `:close: Agent SDK set to "${agentSdk.primary}" — OpenCode disabled.`,
       items: [],
@@ -576,12 +612,42 @@ export async function execOpencodePrompt(userMessage, options = {}) {
     if (persistent && namedId !== activeNamedSessionId) {
       activeNamedSessionId = namedId;
     }
+    const shouldActivateManagedSession = persistent || Boolean(sessionId);
+    const providerRuntime = opencodeSessionCompat.resolveProvider({
+      providerSelection: provider || executorOverrides?.provider || "opencode",
+      model: executorOverrides?.model || null,
+    });
+    opencodeSessionCompat.beginTurn(namedId, {
+      activate: shouldActivateManagedSession,
+      status: "running",
+      threadId: _activeServerSessionId,
+      providerSelection: providerRuntime.providerId || "opencode",
+      model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+      metadata: {
+        providerThreadId: _activeServerSessionId,
+        turnCount,
+        persistent,
+        mode: mode || null,
+      },
+    });
 
     // Ensure we have a server session UUID
     let serverSessionId;
     try {
       serverSessionId = await getOrCreateServerSession(namedId);
     } catch (err) {
+      opencodeSessionCompat.failTurn(namedId, {
+        activate: shouldActivateManagedSession,
+        status: "failed",
+        threadId: _activeServerSessionId,
+        error: err.message,
+        providerSelection: providerRuntime.providerId || "opencode",
+        model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+        metadata: {
+          providerThreadId: _activeServerSessionId,
+          persistent,
+        },
+      });
       return {
         finalResponse: `:close: Could not establish OpenCode session: ${err.message}`,
         items: [],
@@ -643,6 +709,12 @@ export async function execOpencodePrompt(userMessage, options = {}) {
               event.properties?.session_id ||
               event.sessionId;
             if (eventSessionId && eventSessionId !== serverSessionId) continue;
+            opencodeSessionCompat.recordStreamEvent(namedId, event, {
+              activate: shouldActivateManagedSession,
+              threadId: serverSessionId,
+              providerSelection: providerRuntime.providerId || "opencode",
+              model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+            });
             const formatted = formatOpencodeEvent(event);
             if (formatted) {
               try {
@@ -724,6 +796,18 @@ export async function execOpencodePrompt(userMessage, options = {}) {
         if (persistent || turnCount % 10 === 0) {
           await saveState().catch(() => {});
         }
+        opencodeSessionCompat.completeTurn(namedId, {
+          activate: shouldActivateManagedSession,
+          status: "completed",
+          threadId: serverSessionId,
+          providerSelection: providerRuntime.providerId || "opencode",
+          model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+          metadata: {
+            providerThreadId: serverSessionId,
+            turnCount,
+            persistent,
+          },
+        });
 
         // Rotate ephemeral sessions to avoid unbounded session accumulation
         if (!persistent && namedId.startsWith("ephemeral-")) {
@@ -765,6 +849,18 @@ export async function execOpencodePrompt(userMessage, options = {}) {
             /* best-effort */
           }
 
+          opencodeSessionCompat.abortTurn(namedId, {
+            activate: shouldActivateManagedSession,
+            status: reason === "user_stop" ? "aborted" : "timeout",
+            threadId: serverSessionId,
+            error: msg,
+            providerSelection: providerRuntime.providerId || "opencode",
+            model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+            metadata: {
+              providerThreadId: serverSessionId,
+              persistent,
+            },
+          });
           return { finalResponse: msg, items: [], usage: null };
         }
 
@@ -786,10 +882,35 @@ export async function execOpencodePrompt(userMessage, options = {}) {
           };
         }
 
+        opencodeSessionCompat.failTurn(namedId, {
+          activate: shouldActivateManagedSession,
+          status: "failed",
+          threadId: serverSessionId,
+          error: err?.message || String(err),
+          providerSelection: providerRuntime.providerId || "opencode",
+          model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+          metadata: {
+            providerThreadId: serverSessionId,
+            persistent,
+          },
+        });
+
         throw err;
       }
     }
 
+    opencodeSessionCompat.failTurn(activeNamedSessionId || sessionId || "primary", {
+      activate: Boolean(activeNamedSessionId || sessionId),
+      status: "failed",
+      threadId: _activeServerSessionId,
+      error: "OpenCode agent failed after all retry attempts.",
+      providerSelection: providerRuntime.providerId || "opencode",
+      model: providerRuntime.providerConfig?.model || executorOverrides?.model || null,
+      metadata: {
+        providerThreadId: _activeServerSessionId,
+        persistent,
+      },
+    });
     return {
       finalResponse: ":close: OpenCode agent failed after all retry attempts.",
       items: [],
@@ -812,10 +933,13 @@ export async function execOpencodePrompt(userMessage, options = {}) {
  * @param {string} _message - Steering message (for logging; will be surfaced to caller)
  * @returns {Promise<{ok: boolean, reason?: string, mode?: string}>}
  */
-export async function steerOpencodePrompt(_message) {
+export async function steerOpencodePrompt(_message, options = {}) {
   try {
     agentSdk = resolveAgentSdkConfig({ reload: true });
-    if (agentSdk.primary !== "opencode") {
+    if (
+      agentSdk.primary !== "opencode" &&
+      !shouldBypassAgentSdkPrimaryGuard(options?.expectedPrimary)
+    ) {
       return { ok: false, reason: "agent_sdk_not_opencode" };
     }
     if (!agentSdk.capabilities?.steering) {
@@ -842,18 +966,19 @@ export function isOpencodeBusy() {
 }
 
 export function getSessionInfo() {
-  return {
+  return opencodeSessionCompat.getSessionInfo({
     namedSessionId: activeNamedSessionId,
     serverSessionId: _activeServerSessionId,
     turnCount,
     isActive: _serverReady,
     isBusy: activeTurn,
     sessionCount: _sessionMap.size,
-  };
+    threadId: _activeServerSessionId,
+  });
 }
 
 export function getActiveSessionId() {
-  return activeNamedSessionId;
+  return opencodeSessionCompat.getActiveSessionId();
 }
 
 // ── Session Management Exports ─────────────────────────────────────────────────
@@ -865,6 +990,10 @@ export async function listSessions() {
       id: namedId,
       serverSessionId: serverUUID,
       isActive: namedId === activeNamedSessionId,
+      threadId: serverUUID,
+      metadata: {
+        providerThreadId: serverUUID,
+      },
     });
   }
   // Also query the server for its live sessions if available
@@ -883,6 +1012,10 @@ export async function listSessions() {
             serverSessionId: ssId,
             isActive: ssId === _activeServerSessionId,
             serverManaged: true,
+            threadId: ssId,
+            metadata: {
+              providerThreadId: ssId,
+            },
           });
         }
       }
@@ -890,7 +1023,7 @@ export async function listSessions() {
       /* best-effort */
     }
   }
-  return sessions;
+  return opencodeSessionCompat.listSessions({ extraSessions: sessions });
 }
 
 export async function switchSession(namedId) {
@@ -898,14 +1031,43 @@ export async function switchSession(namedId) {
   _activeServerSessionId = _sessionMap.get(namedId) || null;
   console.log(`[opencode-shell] switched to session "${namedId}"`);
   await saveState();
+  return opencodeSessionCompat.switchSession(namedId, {
+    threadId: _activeServerSessionId,
+    status: _activeServerSessionId ? "active" : "idle",
+    metadata: {
+      providerThreadId: _activeServerSessionId,
+      sessionCount: _sessionMap.size,
+      turnCount,
+    },
+  });
 }
 
 export async function createSession(namedId) {
   if (_sessionMap.has(namedId)) {
-    return { id: namedId, serverSessionId: _sessionMap.get(namedId) };
+    opencodeSessionCompat.createSession(namedId, {
+      activate: false,
+      status: "idle",
+      threadId: _sessionMap.get(namedId),
+      metadata: {
+        providerThreadId: _sessionMap.get(namedId),
+        sessionCount: _sessionMap.size,
+        turnCount,
+      },
+    });
+    return { id: namedId, sessionId: namedId, serverSessionId: _sessionMap.get(namedId) };
   }
   // Defer actual server session creation until first prompt
-  return { id: namedId, serverSessionId: null };
+  opencodeSessionCompat.createSession(namedId, {
+    activate: false,
+    status: "idle",
+    threadId: null,
+    metadata: {
+      providerThreadId: null,
+      sessionCount: _sessionMap.size,
+      turnCount,
+    },
+  });
+  return { id: namedId, sessionId: namedId, serverSessionId: null };
 }
 
 // ── Reset ──────────────────────────────────────────────────────────────────────
@@ -924,6 +1086,15 @@ export async function resetSession() {
   activeNamedSessionId = null;
   turnCount = 0;
   _sessionMap.clear();
+  opencodeSessionCompat.reset({
+    status: "idle",
+    threadId: null,
+    metadata: {
+      providerThreadId: null,
+      sessionCount: 0,
+      turnCount: 0,
+    },
+  });
   await saveState();
   console.log("[opencode-shell] session reset");
 }

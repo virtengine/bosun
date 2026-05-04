@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
+
+vi.setConfig({ testTimeout: testTimeout(15_000) });
+
+const SLOW_CODEX_SHELL_CONCURRENT_SESSION_TEST_TIMEOUT_MS = testTimeout(15_000);
 
 const mockCodexCtor = vi.fn();
 const mockStartThread = vi.fn();
@@ -29,6 +34,17 @@ vi.mock("../shell/codex-sdk-import.mjs", () => ({
       return mockStartThread(...args);
     }
   },
+  loadBareCodexSdkModule: vi.fn(async () => ({
+    Codex: class MockCodex {
+      constructor(options) {
+        mockCodexCtor(options);
+      }
+
+      startThread(...args) {
+        return mockStartThread(...args);
+      }
+    },
+  })),
 }));
 
 vi.mock("../agent/agent-sdk.mjs", () => ({
@@ -76,15 +92,20 @@ vi.mock("../infra/stream-resilience.mjs", () => ({
     String(err?.message || "").toLowerCase().includes("stream disconnected"),
 }));
 
-vi.mock("node:fs/promises", () => ({
-  mkdir: vi.fn().mockResolvedValue(undefined),
-  readdir: vi.fn().mockResolvedValue([]),
-  readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
-  writeFile: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    mkdir: vi.fn().mockResolvedValue(undefined),
+    readdir: vi.fn().mockResolvedValue([]),
+    readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 const {
   execCodexPrompt,
+  getSessionStoreDir,
   resetThread,
 } = await import("../shell/codex-shell.mjs");
 const {
@@ -184,6 +205,118 @@ describe("codex-shell stream safeguards", () => {
     expect(receivedPrompt).toContain("replace_lines");
     expect(receivedPrompt).toContain("Never leave repo-root scratch artifacts behind");
     expect(receivedPrompt).toContain("do not create `.tmp-*`");
+  });
+
+  it("stores shell-private session state outside the chat history session directory", async () => {
+    const normalized = getSessionStoreDir().replace(/\\/g, "/");
+    expect(normalized.endsWith("/logs/codex-shell-sessions")).toBe(true);
+    expect(normalized.endsWith("/logs/sessions")).toBe(false);
+  });
+
+  it("allows concurrent persistent turns in different sessions", async () => {
+    let releaseFirstTurn;
+    let markFirstRunning;
+    const firstRunning = new Promise((resolve) => {
+      markFirstRunning = resolve;
+    });
+    let startCount = 0;
+
+    mockStartThread.mockImplementation(() => {
+      startCount += 1;
+      const threadIndex = startCount;
+      return {
+        id: `codex-test-thread-concurrent-${threadIndex}`,
+        runStreamed: async () => {
+          if (threadIndex === 1) {
+            markFirstRunning();
+            return {
+              events: {
+                async *[Symbol.asyncIterator]() {
+                  await new Promise((resolve) => {
+                    releaseFirstTurn = resolve;
+                  });
+                  yield {
+                    type: "item.completed",
+                    item: { type: "agent_message", text: "first session completed" },
+                  };
+                  yield { type: "turn.completed" };
+                },
+              },
+            };
+          }
+          return {
+            events: {
+              async *[Symbol.asyncIterator]() {
+                yield {
+                  type: "item.completed",
+                  item: { type: "agent_message", text: "second session completed" },
+                };
+                yield { type: "turn.completed" };
+              },
+            },
+          };
+        },
+      };
+    });
+
+    const firstPromise = execCodexPrompt("run first session", {
+      persistent: true,
+      sessionId: "persistent-a",
+      timeoutMs: 5000,
+    });
+    await firstRunning;
+
+    const second = await execCodexPrompt("run second session", {
+      persistent: true,
+      sessionId: "persistent-b",
+      timeoutMs: 5000,
+    });
+
+    expect(second.finalResponse).toContain("second session completed");
+    expect(startCount).toBe(2);
+
+    releaseFirstTurn();
+    const first = await firstPromise;
+    expect(first.finalResponse).toContain("first session completed");
+  }, SLOW_CODEX_SHELL_CONCURRENT_SESSION_TEST_TIMEOUT_MS);
+
+  it("returns normalized usage from streamed turn completion events", async () => {
+    mockStartThread.mockImplementation(() => ({
+      id: "codex-test-thread-usage",
+      runStreamed: async () => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "item.completed",
+              item: { type: "agent_message", text: "usage-aware result" },
+            };
+            yield {
+              type: "turn.completed",
+              usage: {
+                input_tokens: 210,
+                output_tokens: 45,
+                total_tokens: 255,
+                input_tokens_details: { cached_tokens: 33 },
+              },
+            };
+          },
+        },
+      }),
+    }));
+
+    const result = await execCodexPrompt("capture usage", {
+      persistent: true,
+      sessionId: "usage-session",
+      timeoutMs: 5000,
+    });
+
+    expect(result.finalResponse).toContain("usage-aware result");
+    expect(result.usage).toEqual(expect.objectContaining({
+      inputTokens: 210,
+      outputTokens: 45,
+      totalTokens: 255,
+      cacheInputTokens: 33,
+    }));
   });
 
   it("retries when first stream event never arrives", async () => {
@@ -684,6 +817,17 @@ describe("codex-shell stream safeguards", () => {
     expect(resolved.provider).toBe("azure");
     expect(resolved.env.OPENAI_BASE_URL).toBe("https://example-resource.openai.azure.com/openai/v1");
     expect(resolved.env.AZURE_OPENAI_API_KEY).toBe("azure-key");
+  });
+  it("accepts AZURE_OPENAI_KEY as a legacy Azure auth alias", async () => {
+    const actualProfiles = await vi.importActual("../shell/codex-model-profiles.mjs");
+    const resolved = actualProfiles.resolveCodexProfileRuntime({
+      OPENAI_BASE_URL: "https://example-resource.openai.azure.com/openai/v1",
+      AZURE_OPENAI_KEY: "legacy-azure-key",
+    });
+
+    expect(resolved.provider).toBe("azure");
+    expect(resolved.env.AZURE_OPENAI_API_KEY).toBe("legacy-azure-key");
+    expect(resolved.env.OPENAI_API_KEY).toBe("legacy-azure-key");
   });
   it("strips non-Azure OPENAI_BASE_URL before creating the SDK", async () => {
     const {

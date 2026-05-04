@@ -172,9 +172,27 @@ function normalizePresencePayload(payload) {
 }
 
 export async function initPresence(options = {}) {
-  const forceReset = options.force || process.env.VITEST;
-  if (state.initialized && !forceReset) return state;
-  if (forceReset) {
+  const requestedRepoRoot = options.repoRoot || process.cwd();
+  const requestedPresencePath =
+    options.presencePath ||
+    resolve(requestedRepoRoot, ".cache", "bosun", PRESENCE_FILENAME);
+  const requestedInstanceId = options.instanceId || process.env.VE_INSTANCE_ID || null;
+  const forceReset = Boolean(options.force);
+  const repoChanged = resolve(state.repoRoot || "") !== resolve(requestedRepoRoot);
+  const presencePathChanged = String(state.presencePath || "") !== String(requestedPresencePath);
+  const instanceChanged =
+    requestedInstanceId !== null && String(state.instanceId || "") !== String(requestedInstanceId);
+  const workspaceChanged = options.localWorkspace !== undefined;
+  const shouldReinitialize =
+    forceReset
+    || !state.initialized
+    || repoChanged
+    || presencePathChanged
+    || instanceChanged
+    || workspaceChanged;
+
+  if (!shouldReinitialize) return state;
+  if (shouldReinitialize) {
     state.initialized = false;
     state.repoRoot = null;
     state.presencePath = null;
@@ -184,19 +202,17 @@ export async function initPresence(options = {}) {
     state.localMeta = null;
     state.instances = new Map();
   }
-  state.repoRoot = options.repoRoot || process.cwd();
-  state.presencePath =
-    options.presencePath ||
-    resolve(state.repoRoot, ".cache", "bosun", PRESENCE_FILENAME);
+  state.repoRoot = requestedRepoRoot;
+  state.presencePath = requestedPresencePath;
   state.localWorkspace = options.localWorkspace || null;
   state.instanceId = await loadOrCreateInstanceId(
     state.repoRoot,
-    options.instanceId || process.env.VE_INSTANCE_ID,
+    requestedInstanceId,
   );
   state.localMeta = buildLocalMeta();
   await ensurePresenceDir(state.repoRoot);
   const shouldLoadRegistry =
-    options.loadRegistry ?? (!options.skipLoad && !process.env.VITEST);
+    options.loadRegistry ?? !options.skipLoad;
   if (shouldLoadRegistry) {
     await loadPresenceRegistry();
   }

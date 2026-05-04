@@ -82,9 +82,13 @@ Limit auto-generated fix PRs to {{maxAutoFixPRs}} in this run.`,
     node("create-fix-pr", "action.create_pr", "Handoff Fix Lifecycle", {
       title: "fix(deps): resolve {{auditLevel}}+ vulnerabilities",
       body: "## Summary\n\nAutomated dependency audit fix. Resolves vulnerabilities flagged by `npm audit` at severity level **{{auditLevel}}** or higher.\n\n## What Changed\n\n- Updated vulnerable dependencies to patched versions\n- Verified no breaking changes via build and test validation",
-      branch: "fix/dep-audit-{{_runId}}",
       baseBranch: "main",
     }, { x: 50, y: 900 }),
+
+    node("fix-pr-created", "condition.expression", "Fix PR Created?", {
+      expression:
+        "(() => { const out = $ctx.getNodeOutput('create-fix-pr') || {}; return out?.success === true && Boolean(out?.prNumber || out?.prUrl || out?.handedOff); })()",
+    }, { x: 50, y: 980, outputs: ["yes", "no"] }),
 
     node("alert-critical", "notify.telegram", "Alert: Critical Vuln", {
       message: ":alert: **CRITICAL vulnerability** found in dependencies!\n\nRun `npm audit` for details. Manual review required.",
@@ -104,6 +108,12 @@ Limit auto-generated fix PRs to {{maxAutoFixPRs}} in this run.`,
       message: "Dependency audit complete — fixes applied where possible",
       level: "info",
     }, { x: 300, y: 1050 }),
+
+    node("log-pr-blocked", "notify.log", "PR Creation Blocked", {
+      message:
+        "Dependency audit PR creation blocked: {{$ctx.getNodeOutput('create-fix-pr')?.error || 'unknown reason'}}",
+      level: "warn",
+    }, { x: 250, y: 980 }),
   ],
   edges: [
     edge("trigger", "run-audit"),
@@ -118,8 +128,11 @@ Limit auto-generated fix PRs to {{maxAutoFixPRs}} in this run.`,
     edge("auto-fix-enabled", "auto-fix", { condition: "$output?.result === true", port: "yes" }),
     edge("auto-fix-enabled", "log-done", { condition: "$output?.result !== true", port: "no" }),
     edge("auto-fix", "create-fix-pr"),
-    edge("create-fix-pr", "alert-high"),
+    edge("create-fix-pr", "fix-pr-created"),
+    edge("fix-pr-created", "alert-high", { condition: "$output?.result === true", port: "yes" }),
+    edge("fix-pr-created", "log-pr-blocked", { condition: "$output?.result !== true", port: "no" }),
     edge("alert-high", "log-done"),
+    edge("log-pr-blocked", "log-done"),
   ],
   metadata: {
     author: "bosun",

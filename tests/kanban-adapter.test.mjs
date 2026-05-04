@@ -4,9 +4,13 @@ const execFileMock = vi.hoisted(() => vi.fn());
 const loadConfigMock = vi.hoisted(() => vi.fn());
 const fetchWithFallbackMock = vi.hoisted(() => vi.fn());
 
-vi.mock("node:child_process", () => ({
-  execFile: execFileMock,
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    execFile: execFileMock,
+  };
+});
 
 vi.mock("../config/config.mjs", () => ({
   loadConfig: loadConfigMock,
@@ -1039,30 +1043,30 @@ describe("kanban-adapter jira backend", () => {
   });
 });
 
-describe("kanban-adapter gnap backend", () => {
+describe("kanban-adapter repo-mirror backend", () => {
   const originalKanbanBackend = process.env.KANBAN_BACKEND;
   let tempDir = "";
-  let gnapRepoPath = "";
+  let repoMirrorRepoPath = "";
 
   beforeEach(() => {
     vi.clearAllMocks();
-    tempDir = mkdtempSync(resolve(tmpdir(), "bosun-gnap-kanban-"));
-    gnapRepoPath = resolve(tempDir, "projection-repo");
+    tempDir = mkdtempSync(resolve(tmpdir(), "bosun-repo-mirror-kanban-"));
+    repoMirrorRepoPath = resolve(tempDir, "projection-repo");
     configureTaskStore({ baseDir: tempDir });
     loadStore();
-    process.env.KANBAN_BACKEND = "gnap";
+    process.env.KANBAN_BACKEND = "repo-mirror";
     loadConfigMock.mockReturnValue({
-      kanban: { backend: "gnap" },
-      gnap: {
+      kanban: { backend: "repo-mirror" },
+      repoMirror: {
         enabled: true,
-        repoPath: gnapRepoPath,
+        repoPath: repoMirrorRepoPath,
         syncMode: "projection",
         runStorage: "git",
         messageStorage: "git",
         publicRoadmapEnabled: false,
       },
     });
-    setKanbanBackend("gnap");
+    setKanbanBackend("repo-mirror");
   });
 
   afterEach(() => {
@@ -1073,17 +1077,17 @@ describe("kanban-adapter gnap backend", () => {
     }
   });
 
-  it("registers the gnap backend and exposes projection metadata safely", async () => {
-    expect(getAvailableBackends()).toContain("gnap");
-    expect(getKanbanBackendName()).toBe("gnap");
+  it("registers the repo-mirror backend and exposes projection metadata safely", async () => {
+    expect(getAvailableBackends()).toContain("repo-mirror");
+    expect(getKanbanBackendName()).toBe("repo-mirror");
 
     addTask({
-      id: "gnap-seeded-1",
-      title: "Seeded GNAP task",
+      id: "repo-mirror-seeded-1",
+      title: "Seeded RepoMirror task",
       description: "Projected from internal store",
       status: "inprogress",
       assignee: "agent.alpha",
-      branchName: "feature/gnap-seeded",
+      branchName: "feature/repo-mirror-seeded",
       prNumber: 42,
       prUrl: "https://example.test/pr/42",
       workflowRuns: [
@@ -1108,99 +1112,99 @@ describe("kanban-adapter gnap backend", () => {
     });
 
     const adapter = getKanbanAdapter();
-    expect(adapter.name).toBe("gnap");
+    expect(adapter.name).toBe("repo-mirror");
 
     const projects = await adapter.listProjects();
     expect(projects).toEqual([
       expect.objectContaining({
-        id: "gnap",
-        backend: "gnap",
+        id: "repo-mirror",
+        backend: "repo-mirror",
         meta: expect.objectContaining({
           projectionOnly: true,
-          repoPath: gnapRepoPath,
+          repoPath: repoMirrorRepoPath,
           syncMode: "projection",
         }),
       }),
     ]);
 
-    const listed = await adapter.listTasks("gnap");
+    const listed = await adapter.listTasks("repo-mirror");
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({
-      id: "gnap-seeded-1",
-      title: "Seeded GNAP task",
+      id: "repo-mirror-seeded-1",
+      title: "Seeded RepoMirror task",
       status: "inprogress",
-      backend: "gnap",
+      backend: "repo-mirror",
       assignee: "agent.alpha",
-      branchName: "feature/gnap-seeded",
+      branchName: "feature/repo-mirror-seeded",
       prNumber: 42,
     });
     expect(listed[0]?.comments).toHaveLength(1);
     expect(listed[0]?.meta?.projectionOnly).toBe(true);
 
-    const gnapDir = resolve(gnapRepoPath, ".gnap");
-    expect(existsSync(resolve(gnapDir, "version"))).toBe(true);
-    expect(existsSync(resolve(gnapDir, "agents.json"))).toBe(true);
+    const repoMirrorDir = resolve(repoMirrorRepoPath, ".repo-mirror");
+    expect(existsSync(resolve(repoMirrorDir, "version"))).toBe(true);
+    expect(existsSync(resolve(repoMirrorDir, "agents.json"))).toBe(true);
 
-    const taskFiles = readdirSync(resolve(gnapDir, "tasks"));
-    const runFiles = readdirSync(resolve(gnapDir, "runs"));
-    const messageFiles = readdirSync(resolve(gnapDir, "messages"));
+    const taskFiles = readdirSync(resolve(repoMirrorDir, "tasks"));
+    const runFiles = readdirSync(resolve(repoMirrorDir, "runs"));
+    const messageFiles = readdirSync(resolve(repoMirrorDir, "messages"));
     expect(taskFiles).toHaveLength(1);
     expect(runFiles).toHaveLength(1);
     expect(messageFiles).toHaveLength(1);
 
     const projectedTask = JSON.parse(
-      readFileSync(resolve(gnapDir, "tasks", taskFiles[0]), "utf8"),
+      readFileSync(resolve(repoMirrorDir, "tasks", taskFiles[0]), "utf8"),
     );
     expect(projectedTask).toMatchObject({
-      task_id: "gnap-seeded-1",
+      task_id: "repo-mirror-seeded-1",
       state: "in_progress",
       status: "inprogress",
-      branch_name: "feature/gnap-seeded",
+      branch_name: "feature/repo-mirror-seeded",
       pr: { number: 42, url: "https://example.test/pr/42" },
     });
 
     const projectedRun = JSON.parse(
-      readFileSync(resolve(gnapDir, "runs", runFiles[0]), "utf8"),
+      readFileSync(resolve(repoMirrorDir, "runs", runFiles[0]), "utf8"),
     );
     expect(projectedRun).toMatchObject({
-      task_id: "gnap-seeded-1",
+      task_id: "repo-mirror-seeded-1",
       run_id: "run-seeded-1",
       workflow_id: "wf-seeded",
       source: "workflow",
     });
 
     const projectedMessage = JSON.parse(
-      readFileSync(resolve(gnapDir, "messages", messageFiles[0]), "utf8"),
+      readFileSync(resolve(repoMirrorDir, "messages", messageFiles[0]), "utf8"),
     );
     expect(projectedMessage).toMatchObject({
-      task_id: "gnap-seeded-1",
+      task_id: "repo-mirror-seeded-1",
       message_id: "comment-seeded-1",
       body: "Projected note",
       author: "agent.alpha",
     });
 
-    const projectedTaskDetail = await adapter.getTask("gnap-seeded-1");
-    expect(projectedTaskDetail?.id).toBe("gnap-seeded-1");
+    const projectedTaskDetail = await adapter.getTask("repo-mirror-seeded-1");
+    expect(projectedTaskDetail?.id).toBe("repo-mirror-seeded-1");
     expect(projectedTaskDetail?.comments).toHaveLength(1);
     await expect(adapter.getTask("missing")).resolves.toBeNull();
   });
 
-  it("projects GNAP mutations while keeping the internal task store authoritative", async () => {
+  it("projects RepoMirror mutations while keeping the internal task store authoritative", async () => {
     const adapter = getKanbanAdapter();
-    const created = await adapter.createTask("gnap", {
+    const created = await adapter.createTask("repo-mirror", {
       title: "Projected task",
-      description: "Created through GNAP adapter",
+      description: "Created through RepoMirror adapter",
       assignee: "agent.beta",
-      branchName: "feature/gnap-created",
+      branchName: "feature/repo-mirror-created",
       prNumber: 77,
       prUrl: "https://example.test/pr/77",
     });
     expect(created).toMatchObject({
-      backend: "gnap",
+      backend: "repo-mirror",
       title: "Projected task",
       status: "todo",
       assignee: "agent.beta",
-      branchName: "feature/gnap-created",
+      branchName: "feature/repo-mirror-created",
       prNumber: 77,
     });
 
@@ -1214,7 +1218,7 @@ describe("kanban-adapter gnap backend", () => {
 
     const internalTask = getTask(created.id);
     expect(internalTask?.status).toBe("done");
-    expect(internalTask?.branchName).toBe("feature/gnap-created");
+    expect(internalTask?.branchName).toBe("feature/repo-mirror-created");
 
     const detail = await adapter.getTask(created.id);
     expect(detail?.status).toBe("done");
@@ -1222,23 +1226,23 @@ describe("kanban-adapter gnap backend", () => {
       true,
     );
 
-    const gnapDir = resolve(gnapRepoPath, ".gnap");
-    const taskFiles = readdirSync(resolve(gnapDir, "tasks"));
+    const repoMirrorDir = resolve(repoMirrorRepoPath, ".repo-mirror");
+    const taskFiles = readdirSync(resolve(repoMirrorDir, "tasks"));
     const projectedTask = JSON.parse(
-      readFileSync(resolve(gnapDir, "tasks", taskFiles[0]), "utf8"),
+      readFileSync(resolve(repoMirrorDir, "tasks", taskFiles[0]), "utf8"),
     );
     expect(projectedTask).toMatchObject({
       task_id: created.id,
       state: "done",
       status: "done",
-      branch_name: "feature/gnap-created",
+      branch_name: "feature/repo-mirror-created",
       pr: { number: 77, url: "https://example.test/pr/77" },
     });
 
-    const messageFiles = readdirSync(resolve(gnapDir, "messages"));
+    const messageFiles = readdirSync(resolve(repoMirrorDir, "messages"));
     expect(messageFiles.length).toBeGreaterThanOrEqual(1);
     const messages = messageFiles.map((fileName) =>
-      JSON.parse(readFileSync(resolve(gnapDir, "messages", fileName), "utf8")),
+      JSON.parse(readFileSync(resolve(repoMirrorDir, "messages", fileName), "utf8")),
     );
     expect(messages.some((message) => message.task_id === created.id && message.body === "Completion evidence attached")).toBe(true);
 
@@ -1246,8 +1250,8 @@ describe("kanban-adapter gnap backend", () => {
     expect(deleted).toBe(true);
     expect(getTask(created.id)).toBeNull();
 
-    const remainingProjectedTasks = readdirSync(resolve(gnapDir, "tasks")).map((fileName) =>
-      JSON.parse(readFileSync(resolve(gnapDir, "tasks", fileName), "utf8")),
+    const remainingProjectedTasks = readdirSync(resolve(repoMirrorDir, "tasks")).map((fileName) =>
+      JSON.parse(readFileSync(resolve(repoMirrorDir, "tasks", fileName), "utf8")),
     );
     expect(remainingProjectedTasks.some((task) => task.task_id === created.id)).toBe(false);
   });
@@ -1256,23 +1260,23 @@ describe("kanban-adapter gnap backend", () => {
     const adapter = getKanbanAdapter();
     await adapter.listProjects();
 
-    const gnapDir = resolve(gnapRepoPath, ".gnap");
-    mkdirSync(resolve(gnapDir, "tasks"), { recursive: true });
-    mkdirSync(resolve(gnapDir, "messages"), { recursive: true });
-    mkdirSync(resolve(gnapDir, "runs"), { recursive: true });
+    const repoMirrorDir = resolve(repoMirrorRepoPath, ".repo-mirror");
+    mkdirSync(resolve(repoMirrorDir, "tasks"), { recursive: true });
+    mkdirSync(resolve(repoMirrorDir, "messages"), { recursive: true });
+    mkdirSync(resolve(repoMirrorDir, "runs"), { recursive: true });
 
     writeFileSync(
-      resolve(gnapDir, "tasks", "peer-task.json"),
+      resolve(repoMirrorDir, "tasks", "peer-task.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-task.v1",
+        protocol: "bosun-repo-mirror-task.v1",
         schema_version: 1,
         task_id: "peer-task-1",
         title: "Peer authored task",
-        description: "Created by another collaborator via GNAP",
+        description: "Created by another collaborator via RepoMirror",
         state: "in_progress",
         status: "inprogress",
         assignee: "agent.peer",
-        project_id: "gnap",
+        project_id: "repo-mirror",
         branch_name: "feature/peer-task",
         pr: { number: 99, url: "https://example.test/pr/99" },
         tags: ["shared", "peer"],
@@ -1282,30 +1286,30 @@ describe("kanban-adapter gnap backend", () => {
         evidence: { attachments: [], workflow_runs: [] },
         timeline: [],
         source: {
-          system: "gnap-peer",
-          backend: "gnap",
+          system: "repo-mirror-peer",
+          backend: "repo-mirror",
           sync_mode: "projection",
         },
       }, null, 2),
       "utf8",
     );
     writeFileSync(
-      resolve(gnapDir, "messages", "peer-message.json"),
+      resolve(repoMirrorDir, "messages", "peer-message.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-message.v1",
+        protocol: "bosun-repo-mirror-message.v1",
         schema_version: 1,
         message_id: "peer-message-1",
         task_id: "peer-task-1",
         kind: "comment",
         author: "agent.peer",
-        source: "gnap-peer",
+        source: "repo-mirror-peer",
         created_at: "2026-03-31T04:05:30.000Z",
         body: "Peer-authored status update",
       }, null, 2),
       "utf8",
     );
 
-    const listed = await adapter.listTasks("gnap");
+    const listed = await adapter.listTasks("repo-mirror");
     expect(listed.some((task) => task.id === "peer-task-1")).toBe(true);
 
     const detail = await adapter.getTask("peer-task-1");
@@ -1328,11 +1332,11 @@ describe("kanban-adapter gnap backend", () => {
       branchName: "feature/peer-task",
       prNumber: 99,
     });
-    expect(internalTask?.meta?.gnap?.imported).toBe(true);
-    expect(existsSync(resolve(gnapDir, "tasks", "peer-task.json"))).toBe(true);
+    expect(internalTask?.meta?.repoMirror?.imported).toBe(true);
+    expect(existsSync(resolve(repoMirrorDir, "tasks", "peer-task.json"))).toBe(true);
   });
 
-  it("merges peer GNAP evidence into newer local tasks without overwriting local canonical fields", async () => {
+  it("merges peer RepoMirror evidence into newer local tasks without overwriting local canonical fields", async () => {
     const adapter = getKanbanAdapter();
     await adapter.listProjects();
 
@@ -1350,15 +1354,15 @@ describe("kanban-adapter gnap backend", () => {
       },
     });
 
-    const gnapDir = resolve(gnapRepoPath, ".gnap");
-    mkdirSync(resolve(gnapDir, "tasks"), { recursive: true });
-    mkdirSync(resolve(gnapDir, "messages"), { recursive: true });
-    mkdirSync(resolve(gnapDir, "runs"), { recursive: true });
+    const repoMirrorDir = resolve(repoMirrorRepoPath, ".repo-mirror");
+    mkdirSync(resolve(repoMirrorDir, "tasks"), { recursive: true });
+    mkdirSync(resolve(repoMirrorDir, "messages"), { recursive: true });
+    mkdirSync(resolve(repoMirrorDir, "runs"), { recursive: true });
 
     writeFileSync(
-      resolve(gnapDir, "tasks", "shared-task-merge-1.json"),
+      resolve(repoMirrorDir, "tasks", "shared-task-merge-1.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-task.v1",
+        protocol: "bosun-repo-mirror-task.v1",
         schema_version: 1,
         task_id: "shared-task-merge-1",
         title: "Peer older title",
@@ -1366,7 +1370,7 @@ describe("kanban-adapter gnap backend", () => {
         state: "in_progress",
         status: "inprogress",
         assignee: "agent.peer",
-        project_id: "gnap",
+        project_id: "repo-mirror",
         branch_name: "feature/peer-older",
         created_at: "2026-03-31T04:00:00.000Z",
         updated_at: "2026-03-31T04:00:00.000Z",
@@ -1388,45 +1392,45 @@ describe("kanban-adapter gnap backend", () => {
               started_at: "2026-03-31T04:01:00.000Z",
               ended_at: "2026-03-31T04:02:00.000Z",
               summary: "Inline peer workflow evidence",
-              source: "gnap-peer-inline",
+              source: "repo-mirror-peer-inline",
             },
           ],
         },
         timeline: [
           {
             type: "status.transition",
-            source: "gnap-peer",
+            source: "repo-mirror-peer",
             status: "inprogress",
             timestamp: "2026-03-31T04:03:00.000Z",
           },
         ],
         source: {
-          system: "gnap-peer",
-          backend: "gnap",
+          system: "repo-mirror-peer",
+          backend: "repo-mirror",
           sync_mode: "projection",
         },
       }, null, 2),
       "utf8",
     );
     writeFileSync(
-      resolve(gnapDir, "messages", "shared-task-merge-1-message.json"),
+      resolve(repoMirrorDir, "messages", "shared-task-merge-1-message.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-message.v1",
+        protocol: "bosun-repo-mirror-message.v1",
         schema_version: 1,
         message_id: "peer-merge-message-1",
         task_id: "shared-task-merge-1",
         kind: "comment",
         author: "agent.peer",
-        source: "gnap-peer",
+        source: "repo-mirror-peer",
         created_at: "2026-03-31T04:04:00.000Z",
         body: "Peer evidence comment",
       }, null, 2),
       "utf8",
     );
     writeFileSync(
-      resolve(gnapDir, "runs", "shared-task-merge-1-run.json"),
+      resolve(repoMirrorDir, "runs", "shared-task-merge-1-run.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-run.v1",
+        protocol: "bosun-repo-mirror-run.v1",
         schema_version: 1,
         task_id: "shared-task-merge-1",
         run_id: "peer-run-file-1",
@@ -1434,7 +1438,7 @@ describe("kanban-adapter gnap backend", () => {
         status: "running",
         started_at: "2026-03-31T04:04:30.000Z",
         summary: "Peer run file",
-        source: "gnap-peer",
+        source: "repo-mirror-peer",
       }, null, 2),
       "utf8",
     );
@@ -1462,7 +1466,7 @@ describe("kanban-adapter gnap backend", () => {
     expect(internalTask?.meta?.comments.some((entry) => entry.body === "Peer evidence comment")).toBe(true);
 
     const projectedTask = JSON.parse(
-      readFileSync(resolve(gnapDir, "tasks", "shared-task-merge-1.json"), "utf8"),
+      readFileSync(resolve(repoMirrorDir, "tasks", "shared-task-merge-1.json"), "utf8"),
     );
     expect(projectedTask.title).toBe("Local canonical task");
     expect(projectedTask.status).toBe("todo");
@@ -1474,15 +1478,15 @@ describe("kanban-adapter gnap backend", () => {
     const adapter = getKanbanAdapter();
     await adapter.listProjects();
 
-    const gnapDir = resolve(gnapRepoPath, ".gnap");
-    mkdirSync(resolve(gnapDir, "tasks"), { recursive: true });
-    mkdirSync(resolve(gnapDir, "messages"), { recursive: true });
-    mkdirSync(resolve(gnapDir, "runs"), { recursive: true });
+    const repoMirrorDir = resolve(repoMirrorRepoPath, ".repo-mirror");
+    mkdirSync(resolve(repoMirrorDir, "tasks"), { recursive: true });
+    mkdirSync(resolve(repoMirrorDir, "messages"), { recursive: true });
+    mkdirSync(resolve(repoMirrorDir, "runs"), { recursive: true });
 
     writeFileSync(
-      resolve(gnapDir, "tasks", "shared-peer-update.json"),
+      resolve(repoMirrorDir, "tasks", "shared-peer-update.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-task.v1",
+        protocol: "bosun-repo-mirror-task.v1",
         schema_version: 1,
         task_id: "shared-peer-update",
         title: "Shared peer update task",
@@ -1490,7 +1494,7 @@ describe("kanban-adapter gnap backend", () => {
         state: "in_progress",
         status: "inprogress",
         assignee: "agent.peer",
-        project_id: "gnap",
+        project_id: "repo-mirror",
         updated_at: "2026-03-31T04:10:00.000Z",
         last_activity_at: "2026-03-31T04:10:00.000Z",
         evidence: {
@@ -1506,32 +1510,32 @@ describe("kanban-adapter gnap backend", () => {
         },
         timeline: [],
         source: {
-          system: "gnap-peer",
-          backend: "gnap",
+          system: "repo-mirror-peer",
+          backend: "repo-mirror",
           sync_mode: "projection",
         },
       }, null, 2),
       "utf8",
     );
     writeFileSync(
-      resolve(gnapDir, "messages", "shared-peer-update-message.json"),
+      resolve(repoMirrorDir, "messages", "shared-peer-update-message.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-message.v1",
+        protocol: "bosun-repo-mirror-message.v1",
         schema_version: 1,
         message_id: "peer-preserved-message-1",
         task_id: "shared-peer-update",
         kind: "comment",
         author: "agent.peer",
-        source: "gnap-peer",
+        source: "repo-mirror-peer",
         created_at: "2026-03-31T04:10:30.000Z",
         body: "Peer status update",
       }, null, 2),
       "utf8",
     );
     writeFileSync(
-      resolve(gnapDir, "runs", "shared-peer-update-run.json"),
+      resolve(repoMirrorDir, "runs", "shared-peer-update-run.json"),
       JSON.stringify({
-        protocol: "bosun-gnap-run.v1",
+        protocol: "bosun-repo-mirror-run.v1",
         schema_version: 1,
         task_id: "shared-peer-update",
         run_id: "peer-preserved-run-1",
@@ -1539,7 +1543,7 @@ describe("kanban-adapter gnap backend", () => {
         status: "running",
         started_at: "2026-03-31T04:09:00.000Z",
         summary: "Peer preserved run",
-        source: "gnap-peer",
+        source: "repo-mirror-peer",
       }, null, 2),
       "utf8",
     );
@@ -1564,13 +1568,13 @@ describe("kanban-adapter gnap backend", () => {
     expect(detail?.comments.some((entry) => entry.body === "Peer status update")).toBe(true);
     expect(detail?.comments.some((entry) => entry.body === "Bosun completion note")).toBe(true);
 
-    const runDocs = readdirSync(resolve(gnapDir, "runs")).map((fileName) =>
-      JSON.parse(readFileSync(resolve(gnapDir, "runs", fileName), "utf8")),
+    const runDocs = readdirSync(resolve(repoMirrorDir, "runs")).map((fileName) =>
+      JSON.parse(readFileSync(resolve(repoMirrorDir, "runs", fileName), "utf8")),
     );
     expect(runDocs.some((entry) => entry.task_id === "shared-peer-update" && entry.run_id === "peer-preserved-run-1")).toBe(true);
 
-    const messageDocs = readdirSync(resolve(gnapDir, "messages")).map((fileName) =>
-      JSON.parse(readFileSync(resolve(gnapDir, "messages", fileName), "utf8")),
+    const messageDocs = readdirSync(resolve(repoMirrorDir, "messages")).map((fileName) =>
+      JSON.parse(readFileSync(resolve(repoMirrorDir, "messages", fileName), "utf8")),
     );
     expect(messageDocs.some((entry) => entry.task_id === "shared-peer-update" && entry.message_id === "peer-preserved-message-1")).toBe(true);
     expect(messageDocs.some((entry) => entry.task_id === "shared-peer-update" && entry.body === "Bosun completion note")).toBe(true);
@@ -1653,6 +1657,80 @@ describe("kanban-adapter internal backend", () => {
     expect(removeTask(created.id)).toBe(false);
   });
 
+  it("does not infer a base branch from health-check target prose", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "chore(health): codebase health check — all",
+      description: "Run all health check(s).\nTarget: entire repo\nOutput: json",
+      status: "todo",
+    });
+
+    expect(created.baseBranch).toBeNull();
+    expect(created.meta?.baseBranch ?? null).toBeNull();
+    expect(created.meta?.base_branch ?? null).toBeNull();
+  });
+
+  it("still infers a base branch from explicit branch markers in task text", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Base branch marker task",
+      description: "Run validation.\nBase branch: origin/main",
+      status: "todo",
+    });
+
+    expect(created.baseBranch).toBe("origin/main");
+  });
+
+  it("does not treat generic target payload fields as a base-branch alias", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Generic target should not become a branch",
+      description: "Dispatch work to the entire repo.",
+      status: "todo",
+      target: "entire",
+    });
+
+    expect(created.baseBranch).toBeNull();
+    expect(created.meta?.baseBranch ?? null).toBeNull();
+
+    const explicit = await adapter.createTask("internal", {
+      title: "Explicit target branch still works",
+      description: "Dispatch work to the main branch.",
+      status: "todo",
+      targetBranch: "origin/main",
+    });
+
+    expect(explicit.baseBranch).toBe("origin/main");
+  });
+
+  it("clears persisted base branch metadata when explicitly unset", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Clearable base branch",
+      description: "Base branch is stored explicitly in canonical metadata.",
+      status: "todo",
+      baseBranch: "origin/main",
+      meta: {
+        baseBranch: "origin/main",
+        base_branch: "origin/main",
+      },
+    });
+
+    expect(created.baseBranch).toBe("origin/main");
+
+    const updated = await adapter.updateTask(created.id, {
+      baseBranch: "",
+    });
+
+    expect(updated.baseBranch).toBeNull();
+    expect(updated.meta?.baseBranch ?? null).toBeNull();
+    expect(updated.meta?.base_branch ?? null).toBeNull();
+  });
+
   it("preserves PR linkage across repeated status updates and store reload cycles", async () => {
     const adapter = getKanbanAdapter();
 
@@ -1694,6 +1772,94 @@ describe("kanban-adapter internal backend", () => {
     expect(listed?.branchName).toBe("feature/reload-linkage");
     expect(listed?.prNumber).toBe(321);
     expect(listed?.prUrl).toBe("https://example.test/pr/321");
+  });
+
+  it("treats explicit non-draft tasks as dispatchable even when stale meta.draft remains true", async () => {
+    const adapter = getKanbanAdapter();
+
+    addTask({
+      id: "stale-draft-flag-task",
+      title: "Dispatchable task",
+      status: "todo",
+      draft: false,
+      workspace: "virtengine-gh",
+      repository: "virtengine/bosun",
+      meta: {
+        draft: true,
+      },
+    });
+
+    const detail = await adapter.getTask("stale-draft-flag-task");
+    expect(detail?.draft).toBe(false);
+    expect(detail?.meta?.draft).toBe(false);
+
+    const listed = await adapter.listTasks("internal", { status: "todo" });
+    expect(listed.find((task) => task.id === "stale-draft-flag-task")).toMatchObject({
+      id: "stale-draft-flag-task",
+      status: "todo",
+      draft: false,
+    });
+  });
+
+  it("preserves persisted anti-thrash cooldown fields in internal task listings", async () => {
+    const adapter = getKanbanAdapter();
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+
+    addTask({
+      id: "cooldown-task",
+      title: "Cooldown task",
+      status: "todo",
+      consecutiveNoCommits: 2,
+      cooldownUntil: retryAt,
+      workspace: "virtengine-gh",
+      repository: "virtengine/bosun",
+    });
+
+    const detail = await adapter.getTask("cooldown-task");
+    expect(detail).toMatchObject({
+      id: "cooldown-task",
+      consecutiveNoCommits: 2,
+      cooldownUntil: retryAt,
+    });
+
+    const listed = await adapter.listTasks("internal", { status: "todo" });
+    expect(listed.find((task) => task.id === "cooldown-task")).toMatchObject({
+      id: "cooldown-task",
+      consecutiveNoCommits: 2,
+      cooldownUntil: retryAt,
+    });
+  });
+
+  it("persists anti-thrash cooldown fields through internal updateTask", async () => {
+    const adapter = getKanbanAdapter();
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+
+    addTask({
+      id: "cooldown-update-task",
+      title: "Cooldown update task",
+      status: "todo",
+      workspace: "virtengine-gh",
+      repository: "virtengine/bosun",
+    });
+
+    await adapter.updateTask("cooldown-update-task", {
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    });
+
+    const detail = await adapter.getTask("cooldown-update-task");
+    expect(detail).toMatchObject({
+      id: "cooldown-update-task",
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    });
+
+    const listed = await adapter.listTasks("internal", { status: "todo" });
+    expect(listed.find((task) => task.id === "cooldown-update-task")).toMatchObject({
+      id: "cooldown-update-task",
+      consecutiveNoCommits: 3,
+      cooldownUntil: retryAt,
+    });
   });
 
   it("merges PR linkage updates idempotently without duplicating metadata records", async () => {
@@ -1823,6 +1989,91 @@ describe("kanban-adapter internal backend", () => {
     expect(reloaded.meta?.prLinkageSource).toBe("auto-load");
     expect(reloaded.meta?.prLinkageFreshness).toBe("fresh");
     expect(reloaded.meta?.prLinkageUpdatedAt).toBe("2026-03-22T12:00:00.000Z");
+  });
+
+  it("promotes explicit branch metadata ahead of stale historical PR linkage", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Promote canonical task branch",
+      description: "Keeps the current task branch ahead of stale linkage history",
+      status: "inprogress",
+      branchName: "task/TASKDIAGLOCA-diagnostics-export",
+      baseBranch: "origin/main",
+    });
+
+    const rawTask = getTask(created.id);
+    rawTask.prLinkage = [{
+      branchName: "task/TASKDIAGLOCA-diagnostics-export",
+      prUrl: null,
+      prNumber: null,
+      source: "workflow",
+      linkedAt: "2026-04-03T12:34:31.745Z",
+      updatedAt: "2026-04-03T15:05:18.175Z",
+    }];
+    rawTask.meta = {
+      ...(rawTask.meta || {}),
+      prLinkage: [...rawTask.prLinkage],
+      prLinkageSource: "workflow",
+      prLinkageUpdatedAt: "2026-04-03T15:05:18.175Z",
+    };
+
+    const canonicalBranch = "task/f82209dfe236-m-fix-workspace-restore-per-agent-rate-limiting-f";
+    const promoted = await adapter.updateTask(created.id, {
+      branchName: canonicalBranch,
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+
+    expect(promoted.branchName).toBe(canonicalBranch);
+    const rawAfterPromote = getTask(created.id);
+    expect(rawAfterPromote.prLinkage[0]?.branchName).toBe(canonicalBranch);
+    expect(rawAfterPromote.meta?.prLinkage?.[0]?.branchName).toBe(canonicalBranch);
+
+    const afterBaseOnlyUpdate = await adapter.updateTask(created.id, {
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+    expect(afterBaseOnlyUpdate.branchName).toBe(canonicalBranch);
+
+    const rawAfterBaseOnlyUpdate = getTask(created.id);
+    expect(rawAfterBaseOnlyUpdate.branchName).toBe(canonicalBranch);
+    expect(rawAfterBaseOnlyUpdate.prLinkage[0]?.branchName).toBe(canonicalBranch);
+    expect(rawAfterBaseOnlyUpdate.meta?.prLinkage?.[0]?.branchName).toBe(canonicalBranch);
+  });
+
+  it("does not resurrect stale branch linkage on status updates without new PR linkage data", async () => {
+    const adapter = getKanbanAdapter();
+
+    const created = await adapter.createTask("internal", {
+      title: "Avoid stale branch resurrection",
+      description: "Keeps canonical branch metadata stable across blocked transitions",
+      status: "inprogress",
+      branchName: "task/f82209dfe236-clean-branch",
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+
+    await adapter.updateTask(created.id, {
+      branchName: "task/f82209dfe236-clean-branch",
+      baseBranch: "bosun/codex-self-improvement-loop-commits",
+    });
+
+    const rawTask = getTask(created.id);
+    rawTask.branchName = "task/TASKDIAGLOCA-diagnostics-export";
+
+    const transitioned = await adapter.updateTaskStatus(created.id, "blocked", {
+      source: "workflow",
+    });
+
+    expect(transitioned.branchName).toBe("task/TASKDIAGLOCA-diagnostics-export");
+    const reloaded = await adapter.updateTask(created.id, {
+      branchName: "task/f82209dfe236-clean-branch",
+    });
+    expect(reloaded.branchName).toBe("task/f82209dfe236-clean-branch");
+
+    await adapter.updateTaskStatus(created.id, "inprogress", {
+      source: "workflow",
+    });
+    const afterStatusOnlyUpdate = await adapter.getTask(created.id);
+    expect(afterStatusOnlyUpdate.branchName).toBe("task/f82209dfe236-clean-branch");
   });
 
   it("exposes internal timeline and workflow tracking fields on task detail", async () => {

@@ -3030,10 +3030,15 @@ export function LibraryTab() {
   const [importSkills, setImportSkills] = useState(true);
   const [importPrompts, setImportPrompts] = useState(true);
   const [importTools, setImportTools] = useState(true);
+  const isMountedRef = useRef(true);
+  const loadEntriesRequestRef = useRef(0);
 
   // Load all entries on mount and type/search changes
   const loadEntries = useCallback(async () => {
-    setLoading(true);
+    const requestId = ++loadEntriesRequestRef.current;
+    if (isMountedRef.current) {
+      setLoading(true);
+    }
     try {
       if (!importAgents && !importPrompts && !importSkills && !importTools) {
         throw new Error("Select at least one import type");
@@ -3042,14 +3047,20 @@ export function LibraryTab() {
         fetchEntries(filterType.value),
         apiFetch("/api/library").then((res) => res?.data || []),
       ]);
+      if (!isMountedRef.current || requestId !== loadEntriesRequestRef.current) return;
       entries.value = filteredEntries;
       allEntries.value = globalEntries;
       initialized.value = globalEntries.length > 0;
     } catch (err) {
-      showToast("Failed to load library: " + err.message, "error");
+      if (isMountedRef.current && requestId === loadEntriesRequestRef.current) {
+        showToast("Failed to load library: " + err.message, "error");
+      }
+    } finally {
+      if (isMountedRef.current && requestId === loadEntriesRequestRef.current) {
+        setLoading(false);
+      }
     }
-    setLoading(false);
-  }, []);
+  }, [importAgents, importPrompts, importSkills, importTools]);
 
   useEffect(() => { loadEntries(); }, [filterType.value]);
 
@@ -3066,6 +3077,10 @@ export function LibraryTab() {
 
   // Debounced search
   const searchTimer = useRef(null);
+  useEffect(() => () => {
+    isMountedRef.current = false;
+    clearTimeout(searchTimer.current);
+  }, []);
   const handleSearch = useCallback((value) => {
     searchQuery.value = value;
     clearTimeout(searchTimer.current);

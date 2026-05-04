@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildTaskReplanContext,
+  buildTaskReplanOperationalProtocols,
   buildTaskReplanPrompt,
   extractTaskReplanProposal,
   normalizeTaskReplanProposal,
@@ -124,5 +125,40 @@ describe("task replanner helpers", () => {
     expect(prompt).toContain("explicit decomposition request");
     expect(normalized.mode).toBe("decompose");
     expect(normalized.subtasks[0].tags).toContain("decompose");
+  });
+
+  it("builds runtime operational protocols from task graph context", () => {
+    const context = buildTaskReplanContext(
+      {
+        id: "TASK-42",
+        title: "Research sweep and patch cycle",
+        description: "One task is carrying investigation, implementation, and verification work across multiple related items.",
+        status: "blocked",
+        priority: "high",
+        tags: ["research", "batch"],
+        timeline: [
+          { type: "task.failed", source: "workflow", message: "compile failed" },
+          { type: "task.retry", source: "workflow", message: "retry queued" },
+          { type: "task.note", source: "operator", message: "hold context for handoff" },
+        ],
+        workflowRuns: [{ runId: "run-1", status: "failed", summary: "compile failed" }],
+      },
+      {
+        childTasks: [],
+        relatedTasks: [
+          { id: "TASK-43", title: "Sibling A", status: "todo" },
+          { id: "TASK-44", title: "Sibling B", status: "todo" },
+        ],
+        auditSummary: { eventCount: 5, artifactCount: 2, toolCallCount: 7 },
+      },
+    );
+
+    const protocols = buildTaskReplanOperationalProtocols(context, { labels: ["research"] });
+    expect(protocols.map((entry) => entry.title)).toEqual(expect.arrayContaining([
+      "Task Decomposition Protocol",
+      "Context Preservation Protocol",
+      "Batch Ledger Protocol",
+    ]));
+    expect(protocols.every((entry) => entry.sourceKind === "runtime-protocol")).toBe(true);
   });
 });

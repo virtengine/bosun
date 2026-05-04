@@ -68,6 +68,43 @@ export function validateTaskBatchPayload(payload) {
   });
 }
 
+export function isTaskBatchDispatchEligible(task) {
+  if (!task || typeof task !== "object" || Array.isArray(task)) return false;
+  if (String(task.status || "").trim().toLowerCase() !== "todo") return false;
+  const cooldownUntil = Date.parse(String(task.cooldownUntil || ""));
+  if (Number.isFinite(cooldownUntil) && Date.now() < cooldownUntil) return false;
+
+  const description = typeof task.description === "string" ? task.description.trim() : "";
+  const title = typeof task.title === "string" ? task.title.trim() : "";
+  const branchName =
+    typeof task.branchName === "string" ? task.branchName.trim()
+      : typeof task.branch === "string" ? task.branch.trim()
+        : "";
+  const baseBranch = typeof task.baseBranch === "string" ? task.baseBranch.trim() : "";
+  const repository = typeof task.repository === "string" ? task.repository.trim() : "";
+  const workspace = typeof task.workspace === "string" ? task.workspace.trim() : "";
+  const tags = Array.isArray(task.tags)
+    ? task.tags.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  const plannerMeta = task.meta && typeof task.meta.planner === "object";
+  const workflowMeta = task.meta && typeof task.meta.workflow === "object";
+  const repoAreas = Array.isArray(task.meta?.repo_areas)
+    ? task.meta.repo_areas.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  const hasContentSignal = Boolean(description || tags.length > 0 || (title && title !== String(task.id || "").trim()));
+  const hasExecutionSignal = Boolean(
+    branchName ||
+    baseBranch ||
+    repository ||
+    workspace ||
+    plannerMeta ||
+    workflowMeta ||
+    repoAreas.length > 0
+  );
+
+  return hasContentSignal && hasExecutionSignal;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Task Batch Processor — Parallel Task Dispatch
 // ═══════════════════════════════════════════════════════════════════════════
@@ -124,16 +161,17 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
         process.env.REPO_ROOT = repoRoot;
         process.env.BOSUN_STORE_PATH = path.join(repoRoot, ".bosun", ".cache", "kanban-state.json");
         const kanbanModuleUrl = pathToFileURL(path.join(repoRoot, "kanban", "kanban-adapter.mjs")).href;
+        const looksDispatchable = ${isTaskBatchDispatchEligible.toString()};
         import(kanbanModuleUrl)
           .then(k => k.listTasks(undefined, { status: "todo" }))
           .then(tasks => {
-            const filtered = (tasks || []).filter((task) => task && task.status === "todo" && !task.draft);
+            const filtered = (tasks || []).filter((task) => looksDispatchable(task));
             const batch = filtered.slice(0, parseInt(process.env.MAX_BATCH || "10"));
             console.log(JSON.stringify(batch.map(t => ({
               taskId: t.id,
               taskTitle: t.title || t.id,
               status: t.status,
-              branch: t.branch || t.metadata?.branch || null,
+              branch: t.branch || t.branchName || t.metadata?.branch || t.metadata?.branchName || null,
               scope: t.scope || t.metadata?.scope || null,
               repository: typeof t?.repository === "string" ? t.repository.trim() : null,
               workspace: typeof t?.workspace === "string" ? t.workspace.trim() : null,
@@ -149,7 +187,7 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
     // ── Fan-out: dispatch each task to the lifecycle workflow ─────────────
     node("dispatch-tasks", "loop.for_each", "Dispatch Tasks", {
       items: "$ctx.getNodeOutput('query-tasks')?.output || []",
-      itemVariable: "currentTask",
+      variable: "currentTask",
       indexVariable: "taskIndex",
       maxConcurrent: "{{maxConcurrent}}",
       workflowId: "{{subWorkflow}}",
@@ -184,7 +222,7 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
   ],
   edges: [
     edge("trigger", "check-coordinator"),
-    edge("check-coordinator", "query-tasks", { condition: "$output === true || $output?.result === true || $output?.value === true" }),
+    edge("check-coordinator", "query-tasks", { condition: "$output === true || $output?.result === true || $output?.value === true || $output?.triggered === true" }),
     edge("query-tasks", "dispatch-tasks"),
     edge("dispatch-tasks", "join-dispatch"),
     edge("join-dispatch", "record-results"),
@@ -196,7 +234,7 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
     author: "bosun",
     version: 1,
     createdAt: "2026-03-15T00:00:00Z",
-    templateVersion: "1.0.0",
+    templateVersion: "1.0.1",
     tags: ["task", "batch", "parallel", "dispatch", "lifecycle"],
   },
 };
@@ -250,15 +288,16 @@ export const TASK_BATCH_PR_TEMPLATE = {
         process.env.REPO_ROOT = repoRoot;
         process.env.BOSUN_STORE_PATH = path.join(repoRoot, ".bosun", ".cache", "kanban-state.json");
         const kanbanModuleUrl = pathToFileURL(path.join(repoRoot, "kanban", "kanban-adapter.mjs")).href;
+        const looksDispatchable = ${isTaskBatchDispatchEligible.toString()};
         import(kanbanModuleUrl)
           .then(k => k.listTasks(undefined, { status: "todo" }))
           .then(tasks => {
-            const filtered = (tasks || []).filter((task) => task && task.status === "todo" && !task.draft);
+            const filtered = (tasks || []).filter((task) => looksDispatchable(task));
             const batch = filtered.slice(0, parseInt(process.env.MAX_BATCH || "5"));
             console.log(JSON.stringify(batch.map(t => ({
               taskId: t.id,
               taskTitle: t.title || t.id,
-              branch: t.branch || t.metadata?.branch || null,
+              branch: t.branch || t.branchName || t.metadata?.branch || t.metadata?.branchName || null,
               repository: typeof t?.repository === "string" ? t.repository.trim() : null,
               workspace: typeof t?.workspace === "string" ? t.workspace.trim() : null,
             }))));

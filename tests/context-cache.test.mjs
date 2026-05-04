@@ -8,6 +8,7 @@ const __dirname = dirname(__filename);
 
 // Use a temp directory for test cache to avoid polluting real cache
 const TEST_CACHE_DIR = resolve(__dirname, "..", ".cache-test-tool-logs");
+const TEST_TOOL_LOG_DIR = resolve(TEST_CACHE_DIR, "tool-logs");
 const TEST_COMMAND_DIAGNOSTICS_STATE = resolve(TEST_CACHE_DIR, "command-diagnostics-state.json");
 
 // Mock the cache directory before importing the module
@@ -20,12 +21,15 @@ describe("context-cache", () => {
   let contextCache;
   let originalGitOutputMaxChars;
   let originalCommandDiagnosticsStateFile;
+  let originalToolLogDir;
 
   beforeEach(async () => {
     originalGitOutputMaxChars = process.env.BOSUN_GIT_OUTPUT_MAX_CHARS;
     originalCommandDiagnosticsStateFile = process.env.BOSUN_COMMAND_DIAGNOSTICS_STATE_FILE;
+    originalToolLogDir = process.env.BOSUN_TOOL_LOG_DIR;
     delete process.env.BOSUN_GIT_OUTPUT_MAX_CHARS;
     process.env.BOSUN_COMMAND_DIAGNOSTICS_STATE_FILE = TEST_COMMAND_DIAGNOSTICS_STATE;
+    process.env.BOSUN_TOOL_LOG_DIR = TEST_TOOL_LOG_DIR;
     // Clean test directory
     rmSync(TEST_CACHE_DIR, { recursive: true, force: true });
     mkdirSync(TEST_CACHE_DIR, { recursive: true });
@@ -45,6 +49,11 @@ describe("context-cache", () => {
       delete process.env.BOSUN_COMMAND_DIAGNOSTICS_STATE_FILE;
     } else {
       process.env.BOSUN_COMMAND_DIAGNOSTICS_STATE_FILE = originalCommandDiagnosticsStateFile;
+    }
+    if (originalToolLogDir === undefined) {
+      delete process.env.BOSUN_TOOL_LOG_DIR;
+    } else {
+      process.env.BOSUN_TOOL_LOG_DIR = originalToolLogDir;
     }
     rmSync(TEST_CACHE_DIR, { recursive: true, force: true });
     vi.restoreAllMocks();
@@ -119,6 +128,21 @@ describe("context-cache", () => {
           item.text || item.output || "";
         expect(text).toContain("bosun --tool-log");
       }
+    });
+
+    it("attaches a spill pointer with tier metadata to cached historical tool outputs", async () => {
+      const items = makeToolItems(8, 5000);
+      const result = await contextCache.cacheAndCompressItems(items);
+      const cached = result.find((it) => it._cachedLogId !== undefined);
+
+      expect(cached?._spillPointer).toEqual(expect.objectContaining({
+        kind: "tool-log",
+        storage: "disk",
+        logId: cached?._cachedLogId,
+        retrieveCommand: `bosun --tool-log ${cached?._cachedLogId}`,
+        stage: "historical_tool_compaction",
+        tier: expect.stringMatching(/^tier[123]$|^structured$/),
+      }));
     });
 
     it("does not compress agent messages (non-tool items)", async () => {
@@ -399,6 +423,40 @@ describe("context-cache", () => {
       expect(result._liveCompactionPolicy.why.length).toBeGreaterThan(1);
     });
   });
+
+  describe("session coverage telemetry", () => {
+    const sessionCases = [
+      { sessionType: "task", expectedNormalized: "task" },
+      { sessionType: "flow", expectedNormalized: "flow" },
+      { sessionType: "delegate", expectedNormalized: "delegate" },
+      { sessionType: "voice-delegate", expectedNormalized: "voice" },
+    ];
+
+    it.each(sessionCases)("records coverage for $sessionType sessions", async ({ sessionType, expectedNormalized }) => {
+      contextCache.clearShreddingStats();
+      const items = [{
+        type: "command_execution",
+        command: "rg needle src",
+        exit_code: 0,
+        aggregated_output: Array.from({ length: 160 }, (_, index) => `src/file${index}.ts:${index + 1}: needle ${"x".repeat(24)}`).join("\n"),
+      }];
+
+      await contextCache.maybeCompressSessionItems(items, {
+        sessionType,
+        agentType: "codex-sdk",
+        liveToolCompactionEnabled: true,
+        liveToolCompactionMode: "aggressive",
+        liveToolCompactionMinChars: 1000,
+        liveToolCompactionTargetChars: 1200,
+        force: true,
+      });
+
+      const stats = contextCache.getShreddingStats();
+      expect(stats.some((entry) => entry.stage === "live_tool_compaction" && entry.sessionType === sessionType)).toBe(true);
+      expect(stats.some((entry) => entry.normalizedSessionType === expectedNormalized)).toBe(true);
+      expect(stats.some((entry) => entry.stage === "session_total" && entry.decision === "compressed")).toBe(true);
+    });
+  });
   // ── retrieveToolLog ────────────────────────────────────────────────────
 
   describe("retrieveToolLog", () => {
@@ -417,6 +475,12 @@ describe("context-cache", () => {
       expect(retrieved.entry).toBeDefined();
       expect(retrieved.entry.id).toBe(logId);
       expect(retrieved.entry.item).toBeDefined();
+      expect(retrieved.spillPointer).toEqual(expect.objectContaining({
+        kind: "tool-log",
+        logId,
+        filePath: expect.stringContaining("tool-logs"),
+        retrieveCommand: `bosun --tool-log ${logId}`,
+      }));
     });
 
     it("returns found=false for non-existent ID", async () => {
@@ -1277,6 +1341,11 @@ describe("live tool compaction", () => {
     expect(retrieved.found).toBe(true);
     expect(retrieved.entry.decision?.family).toBe("test");
     expect(retrieved.entry.decision?.budgetPolicy).toBeTruthy();
+    expect(compacted.spillPointer).toEqual(expect.objectContaining({
+      kind: "tool-log",
+      stage: "live_tool_compaction",
+      retrieveCommand: `bosun --tool-log ${compacted.toolLogId}`,
+    }));
   });
 
   it("uses signal-first fallback compaction for unknown large command outputs", async () => {
@@ -1341,8 +1410,6 @@ describe("live tool compaction", () => {
     expect(compacted.text).toContain("Hint: Signal coverage is low.");
   });
 });
-
-
 
 
 

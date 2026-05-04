@@ -60,6 +60,12 @@ import {
   normalizeTemplateOverridesById,
 } from "./workflow/workflow-templates.mjs";
 import { discoverTelegramChats } from "./telegram/get-telegram-chat-id.mjs";
+import {
+  buildLocalConnectionEntry,
+  readRemoteConnectionConfig,
+  saveRemoteConnectionConfig,
+  setLocalConnectionConfig,
+} from "./tui/lib/connection-target.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -998,7 +1004,7 @@ function getGitHubAuthScopes(cwd) {
     const scopesText = line.split(":").slice(1).join(":");
     return scopesText
       .split(",")
-      .map((scope) => scope.trim())
+      .map((scope) => String(scope || "").trim().replace(/^['"\s]+|['"\s]+$/g, ""))
       .filter(Boolean);
   } catch {
     return [];
@@ -6384,6 +6390,24 @@ async function writeConfigFiles({ env, configJson, repoRoot, configDir }) {
   writeFileSync(configPath, JSON.stringify(configOut, null, 2) + "\n", "utf8");
   success(`Config written to ${relative(repoRoot, configPath)}`);
 
+  const localProtocol = parseBooleanEnvValue(env.TELEGRAM_UI_TLS_DISABLE, false) ? "http" : "https";
+  const localHost = String(env.TELEGRAM_UI_DESKTOP_HOST || env.TELEGRAM_UI_HOST || "127.0.0.1").trim() || "127.0.0.1";
+  const localPort = normalizeTelegramUiPort(env.TELEGRAM_UI_PORT || process.env.TELEGRAM_UI_PORT);
+  const localConnection = buildLocalConnectionEntry({
+    name: "Local Backend",
+    host: localHost,
+    port: Number(localPort),
+    protocol: localProtocol,
+  });
+  if (localConnection) {
+    const remoteConnectionConfig = setLocalConnectionConfig(
+      readRemoteConnectionConfig(targetDir),
+      localConnection,
+    );
+    saveRemoteConnectionConfig(remoteConnectionConfig, targetDir);
+    success(`Backend connection seeded for ${localConnection.endpoint}`);
+  }
+
   const installAssistiveActions = parseBooleanEnvValue(
     env.BOSUN_PR_ASSISTIVE_ACTIONS_INSTALL_ON_SETUP
       ?? configJson.prAutomation?.assistiveActions?.installOnSetup,
@@ -6765,4 +6789,3 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(__filename_setup)) {
     process.exit(1);
   });
 }
-

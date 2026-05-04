@@ -21,17 +21,14 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, relative } from "node:path";
 import crypto from "node:crypto";
-// Lazy-load state-ledger-sqlite functions to avoid pulling in node:sqlite on
-// Node < 22 runtimes (e.g. Node 20 CI) where the built-in module doesn't exist.
-let _stateLedgerModule;
-async function getStateLedgerModule() {
-  if (!_stateLedgerModule) {
-    _stateLedgerModule = await import("../lib/state-ledger-sqlite.mjs");
-  }
-  return _stateLedgerModule;
-}
+import {
+  appendKnowledgeEntryToStateLedger,
+  listKnowledgeEntriesFromStateLedger,
+  resolveStateLedgerPath,
+} from "../lib/state-ledger-sqlite.mjs";
+import { ensureContextIndexFresh, getContextPathAdjacency } from "./context-indexer.mjs";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -44,6 +41,7 @@ const MIN_ENTRY_LENGTH = 20;
 const RATE_LIMIT_MS = 30_000;
 const DEFAULT_BRIEFING_LIMIT = 4;
 const REGISTRY_VERSION = "1.0.0";
+const CONTEXT_INDEX_FILE = ".bosun/context-index/agent-index.json";
 const MEMORY_SCOPE_PRIORITY = {
   run: 4,
   session: 3,
@@ -51,6 +49,9 @@ const MEMORY_SCOPE_PRIORITY = {
   team: 1,
 };
 const MEMORY_SCOPES = new Set(Object.keys(MEMORY_SCOPE_PRIORITY));
+const PATH_ADJACENCY_RELATION_TYPES = new Set(["file_imports_file"]);
+const DIRECT_PATH_MATCH_SCORE = 140;
+const ADJACENT_PATH_MATCH_SCORE = 80;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -60,10 +61,15 @@ const knowledgeState = {
   registryFile: DEFAULT_REGISTRY_FILE,
   sectionHeader: DEFAULT_SECTION_HEADER,
   entriesWritten: 0,
-  lastWriteAt: null,
-  lastWriteByAgent: new Map(),
+  lastWriteByThrottleKey: new Map(),
   entryHashes: new Set(),
+  writeQueue: Promise.resolve(),
 };
+
+function resetKnowledgeThrottleState() {
+  knowledgeState.lastWriteByThrottleKey = new Map();
+}
+
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -74,6 +80,12 @@ function normalizeText(value) {
 function normalizeNullable(value) {
   const text = normalizeText(value);
   return text || null;
+}
+
+function getScopeThrottleKey(entry) {
+  const scopeLevel = normalizeScopeLevel(entry?.scopeLevel);
+  const scopeId = getScopeIdentifier(entry, scopeLevel);
+  return `${scopeLevel}:${scopeId || "default"}`;
 }
 
 function normalizeStringList(value, { maxItems = 12, maxLength = 240 } = {}) {
@@ -97,6 +109,50 @@ function normalizeStringList(value, { maxItems = 12, maxLength = 240 } = {}) {
   return out;
 }
 
+function normalizeRepoPath(value, repoRoot = knowledgeState.repoRoot || process.cwd()) {
+  const text = normalizeText(value);
+  if (!text) return "";
+  const withoutPrefix = text.replace(/^file:\/\//i, "");
+  let normalized = withoutPrefix.replace(/\\/g, "/");
+  if (repoRoot && (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith("/"))) {
+    try {
+      normalized = relative(repoRoot, withoutPrefix).replace(/\\/g, "/");
+    } catch {
+      // fall back to the normalized absolute path
+    }
+  }
+  normalized = normalized.replace(/^\.\//, "").replace(/^\/+/, "");
+  const segments = normalized
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments[0] === ".") segments.shift();
+  return segments.join("/");
+}
+
+function normalizeRelatedPaths(value, { maxItems = 24, maxLength = 320, repoRoot } = {}) {
+  const rawValues = Array.isArray(value)
+    ? value
+    : (typeof value === "string" && value.includes(",")
+        ? value.split(",")
+        : [value]);
+  const out = [];
+  const seen = new Set();
+  for (const entry of rawValues) {
+    const normalized = normalizeRepoPath(entry, repoRoot);
+    if (!normalized) continue;
+    const clipped = normalized.length > maxLength
+      ? normalized.slice(0, maxLength).trim()
+      : normalized;
+    const key = clipped.toLowerCase();
+    if (!clipped || seen.has(key)) continue;
+    seen.add(key);
+    out.push(clipped);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
 function normalizeConfidence(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return null;
@@ -107,6 +163,29 @@ function normalizeScopeLevel(value) {
   const raw = normalizeText(value).toLowerCase();
   if (!raw) return "workspace";
   return MEMORY_SCOPES.has(raw) ? raw : "workspace";
+}
+
+function extractPathCandidatesFromText(value, repoRoot = knowledgeState.repoRoot || process.cwd()) {
+  const text = normalizeText(value);
+  if (!text) return [];
+  const candidates = [];
+  let start = -1;
+  for (let i = 0; i <= text.length; i++) {
+    const ch = i < text.length ? text[i] : "";
+    const isPathChar =
+      ch === "/" || ch === "\\" || ch === "." || ch === "-" || ch === "_" ||
+      (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9");
+    if (isPathChar) {
+      if (start < 0) start = i;
+    } else {
+      if (start >= 0) {
+        const token = text.slice(start, i);
+        if (token.includes(".")) candidates.push(token);
+        start = -1;
+      }
+    }
+  }
+  return normalizeRelatedPaths(candidates, { repoRoot, maxItems: 24 });
 }
 
 function getScopeIdentifier(entry, scopeLevel = entry?.scopeLevel) {
@@ -154,6 +233,26 @@ function createEmptyRegistry() {
 
 function serializeEntry(entry) {
   const normalizedScopeLevel = normalizeScopeLevel(entry?.scopeLevel);
+  const repoRoot = knowledgeState.repoRoot || process.cwd();
+  const relatedPaths = normalizeRelatedPaths(
+    [
+      ...(Array.isArray(entry?.relatedPaths) ? entry.relatedPaths : []),
+      ...(Array.isArray(entry?.document?.relatedPaths) ? entry.document.relatedPaths : []),
+      ...extractPathCandidatesFromText(entry?.taskRef, repoRoot),
+      ...extractPathCandidatesFromText(entry?.scope, repoRoot),
+      ...extractPathCandidatesFromText(entry?.content, repoRoot),
+      ...(Array.isArray(entry?.provenance)
+        ? entry.provenance.flatMap((value) => extractPathCandidatesFromText(value, repoRoot))
+        : []),
+      ...(Array.isArray(entry?.evidence)
+        ? entry.evidence.flatMap((value) => extractPathCandidatesFromText(value, repoRoot))
+        : []),
+      ...(Array.isArray(entry?.tags)
+        ? entry.tags.flatMap((value) => extractPathCandidatesFromText(value, repoRoot))
+        : []),
+    ],
+    { repoRoot },
+  );
   const normalizedEntry = {
     content: normalizeText(entry?.content),
     scope: normalizeNullable(entry?.scope),
@@ -177,6 +276,7 @@ function serializeEntry(entry) {
     tags: Array.isArray(entry?.tags)
       ? entry.tags.map((tag) => normalizeText(tag)).filter(Boolean)
       : [],
+    relatedPaths,
   };
   if (!getScopeIdentifier(normalizedEntry, normalizedScopeLevel) && normalizedScopeLevel === "workspace") {
     normalizedEntry.workspaceId = "default";
@@ -215,23 +315,20 @@ async function loadLegacyRegistryEntries(repoRoot = knowledgeState.repoRoot || p
 }
 
 async function backfillLedgerEntries(repoRoot, entries = []) {
-  let mod;
-  try { mod = await getStateLedgerModule(); } catch { return; }
   for (const rawEntry of Array.isArray(entries) ? entries : []) {
     const entry = normalizeRegistryEntry(rawEntry);
     if (!entry) continue;
     try {
-      mod.appendKnowledgeEntryToStateLedger(entry, { repoRoot });
+      appendKnowledgeEntryToStateLedger(entry, { repoRoot });
     } catch {
       // best-effort migration only
     }
   }
 }
 
-async function loadRegistryEntries(repoRoot = knowledgeState.repoRoot || process.cwd()) {
+function loadLedgerRegistryEntries(repoRoot = knowledgeState.repoRoot || process.cwd()) {
   try {
-    const mod = await getStateLedgerModule();
-    const entries = mod.listKnowledgeEntriesFromStateLedger({ repoRoot, limit: 5000 })
+    const entries = listKnowledgeEntriesFromStateLedger({ repoRoot, limit: 5000 })
       .map((entry) => normalizeRegistryEntry(entry))
       .filter(Boolean);
     if (entries.length > 0) {
@@ -242,12 +339,21 @@ async function loadRegistryEntries(repoRoot = knowledgeState.repoRoot || process
       };
     }
   } catch {
-    // fall back to legacy registry
+    // fall through to null
   }
+  return null;
+}
+
+async function loadRegistryEntries(repoRoot = knowledgeState.repoRoot || process.cwd()) {
+  const ledgerRegistry = loadLedgerRegistryEntries(repoRoot);
+  if (ledgerRegistry) return ledgerRegistry;
 
   const legacyRegistry = await loadLegacyRegistryEntries(repoRoot);
   if (legacyRegistry.entries.length > 0) {
     await backfillLedgerEntries(repoRoot, legacyRegistry.entries);
+    const syncedRegistry = loadLedgerRegistryEntries(repoRoot) || legacyRegistry;
+    await saveRegistryEntries(repoRoot, syncedRegistry);
+    return syncedRegistry;
   }
   return legacyRegistry;
 }
@@ -265,9 +371,18 @@ async function saveRegistryEntries(repoRoot, registry) {
   await writeFile(registryPath, JSON.stringify(payload, null, 2), "utf8");
 }
 
+async function syncRegistryProjectionFromLedger(repoRoot = knowledgeState.repoRoot || process.cwd()) {
+  const registry = loadLedgerRegistryEntries(repoRoot) || createEmptyRegistry();
+  await saveRegistryEntries(repoRoot, registry);
+  return registry;
+}
+
 async function ensureEntryHashesLoaded() {
   knowledgeState.entryHashes.clear();
-  const registry = await loadRegistryEntries(knowledgeState.repoRoot || process.cwd());
+  const repoRoot = knowledgeState.repoRoot || process.cwd();
+  const registry =
+    loadLedgerRegistryEntries(repoRoot)
+    || await loadLegacyRegistryEntries(repoRoot);
   for (const entry of registry.entries) {
     if (entry?.hash) knowledgeState.entryHashes.add(entry.hash);
   }
@@ -322,6 +437,8 @@ function buildSearchText(entry) {
     ...(Array.isArray(entry.provenance) ? entry.provenance : []),
     ...(Array.isArray(entry.evidence) ? entry.evidence : []),
     ...(Array.isArray(entry.tags) ? entry.tags : []),
+    ...(Array.isArray(entry.relatedPaths) ? entry.relatedPaths : []),
+    ...(Array.isArray(entry.document?.relatedPaths) ? entry.document.relatedPaths : []),
   ]
     .filter(Boolean)
     .join(" ");
@@ -344,12 +461,107 @@ function isEntryVisibleForContext(entry, context) {
   return false;
 }
 
-function scoreEntry(entry, queryTokens, context) {
+async function loadContextPathAdjacency(repoRoot, directPaths = []) {
+  const contextIndexDbPath = resolve(repoRoot, ".bosun", "context-index", "index.db");
+  const hasRefreshablePath = (Array.isArray(directPaths) ? directPaths : [])
+    .some((relPath) => existsSync(resolve(repoRoot, String(relPath || ""))));
+  if (hasRefreshablePath) {
+    try {
+      await ensureContextIndexFresh({
+        rootDir: repoRoot,
+        changedFiles: directPaths,
+        useTreeSitter: false,
+        useZoekt: false,
+      });
+    } catch {
+      // best-effort refresh only
+    }
+  }
+  if (existsSync(contextIndexDbPath)) {
+    try {
+      const dbAdjacency = await getContextPathAdjacency(directPaths, {
+        rootDir: repoRoot,
+        relationTypes: [...PATH_ADJACENCY_RELATION_TYPES],
+      });
+      if (dbAdjacency instanceof Map && dbAdjacency.size > 0) {
+        return dbAdjacency;
+      }
+    } catch {
+      // fall back to the JSON projection below
+    }
+  }
+  const indexPath = resolve(repoRoot, CONTEXT_INDEX_FILE);
+  if (!existsSync(indexPath)) {
+    return new Map();
+  }
+  try {
+    const payload = JSON.parse(await readFile(indexPath, "utf8"));
+    const relations = Array.isArray(payload?.relations) ? payload.relations : [];
+    const adjacency = new Map();
+    const addEdge = (fromPath, toPath) => {
+      const from = normalizeRepoPath(fromPath, repoRoot);
+      const to = normalizeRepoPath(toPath, repoRoot);
+      if (!from || !to || from === to) return;
+      if (!adjacency.has(from)) adjacency.set(from, new Set());
+      adjacency.get(from).add(to);
+    };
+    for (const relation of relations) {
+      if (!PATH_ADJACENCY_RELATION_TYPES.has(relation?.relationType)) continue;
+      addEdge(relation.fromPath, relation.toPath);
+      addEdge(relation.toPath, relation.fromPath);
+    }
+    return adjacency;
+  } catch {
+    return new Map();
+  }
+}
+
+async function buildPathContext(options = {}, repoRoot = knowledgeState.repoRoot || process.cwd()) {
+  const directPaths = new Set(normalizeRelatedPaths([
+    ...(Array.isArray(options.relatedPaths) ? options.relatedPaths : []),
+    ...(Array.isArray(options.changedFiles) ? options.changedFiles : []),
+  ], { repoRoot }));
+  if (directPaths.size === 0) {
+    return { directPaths, adjacentPaths: new Set() };
+  }
+  const adjacency = await loadContextPathAdjacency(repoRoot, [...directPaths]);
+  const adjacentPaths = new Set();
+  for (const directPath of directPaths) {
+    const neighbors = adjacency.get(directPath);
+    if (!neighbors) continue;
+    for (const neighbor of neighbors) {
+      if (!directPaths.has(neighbor)) adjacentPaths.add(neighbor);
+    }
+  }
+  return { directPaths, adjacentPaths };
+}
+
+function collectEntryRelatedPaths(entry, repoRoot = knowledgeState.repoRoot || process.cwd()) {
+  return normalizeRelatedPaths([
+    ...(Array.isArray(entry?.relatedPaths) ? entry.relatedPaths : []),
+    ...(Array.isArray(entry?.document?.relatedPaths) ? entry.document.relatedPaths : []),
+    ...(Array.isArray(entry?.provenance)
+      ? entry.provenance.flatMap((value) => extractPathCandidatesFromText(value, repoRoot))
+      : []),
+    ...(Array.isArray(entry?.evidence)
+      ? entry.evidence.flatMap((value) => extractPathCandidatesFromText(value, repoRoot))
+      : []),
+    ...(Array.isArray(entry?.tags)
+      ? entry.tags.flatMap((value) => extractPathCandidatesFromText(value, repoRoot))
+      : []),
+    ...extractPathCandidatesFromText(entry?.content, repoRoot),
+    ...extractPathCandidatesFromText(entry?.taskRef, repoRoot),
+  ], { repoRoot });
+}
+
+function scoreEntry(entry, queryTokens, context, pathContext = { directPaths: new Set(), adjacentPaths: new Set() }) {
   const scopeLevel = normalizeScopeLevel(entry?.scopeLevel);
   const priority = MEMORY_SCOPE_PRIORITY[scopeLevel] || 0;
   const haystack = tokenize(buildSearchText(entry));
   const tokenSet = new Set(haystack);
   let score = priority * 100;
+  const directPathHits = [];
+  const adjacentPathHits = [];
 
   for (const token of queryTokens) {
     if (tokenSet.has(token)) score += 25;
@@ -359,9 +571,27 @@ function scoreEntry(entry, queryTokens, context) {
     score += 50;
   }
 
+  const entryRelatedPaths = collectEntryRelatedPaths(entry, context.repoRoot);
+  for (const relatedPath of entryRelatedPaths) {
+    if (pathContext.directPaths.has(relatedPath)) {
+      directPathHits.push(relatedPath);
+      score += DIRECT_PATH_MATCH_SCORE;
+      continue;
+    }
+    if (pathContext.adjacentPaths.has(relatedPath)) {
+      adjacentPathHits.push(relatedPath);
+      score += ADJACENT_PATH_MATCH_SCORE;
+    }
+  }
+
   const timestampMs = Date.parse(entry.timestamp || "") || 0;
   score += Math.floor(timestampMs / 1000 / 60 / 60 / 24);
-  return score;
+  return {
+    score,
+    relatedPaths: entryRelatedPaths,
+    directPathHits,
+    adjacentPathHits,
+  };
 }
 
 // ── Initialization ───────────────────────────────────────────────────────────
@@ -372,9 +602,9 @@ export function initSharedKnowledge(opts = {}) {
   knowledgeState.registryFile = opts.registryFile || DEFAULT_REGISTRY_FILE;
   knowledgeState.sectionHeader = opts.sectionHeader || DEFAULT_SECTION_HEADER;
   knowledgeState.entriesWritten = 0;
-  knowledgeState.lastWriteAt = null;
-  knowledgeState.lastWriteByAgent = new Map();
+  resetKnowledgeThrottleState();
   knowledgeState.entryHashes = new Set();
+  knowledgeState.writeQueue = Promise.resolve();
 }
 
 // ── Entry Format ─────────────────────────────────────────────────────────────
@@ -403,6 +633,7 @@ export function buildKnowledgeEntry(opts = {}) {
     tags: Array.isArray(opts.tags)
       ? opts.tags.map((tag) => normalizeText(tag)).filter(Boolean)
       : [],
+    relatedPaths: normalizeRelatedPaths(opts.relatedPaths),
   };
   if (!getScopeIdentifier(entry, entry.scopeLevel) && entry.scopeLevel === "workspace") {
     entry.workspaceId = "default";
@@ -446,6 +677,9 @@ export function formatEntryAsMarkdown(entry) {
   }
   if (Array.isArray(entry.tags) && entry.tags.length > 0) {
     lines.push(`> **Tags:** ${entry.tags.join(", ")}`);
+  }
+  if (Array.isArray(entry.relatedPaths) && entry.relatedPaths.length > 0) {
+    lines.push(`> **Related Paths:** ${entry.relatedPaths.join(" | ")}`);
   }
   lines.push("");
   lines.push(entry.content);
@@ -524,7 +758,9 @@ export function validateEntry(entry) {
 
 function hashEntry(content, scope, entry = {}) {
   const scopeLevel = normalizeScopeLevel(entry.scopeLevel);
+  const repoRoot = normalizeText(resolve(knowledgeState.repoRoot || process.cwd())).toLowerCase();
   const data = [
+    repoRoot,
     normalizeText(scope),
     normalizeText(content).toLowerCase(),
     scopeLevel,
@@ -542,105 +778,132 @@ export function isDuplicate(entry) {
 
 // ── Write ────────────────────────────────────────────────────────────────────
 
+async function writeKnowledgeMarkdownMirror(filePath, markdown) {
+  await ensureParentDir(filePath);
+  let content = "";
+  if (existsSync(filePath)) {
+    content = await readFile(filePath, "utf8");
+  }
+
+  const sectionIdx = content.indexOf(knowledgeState.sectionHeader);
+  if (sectionIdx === -1) {
+    const newContent =
+      content.trimEnd() +
+      "\n\n" +
+      knowledgeState.sectionHeader +
+      "\n\n" +
+      markdown +
+      ENTRY_SEPARATOR;
+    await writeFile(filePath, newContent, "utf8");
+    return;
+  }
+
+  const afterSection = content.slice(sectionIdx + knowledgeState.sectionHeader.length);
+  const nextSectionMatch = afterSection.match(/\n## [^#]/);
+  if (nextSectionMatch) {
+    const insertPos =
+      sectionIdx +
+      knowledgeState.sectionHeader.length +
+      nextSectionMatch.index;
+    const before = content.slice(0, insertPos);
+    const after = content.slice(insertPos);
+    await writeFile(
+      filePath,
+      before + "\n" + markdown + ENTRY_SEPARATOR + after,
+      "utf8",
+    );
+    return;
+  }
+
+  await writeFile(
+    filePath,
+    content.trimEnd() + "\n\n" + markdown + ENTRY_SEPARATOR,
+    "utf8",
+  );
+}
+
 export async function appendKnowledgeEntry(entry, options = {}) {
-  const normalizedEntry = serializeEntry(entry);
-  const validation = validateEntry(normalizedEntry);
-  if (!validation.valid) {
-    return { success: false, reason: validation.reason };
-  }
-
-  const agentId = normalizeText(normalizedEntry.agentId || "unknown");
-  const lastWriteForAgent = knowledgeState.lastWriteByAgent.get(agentId) || 0;
-  const skipRateLimit = options?.skipRateLimit === true;
-  if (!skipRateLimit && lastWriteForAgent) {
-    const elapsed = Date.now() - lastWriteForAgent;
-    if (elapsed < RATE_LIMIT_MS) {
-      return {
-        success: false,
-        reason: `rate limited — wait ${Math.ceil((RATE_LIMIT_MS - elapsed) / 1000)}s`,
-      };
-    }
-  }
-
-  await ensureEntryHashesLoaded();
-  if (isDuplicate(normalizedEntry)) {
-    return { success: false, reason: "duplicate entry — already recorded" };
-  }
-
-  const markdown = formatEntryAsMarkdown(normalizedEntry);
-  const filePath = resolve(knowledgeState.repoRoot || process.cwd(), knowledgeState.targetFile);
-
-  try {
-    await ensureParentDir(filePath);
-    let content = "";
-    if (existsSync(filePath)) {
-      content = await readFile(filePath, "utf8");
+  const writeOperation = async () => {
+    const normalizedEntry = serializeEntry(entry);
+    const validation = validateEntry(normalizedEntry);
+    if (!validation.valid) {
+      return { success: false, reason: validation.reason };
     }
 
-    const sectionIdx = content.indexOf(knowledgeState.sectionHeader);
-    if (sectionIdx === -1) {
-      const newContent =
-        content.trimEnd() +
-        "\n\n" +
-        knowledgeState.sectionHeader +
-        "\n\n" +
-        markdown +
-        ENTRY_SEPARATOR;
-      await writeFile(filePath, newContent, "utf8");
-    } else {
-      const afterSection = content.slice(sectionIdx + knowledgeState.sectionHeader.length);
-      const nextSectionMatch = afterSection.match(/\n## [^#]/);
-      if (nextSectionMatch) {
-        const insertPos =
-          sectionIdx +
-          knowledgeState.sectionHeader.length +
-          nextSectionMatch.index;
-        const before = content.slice(0, insertPos);
-        const after = content.slice(insertPos);
-        await writeFile(
-          filePath,
-          before + "\n" + markdown + ENTRY_SEPARATOR + after,
-          "utf8",
-        );
-      } else {
-        await writeFile(
-          filePath,
-          content.trimEnd() + "\n\n" + markdown + ENTRY_SEPARATOR,
-          "utf8",
-        );
+    const agentId = normalizeText(normalizedEntry.agentId || "unknown");
+    const scopeThrottleKey = getScopeThrottleKey(normalizedEntry);
+    const throttleKey = `${agentId}::${scopeThrottleKey}`;
+    const skipRateLimit = options?.skipRateLimit === true;
+    const now = Date.now();
+    const lastRelevantWrite = knowledgeState.lastWriteByThrottleKey.get(throttleKey) || 0;
+    if (!skipRateLimit && lastRelevantWrite) {
+      const elapsed = now - lastRelevantWrite;
+      if (elapsed < RATE_LIMIT_MS) {
+        return {
+          success: false,
+          reason: `rate limited — wait ${Math.ceil((RATE_LIMIT_MS - elapsed) / 1000)}s`,
+        };
       }
     }
 
-    const registry = await loadRegistryEntries(knowledgeState.repoRoot || process.cwd());
-    registry.entries.push(normalizedEntry);
-    await saveRegistryEntries(knowledgeState.repoRoot || process.cwd(), registry);
-    let ledgerPath = null;
-    try {
-      const mod = await getStateLedgerModule();
-      const ledgerResult = mod.appendKnowledgeEntryToStateLedger(normalizedEntry, {
-        repoRoot: knowledgeState.repoRoot || process.cwd(),
-      });
-      ledgerPath = ledgerResult?.path || mod.resolveStateLedgerPath({
-        repoRoot: knowledgeState.repoRoot || process.cwd(),
-      });
-    } catch {
-      // SQLite unavailable on this Node version — skip ledger write
+    await ensureEntryHashesLoaded();
+    if (isDuplicate(normalizedEntry)) {
+      return { success: false, reason: "duplicate entry — already recorded" };
     }
 
-    knowledgeState.entryHashes.add(normalizedEntry.hash);
-    knowledgeState.entriesWritten++;
-    knowledgeState.lastWriteAt = Date.now();
-    knowledgeState.lastWriteByAgent.set(agentId, knowledgeState.lastWriteAt);
+    const markdown = formatEntryAsMarkdown(normalizedEntry);
+    const effectiveRepoRoot = knowledgeState.repoRoot || process.cwd();
+    const filePath = resolve(knowledgeState.repoRoot || process.cwd(), knowledgeState.targetFile);
 
-    return {
-      success: true,
-      hash: normalizedEntry.hash,
-      registryPath: getRegistryPath(knowledgeState.repoRoot || process.cwd()),
-      ledgerPath,
-    };
-  } catch (err) {
-    return { success: false, reason: `write error: ${err.message}` };
-  }
+    try {
+      const ledgerResult = appendKnowledgeEntryToStateLedger(normalizedEntry, {
+        repoRoot: effectiveRepoRoot,
+      });
+      const syncedRegistry = await syncRegistryProjectionFromLedger(effectiveRepoRoot);
+      const syncedContainsEntry = Array.isArray(syncedRegistry?.entries)
+        && syncedRegistry.entries.some((entry) => entry?.hash === normalizedEntry.hash);
+      if (!syncedContainsEntry) {
+        const legacyRegistry = await loadLegacyRegistryEntries(effectiveRepoRoot);
+        await saveRegistryEntries(effectiveRepoRoot, {
+          ...legacyRegistry,
+          entries: [
+            normalizedEntry,
+            ...legacyRegistry.entries.filter((entry) => entry?.hash !== normalizedEntry.hash),
+          ],
+        });
+      }
+
+      let mirrored = true;
+      let mirrorReason = null;
+      try {
+        await writeKnowledgeMarkdownMirror(filePath, markdown);
+      } catch (mirrorError) {
+        mirrored = false;
+        mirrorReason = `markdown mirror failed: ${mirrorError.message}`;
+      }
+
+      knowledgeState.entryHashes.add(normalizedEntry.hash);
+      knowledgeState.entriesWritten++;
+      knowledgeState.lastWriteByThrottleKey.set(throttleKey, Date.now());
+
+      return {
+        success: true,
+        hash: normalizedEntry.hash,
+        registryPath: getRegistryPath(effectiveRepoRoot),
+        ledgerPath: ledgerResult?.path || resolveStateLedgerPath({
+          repoRoot: effectiveRepoRoot,
+        }),
+        mirrored,
+        mirrorReason,
+      };
+    } catch (err) {
+      return { success: false, reason: `write error: ${err.message}` };
+    }
+  };
+
+  const queuedWrite = knowledgeState.writeQueue.then(writeOperation, writeOperation);
+  knowledgeState.writeQueue = queuedWrite.catch(() => undefined);
+  return queuedWrite;
 }
 
 // ── Read / Retrieve ──────────────────────────────────────────────────────────
@@ -717,6 +980,7 @@ export async function retrieveKnowledgeEntries(options = {}) {
     sessionId: normalizeNullable(options.sessionId),
     runId: normalizeNullable(options.runId),
     taskId: normalizeNullable(options.taskId),
+    repoRoot,
   };
   const queryTokens = tokenize(
     [
@@ -728,13 +992,17 @@ export async function retrieveKnowledgeEntries(options = {}) {
       .join(" "),
   );
   const limit = Math.max(1, Number(options.limit) || DEFAULT_BRIEFING_LIMIT);
+  const pathContext = await buildPathContext(options, repoRoot);
 
   return registry.entries
     .filter((entry) => isEntryVisibleForContext(entry, context))
-    .map((entry) => ({
-      ...entry,
-      score: scoreEntry(entry, queryTokens, context),
-    }))
+    .map((entry) => {
+      const scored = scoreEntry(entry, queryTokens, context, pathContext);
+      return {
+        ...entry,
+        ...scored,
+      };
+    })
     .sort((left, right) => {
       const scopeDelta =
         (MEMORY_SCOPE_PRIORITY[right.scopeLevel] || 0) -
@@ -762,8 +1030,15 @@ export function formatKnowledgeBriefing(entries, options = {}) {
     const topic = entry.scope ? ` (${entry.scope})` : "";
     const scopeId = getScopeIdentifier(entry, scopeLevel) || "unknown";
     const taskPart = entry.taskRef ? ` • ref: \`${entry.taskRef}\`` : "";
+    const directPaths = normalizeRelatedPaths(entry.directPathHits || []);
+    const adjacentPaths = normalizeRelatedPaths(entry.adjacentPathHits || []);
+    const pathReason = directPaths.length > 0
+      ? ` • matched=${directPaths.slice(0, 2).join(", ")}`
+      : (adjacentPaths.length > 0
+          ? ` • graph=${adjacentPaths.slice(0, 2).join(", ")}`
+          : "");
     lines.push(
-      `- [${scopeLevel}]${topic} ${truncateInline(entry.content)} • scope=${scopeId}${taskPart}`,
+      `- [${scopeLevel}]${topic} ${truncateInline(entry.content)} • scope=${scopeId}${taskPart}${pathReason}`,
     );
   }
 
@@ -776,7 +1051,7 @@ export function getKnowledgeState() {
   return {
     ...knowledgeState,
     entryHashes: knowledgeState.entryHashes.size,
-    lastWriteByAgent: knowledgeState.lastWriteByAgent.size,
+    throttleKeys: knowledgeState.lastWriteByThrottleKey.size,
   };
 }
 
@@ -786,8 +1061,9 @@ export function formatKnowledgeSummary() {
     `Target: ${knowledgeState.targetFile}`,
     `Registry: ${knowledgeState.registryFile}`,
     `Dedup cache: ${knowledgeState.entryHashes.size} hashes`,
-    knowledgeState.lastWriteAt
-      ? `Last write: ${new Date(knowledgeState.lastWriteAt).toISOString()}`
+    `Throttle keys: ${knowledgeState.lastWriteByThrottleKey.size}`,
+    knowledgeState.lastWriteByThrottleKey.size > 0
+      ? "Per-agent/per-scope throttles active"
       : "No writes this session",
   ].join("\n");
 }

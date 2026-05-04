@@ -19,18 +19,18 @@ for (const { relPath, source } of sourceFiles) {
       expect(source).toContain('historic: "historic"');
     });
 
-    it("classifies historic sessions as non-active statuses", () => {
+    it("classifies in-progress sessions from runtime-live work and historic sessions as the remainder", () => {
       expect(source).toMatch(
-        /function isHistoricSession\(session\)\s*\{\s*return !isActiveSession\(session\);\s*\}/,
+        /function isHistoricSession\(session\)\s*\{\s*return !isInProgressSession\(session\);\s*\}/,
       );
       expect(source).toMatch(
-        /function isActiveSession\(session\)\s*\{\s*return getSessionLifecycleState\(session\)\.isActive;\s*\}/,
+        /function isInProgressSession\(session\)\s*\{[\s\S]*return runtime\.isLive \|\| runtime\.key === "running" \|\| runtime\.key === "queued";\s*\}/,
       );
     });
 
-    it("renders All, Lifecycle Active, and Historic filter buttons with counts", () => {
+    it("renders All, In Progress, and Historic filter buttons with counts", () => {
       expect(source).toContain("All (${allCount})");
-      expect(source).toContain("Lifecycle Active (${activeCount})");
+      expect(source).toContain("In Progress (${activeCount})");
       expect(source).toContain("Historic (${historicCount})");
     });
 

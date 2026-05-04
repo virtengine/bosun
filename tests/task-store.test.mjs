@@ -143,6 +143,138 @@ describe("task-store corruption recovery", () => {
     expect(ts.getAllTasks()).toEqual([]);
     expect(existsSync(`${storePath}.bak`)).toBe(false);
   });
+
+  it("configures the repo-local store under baseDir even when Bosun home exists", async () => {
+    const repoDir = makeTempDir("task-store-repo-root-");
+    const repoStoreDir = join(repoDir, ".bosun", ".cache");
+    mkdirSync(repoStoreDir, { recursive: true });
+    writeFileSync(
+      join(repoStoreDir, "kanban-state.json"),
+      JSON.stringify({
+        _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: { todo: 1 } },
+        tasks: {
+          "repo-task-1": {
+            id: "repo-task-1",
+            title: "Repo-local task",
+            status: "todo",
+          },
+        },
+        sprints: {},
+      }, null, 2),
+      "utf8",
+    );
+
+    const homeDir = makeTempDir("task-store-home-");
+    const bosunHomeDir = join(homeDir, "bosun", ".cache");
+    mkdirSync(bosunHomeDir, { recursive: true });
+
+    const env = {
+      APPDATA: process.env.APPDATA,
+      LOCALAPPDATA: process.env.LOCALAPPDATA,
+      USERPROFILE: process.env.USERPROFILE,
+      HOME: process.env.HOME,
+      BOSUN_HOME: process.env.BOSUN_HOME,
+      BOSUN_DIR: process.env.BOSUN_DIR,
+    };
+    try {
+      process.env.APPDATA = homeDir;
+      process.env.LOCALAPPDATA = homeDir;
+      process.env.USERPROFILE = homeDir;
+      process.env.HOME = homeDir;
+      delete process.env.BOSUN_HOME;
+      delete process.env.BOSUN_DIR;
+
+      const ts = await loadTaskStoreModule();
+      ts.configureTaskStore({ baseDir: repoDir });
+      ts.loadStore();
+
+      expect(ts.getAllTasks()).toEqual([
+        expect.objectContaining({
+          id: "repo-task-1",
+          title: "Repo-local task",
+          status: "todo",
+        }),
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(env)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it("treats an all-NUL store file as corruption (Windows unflushed-write artifact)", async () => {
+    const dir = makeTempDir("task-store-nul-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+    // Simulate the post-crash NUL-fill: file size > 0, all bytes are 0x00.
+    writeFileSync(storePath, Buffer.alloc(2048, 0));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    // Original NUL bytes should be quarantined to a dedicated *.bak.corrupt-* path.
+    const warnMessages = warnSpy.mock.calls.map((c) => String(c[1] ?? c[0]));
+    expect(
+      warnMessages.some((m) => m.includes(".bak.corrupt-")),
+      "Expected a quarantine warning naming .bak.corrupt-* path",
+    ).toBe(true);
+    expect(
+      warnMessages.some((m) => /NUL|zero-fill/i.test(m)),
+      "Expected diagnostic mentioning NUL / zero-fill corruption",
+    ).toBe(true);
+    expect(ts.getAllTasks()).toEqual([]);
+  });
+
+  it("preserves a parseable .bak instead of overwriting it with corrupt bytes", async () => {
+    const dir = makeTempDir("task-store-bak-preserve-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+    const backupPath = `${storePath}.bak`;
+
+    const goodStore = {
+      _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: {} },
+      tasks: { "good-1": { id: "good-1", title: "Good task", status: "todo" } },
+    };
+    const goodJson = JSON.stringify(goodStore, null, 2);
+    writeFileSync(backupPath, goodJson, "utf8");
+    writeFileSync(storePath, "{not valid json!!!", "utf8");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    // .bak must still hold the prior good content
+    expect(readFileSync(backupPath, "utf8")).toBe(goodJson);
+  });
+
+  it("auto-recovers from .bak when primary store is corrupt", async () => {
+    const dir = makeTempDir("task-store-autorecover-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+    const backupPath = `${storePath}.bak`;
+
+    const goodStore = {
+      _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: {} },
+      tasks: { "recovered-1": { id: "recovered-1", title: "Recovered", status: "doing" } },
+    };
+    writeFileSync(backupPath, JSON.stringify(goodStore, null, 2), "utf8");
+    writeFileSync(storePath, Buffer.alloc(512, 0)); // NUL corruption
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    expect(ts.getAllTasks()).toEqual([
+      expect.objectContaining({ id: "recovered-1", title: "Recovered", status: "doing" }),
+    ]);
+  });
 });
 
 // ── Atomic Rename Fallback ─────────────────────────────────────────────────
@@ -257,6 +389,52 @@ describe("task-store concurrent save consistency", () => {
 });
 
 describe("task-store delegation topology", () => {
+  it("hydrates legacy top-level workflow fields from persisted topology", async () => {
+    const dir = makeTempDir("task-store-topology-compat-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    writeFileSync(storePath, JSON.stringify({
+      _meta: { version: 1, updatedAt: new Date().toISOString(), taskCount: 1, stats: { inprogress: 1 } },
+      tasks: {
+        "TASK-TOPOLOGY": {
+          id: "TASK-TOPOLOGY",
+          title: "Task topology compatibility",
+          status: "inprogress",
+          topology: {
+            workflowId: "wf-task-lifecycle",
+            workflowName: "Task Lifecycle",
+            latestRunId: "run-topology-1",
+            latestSessionId: "session-topology-1",
+            sessionId: "session-topology-1",
+            rootSessionId: "TASK-TOPOLOGY",
+            parentSessionId: "workflow:parent-session",
+          },
+        },
+      },
+      sprints: {},
+    }, null, 2), "utf8");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    expect(ts.getTask("TASK-TOPOLOGY")).toEqual(expect.objectContaining({
+      workflowId: "wf-task-lifecycle",
+      workflowName: "Task Lifecycle",
+      latestRunId: "run-topology-1",
+      latestSessionId: "session-topology-1",
+      sessionId: "session-topology-1",
+      rootSessionId: "TASK-TOPOLOGY",
+      parentSessionId: "workflow:parent-session",
+      topology: expect.objectContaining({
+        latestRunId: "run-topology-1",
+        sessionId: "session-topology-1",
+      }),
+    }));
+  });
+
   it("normalizes task graph topology and delegated workflow run lineage", async () => {
     const dir = makeTempDir("task-store-lineage-");
     const storeDir = join(dir, ".bosun", ".cache");
@@ -326,6 +504,142 @@ describe("task-store delegation topology", () => {
       latestRunId: "run-child-1",
       latestSessionId: "TASK-CHILD:delegate:run-parent-1",
     }));
+  });
+
+  it("does not let sparse same-run delegation updates clobber richer workflow run summaries", async () => {
+    const dir = makeTempDir("task-store-run-link-merge-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({ id: "TASK-MERGE", title: "Merge workflow runs", status: "inprogress" });
+    ts.linkTaskWorkflowRun("TASK-MERGE", {
+      runId: "run-merge-1",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      status: "completed",
+      startedAt: "2026-04-23T15:31:15.528Z",
+      endedAt: "2026-04-23T15:50:31.126Z",
+      summary: "Workflow completed successfully.",
+      rootRunId: "run-root-1",
+      parentRunId: "run-parent-1",
+      taskId: "TASK-MERGE",
+      rootTaskId: "TASK-MERGE",
+      parentTaskId: "TASK-MERGE",
+      sessionId: "workflow:root-session:run-root-1",
+      rootSessionId: "workflow:root-session:run-root-1",
+      parentSessionId: null,
+      delegationDepth: 0,
+      source: "workflow",
+    });
+    ts.linkTaskWorkflowRun("TASK-MERGE", {
+      runId: "run-merge-1",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      nodeId: "auto-fix",
+      status: "failed",
+      rootRunId: "run-root-1",
+      parentRunId: "run-parent-1",
+      taskId: "TASK-MERGE",
+      rootTaskId: "TASK-MERGE",
+      parentTaskId: "TASK-MERGE",
+      sessionId: "TASK-MERGE:agent:run-merge-1:auto-fix:turn",
+      rootSessionId: "TASK-MERGE",
+      parentSessionId: "workflow:root-session:run-root-1",
+      delegationDepth: 1,
+      source: "workflow",
+    });
+
+    const task = ts.getTask("TASK-MERGE");
+    expect(task?.workflowRuns).toEqual([
+      expect.objectContaining({
+        runId: "run-merge-1",
+        workflowName: "Backend Agent",
+        status: "completed",
+        startedAt: "2026-04-23T15:31:15.528Z",
+        endedAt: "2026-04-23T15:50:31.126Z",
+        summary: "Workflow completed successfully.",
+        sessionId: "workflow:root-session:run-root-1",
+        rootSessionId: "workflow:root-session:run-root-1",
+        parentSessionId: "workflow:root-session:run-root-1",
+      }),
+    ]);
+    expect(task?.topology).toEqual(expect.objectContaining({
+      latestRunId: "run-merge-1",
+      latestNodeId: "auto-fix",
+      workflowName: "Backend Agent",
+      latestSessionId: "workflow:root-session:run-root-1",
+      delegationDepth: 0,
+    }));
+  });
+
+  it("clears stale latestNodeId when a newer run is promoted without node progress", async () => {
+    const dir = makeTempDir("task-store-latest-node-reset-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({ id: "TASK-LATEST-NODE", title: "Latest node projection", status: "inprogress" });
+    ts.linkTaskWorkflowRun("TASK-LATEST-NODE", {
+      runId: "run-old-write-tests",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      nodeId: "write-tests",
+      status: "failed",
+      startedAt: "2026-04-23T19:08:06.185Z",
+      endedAt: "2026-04-23T19:28:12.940Z",
+      summary: "Failed at Write Tests First: Invalid string length",
+      rootRunId: "run-root",
+      parentRunId: "run-parent-old",
+      taskId: "TASK-LATEST-NODE",
+      rootTaskId: "TASK-LATEST-NODE",
+      parentTaskId: "TASK-LATEST-NODE",
+      sessionId: "workflow:root-session:run-root",
+      rootSessionId: "workflow:root-session:run-root",
+      parentSessionId: null,
+      source: "workflow",
+    });
+    ts.linkTaskWorkflowRun("TASK-LATEST-NODE", {
+      runId: "run-new-retry",
+      workflowId: "wf-backend",
+      workflowName: "Backend Agent",
+      status: "running",
+      startedAt: "2026-04-23T20:28:20.227Z",
+      rootRunId: "run-root",
+      parentRunId: "run-old-write-tests",
+      retryOf: "run-old-write-tests",
+      taskId: "TASK-LATEST-NODE",
+      rootTaskId: "TASK-LATEST-NODE",
+      parentTaskId: "TASK-LATEST-NODE",
+      sessionId: "workflow:root-session:run-root",
+      rootSessionId: "workflow:root-session:run-root",
+      parentSessionId: null,
+      source: "workflow",
+    });
+
+    const task = ts.getTask("TASK-LATEST-NODE");
+    expect(task?.topology).toEqual(expect.objectContaining({
+      latestRunId: "run-new-retry",
+      latestNodeId: null,
+    }));
+    expect(task?.workflowRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runId: "run-old-write-tests",
+        nodeId: "write-tests",
+      }),
+      expect.objectContaining({
+        runId: "run-new-retry",
+        nodeId: null,
+      }),
+    ]));
   });
 });
 
@@ -500,7 +814,7 @@ describe("task-store DAG organization", () => {
     expect(ts.getTask("review-b")?.dependencyTaskIds || []).not.toContain("review-a");
   });
 
-  it("recovers timed blocked tasks back to todo", async () => {
+  it("does not auto-recover branch refresh conflicts that require repair workflow", async () => {
     const dir = makeTempDir("task-store-auto-recovery-");
     const storeDir = join(dir, ".bosun", ".cache");
     mkdirSync(storeDir, { recursive: true });
@@ -533,12 +847,158 @@ describe("task-store DAG organization", () => {
     const recovered = ts.recoverAutoBlockedTasks();
     const task = ts.getTask("blocked-auto-1");
 
-    expect(recovered.recoveredTaskIds).toEqual(["blocked-auto-1"]);
+    expect(recovered.recoveredTaskIds).toEqual([]);
+    expect(task.status).toBe("blocked");
+    expect(task.cooldownUntil).toBe(retryAt);
+    expect(task.blockedReason).toBe("Auto recovery pending");
+    expect(task.meta?.autoRecovery?.active).toBe(true);
+    expect(task.meta?.worktreeFailure).toMatchObject({
+      failureKind: "branch_refresh_conflict",
+      blockedReason: "repair pending",
+    });
+  });
+
+  it("recovers blocked tasks with stale workflow placeholders", async () => {
+    const dir = makeTempDir("task-store-stale-worktree-placeholder-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({
+      id: "blocked-placeholder-1",
+      title: "Blocked placeholder task",
+      status: "blocked",
+      cooldownUntil: "{{acquire-worktree.retryAt}}",
+      blockedReason: "{{acquire-worktree.blockedReason}}",
+    });
+
+    const recovered = ts.recoverAutoBlockedTasks();
+    const task = ts.getTask("blocked-placeholder-1");
+
+    expect(recovered.recoveredTaskIds).toEqual(["blocked-placeholder-1"]);
     expect(task.status).toBe("todo");
     expect(task.cooldownUntil).toBeNull();
     expect(task.blockedReason).toBeNull();
-    expect(task.meta?.autoRecovery?.active).toBe(false);
+  });
+
+  it("auto-unblocks blocked parent tasks when all child tasks are settled", async () => {
+    const dir = makeTempDir("task-store-parent-recovery-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({
+      id: "parent-blocked-1",
+      title: "Blocked parent task",
+      status: "blocked",
+      cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+      blockedReason: "Waiting for replanned subtasks to complete",
+      childTaskIds: ["child-done-1", "child-cancelled-1"],
+      meta: {
+        blockedReason: "Waiting for replanned subtasks to complete",
+        worktreeFailure: {
+          failureKind: "stale_child_state",
+          blockedReason: "stale child blocker",
+        },
+        keep: "yes",
+      },
+    });
+    ts.addTask({ id: "child-done-1", title: "Child done", status: "done", parentTaskId: "parent-blocked-1" });
+    ts.addTask({ id: "child-cancelled-1", title: "Child cancelled", status: "cancelled", parentTaskId: "parent-blocked-1" });
+
+    const recovered = ts.recoverAutoBlockedTasks();
+    const task = ts.getTask("parent-blocked-1");
+    const lastTimelineEvent = task.timeline.at(-1);
+    const lastHistory = task.statusHistory.at(-1);
+
+    expect(recovered.recoveredTaskIds).toEqual(["parent-blocked-1"]);
+    expect(task.status).toBe("todo");
+    expect(task.cooldownUntil).toBeNull();
+    expect(task.blockedReason).toBeNull();
+    expect(task.meta?.blockedReason).toBeUndefined();
     expect(task.meta?.worktreeFailure).toBeUndefined();
+    expect(task.meta?.keep).toBe("yes");
+    expect(lastHistory).toMatchObject({
+      status: "todo",
+      source: "auto-recovery",
+    });
+    expect(lastTimelineEvent).toMatchObject({
+      type: "status.transition",
+      action: "recover_parent_task",
+      status: "todo",
+      source: "auto-recovery",
+    });
+    expect(String(lastTimelineEvent?.message || "")).toContain("all 2 subtasks settled");
+  });
+
+  it("recovers blocked parent tasks with PR metadata back to inreview", async () => {
+    const dir = makeTempDir("task-store-parent-recovery-pr-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({
+      id: "parent-review-1",
+      title: "Blocked parent task with PR",
+      status: "blocked",
+      blockedReason: "Waiting for decomposed child tasks to complete",
+      childTaskIds: ["child-review-1"],
+      prNumber: 42,
+    });
+    ts.addTask({ id: "child-review-1", title: "Child done", status: "done", parentTaskId: "parent-review-1" });
+
+    const recovered = ts.recoverAutoBlockedTasks();
+    const task = ts.getTask("parent-review-1");
+
+    expect(recovered.recoveredTaskIds).toEqual(["parent-review-1"]);
+    expect(task.status).toBe("inreview");
+    expect(task.blockedReason).toBeNull();
+    expect(task.statusHistory.at(-1)).toMatchObject({
+      status: "inreview",
+      source: "auto-recovery",
+    });
+  });
+
+  it("does not recover blocked parent tasks while any child remains non-terminal", async () => {
+    const dir = makeTempDir("task-store-parent-recovery-pending-");
+    const storeDir = join(dir, ".bosun", ".cache");
+    mkdirSync(storeDir, { recursive: true });
+    const storePath = join(storeDir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({
+      id: "parent-pending-1",
+      title: "Blocked parent task pending child",
+      status: "blocked",
+      blockedReason: "Waiting for replanned subtasks to complete",
+      childTaskIds: ["child-active-1", "child-done-2"],
+    });
+    ts.addTask({ id: "child-active-1", title: "Child active", status: "inprogress", parentTaskId: "parent-pending-1" });
+    ts.addTask({ id: "child-done-2", title: "Child done", status: "done", parentTaskId: "parent-pending-1" });
+
+    const recovered = ts.recoverAutoBlockedTasks();
+    const task = ts.getTask("parent-pending-1");
+
+    expect(recovered.recoveredTaskIds).toEqual([]);
+    expect(task.status).toBe("blocked");
+    expect(task.blockedReason).toBe("Waiting for replanned subtasks to complete");
+    expect(task.statusHistory.at(-1)?.status).not.toBe("todo");
+    expect(task.timeline.at(-1)?.action).not.toBe("recover_parent_task");
   });
 
   it("recovers blocked tasks with stale workflow placeholders", async () => {
@@ -1073,6 +1533,40 @@ describe("task-store sprint and DAG primitives", () => {
         failingJobs: ["CI", "Lint"],
       }),
     );
+  });
+
+  it("normalizes stale meta.draft to match the canonical draft flag on updates", async () => {
+    const dir = makeTempDir("task-store-stale-meta-draft-");
+    const storePath = join(dir, "kanban-state.json");
+
+    const ts = await loadTaskStoreModule();
+    ts.configureTaskStore({ storePath });
+    ts.loadStore();
+
+    ts.addTask({
+      id: "stale-meta-draft",
+      title: "Stale draft metadata",
+      status: "todo",
+      draft: false,
+      meta: {
+        draft: true,
+      },
+    });
+
+    const created = ts.getTask("stale-meta-draft");
+    expect(created?.draft).toBe(false);
+    expect(created?.meta?.draft).toBe(false);
+
+    ts.updateTask("stale-meta-draft", {
+      status: "todo",
+      meta: {
+        draft: true,
+      },
+    });
+
+    const updated = ts.getTask("stale-meta-draft");
+    expect(updated?.draft).toBe(false);
+    expect(updated?.meta?.draft).toBe(false);
   });
 });
 

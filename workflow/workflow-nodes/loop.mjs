@@ -76,6 +76,62 @@ import {
   trimLogText,
 } from "./definitions.mjs";
 
+function clearInheritedTaskIdentity(data) {
+  if (!data || typeof data !== "object") return;
+  for (const key of [
+    "taskId",
+    "activeTaskId",
+    "taskTitle",
+    "task",
+    "taskInfo",
+    "taskDetail",
+    "taskDescription",
+    "branch",
+    "branchName",
+    "baseBranch",
+    "_workflowRootTaskId",
+    "_workflowParentTaskId",
+    "_workflowRootSessionId",
+    "_workflowParentSessionId",
+  ]) {
+    delete data[key];
+  }
+}
+
+function resolveDispatchLaunchPlan(engine, workflowId, fallbackWindow) {
+  const normalizedFallback = Math.max(1, Number(fallbackWindow) || 1);
+  if (!engine || typeof engine.get !== "function") {
+    return { windowSize: normalizedFallback, slotLimit: null };
+  }
+  const workflow = engine.get(workflowId);
+  if (!workflow || !Array.isArray(workflow.nodes)) {
+    return { windowSize: normalizedFallback, slotLimit: null };
+  }
+
+  const slotLimits = workflow.nodes
+    .filter((candidate) => candidate && typeof candidate === "object")
+    .filter((candidate) => candidate.type === "condition.slot_available" || candidate.type === "trigger.task_available")
+    .map((candidate) => Number(candidate?.config?.maxParallel))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => Math.max(1, Math.trunc(value)));
+
+  if (slotLimits.length === 0) {
+    return { windowSize: normalizedFallback, slotLimit: null };
+  }
+
+  const slotLimit = Math.max(1, Math.min(...slotLimits));
+  return {
+    windowSize: Math.max(1, Math.min(normalizedFallback, slotLimit)),
+    slotLimit,
+  };
+}
+
+async function waitForVisibleTaskLifecycleSlots(engine, minimumActiveSlots, maxWaitMs = 100) {
+  void engine;
+  void minimumActiveSlots;
+  void maxWaitMs;
+}
+
 registerNodeType("loop.for_each", {
   describe: () =>
     "Iterate over an array, executing a sub-workflow for each item. " +
@@ -119,6 +175,7 @@ registerNodeType("loop.for_each", {
     const indexVar = node.config?.indexVariable || "index";
     const maxConcurrent = Math.max(1, node.config?.maxConcurrent || 1);
     const subWorkflowId = node.config?.workflowId || "";
+    const subWorkflowMode = String(ctx.resolve(node.config?.mode || "sync") || "sync").trim().toLowerCase() || "sync";
 
     // Store items for downstream processing (backward compat)
     ctx.data[`_loop_${node.id}_items`] = items;
@@ -130,9 +187,14 @@ registerNodeType("loop.for_each", {
     if (subWorkflowId && engine?.execute) {
       ctx.log(node.id, `Fan-out: ${items.length} item(s), concurrency=${maxConcurrent}, workflow=${subWorkflowId}`);
 
-      // Process items in batches of maxConcurrent
-      for (let batchStart = 0; batchStart < items.length; batchStart += maxConcurrent) {
-        const batch = items.slice(batchStart, batchStart + maxConcurrent);
+      const dispatchLaunchPlan = subWorkflowMode === "dispatch"
+        ? resolveDispatchLaunchPlan(engine, subWorkflowId, maxConcurrent)
+        : { windowSize: maxConcurrent, slotLimit: null };
+
+      // Process items in bounded windows so slot-gated child workflows can
+      // observe earlier allocations before later dispatches fan out.
+      for (let batchStart = 0; batchStart < items.length; batchStart += dispatchLaunchPlan.windowSize) {
+        const batch = items.slice(batchStart, batchStart + dispatchLaunchPlan.windowSize);
         const batchPromises = batch.map(async (item, batchIdx) => {
           const itemIndex = batchStart + batchIdx;
           const itemData = {
@@ -143,10 +205,65 @@ registerNodeType("loop.for_each", {
             _loopIteration: itemIndex,
             _loopTotal: items.length,
           };
+          if (item && typeof item === "object" && !Array.isArray(item)) {
+            const taskId = String(item.taskId || item.id || item.task_id || "").trim();
+            const taskTitle = String(item.taskTitle || item.title || taskId).trim();
+            const taskRecord = {
+              ...item,
+              ...(taskId ? { id: taskId } : {}),
+              ...(taskTitle ? { title: taskTitle } : {}),
+            };
+            if (taskId) {
+              clearInheritedTaskIdentity(itemData);
+              itemData[varName] = item;
+              itemData[indexVar] = itemIndex;
+              itemData._loopParentNodeId = node.id;
+              itemData._loopIteration = itemIndex;
+              itemData._loopTotal = items.length;
+              bindTaskContext({ data: itemData }, { taskId, taskTitle, task: taskRecord });
+              itemData._workflowRootTaskId = taskId;
+              itemData._workflowParentTaskId = taskId;
+              itemData._workflowRootSessionId = taskId;
+              itemData._workflowParentSessionId = taskId;
+            }
+            const description = String(item.taskDescription || item.description || "").trim();
+            const branch = String(item.branch || item.branchName || "").trim();
+            const baseBranch = String(item.baseBranch || item.base_branch || "").trim();
+            const repository = String(item.repository || "").trim();
+            const workspace = String(item.workspace || "").trim();
+            const scope = String(item.scope || "").trim();
+            if (description) itemData.taskDescription = description;
+            if (branch) {
+              itemData.branch = branch;
+              itemData.branchName = branch;
+            }
+            if (baseBranch) itemData.baseBranch = baseBranch;
+            if (repository) itemData.repository = repository;
+            if (workspace) itemData.workspace = workspace;
+            if (scope) itemData.scope = scope;
+          }
           try {
+            if (subWorkflowMode === "dispatch") {
+              Promise.resolve(engine.execute(subWorkflowId, itemData))
+                .then((runCtx) => {
+                  const status = Array.isArray(runCtx?.errors) && runCtx.errors.length > 0 ? "failed" : "completed";
+                  ctx.log(node.id, `Loop dispatch item ${itemIndex} finished with status=${status}`);
+                })
+                .catch((err) => {
+                  ctx.log(node.id, `Loop dispatch item ${itemIndex} failed: ${err?.message || err}`, "error");
+                });
+              return {
+                index: itemIndex,
+                item,
+                success: true,
+                queued: true,
+                mode: "dispatch",
+                workflowId: subWorkflowId,
+              };
+            }
             const runCtx = await engine.execute(subWorkflowId, itemData);
             const ok = !runCtx?.errors?.length;
-            return { index: itemIndex, item, success: ok, runId: runCtx?.id || null };
+            return { index: itemIndex, item, success: ok, runId: runCtx?.id || null, mode: "sync", workflowId: subWorkflowId };
           } catch (err) {
             return { index: itemIndex, item, success: false, error: err?.message || String(err) };
           }
@@ -318,4 +435,3 @@ registerNodeType("loop.while", {
 // ═══════════════════════════════════════════════════════════════════════════
 //  SESSION / AGENT MANAGEMENT — Direct session control
 // ═══════════════════════════════════════════════════════════════════════════
-

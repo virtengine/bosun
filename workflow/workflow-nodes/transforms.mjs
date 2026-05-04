@@ -76,6 +76,14 @@ import {
   trimLogText,
 } from "./definitions.mjs";
 
+let _mcpAdapter = null;
+async function getMcpAdapter() {
+  if (!_mcpAdapter) {
+    _mcpAdapter = await import("../mcp-workflow-adapter.mjs");
+  }
+  return _mcpAdapter;
+}
+
 registerNodeType("transform.json_parse", {
   describe: () => "Parse JSON from a previous node's output",
   schema: {
@@ -362,7 +370,6 @@ registerNodeType("transform.mcp_extract", {
 
 /** Module-scope lazy caches for task lifecycle imports. */
 let _taskClaimsMod = null;
-let _taskClaimsInitPromise = null;
 let _taskComplexityMod = null;
 let _kanbanAdapterMod = null;
 let _agentPoolMod = null;
@@ -425,6 +432,30 @@ function deriveTaskBranch(task = {}) {
   if (taskId) return `task/${taskId}-${suffix}`;
   return `task/${suffix}`;
 }
+
+function normalizeMirroredRepoRoot(inputPath, fallbackRepoName = "") {
+  const rawPath = String(inputPath || "").trim();
+  if (!rawPath) return "";
+  const normalized = rawPath.replace(/\\/g, "/");
+  const marker = "/.bosun/workspaces/";
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex < 0) return rawPath;
+  const prefix = normalized.slice(0, markerIndex);
+  const tail = normalized.slice(markerIndex + marker.length).split("/").filter(Boolean);
+  const inferredRepoName = String(fallbackRepoName || tail[1] || tail[tail.length - 1] || "").trim();
+  if (!prefix || !inferredRepoName) return rawPath;
+  const prefixName = String(prefix.split("/").filter(Boolean).pop() || "").toLowerCase();
+  const candidate = prefixName === inferredRepoName.toLowerCase()
+    ? prefix
+    : resolve(prefix, inferredRepoName);
+  try {
+    if (existsSync(resolve(candidate, ".git"))) return candidate;
+  } catch {
+    // ignore invalid inferred path
+  }
+  return candidate;
+}
+
 function looksLikeFilesystemPath(value) {
   const text = String(value || "").trim();
   return /^[a-zA-Z]:[\\/]/.test(text) || text.startsWith("/") || text.startsWith("\\");
@@ -435,20 +466,8 @@ function resolveTaskRepositoryRoot(taskRepository, currentRepoRoot) {
   if (!repository || !repoRoot) return "";
   const repoName = repository.split("/").pop();
   if (!repoName) return "";
-  const normalizedRepoRoot = repoRoot.replace(/\\/g, "/");
-  const mirrorToken = "/.bosun/workspaces/";
-  if (normalizedRepoRoot.includes(mirrorToken)) {
-    const prefix = normalizedRepoRoot.slice(0, normalizedRepoRoot.indexOf(mirrorToken));
-    const prefixName = String(prefix.split("/").filter(Boolean).pop() || "").toLowerCase();
-    const inferredRepoRoot = prefixName === String(repoName).toLowerCase()
-      ? prefix
-      : resolve(prefix, repoName);
-    try {
-      if (existsSync(resolve(inferredRepoRoot, ".git"))) return inferredRepoRoot;
-    } catch {
-      // ignore invalid inferred path
-    }
-  }
+  const normalizedMirrorRoot = normalizeMirroredRepoRoot(repoRoot, repoName);
+  if (normalizedMirrorRoot && normalizedMirrorRoot !== repoRoot) return normalizedMirrorRoot;
   const candidates = [
     resolve(repoRoot, "..", repoName),
     resolve(repoRoot, ".bosun", "workspaces", String(process.env.BOSUN_WORKSPACE || "").trim(), repoName),
@@ -467,18 +486,22 @@ function resolveTaskRepositoryRoot(taskRepository, currentRepoRoot) {
 }
 async function ensureTaskClaimsInitialized(ctx, claims) {
   if (typeof claims?.initTaskClaims !== "function") return;
-  if (!_taskClaimsInitPromise) {
-    const repoRoot = pickTaskString(
-      ctx?.data?.repoRoot,
-      ctx?.data?.workspace,
-      process.cwd(),
-    );
-    _taskClaimsInitPromise = claims.initTaskClaims({ repoRoot }).catch((err) => {
-      _taskClaimsInitPromise = null;
+  const runtimeState = getWorkflowRuntimeState(ctx);
+  if (!runtimeState.taskClaimsInitPromises || typeof runtimeState.taskClaimsInitPromises !== "object") {
+    runtimeState.taskClaimsInitPromises = {};
+  }
+  const repoRoot = resolve(pickTaskString(
+    ctx?.data?.repoRoot,
+    ctx?.data?.workspace,
+    process.cwd(),
+  ));
+  if (!runtimeState.taskClaimsInitPromises[repoRoot]) {
+    runtimeState.taskClaimsInitPromises[repoRoot] = claims.initTaskClaims({ repoRoot }).catch((err) => {
+      delete runtimeState.taskClaimsInitPromises[repoRoot];
       throw err;
     });
   }
-  await _taskClaimsInitPromise;
+  await runtimeState.taskClaimsInitPromises[repoRoot];
 }
 async function ensureTaskComplexityMod() {
   if (!_taskComplexityMod) _taskComplexityMod = await import("../../task/task-complexity.mjs");
@@ -624,11 +647,14 @@ export {
   _noCommitCounts,
   _skipUntil,
   MAX_NO_COMMIT_ATTEMPTS,
+  NO_COMMIT_BASE_COOLDOWN_MS,
+  NO_COMMIT_MAX_COOLDOWN_MS,
 };
 
 export {
   deriveTaskBranch,
   looksLikeFilesystemPath,
+  normalizeMirroredRepoRoot,
   pickTaskString,
   resolveTaskRepositoryRoot,
 };

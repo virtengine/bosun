@@ -25,4 +25,10 @@ describe("workflow copilot integration surfaces", () => {
     expect(serverSource).toContain("function buildRunCopilotContextPayload");
     expect(serverSource).toContain('action === "copilot-context"');
   });
+
+  it("keeps run copilot context resilient when optional forensics calls fail", () => {
+    expect(serverSource).toContain("available: false");
+    expect(serverSource).toContain("Failed to load node forensics");
+    expect(serverSource).toContain("Failed to load run forensics");
+  });
 });

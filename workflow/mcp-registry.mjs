@@ -10,8 +10,12 @@
  *
  * EXPORTS:
  *   CURATED_MCP_CATALOG       — frozen array of known-good MCP server defs
+ *   MCP_STABILITY_TIERS       — supported registry stability tiers
+ *   RESEARCH_MCP_BUNDLES      — first-class research/scientific tool bundles
  *   listCatalog()             — read-only catalog query
  *   getCatalogEntry(id)       — single catalog entry by ID
+ *   listResearchToolBundles() — available research/scientific tool bundles
+ *   getResearchToolBundle()   — normalized research tool bundle by ID
  *   installMcpServer()        — one-click install from catalog or custom def
  *   uninstallMcpServer()      — remove an installed server
  *   listInstalledMcpServers() — all installed MCP servers
@@ -49,6 +53,83 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DISCOVERY_PROXY_SCRIPT = resolve(__dirname, "mcp-discovery-proxy.mjs");
 const DISCOVERY_PROXY_ID = "bosun-discovery-proxy";
 const DEFAULT_SHARED_HOST_STARTUP_TIMEOUT_MS = 5_000;
+export const MCP_STABILITY_TIERS = Object.freeze(["verified", "experimental"]);
+export const RESEARCH_MCP_BUNDLES = Object.freeze([
+  Object.freeze({
+    id: "scientific-evidence",
+    name: "Scientific Evidence",
+    description:
+      "Literature-first research bundle for Bosun evidence workflows: web search, document retrieval, PDF-capable corpus review, and runtime log evidence.",
+    recommendedMcpServers: Object.freeze(["fetch", "filesystem", "context7"]),
+    optionalMcpServers: Object.freeze(["exa", "brave-search", "microsoft-docs"]),
+    nativeCapabilities: Object.freeze([
+      Object.freeze({
+        id: "pdf-corpus-ingestion",
+        name: "PDF Corpus Ingestion",
+        description: "Bosun sidecar extracts and scores local PDF/text corpus files for grounded evidence bundles.",
+      }),
+      Object.freeze({
+        id: "runtime-log-query",
+        name: "Runtime Log Query",
+        description: "Bosun sidecar can pull bounded monitor/error/runtime log snippets into the same evidence artifact.",
+      }),
+      Object.freeze({
+        id: "reviewed-finding-promotion",
+        name: "Reviewed Finding Promotion",
+        description: "Only verifier-approved findings are promoted into shared knowledge while raw evidence stays in sidecar artifacts.",
+      }),
+    ]),
+    preferredSearchServers: Object.freeze(["exa", "brave-search", "fetch"]),
+    preferredDocumentServers: Object.freeze(["fetch", "filesystem", "context7", "microsoft-docs"]),
+    evidenceWorkflowIds: Object.freeze(["template-research-evidence-agent"]),
+    tags: Object.freeze(["research", "scientific-evidence", "citations", "pdf", "runtime-logs"]),
+  }),
+]);
+
+export function normalizeMcpStabilityTier(value, { fallback = "experimental" } = {}) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "verified" || normalized === "stable" || normalized === "production") {
+    return "verified";
+  }
+  if (
+    normalized === "experimental"
+    || normalized === "unverified"
+    || normalized === "preview"
+    || normalized === "beta"
+  ) {
+    return "experimental";
+  }
+  return fallback;
+}
+
+function normalizeResearchBundle(bundle) {
+  if (!bundle || typeof bundle !== "object") return null;
+  return {
+    ...bundle,
+    recommendedMcpServers: Array.isArray(bundle.recommendedMcpServers) ? [...bundle.recommendedMcpServers] : [],
+    optionalMcpServers: Array.isArray(bundle.optionalMcpServers) ? [...bundle.optionalMcpServers] : [],
+    preferredSearchServers: Array.isArray(bundle.preferredSearchServers) ? [...bundle.preferredSearchServers] : [],
+    preferredDocumentServers: Array.isArray(bundle.preferredDocumentServers) ? [...bundle.preferredDocumentServers] : [],
+    nativeCapabilities: Array.isArray(bundle.nativeCapabilities)
+      ? bundle.nativeCapabilities.map((entry) => ({ ...entry }))
+      : [],
+    evidenceWorkflowIds: Array.isArray(bundle.evidenceWorkflowIds) ? [...bundle.evidenceWorkflowIds] : [],
+    tags: Array.isArray(bundle.tags) ? [...bundle.tags] : [],
+  };
+}
+
+function normalizeCatalogEntry(entry) {
+  if (!entry || typeof entry !== "object") return entry;
+  const stabilityTier = normalizeMcpStabilityTier(entry.stabilityTier, {
+    fallback: entry.source === "catalog" ? "verified" : "experimental",
+  });
+  return {
+    ...entry,
+    stabilityTier,
+    installSurface: entry.installSurface || "curated",
+    tags: Array.isArray(entry.tags) ? [...entry.tags] : [],
+  };
+}
 
 /**
  * Curated catalog of popular, reliable MCP servers.
@@ -69,6 +150,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     args: ["-y", "@anthropic/mcp-github"],
     env: { GITHUB_PERSONAL_ACCESS_TOKEN: "" },
     tags: ["github", "vcs", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/anthropics/github-mcp-server",
   },
@@ -79,6 +161,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     transport: "url",
     url: "https://learn.microsoft.com/api/mcp",
     tags: ["docs", "microsoft", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://learn.microsoft.com",
   },
@@ -90,6 +173,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@upstash/context7-mcp"],
     tags: ["docs", "libraries", "community"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/nicepkg/context7",
   },
@@ -102,6 +186,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
     tags: ["reasoning", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/modelcontextprotocol/servers",
   },
@@ -113,6 +198,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
     tags: ["filesystem", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/modelcontextprotocol/servers",
   },
@@ -124,6 +210,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-fetch"],
     tags: ["web", "http", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/modelcontextprotocol/servers",
   },
@@ -135,6 +222,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-memory"],
     tags: ["memory", "knowledge-graph", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/modelcontextprotocol/servers",
   },
@@ -147,6 +235,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     args: ["-y", "@modelcontextprotocol/server-postgres"],
     env: { POSTGRES_CONNECTION_STRING: "" },
     tags: ["database", "postgres", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/modelcontextprotocol/servers",
   },
@@ -159,6 +248,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@playwright/mcp@latest"],
     tags: ["browser", "testing", "automation", "official"],
+    stabilityTier: "verified",
     source: "catalog",
     homepage: "https://github.com/nicholasrq/playwright-mcp",
   },
@@ -170,6 +260,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@anthropic/mcp-puppeteer"],
     tags: ["browser", "testing", "screenshot"],
+    stabilityTier: "experimental",
     source: "catalog",
     homepage: "https://github.com/anthropics/puppeteer-mcp-server",
   },
@@ -183,6 +274,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     args: ["-y", "@anthropic/mcp-brave-search"],
     env: { BRAVE_API_KEY: "" },
     tags: ["search", "web"],
+    stabilityTier: "experimental",
     source: "catalog",
     homepage: "https://github.com/anthropics/brave-search-mcp-server",
   },
@@ -195,6 +287,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     args: ["-y", "exa-mcp-server"],
     env: { EXA_API_KEY: "" },
     tags: ["search", "web", "ai"],
+    stabilityTier: "experimental",
     source: "catalog",
     homepage: "https://github.com/nicepkg/exa-mcp-server",
   },
@@ -208,6 +301,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     args: ["-y", "mcp-linear"],
     env: { LINEAR_API_KEY: "" },
     tags: ["project-management", "issues"],
+    stabilityTier: "experimental",
     source: "catalog",
     homepage: "https://github.com/nicepkg/mcp-linear",
   },
@@ -220,6 +314,7 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     args: ["-y", "@anthropic/mcp-slack"],
     env: { SLACK_BOT_TOKEN: "", SLACK_TEAM_ID: "" },
     tags: ["messaging", "slack"],
+    stabilityTier: "experimental",
     source: "catalog",
     homepage: "https://github.com/anthropics/slack-mcp-server",
   },
@@ -232,24 +327,32 @@ export const CURATED_MCP_CATALOG = Object.freeze([
     command: "npx",
     args: ["-y", "@anthropic/mcp-google-drive"],
     tags: ["cloud", "storage", "google"],
+    stabilityTier: "experimental",
     source: "catalog",
     homepage: "https://github.com/anthropics/google-drive-mcp-server",
   },
-]);
+].map((entry) => Object.freeze(normalizeCatalogEntry(entry))));
 
 // ── Catalog Queries ───────────────────────────────────────────────────────────
 
 /**
- * List all catalog entries, optionally filtered by tags.
- * @param {{ tags?: string[] }} [options]
+ * List catalog entries, defaulting to the verified install surface.
+ * @param {{ tags?: string[], stabilityTier?: string, includeExperimental?: boolean }} [options]
  * @returns {ReadonlyArray<Object>}
  */
-export function listCatalog({ tags } = {}) {
-  if (!tags || !tags.length) return CURATED_MCP_CATALOG;
-  const tagSet = new Set(tags.map((t) => t.toLowerCase()));
-  return CURATED_MCP_CATALOG.filter((entry) =>
-    entry.tags.some((t) => tagSet.has(t.toLowerCase())),
-  );
+export function listCatalog({ tags, stabilityTier, includeExperimental = false } = {}) {
+  const normalizedTier = normalizeMcpStabilityTier(stabilityTier, { fallback: null });
+  const tagSet = tags?.length
+    ? new Set(tags.map((t) => String(t || "").trim().toLowerCase()).filter(Boolean))
+    : null;
+  return CURATED_MCP_CATALOG.filter((entry) => {
+    if (normalizedTier && entry.stabilityTier !== normalizedTier) return false;
+    if (!normalizedTier && includeExperimental === false && entry.stabilityTier !== "verified") {
+      return false;
+    }
+    if (tagSet && !entry.tags.some((t) => tagSet.has(t.toLowerCase()))) return false;
+    return true;
+  });
 }
 
 /**
@@ -260,6 +363,32 @@ export function listCatalog({ tags } = {}) {
 export function getCatalogEntry(id) {
   const normalized = String(id || "").trim().toLowerCase();
   return CURATED_MCP_CATALOG.find((e) => e.id === normalized) || null;
+}
+
+export function listResearchToolBundles() {
+  return RESEARCH_MCP_BUNDLES.map((bundle) => normalizeResearchBundle(bundle));
+}
+
+export function getResearchToolBundle(id = "scientific-evidence", options = {}) {
+  const normalizedId = String(id || "scientific-evidence").trim().toLowerCase() || "scientific-evidence";
+  const includeExperimental = options.includeExperimental !== false;
+  const bundle = RESEARCH_MCP_BUNDLES.find((entry) => entry.id === normalizedId) || null;
+  if (!bundle) return null;
+  const normalized = normalizeResearchBundle(bundle);
+  const expandServers = (ids) =>
+    ids
+      .map((serverId) => getCatalogEntry(serverId))
+      .filter(Boolean)
+      .filter((entry) => includeExperimental || entry.stabilityTier === "verified");
+  const recommendedEntries = expandServers(normalized.recommendedMcpServers);
+  const optionalEntries = expandServers(normalized.optionalMcpServers);
+  return {
+    ...normalized,
+    recommendedCatalogEntries: recommendedEntries,
+    optionalCatalogEntries: optionalEntries,
+    recommendedServerIds: recommendedEntries.map((entry) => entry.id),
+    optionalServerIds: optionalEntries.map((entry) => entry.id),
+  };
 }
 
 function normalizeMcpEnv(env = {}, { requireAuth = true } = {}) {
@@ -316,9 +445,14 @@ function finalizeResolvedServer(server, options = {}) {
       server: {
         id: normalizedId,
         name: server?.name || normalizedId,
+        description: server?.description || "",
         transport,
         url,
         env,
+        stabilityTier: normalizeMcpStabilityTier(server?.stabilityTier, { fallback: null }),
+        installSurface: server?.installSurface || null,
+        source: server?.source || null,
+        homepage: server?.homepage || null,
       },
       error: null,
     };
@@ -335,11 +469,16 @@ function finalizeResolvedServer(server, options = {}) {
     server: {
       id: normalizedId,
       name: server?.name || normalizedId,
+      description: server?.description || "",
       transport,
       command,
       args: Array.isArray(server?.args) ? [...server.args] : [],
       url: null,
       env,
+      stabilityTier: normalizeMcpStabilityTier(server?.stabilityTier, { fallback: null }),
+      installSurface: server?.installSurface || null,
+      source: server?.source || null,
+      homepage: server?.homepage || null,
     },
     error: null,
   };
@@ -380,6 +519,10 @@ export async function installMcpServer(rootDir, catalogIdOrDef, { envOverrides }
   } else {
     throw new Error(`${TAG} installMcpServer requires a catalog ID string or server definition object`);
   }
+  serverDef.stabilityTier = normalizeMcpStabilityTier(serverDef.stabilityTier, {
+    fallback: serverDef.source === "catalog" ? "verified" : "experimental",
+  });
+  serverDef.installSurface = serverDef.installSurface || (serverDef.source === "catalog" ? "curated" : "custom");
 
   // Apply environment overrides
   if (envOverrides && typeof envOverrides === "object") {
@@ -393,6 +536,8 @@ export async function installMcpServer(rootDir, catalogIdOrDef, { envOverrides }
     name: serverDef.name,
     description: serverDef.description || "",
     tags: serverDef.tags || [],
+    stabilityTier: serverDef.stabilityTier,
+    installSurface: serverDef.installSurface,
     meta: {
       transport: serverDef.transport || "stdio",
       command: serverDef.command || null,
@@ -401,6 +546,8 @@ export async function installMcpServer(rootDir, catalogIdOrDef, { envOverrides }
       env: serverDef.env || {},
       source: serverDef.source || "catalog",
       homepage: serverDef.homepage || null,
+      stabilityTier: serverDef.stabilityTier,
+      installSurface: serverDef.installSurface,
     },
   }, serverDef);
 
@@ -486,11 +633,16 @@ export async function resolveMcpServersForAgent(rootDir, mcpServerIds = [], opti
         {
           id: entry.id,
           name: entry.name,
+          description: entry.description || config.description || "",
           transport: config.transport || entry.meta?.transport || "stdio",
           command: config.command || entry.meta?.command || null,
           args: config.args || entry.meta?.args || [],
           url: config.url || entry.meta?.url || null,
           env: config.env || entry.meta?.env || {},
+          source: config.source || entry.meta?.source || null,
+          homepage: config.homepage || entry.meta?.homepage || null,
+          stabilityTier: config.stabilityTier || entry.stabilityTier || entry.meta?.stabilityTier || null,
+          installSurface: config.installSurface || entry.installSurface || entry.meta?.installSurface || null,
         },
         { requireAuth },
       );
@@ -510,11 +662,16 @@ export async function resolveMcpServersForAgent(rootDir, mcpServerIds = [], opti
             {
               id: fallbackConfig.id,
               name: fallbackConfig.name,
+              description: fallbackConfig.description || "",
               transport: fallbackConfig.transport,
               command: fallbackConfig.command || null,
               args: fallbackConfig.args || [],
               url: fallbackConfig.url || null,
               env: fallbackConfig.env || {},
+              source: fallbackConfig.source || null,
+              homepage: fallbackConfig.homepage || null,
+              stabilityTier: fallbackConfig.stabilityTier || null,
+              installSurface: fallbackConfig.installSurface || null,
             },
             { requireAuth },
           );
@@ -542,11 +699,16 @@ export async function resolveMcpServersForAgent(rootDir, mcpServerIds = [], opti
           {
             id: config.id,
             name: config.name,
+            description: config.description || "",
             transport: config.transport,
             command: config.command || null,
             args: config.args || [],
             url: config.url || null,
             env: config.env || {},
+            source: config.source || null,
+            homepage: config.homepage || null,
+            stabilityTier: config.stabilityTier || null,
+            installSurface: config.installSurface || null,
           },
           { requireAuth },
         );

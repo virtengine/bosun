@@ -10,6 +10,7 @@ const _visionSessionState = new Map();
 const MAX_TRACE_TURNS = 12;
 const MAX_TURN_EVENTS = 40;
 const MAX_TURN_FINGERPRINTS = 32;
+const MAX_MULTIMODAL_FALLBACK_HISTORY = 8;
 const SECRET_KEY_PATTERN = /(token|key|secret|password|authorization|credential|cookie|client_secret|access_token)/i;
 
 function getSessionKey(sessionId) {
@@ -18,6 +19,47 @@ function getSessionKey(sessionId) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function cloneValue(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function uniqueStrings(values) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((entry) => String(entry ?? "").trim())
+      .filter(Boolean),
+  )];
+}
+
+function buildProfileSlug(value, fallback = "session") {
+  const src = String(value || "").trim().toLowerCase();
+  let result = "";
+  for (const ch of src) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch === "." || ch === "_") {
+      result += ch;
+    } else if (result.length > 0 && result[result.length - 1] !== "-") {
+      result += "-";
+    }
+  }
+  while (result.endsWith("-")) result = result.slice(0, -1);
+  while (result.startsWith("-")) result = result.slice(1);
+  return result || fallback;
+}
+
+function normalizeText(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeBoolean(value, fallback = false) {
+  if (value === true || value === false) return value;
+  const normalized = normalizeText(value).toLowerCase();
+  if (!normalized) return fallback;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
 function redactSecretLikeText(value) {
@@ -128,6 +170,87 @@ function annotateTurnFromEvent(turn, event) {
   }
 }
 
+function normalizeBrowserWorkerIsolation(input = {}, fallback = {}) {
+  const source = {
+    ...(fallback && typeof fallback === "object" ? fallback : {}),
+    ...(input && typeof input === "object" ? input : {}),
+  };
+  const sessionId = getSessionKey(source.sessionId || source.ownerSessionId || fallback?.sessionId);
+  const parentSessionId = getSessionKey(source.parentSessionId || fallback?.parentSessionId) || null;
+  const rootSessionId = getSessionKey(source.rootSessionId || fallback?.rootSessionId) || parentSessionId || sessionId || null;
+  const profileScope = normalizeText(source.profileScope || fallback?.profileScope || "isolated-subagent") || "isolated-subagent";
+  const profileId = normalizeText(
+    source.profileId
+    || fallback?.profileId
+    || `${buildProfileSlug(rootSessionId || "root", "root")}--${buildProfileSlug(sessionId || "session")}`,
+  ) || `${buildProfileSlug(rootSessionId || "root", "root")}--${buildProfileSlug(sessionId || "session")}`;
+  const multimodalFallback = normalizeMultimodalFallback(source.multimodalFallback, fallback?.multimodalFallback);
+  return {
+    workerId: normalizeText(source.workerId || fallback?.workerId || `browser-worker:${profileId}`) || `browser-worker:${profileId}`,
+    sessionId: sessionId || null,
+    ownerSessionId: sessionId || null,
+    parentSessionId,
+    rootSessionId,
+    profileId,
+    profileDir: normalizeText(source.profileDir || fallback?.profileDir || `.bosun/.cache/browser-workers/${profileId}`) || `.bosun/.cache/browser-workers/${profileId}`,
+    profileScope,
+    status: normalizeText(source.status || fallback?.status || "attached") || "attached",
+    requestedCapabilities: uniqueStrings(source.requestedCapabilities || fallback?.requestedCapabilities),
+    toolHints: uniqueStrings(source.toolHints || fallback?.toolHints),
+    multimodalFallback,
+    metadata: sanitizeTraceValue(source.metadata || fallback?.metadata || {}),
+    assignedAt: normalizeText(source.assignedAt || fallback?.assignedAt || "") || nowIso(),
+    updatedAt: nowIso(),
+    releasedAt: normalizeText(source.releasedAt || fallback?.releasedAt || "") || null,
+  };
+}
+
+function normalizeMultimodalFallback(input = {}, fallback = {}) {
+  const source = {
+    ...(fallback && typeof fallback === "object" ? fallback : {}),
+    ...(input && typeof input === "object" ? input : {}),
+  };
+  const history = Array.isArray(source.history)
+    ? source.history
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => ({
+          at: normalizeText(entry.at || entry.timestamp || "") || nowIso(),
+          reason: normalizeText(entry.reason || "") || null,
+          summary: normalizeText(entry.summary || entry.description || "") || null,
+          source: normalizeText(entry.source || "") || null,
+        }))
+        .slice(-MAX_MULTIMODAL_FALLBACK_HISTORY)
+    : [];
+  return {
+    enabled: normalizeBoolean(source.enabled, true),
+    mode: normalizeText(source.mode || "vision_summary_to_text") || "vision_summary_to_text",
+    available: normalizeBoolean(source.available, history.length > 0 || Boolean(normalizeText(source.summary || source.description || source.lastDescription))),
+    reason: normalizeText(source.reason || "") || null,
+    summary: normalizeText(source.summary || source.description || source.lastDescription || "") || null,
+    source: normalizeText(source.source || "") || null,
+    frameHash: normalizeText(source.frameHash || "") || null,
+    width: Number.isFinite(Number(source.width)) ? Number(source.width) : null,
+    height: Number.isFinite(Number(source.height)) ? Number(source.height) : null,
+    updatedAt: normalizeText(source.updatedAt || source.lastUpdatedAt || "") || null,
+    history,
+  };
+}
+
+function buildMultimodalFallbackDescription(state, fallback = {}) {
+  const summary = normalizeText(fallback.summary || state?.lastSummary || "");
+  const source = normalizeText(fallback.source || state?.lastFrameSource || "") || "screen";
+  const width = Number.isFinite(Number(fallback.width)) ? Number(fallback.width) : state?.lastFrameWidth;
+  const height = Number.isFinite(Number(fallback.height)) ? Number(fallback.height) : state?.lastFrameHeight;
+  const dimension = width && height ? ` (${width}x${height})` : "";
+  if (summary) {
+    return `[${source}${dimension}] ${summary}`;
+  }
+  if (state?.lastFrameHash) {
+    return `Visual context from ${source}${dimension} is available for text fallback.`;
+  }
+  return "";
+}
+
 export function getVisionSessionState(sessionId) {
   const key = getSessionKey(sessionId);
   if (!key) return null;
@@ -143,6 +266,20 @@ export function getVisionSessionState(sessionId) {
       lastFrameSource: "screen",
       lastFrameWidth: null,
       lastFrameHeight: null,
+      browserWorker: null,
+      multimodalFallback: {
+        enabled: true,
+        mode: "vision_summary_to_text",
+        available: false,
+        reason: null,
+        summary: null,
+        source: null,
+        frameHash: null,
+        width: null,
+        height: null,
+        updatedAt: null,
+        history: [],
+      },
       voiceTurnTrace: null,
     });
   }
@@ -153,6 +290,126 @@ export function clearVisionSessionState(sessionId) {
   const key = getSessionKey(sessionId);
   if (!key) return false;
   return _visionSessionState.delete(key);
+}
+
+export function ensureBrowserWorkerIsolation(sessionId, options = {}) {
+  const state = getVisionSessionState(sessionId);
+  if (!state) return null;
+  state.browserWorker = normalizeBrowserWorkerIsolation({
+    sessionId,
+    ...options,
+  }, state.browserWorker || {});
+  if (!state.multimodalFallback || typeof state.multimodalFallback !== "object") {
+    state.multimodalFallback = normalizeMultimodalFallback();
+  }
+  if (options.multimodalFallback || state.browserWorker?.multimodalFallback) {
+    state.multimodalFallback = normalizeMultimodalFallback(
+      state.browserWorker?.multimodalFallback || options.multimodalFallback,
+      state.multimodalFallback,
+    );
+  }
+  return cloneValue(state.browserWorker);
+}
+
+export function getBrowserWorkerIsolation(sessionId) {
+  const state = getVisionSessionState(sessionId);
+  if (!state?.browserWorker) return null;
+  return cloneValue(state.browserWorker);
+}
+
+export function listBrowserWorkerIsolations(options = {}) {
+  const rootSessionId = getSessionKey(options.rootSessionId);
+  const parentSessionId = getSessionKey(options.parentSessionId);
+  return [..._visionSessionState.values()]
+    .map((state) => state?.browserWorker || null)
+    .filter(Boolean)
+    .filter((worker) => {
+      if (rootSessionId && getSessionKey(worker.rootSessionId) !== rootSessionId) return false;
+      if (parentSessionId && getSessionKey(worker.parentSessionId) !== parentSessionId) return false;
+      return true;
+    })
+    .map((worker) => cloneValue(worker));
+}
+
+export function releaseBrowserWorkerIsolation(sessionId, reason = "released") {
+  const state = getVisionSessionState(sessionId);
+  if (!state?.browserWorker) return null;
+  const released = normalizeBrowserWorkerIsolation({
+    ...state.browserWorker,
+    status: "released",
+    releasedAt: nowIso(),
+    metadata: {
+      ...(state.browserWorker.metadata && typeof state.browserWorker.metadata === "object" ? state.browserWorker.metadata : {}),
+      releaseReason: normalizeText(reason) || "released",
+    },
+  }, state.browserWorker);
+  state.browserWorker = null;
+  return cloneValue(released);
+}
+
+export function recordMultimodalFallback(sessionId, input = {}) {
+  const state = getVisionSessionState(sessionId);
+  if (!state) return null;
+  const description = buildMultimodalFallbackDescription(state, input);
+  const nextHistoryEntry = {
+    at: nowIso(),
+    reason: normalizeText(input.reason || "") || null,
+    summary: normalizeText(input.summary || input.description || description) || null,
+    source: normalizeText(input.source || state.lastFrameSource || "") || null,
+  };
+  const fallback = normalizeMultimodalFallback({
+    ...state.multimodalFallback,
+    ...input,
+    available: Boolean(description),
+    summary: description || normalizeText(input.summary || input.description || ""),
+    source: normalizeText(input.source || state.lastFrameSource || ""),
+    frameHash: normalizeText(input.frameHash || state.lastFrameHash || ""),
+    width: Number.isFinite(Number(input.width)) ? Number(input.width) : state.lastFrameWidth,
+    height: Number.isFinite(Number(input.height)) ? Number(input.height) : state.lastFrameHeight,
+    updatedAt: nowIso(),
+    history: [
+      ...(Array.isArray(state.multimodalFallback?.history) ? state.multimodalFallback.history : []),
+      nextHistoryEntry,
+    ].slice(-MAX_MULTIMODAL_FALLBACK_HISTORY),
+  }, state.multimodalFallback);
+  state.multimodalFallback = fallback;
+  if (state.browserWorker) {
+    state.browserWorker = normalizeBrowserWorkerIsolation({
+      ...state.browserWorker,
+      multimodalFallback: fallback,
+    }, state.browserWorker);
+  }
+  return cloneValue(fallback);
+}
+
+export function describeMultimodalFallback(sessionId, options = {}) {
+  const state = getVisionSessionState(sessionId);
+  if (!state) {
+    return {
+      sessionId: getSessionKey(sessionId),
+      available: false,
+      description: "",
+      browserWorker: null,
+    };
+  }
+  const fallback = normalizeMultimodalFallback(options, state.multimodalFallback);
+  const description = normalizeText(
+    options.description
+    || options.summary
+    || fallback.summary
+    || buildMultimodalFallbackDescription(state, fallback),
+  );
+  return {
+    sessionId: getSessionKey(sessionId),
+    available: Boolean(description),
+    description,
+    browserWorker: cloneValue(state.browserWorker),
+    fallback: cloneValue({
+      ...fallback,
+      summary: description || fallback.summary,
+      available: Boolean(description),
+    }),
+  };
 }
 
 export function beginVoiceTurnTrace(sessionId, metadata = {}) {

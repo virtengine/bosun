@@ -11,16 +11,23 @@
  * @module session-tracker
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve, dirname, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildSessionInsights } from "../lib/session-insights.mjs";
-import { getSessionActivityFromStateLedger, upsertSessionRecordToStateLedger } from "../lib/state-ledger-sqlite.mjs";
+import {
+  deleteSessionRecordFromStateLedger,
+  getSessionActivityFromStateLedger,
+  upsertSessionRecordToStateLedger,
+} from "../lib/state-ledger-sqlite.mjs";
 import { isTestRuntime } from "./test-runtime.mjs";
 import { addCompletedSession } from "./runtime-accumulator.mjs";
+import { recordHarnessTelemetryEvent } from "./session-telemetry.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const requireModule = createRequire(import.meta.url);
+const { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } = requireModule("node:fs");
 const WORKSPACE_MIRROR_MARKER = `${sep}.bosun${sep}workspaces${sep}`.toLowerCase();
 
 function resolveSessionTrackerSourceRepoRoot(startDir = __dirname) {
@@ -42,8 +49,8 @@ const TAG = "[session-tracker]";
  *  Previously 10 — far too few for historic session review. */
 const DEFAULT_MAX_MESSAGES = 300;
 
-/** Default: keep a larger history for manual/primary chat sessions. */
-const DEFAULT_CHAT_MAX_MESSAGES = 2000;
+/** Default: keep a bounded history for manual/primary chat sessions. */
+const DEFAULT_CHAT_MAX_MESSAGES = 600;
 
 /** Maximum characters per message entry to prevent pathological memory bloat.
  *  100 000 chars (~25 000 words) is generous enough for any real agent response
@@ -53,6 +60,7 @@ const MAX_MESSAGE_CHARS = 100_000;
 
 /** Maximum total sessions to keep in memory. */
 const MAX_SESSIONS = 100;
+const RETIRED_SESSION_SUPPRESSION_MS = 5 * 60 * 1000;
 const TERMINAL_SESSION_STATUSES = new Set([
   "completed",
   "failed",
@@ -88,6 +96,37 @@ const REPO_BLOCK_PATTERNS = [
   /index contains uncommitted changes/i,
 ];
 
+const REPO_RECOVERY_PATTERNS = [
+  /git push[\s\S]{0,400}\(exit 0\)/i,
+  /gh pr create[\s\S]{0,400}\(exit 0\)/i,
+  /gh pr edit[\s\S]{0,400}\(exit 0\)/i,
+  /\bbranch pushed:\b/i,
+  /\bdraft pr:\s*`?#\d+/i,
+  /\bopened draft pr\b/i,
+  /\bcreated (?:the )?draft pr\b/i,
+  /\bpre-push hook\b[\s\S]{0,120}\bpassed\b/i,
+];
+
+function hasRepoRecoveryText(text) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return REPO_RECOVERY_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+const PLAN_HANDOFF_PATTERN_GROUPS = [
+  [/\barchitect handoff\b/i, /\bno planning-side code changes were made\b/i],
+  [/\barchitect handoff\b/i, /\bno code changes were made in this planning phase\b/i],
+  [/\barchitect handoff\b/i, /\bcompletion:\s*architect plan produced\b/i],
+];
+
+function hasPlanHandoffText(text) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return PLAN_HANDOFF_PATTERN_GROUPS.some((group) =>
+    group.every((pattern) => pattern.test(normalized)),
+  );
+}
+
 const ENV_BLOCK_PATTERNS = [
   /prompt quality/i,
   /missing task (description|url)/i,
@@ -101,7 +140,8 @@ const ENV_BLOCK_PATTERNS = [
   /authentication failed/i,
   /not authenticated/i,
   /missing credentials/i,
-  /token/i,
+  /\b(?:access|auth|oauth|api|bearer|refresh|session|credential|credentials|missing|invalid|expired)\s+tokens?\b/i,
+  /\btokens?\s+(?:missing|invalid|expired|required|not found)\b/i,
   /connection refused/i,
   /connection reset/i,
   /network/i,
@@ -113,10 +153,22 @@ const ENV_BLOCK_PATTERNS = [
 const COMMIT_BLOCK_PATTERNS = [
   /commit blocked/i,
   /implementation_done_commit_blocked/i,
-  /git commit/i,
-  /git push/i,
+];
+
+const COMMIT_BLOCK_CONTEXT_PATTERNS = [
   /pre-push hook/i,
-  /hook/i,
+  /\bgit commit\b/i,
+  /\bgit push\b/i,
+];
+
+const COMMIT_BLOCK_FAILURE_PATTERNS = [
+  /\bfailed\b/i,
+  /\bdeclined\b/i,
+  /\brejected\b/i,
+  /\bblocked\b/i,
+  /\btimeout\b/i,
+  /\betimedout\b/i,
+  /not completed/i,
 ];
 
 function isTerminalSessionStatus(status) {
@@ -170,10 +222,21 @@ function hasMeaningfulSessionOutput(session) {
 function classifyBlockedSessionText(text) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
+  if (hasRepoRecoveryText(normalized)) return null;
   if (COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return "implementation_done_commit_blocked";
   }
-  if (REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  if (
+    COMMIT_BLOCK_CONTEXT_PATTERNS.some((pattern) => pattern.test(normalized))
+    && COMMIT_BLOCK_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
+    return "implementation_done_commit_blocked";
+  }
+  if (
+    REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))
+    && !hasRepoRecoveryText(normalized)
+    && !hasPlanHandoffText(normalized)
+  ) {
     return "blocked_by_repo";
   }
   if (ENV_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
@@ -262,6 +325,26 @@ function normalizeSessionMetadata(metadata = {}) {
   normalized.delegationDepth = Number.isFinite(delegationDepth)
     ? Math.max(0, Math.trunc(delegationDepth))
     : 0;
+  if (Array.isArray(source.queuedFollowups)) {
+    normalized.queuedFollowups = source.queuedFollowups
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") return null;
+        const content = String(entry.content ?? entry.message ?? "").trim();
+        const attachments = Array.isArray(entry.attachments) ? entry.attachments.filter(Boolean).slice(0, 20) : [];
+        if (!content && attachments.length === 0) return null;
+        return {
+          id: String(entry.id || `queued-${randomToken(10)}`).trim(),
+          content: content.slice(0, MAX_MESSAGE_CHARS),
+          queuedAt: String(entry.queuedAt || entry.createdAt || new Date().toISOString()).trim() || new Date().toISOString(),
+          deliveryMode: String(entry.deliveryMode || entry.mode || "queue").trim() || "queue",
+          agent: String(entry.agent || "").trim() || null,
+          model: String(entry.model || "").trim() || null,
+          attachments,
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 50);
+  }
   return normalized;
 }
 
@@ -362,8 +445,16 @@ function extractUsageFromMeta(meta) {
   const totalTokens = normalizeTokenNumber(
     usage.totalTokens ?? usage.total_tokens ?? (inputTokens + outputTokens),
   );
-  if (inputTokens <= 0 && outputTokens <= 0 && totalTokens <= 0) return null;
-  return { inputTokens, outputTokens, totalTokens };
+  const cacheInputTokens = normalizeTokenNumber(
+    usage.cacheInputTokens
+    ?? usage.cachedInputTokens
+    ?? usage.cache_input_tokens
+    ?? usage.cached_input_tokens
+    ?? usage.prompt_tokens_details?.cached_tokens
+    ?? usage.input_tokens_details?.cached_tokens,
+  );
+  if (inputTokens <= 0 && outputTokens <= 0 && totalTokens <= 0 && cacheInputTokens <= 0) return null;
+  return { inputTokens, outputTokens, totalTokens, cacheInputTokens };
 }
 
 function cloneTurns(turns) {
@@ -375,7 +466,8 @@ function sumTurnTokenUsage(turns = []) {
     inputTokens: acc.inputTokens + (Number(turn?.inputTokens) || 0),
     outputTokens: acc.outputTokens + (Number(turn?.outputTokens) || 0),
     totalTokens: acc.totalTokens + (Number(turn?.totalTokens) || 0),
-  }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+    cacheInputTokens: acc.cacheInputTokens + (Number(turn?.cacheInputTokens) || 0),
+  }), { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheInputTokens: 0 });
 }
 
 function resolveSessionTokenUsage(session, turns = null) {
@@ -389,6 +481,7 @@ function resolveSessionTokenUsage(session, turns = null) {
           inputTokens: 0,
           outputTokens: 0,
           totalTokens: 0,
+          cacheInputTokens: 0,
         });
 }
 
@@ -600,7 +693,7 @@ function buildSessionSummaryRecord(session, { progress = null, preview = null, r
     return derivedRuntimeState || progressStatus;
   })();
   const isLive = runtimeIsLive == null
-    ? Boolean(progress && progress.status !== "ended" && progress.status !== "not_found")
+    ? Boolean(progress && progress.status === "active")
     : Boolean(runtimeIsLive);
   const status = progressStatus === "ended"
     ? lifecycleStatus
@@ -637,6 +730,7 @@ function buildSessionSummaryRecord(session, { progress = null, preview = null, r
     tokenCount: effectiveTokenUsage.totalTokens || 0,
     inputTokens: effectiveTokenUsage.inputTokens || 0,
     outputTokens: effectiveTokenUsage.outputTokens || 0,
+    cacheInputTokens: effectiveTokenUsage.cacheInputTokens || 0,
     tokenUsage: effectiveTokenUsage,
     createdAt: session?.createdAt || new Date(session?.startedAt || Date.now()).toISOString(),
     lastActiveAt,
@@ -651,6 +745,118 @@ function buildSessionSummaryRecord(session, { progress = null, preview = null, r
     totalTokens: effectiveTokenUsage.totalTokens || 0,
     insights: session?.insights || null,
     ...telemetry,
+  };
+}
+
+function buildLightweightSessionSummaryRecord(
+  session,
+  { progress = null, preview = null, runtimeUpdatedAt = null, runtimeIsLive = null } = {},
+) {
+  const s = session;
+  const sessionId = session?.id || session?.taskId;
+  const turns = Array.isArray(session?.turns)
+    ? cloneTurns(session.turns)
+    : (Array.isArray(session?.insights?.turnTimeline)
+      ? cloneTurns(session.insights.turnTimeline)
+      : []);
+  const lastActiveAt = String(
+    session?.lastActiveAt
+      || runtimeUpdatedAt
+      || (session?.lastActivityAt ? new Date(session.lastActivityAt).toISOString() : "")
+      || new Date(session?.startedAt || Date.now()).toISOString(),
+  ).trim();
+  const lifecycleStatus = String(session?.status || "active").trim() || "active";
+  const progressStatus = String(progress?.status || "").trim() || null;
+  const runtimeState = (() => {
+    if (!progressStatus || progressStatus === "ended" || progressStatus === "not_found") {
+      return null;
+    }
+    return progressStatus;
+  })();
+  const isLive = runtimeIsLive == null
+    ? Boolean(progress && progress.status === "active")
+    : Boolean(runtimeIsLive);
+  const status = progressStatus === "ended"
+    ? lifecycleStatus
+    : (runtimeState || lifecycleStatus);
+  const normalizedPreview = preview == null ? null : String(preview || "").trim() || null;
+  const turnCount = Math.max(
+    0,
+    Number(session?.turnCount) || 0,
+    turns.length,
+  );
+  const totalEvents = Math.max(
+    0,
+    Number(session?.totalEvents ?? session?.eventCount ?? 0) || 0,
+  );
+  const tokenUsage =
+    resolveSessionTokenUsage(
+      session,
+      Array.isArray(session?.turns)
+        ? cloneTurns(session.turns)
+        : (Array.isArray(session?.insights?.turnTimeline)
+          ? cloneTurns(session.insights.turnTimeline)
+          : []),
+    )
+    || (session?.tokenUsage && typeof session.tokenUsage === "object"
+      ? session.tokenUsage
+      : {});
+
+  return {
+    id: sessionId,
+    taskId: session?.taskId || sessionId,
+    title: session?.taskTitle || session?.title || null,
+    type: session?.type || "task",
+    status,
+    lifecycleStatus,
+    runtimeState,
+    runtimeUpdatedAt: lastActiveAt,
+    runtimeIsLive: isLive,
+    workspaceId: String(s?.metadata?.workspaceId || "").trim() || null,
+    workspaceDir: String(s?.metadata?.workspaceDir || "").trim() || null,
+    workspaceRoot: String(s?.metadata?.workspaceRoot || "").trim() || null,
+    branch: String(session?.metadata?.branch || "").trim() || null,
+    workflowId: String(session?.metadata?.workflowId || "").trim() || null,
+    workflowName: String(session?.metadata?.workflowName || "").trim() || null,
+    rootTaskId: String(session?.metadata?.rootTaskId || "").trim() || null,
+    parentTaskId: String(session?.metadata?.parentTaskId || "").trim() || null,
+    rootSessionId: String(session?.metadata?.rootSessionId || "").trim() || null,
+    parentSessionId: String(session?.metadata?.parentSessionId || "").trim() || null,
+    rootRunId: String(session?.metadata?.rootRunId || "").trim() || null,
+    parentRunId: String(session?.metadata?.parentRunId || "").trim() || null,
+    delegationDepth: Number.isFinite(Number(session?.metadata?.delegationDepth))
+      ? Math.max(0, Math.trunc(Number(session.metadata.delegationDepth)))
+      : 0,
+    turnCount,
+    turns,
+    tokenCount: Number(session?.tokenCount ?? tokenUsage.totalTokens ?? session?.totalTokens ?? 0) || 0,
+    inputTokens: Number(session?.inputTokens ?? tokenUsage.inputTokens ?? 0) || 0,
+    outputTokens: Number(session?.outputTokens ?? tokenUsage.outputTokens ?? 0) || 0,
+    cacheInputTokens: Number(session?.cacheInputTokens ?? tokenUsage.cacheInputTokens ?? 0) || 0,
+    tokenUsage: {
+      totalTokens: Number(session?.tokenCount ?? tokenUsage.totalTokens ?? session?.totalTokens ?? 0) || 0,
+      inputTokens: Number(session?.inputTokens ?? tokenUsage.inputTokens ?? 0) || 0,
+      outputTokens: Number(session?.outputTokens ?? tokenUsage.outputTokens ?? 0) || 0,
+      cacheInputTokens: Number(session?.cacheInputTokens ?? tokenUsage.cacheInputTokens ?? 0) || 0,
+    },
+    createdAt: session?.createdAt || new Date(session?.startedAt || Date.now()).toISOString(),
+    lastActiveAt,
+    idleMs: progress?.idleMs ?? 0,
+    elapsedMs: progress?.elapsedMs ?? Math.max(
+      0,
+      Number(session?.endedAt || Date.now()) - Number(session?.startedAt || Date.now()),
+    ),
+    recommendation: progress?.recommendation || "none",
+    preview: normalizedPreview,
+    lastMessage: normalizedPreview,
+    totalTokens: Number(session?.totalTokens ?? tokenUsage.totalTokens ?? session?.tokenCount ?? 0) || 0,
+    totalEvents,
+    eventCount: totalEvents,
+    insights: session?.insights || null,
+    metadata:
+      session?.metadata && typeof session.metadata === "object"
+        ? { ...session.metadata }
+        : {},
   };
 }
 
@@ -783,19 +989,32 @@ function mergeSessionLedgerRecordWithExisting(record, existingActivity) {
 function persistSessionRecordToStateLedger(session) {
   const record = buildStateLedgerSessionRecord(session);
   if (!record) return;
-  const explicitLedgerPath = String(process.env.BOSUN_STATE_LEDGER_PATH || "").trim();
-  const explicitRepoRoot = String(process.env.REPO_ROOT || "").trim();
-  const ledgerOptions = explicitRepoRoot
-    ? { repoRoot: resolve(explicitRepoRoot) }
-    : explicitLedgerPath && isTestRuntime()
-      ? { ledgerPath: explicitLedgerPath }
-      : { repoRoot: SESSION_TRACKER_REPO_ROOT };
+  const ledgerOptions = resolveSessionLedgerPersistenceOptions();
   try {
     const existing = getSessionActivityFromStateLedger(record.sessionId, ledgerOptions);
     upsertSessionRecordToStateLedger(
       mergeSessionLedgerRecordWithExisting(record, existing),
       ledgerOptions,
     );
+  } catch {
+    // Best-effort persistence — session tracking should continue even if the
+    // durable index is temporarily unavailable.
+  }
+}
+
+function resolveSessionLedgerPersistenceOptions() {
+  const explicitLedgerPath = String(process.env.BOSUN_STATE_LEDGER_PATH || "").trim();
+  const explicitRepoRoot = String(process.env.REPO_ROOT || "").trim();
+  return explicitRepoRoot
+    ? { repoRoot: resolve(explicitRepoRoot) }
+    : explicitLedgerPath && isTestRuntime()
+      ? { ledgerPath: explicitLedgerPath }
+      : { repoRoot: SESSION_TRACKER_REPO_ROOT };
+}
+
+function deleteSessionRecordFromDurableLedger(sessionId) {
+  try {
+    deleteSessionRecordFromStateLedger(sessionId, resolveSessionLedgerPersistenceOptions());
   } catch {
     // Best-effort persistence — session tracking should continue even if the
     // durable index is temporarily unavailable.
@@ -858,6 +1077,7 @@ function updateTurnTimeline(session, msg) {
     turn.inputTokens = Math.max(turn.inputTokens || 0, usage.inputTokens || 0);
     turn.outputTokens = Math.max(turn.outputTokens || 0, usage.outputTokens || 0);
     turn.totalTokens = Math.max(turn.totalTokens || 0, usage.totalTokens || 0);
+    turn.cacheInputTokens = Math.max(turn.cacheInputTokens || 0, usage.cacheInputTokens || 0);
     if (!session.insights || typeof session.insights !== "object") {
       session.insights = {};
     }
@@ -865,11 +1085,13 @@ function updateTurnTimeline(session, msg) {
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
+      cacheInputTokens: 0,
     };
     session.insights.tokenUsage = {
       inputTokens: Math.max(priorUsage.inputTokens, usage.inputTokens || 0),
       outputTokens: Math.max(priorUsage.outputTokens, usage.outputTokens || 0),
       totalTokens: Math.max(priorUsage.totalTokens, usage.totalTokens || 0),
+      cacheInputTokens: Math.max(priorUsage.cacheInputTokens, usage.cacheInputTokens || 0),
     };
   }
   turn.durationMs = Math.max(0, Number(turn.endedAt || timestampMs) - Number(turn.startedAt || timestampMs));
@@ -928,6 +1150,61 @@ function emitSessionEvent(session, message) {
   }
 }
 
+function buildSessionTelemetryEvent(session, eventType, payload = {}, message = null) {
+  const tokenUsage = message?.meta?.usage && typeof message.meta.usage === "object"
+    ? {
+        inputTokens: Number(message.meta.usage.inputTokens || message.meta.usage.promptTokens || 0),
+        outputTokens: Number(message.meta.usage.outputTokens || message.meta.usage.completionTokens || 0),
+        totalTokens: Number(message.meta.usage.totalTokens || 0),
+        cacheInputTokens: Number(
+          message.meta.usage.cacheInputTokens
+          || message.meta.usage.cachedInputTokens
+          || message.meta.usage.prompt_tokens_details?.cached_tokens
+          || 0,
+        ),
+      }
+    : null;
+  return {
+    timestamp: payload.timestamp || message?.timestamp || session?.lastActiveAt || new Date().toISOString(),
+    eventType,
+    type: eventType,
+    source: "session-tracker",
+    category: "session",
+    taskId: session?.taskId || session?.id,
+    sessionId: session?.id || session?.taskId,
+    runId: session?.metadata?.rootRunId || session?.metadata?.taskSessionId || null,
+    rootRunId: session?.metadata?.rootRunId || null,
+    parentRunId: session?.metadata?.parentRunId || null,
+    workflowId: session?.metadata?.workflowId || null,
+    workflowName: session?.metadata?.workflowName || null,
+    threadId: session?.metadata?.threadId || session?.metadata?.activeThreadId || null,
+    providerId: session?.metadata?.providerId || session?.executor || null,
+    modelId: session?.model || session?.metadata?.modelId || null,
+    toolId: message?.name || payload.toolId || null,
+    toolName: message?.name || payload.toolName || null,
+    approvalId: payload.approvalId || null,
+    actor: payload.actor || session?.metadata?.agentId || session?.type || "session",
+    status: payload.status || session?.status || null,
+    retryCount: payload.retryCount || null,
+    tokenUsage,
+    summary: payload.summary || message?.content || session?.taskTitle || null,
+    reason: payload.reason || null,
+    message: message?.content || null,
+    payload: {
+      messageType: message?.type || null,
+      role: message?.role || null,
+      status: payload.status || session?.status || null,
+      eventCount: Number(session?.totalEvents || 0),
+    },
+    meta: {
+      source: "session-tracker",
+      workspaceId: session?.metadata?.workspaceId || null,
+      workspaceDir: session?.metadata?.workspaceDir || null,
+      branch: session?.metadata?.branch || null,
+    },
+  };
+}
+
 function emitSessionStateEvent(session, reason, extra = {}) {
   if (!session || SESSION_STATE_LISTENERS.size === 0) return;
   const normalizedReason = String(reason || "updated").trim() || "updated";
@@ -973,6 +1250,9 @@ export class SessionTracker {
 
   /** @type {Set<string>} session IDs with pending disk writes */
   #dirty = new Set();
+
+  /** @type {Map<string, number>} recently retired session IDs suppressed from auto-recreation */
+  #retiredSessions = new Map();
 
   /** @type {{ loadedAt: number, sessions: Array<Object> }} */
   #persistedSummaryCache = { loadedAt: 0, sessions: [] };
@@ -1051,6 +1331,10 @@ export class SessionTracker {
     });
     const session = this.#sessions.get(taskId);
     this.#markDirty(taskId);
+    recordHarnessTelemetryEvent(buildSessionTelemetryEvent(session, "session.started", {
+      summary: taskTitle || taskId,
+      status: session.status,
+    }));
     emitSessionStateEvent(session, "session-created", { title: taskTitle || taskId });
   }
 
@@ -1075,6 +1359,11 @@ export class SessionTracker {
 
     // Auto-create session if it doesn't exist yet
     if (!session) {
+      this.getSessionMessages(taskId);
+      session = this.#sessions.get(taskId);
+    }
+    if (!session) {
+      if (this.#isSessionRetired(taskId)) return;
       if (event && (event.role || event.type)) {
         this.#autoCreateSession(taskId, event);
         session = this.#sessions.get(taskId);
@@ -1108,6 +1397,7 @@ export class SessionTracker {
       this.#scheduleDerivedStateRefresh(session);
       this.#markDirty(taskId);
       persistSessionRecordToStateLedger(session);
+      recordHarnessTelemetryEvent(buildSessionTelemetryEvent(session, "session.event", {}, msg));
       emitSessionEvent(session, msg);
       return;
     }
@@ -1148,6 +1438,7 @@ export class SessionTracker {
       this.#scheduleDerivedStateRefresh(session);
       this.#markDirty(taskId);
       persistSessionRecordToStateLedger(session);
+      recordHarnessTelemetryEvent(buildSessionTelemetryEvent(session, "session.message", {}, msg));
       emitSessionEvent(session, msg);
       return;
     }
@@ -1171,6 +1462,7 @@ export class SessionTracker {
     this.#scheduleDerivedStateRefresh(session);
     this.#markDirty(taskId);
     persistSessionRecordToStateLedger(session);
+    recordHarnessTelemetryEvent(buildSessionTelemetryEvent(session, "session.activity", {}, msg));
     emitSessionEvent(session, msg);
   }
 
@@ -1199,6 +1491,10 @@ export class SessionTracker {
     this.#markDirty(taskId);
     this.#flushDirty();
     persistSessionRecordToStateLedger(session);
+    recordHarnessTelemetryEvent(buildSessionTelemetryEvent(session, "session.ended", {
+      status: session.status,
+      reason: "session-ended",
+    }));
     emitSessionStateEvent(session, "session-ended", { status: session.status });
   }
 
@@ -1350,11 +1646,13 @@ export class SessionTracker {
    * @param {string} taskId
    */
   removeSession(taskId) {
+    this.#markSessionRetired(taskId);
     const session = this.#sessions.get(taskId);
     this.#accumulateCompletedSession(session, taskId);
     this.#sessions.delete(taskId);
     this.#dirty.delete(taskId);
     this.#invalidatePersistedSummaryCache();
+    deleteSessionRecordFromDurableLedger(taskId);
     // Remove persisted session file if it exists
     if (this.#persistDir) {
       try {
@@ -1385,6 +1683,7 @@ export class SessionTracker {
    * @param {{ id: string, type?: string, taskId?: string, metadata?: Object }} opts
    */
   createSession({ id, type = "manual", taskId, metadata = {}, maxMessages, sessionKey }) {
+    this.#clearRetiredSession(id);
     // Evict oldest non-active sessions if at capacity
     if (this.#sessions.size >= MAX_SESSIONS && !this.#sessions.has(id)) {
       this.#evictOldest();
@@ -1439,15 +1738,19 @@ export class SessionTracker {
    */
   listAllSessions(options = {}) {
     const includePersisted = options.includePersisted !== false;
+    const lightweight = options.lightweight === true;
+    const includeRuntimeProgress = options.includeRuntimeProgress !== false;
     const byId = new Map();
-    const addSummary = (s, options = {}) => {
+    const addSummary = (s) => {
       if (!s) return;
       const sessionId = s.id || s.taskId;
-      const includeRuntimeProgress = options.includeRuntimeProgress !== false;
       const progress = includeRuntimeProgress && s.status === "active"
         ? this.getProgressStatus(sessionId)
         : null;
-      byId.set(sessionId, buildSessionSummaryRecord(s, {
+      const summaryBuilder = lightweight
+        ? buildLightweightSessionSummaryRecord
+        : buildSessionSummaryRecord;
+      byId.set(sessionId, summaryBuilder(s, {
         progress,
         preview: this.#lastMessagePreview(s),
       }));
@@ -1458,16 +1761,24 @@ export class SessionTracker {
     }
 
     if (includePersisted) {
-      for (const persisted of this.#readPersistedSessionSummaries()) {
+      for (const persisted of this.#readPersistedSessionSummaries({ lightweight })) {
         if (!persisted) continue;
         const sessionId = persisted.id || persisted.taskId;
         if (!sessionId || byId.has(sessionId)) continue;
-        byId.set(sessionId, {
-          ...persisted,
-          turns: Array.isArray(persisted.turns)
-            ? persisted.turns.map((turn) => ({ ...turn }))
-            : [],
-        });
+        byId.set(sessionId, lightweight
+          ? {
+              ...persisted,
+              metadata:
+                persisted?.metadata && typeof persisted.metadata === "object"
+                  ? { ...persisted.metadata }
+                  : {},
+            }
+          : {
+              ...persisted,
+              turns: Array.isArray(persisted.turns)
+                ? persisted.turns.map((turn) => ({ ...turn }))
+                : [],
+            });
       }
     }
 
@@ -1521,7 +1832,11 @@ export class SessionTracker {
    * @param {string} status
    */
   updateSessionStatus(sessionId, status) {
-    const session = this.#sessions.get(sessionId);
+    let session = this.#sessions.get(sessionId);
+    if (!session) {
+      this.getSessionMessages(sessionId);
+      session = this.#sessions.get(sessionId);
+    }
     if (!session) return;
     session.status = isTerminalSessionStatus(status)
       ? deriveTerminalSessionStatus(session, status)
@@ -1536,6 +1851,87 @@ export class SessionTracker {
     emitSessionStateEvent(session, "session-status", { status: session.status });
   }
 
+  touchSession(sessionId) {
+    const session = this.#sessions.get(sessionId);
+    if (!session) return false;
+    session.lastActivityAt = Date.now();
+    session.lastActiveAt = new Date().toISOString();
+    this.#scheduleDerivedStateRefresh(session, { force: true });
+    this.#markDirty(sessionId);
+    persistSessionRecordToStateLedger(session);
+    return true;
+  }
+
+  updateSessionMetadata(sessionId, updater) {
+    const session = this.#sessions.get(sessionId);
+    if (!session) return null;
+    const currentMetadata =
+      session.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata)
+        ? { ...session.metadata }
+        : {};
+    const nextValue = typeof updater === "function"
+      ? updater(currentMetadata)
+      : { ...currentMetadata, ...(updater && typeof updater === "object" ? updater : {}) };
+    const nextMetadata = normalizeSessionMetadata(nextValue || {});
+    session.metadata = nextMetadata;
+    session.lastActivityAt = Date.now();
+    session.lastActiveAt = new Date().toISOString();
+    this.#scheduleDerivedStateRefresh(session, { force: true });
+    this.#markDirty(sessionId);
+    persistSessionRecordToStateLedger(session);
+    emitSessionStateEvent(session, "session-metadata", { metadata: nextMetadata });
+    return nextMetadata;
+  }
+
+  enqueueFollowup(sessionId, payload = {}) {
+    const content = String(payload?.content ?? payload?.message ?? "").trim();
+    const attachments = Array.isArray(payload?.attachments) ? payload.attachments.filter(Boolean).slice(0, 20) : [];
+    if (!content && attachments.length === 0) return null;
+    let queuedEntry = null;
+    const metadata = this.updateSessionMetadata(sessionId, (currentMetadata = {}) => {
+      const queuedFollowups = Array.isArray(currentMetadata.queuedFollowups)
+        ? currentMetadata.queuedFollowups.slice()
+        : [];
+        queuedEntry = {
+          id: `queued-${Date.now()}-${randomToken(6)}`,
+          content: content.slice(0, MAX_MESSAGE_CHARS),
+          queuedAt: new Date().toISOString(),
+          deliveryMode: String(payload?.deliveryMode || payload?.mode || "queue").trim() || "queue",
+          agent: String(payload?.agent || "").trim() || null,
+          model: String(payload?.model || "").trim() || null,
+          attachments,
+        };
+      queuedFollowups.push(queuedEntry);
+      return {
+        ...currentMetadata,
+        queuedFollowups,
+      };
+    });
+    if (!metadata || !queuedEntry) return null;
+    return {
+      entry: queuedEntry,
+      queuedFollowups: Array.isArray(metadata.queuedFollowups) ? metadata.queuedFollowups.slice() : [],
+    };
+  }
+
+  dequeueFollowup(sessionId) {
+    let dequeuedEntry = null;
+    const metadata = this.updateSessionMetadata(sessionId, (currentMetadata = {}) => {
+      const queuedFollowups = Array.isArray(currentMetadata.queuedFollowups)
+        ? currentMetadata.queuedFollowups.slice()
+        : [];
+      dequeuedEntry = queuedFollowups.shift() || null;
+      return {
+        ...currentMetadata,
+        queuedFollowups,
+      };
+    });
+    return {
+      entry: dequeuedEntry,
+      queuedFollowups: Array.isArray(metadata?.queuedFollowups) ? metadata.queuedFollowups.slice() : [],
+    };
+  }
+
   /**
    * Rename a session (update its title).
    * @param {string} sessionId
@@ -1546,6 +1942,10 @@ export class SessionTracker {
     if (!session) return;
     session.taskTitle = newTitle;
     session.title = newTitle;
+    session.metadata = session.metadata && typeof session.metadata === "object"
+      ? session.metadata
+      : {};
+    session.metadata.title = newTitle;
     this.#markDirty(sessionId);
     persistSessionRecordToStateLedger(session);
     emitSessionStateEvent(session, "session-renamed", { title: newTitle });
@@ -1715,6 +2115,7 @@ export class SessionTracker {
 
   /** Auto-create a session when recordEvent is called for an unknown taskId. */
   #autoCreateSession(taskId, event) {
+    if (this.#isSessionRetired(taskId)) return;
     const type = event._sessionType || "task";
     this.createSession({
       id: taskId,
@@ -1723,6 +2124,32 @@ export class SessionTracker {
       taskId,
       metadata: { autoCreated: true },
     });
+  }
+
+  #markSessionRetired(taskId, ttlMs = RETIRED_SESSION_SUPPRESSION_MS) {
+    const sessionId = String(taskId || "").trim();
+    if (!sessionId) return;
+    const ttl = Number(ttlMs);
+    const expiresAt = Date.now() + (Number.isFinite(ttl) && ttl > 0 ? ttl : 0);
+    this.#retiredSessions.set(sessionId, expiresAt);
+  }
+
+  #clearRetiredSession(taskId) {
+    const sessionId = String(taskId || "").trim();
+    if (!sessionId) return;
+    this.#retiredSessions.delete(sessionId);
+  }
+
+  #isSessionRetired(taskId) {
+    const sessionId = String(taskId || "").trim();
+    if (!sessionId) return false;
+    const expiresAt = Number(this.#retiredSessions.get(sessionId) || 0);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+      this.#retiredSessions.delete(sessionId);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -1928,6 +2355,15 @@ export class SessionTracker {
       return { id, kind: "agent_message", summary: content.slice(0, 200), timestamp: eventTimestamp };
     }
 
+    if (event?.type === "session.turn.complete" && event?.text) {
+      return {
+        id,
+        kind: "agent_message",
+        summary: String(event.text).slice(0, 200),
+        timestamp: eventTimestamp,
+      };
+    }
+
     return null;
   }
 
@@ -2130,10 +2566,12 @@ export class SessionTracker {
     this.#persistedSummaryCache = { loadedAt: 0, sessions: [] };
   }
 
-  #readPersistedSessionSummaries() {
+  #readPersistedSessionSummaries(options = {}) {
     if (!this.#persistDir || !existsSync(this.#persistDir)) {
       return [];
     }
+
+    const lightweight = options.lightweight === true;
 
     const now = Date.now();
     if (
@@ -2141,7 +2579,15 @@ export class SessionTracker {
       now - Number(this.#persistedSummaryCache.loadedAt || 0) <
         PERSISTED_SESSION_LIST_CACHE_TTL_MS
     ) {
-      return this.#persistedSummaryCache.sessions;
+      return lightweight
+        ? this.#persistedSummaryCache.sessions.map((session) => ({
+            ...session,
+            metadata:
+              session?.metadata && typeof session.metadata === "object"
+                ? { ...session.metadata }
+                : {},
+          }))
+        : this.#persistedSummaryCache.sessions;
     }
 
     const sessions = [];
@@ -2218,6 +2664,7 @@ export class SessionTracker {
 
       if (itemType === "agent_message" && item.text) {
         return {
+          id: item.id || event.itemId || undefined,
           type: "agent_message",
           content: item.text.slice(0, MAX_MESSAGE_CHARS),
           timestamp: ts,
@@ -2238,6 +2685,7 @@ export class SessionTracker {
 
       if (itemType === "function_call") {
         return {
+          id: item.id || event.itemId || undefined,
           type: "tool_call",
           content: `${item.name}(${(item.arguments || "").slice(0, 500)})`,
           timestamp: ts,
@@ -2247,6 +2695,7 @@ export class SessionTracker {
 
       if (itemType === "function_call_output") {
         return {
+          id: item.id || event.itemId || item.toolCallId || undefined,
           type: "tool_result",
           content: (item.output || "").slice(0, MAX_MESSAGE_CHARS),
           timestamp: ts,
@@ -2281,6 +2730,7 @@ export class SessionTracker {
 ${output}`
           : `${command || "(command)"}${statusLabel}`;
         return {
+          id: item.id || event.itemId || undefined,
           type: "tool_call",
           content: content.slice(0, MAX_MESSAGE_CHARS),
           timestamp: ts,
@@ -2292,6 +2742,7 @@ ${output}`
         const detail = toText(item.text || item.summary || "");
         if (!detail) return null;
         return {
+          id: item.id || event.itemId || undefined,
           type: "system",
           content: detail.slice(0, MAX_MESSAGE_CHARS),
           timestamp: ts,
@@ -2306,6 +2757,7 @@ ${output}`
         const partial = toText(item.text || item.delta);
         if (!partial) return null;
         return {
+          id: item.id || event.itemId || undefined,
           type: "agent_message",
           content: partial.slice(0, MAX_MESSAGE_CHARS),
           timestamp: ts,
@@ -2462,6 +2914,15 @@ ${items.join("\n")}` : "todo updated";
         content: "Turn completed",
         timestamp: eventTimestamp,
         meta: { lifecycle: "turn_completed" },
+      };
+    }
+
+    if (event.type === "session.turn.complete" && event.text) {
+      return {
+        type: "agent_message",
+        content: toText(event.text).slice(0, MAX_MESSAGE_CHARS),
+        timestamp: eventTimestamp,
+        meta: { lifecycle: "session_turn_complete" },
       };
     }
 
@@ -2664,6 +3125,16 @@ export async function createSession(opts) {
  */
 export function appendEvent(sessionId, event) {
   return getSessionTracker().appendEvent(sessionId, event);
+}
+
+/**
+ * Backward-compatible alias used by module-level callers that historically
+ * expected a recordEvent export on the session-tracker module.
+ * @param {string} sessionId
+ * @param {Object|string} event
+ */
+export function recordEvent(sessionId, event) {
+  return getSessionTracker().recordEvent(sessionId, event);
 }
 
 /**

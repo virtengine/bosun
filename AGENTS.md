@@ -52,3 +52,38 @@ Open the closest module `AGENTS.md` before editing.
 - `package.json` - scripts/exports used by many modules.
 - `vitest.config/config.mjs` - test discovery and environment.
 - `.env.example` - supported runtime configuration knobs.
+
+## Agent Learnings
+
+### [pattern] (testing) — 2026-04-03 • ref: `MEM-2`
+
+> **Agent:** workflow:test-node (workflow)
+> **Memory Scope:** workspace:workspace-1
+> **Confidence:** 0.00
+> **Related Paths:** src/auth/login.mjs
+
+Workspace memory: seed auth fixtures before browser login retries.
+
+---
+
+### [pattern] (testing) — 2026-04-03 • ref: `MEM-2`
+
+> **Agent:** workflow:test-node (workflow)
+> **Memory Scope:** workspace:workspace-1
+> **Confidence:** 0.00
+> **Related Paths:** src/auth/login.mjs
+
+Workspace memory: seed auth fixtures before browser login retries.
+
+---
+
+### [pattern] (testing) — 2026-04-03 • ref: `MEM-2`
+
+> **Agent:** workflow:test-node (workflow)
+> **Memory Scope:** workspace:workspace-1
+> **Confidence:** 0.00
+> **Related Paths:** src/auth/login.mjs
+
+Workspace memory: seed auth fixtures before browser login retries.
+
+---

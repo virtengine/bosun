@@ -485,16 +485,20 @@ export default function WorkflowsScreen({
       return;
     }
     try {
-      const [workflowPayload, harnessApprovalPayload, harnessRunsPayload, workflowRunsPayload] = await Promise.all([
-        requestJson("/api/workflows/approvals?status=pending&limit=25"),
-        requestJson("/api/harness/approvals?status=pending&limit=25"),
-        requestJson("/api/harness/runs?limit=8"),
+      const [surfacePayload, workflowRunsPayload] = await Promise.all([
+        requestJson("/api/harness/surface?view=workflows&limit=25"),
         requestJson("/api/workflows/runs?limit=8"),
       ]);
-      setWorkflowApprovals(Array.isArray(workflowPayload?.requests) ? workflowPayload.requests : []);
-      setHarnessApprovals(Array.isArray(harnessApprovalPayload?.requests) ? harnessApprovalPayload.requests : []);
-      setHarnessRuns(Array.isArray(harnessRunsPayload?.items) ? harnessRunsPayload.items : Array.isArray(harnessRunsPayload?.runs) ? harnessRunsPayload.runs : []);
-      setWorkflowRuns(Array.isArray(workflowRunsPayload?.runs) ? workflowRunsPayload.runs : []);
+      setWorkflowApprovals(Array.isArray(surfacePayload?.workflows?.approvals) ? surfacePayload.workflows.approvals : []);
+      setHarnessApprovals(Array.isArray(surfacePayload?.harness?.approvals) ? surfacePayload.harness.approvals : []);
+      setHarnessRuns(Array.isArray(surfacePayload?.harness?.runs) ? surfacePayload.harness.runs : []);
+      setWorkflowRuns(
+        Array.isArray(workflowRunsPayload?.runs)
+          ? workflowRunsPayload.runs
+          : Array.isArray(surfacePayload?.workflows?.runs)
+            ? surfacePayload.workflows.runs
+            : [],
+      );
       setStatusLine("");
     } catch (err) {
       setStatusLine(String(err?.message || err || "Unable to refresh workflow operator inbox"));

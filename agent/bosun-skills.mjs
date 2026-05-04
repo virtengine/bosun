@@ -20,6 +20,10 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeSkillMarkdownSafety } from "../lib/skill-markdown-safety.mjs";
+import { discoverLocalSkillCatalog } from "../infra/library-manager.mjs";
+import { buildSkillbookProtocolMarkdown, listSkillbookStrategyProtocolsSync } from "../workspace/skillbook-store.mjs";
+import { buildTaskReplanContext, buildTaskReplanOperationalProtocols } from "../task/task-replanner.mjs";
+import { buildTaskDebtOperationalProtocols, readTaskDebtEntries } from "../task/task-debt-ledger.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -166,6 +170,10 @@ export function getSkillsIndexPath(bosunHome) {
   return resolve(getSkillsDir(bosunHome), "index.json");
 }
 
+function resolveWorkspaceRootFromSkillsDir(skillsDir) {
+  return resolve(skillsDir, "..", "..");
+}
+
 // ── Scaffolding ───────────────────────────────────────────────────────────────
 
 /**
@@ -242,60 +250,67 @@ function extractSkillFileMetadata(filePath) {
  * @returns {string}          Path to the written index file
  */
 export function buildSkillsIndex(skillsDir) {
+  mkdirSync(skillsDir, { recursive: true });
   const indexPath = resolve(skillsDir, "index.json");
+  const workspaceRoot = resolveWorkspaceRootFromSkillsDir(skillsDir);
   const entries = [];
   const blockedSkills = [];
+  const builtinByFilename = Object.fromEntries(BUILTIN_SKILLS.map((skill) => [skill.filename, skill]));
+  const discovered = discoverLocalSkillCatalog(workspaceRoot);
 
-  // Seed with built-in metadata for known files
-  const builtinByFilename = Object.fromEntries(
-    BUILTIN_SKILLS.map((s) => [s.filename, s]),
-  );
-
-  let files = [];
-  try {
-    files = readdirSync(skillsDir).filter((f) => f.endsWith(".md"));
-  } catch {
-    /* directory may not exist yet */
+  for (const entry of discovered.entries.toSorted((left, right) => String(left.sourcePath || "").localeCompare(String(right.sourcePath || "")))) {
+    const sourcePath = String(entry.sourcePath || "");
+    const filename = sourcePath.split("/").at(-1) || "";
+    const builtin = entry.sourceKind === "workspace" ? builtinByFilename[filename] : null;
+    entries.push({
+      id: entry.id,
+      filename,
+      title: builtin?.title || entry.title || entry.name || basename(filename, ".md"),
+      tags: builtin?.tags || entry.tags || [],
+      important: builtin ? builtin.important === true : entry.important === true,
+      scope: builtin?.scope || "global",
+      updatedAt: entry.updatedAt,
+      sourceKind: entry.sourceKind,
+      sourcePath,
+      catalogOnly: entry.catalogOnly === true,
+      trusted: entry.trusted !== false,
+      trustState: entry.trustState || (entry.trusted === false ? "catalog-only" : "trusted"),
+      trustReason: entry.trustReason || "",
+      contentLength: Number(entry.contentLength || 0),
+    });
   }
 
-  for (const filename of files.toSorted((a, b) => a.localeCompare(b))) {
-    const filePath = resolve(skillsDir, filename);
-    let stat;
-    try { stat = statSync(filePath); } catch { continue; }
+  for (const blocked of discovered.blockedEntries.toSorted((left, right) => String(left.sourcePath || "").localeCompare(String(right.sourcePath || "")))) {
+    blockedSkills.push({
+      filename: String(blocked.sourcePath || "").split("/").at(-1) || "",
+      sourcePath: blocked.sourcePath || "",
+      sourceKind: blocked.sourceKind || "workspace",
+      trustState: blocked.trustState || "blocked",
+      reasons: Array.isArray(blocked.reasons) ? blocked.reasons : [],
+    });
+  }
 
-    const builtin = builtinByFilename[filename];
-    let title = basename(filename, ".md").replaceAll("-", " ").replaceAll(/\b\w/g, (c) => c.toUpperCase());
-    let tags = [];
-    let important = false;
-    let scope = "global";
-
-    if (builtin) {
-      title = builtin.title;
-      tags = builtin.tags;
-      important = builtin.important === true;
-      scope = builtin.scope;
-    } else {
-      const metadata = extractSkillFileMetadata(filePath);
-      if (metadata.blocked) {
-        blockedSkills.push({
-          filename,
-          score: metadata.safety?.score || 0,
-          reasons: metadata.safety?.reasons || [],
-        });
-        continue;
-      }
-      if (metadata.title) title = metadata.title;
-      tags = metadata.tags;
-      important = metadata.important;
-    }
-
+  for (const protocol of listSkillbookStrategyProtocolsSync({ repoRoot: workspaceRoot })) {
     entries.push({
-      filename,
-      title,
-      tags,
-      important,
-      scope,
-      updatedAt: stat.mtime.toISOString(),
+      id: protocol.id,
+      filename: `${protocol.strategyId || protocol.id}.skillbook`,
+      title: protocol.title,
+      tags: protocol.tags,
+      important: protocol.important === true,
+      scope: "workspace",
+      updatedAt: protocol.updatedAt,
+      sourceKind: "skillbook",
+      sourcePath: `.bosun/skillbook/strategies.json#${protocol.strategyId}`,
+      catalogOnly: false,
+      trusted: true,
+      trustState: "trusted",
+      trustReason: "skillbook",
+      strategyId: protocol.strategyId,
+      recommendation: protocol.recommendation,
+      rationale: protocol.rationale,
+      relatedPaths: protocol.relatedPaths,
+      confidence: protocol.confidence,
+      status: protocol.status,
     });
   }
 
@@ -303,6 +318,7 @@ export function buildSkillsIndex(skillsDir) {
     generated: new Date().toISOString(),
     count: entries.length,
     blockedCount: blockedSkills.length,
+    catalogOnlyCount: entries.filter((entry) => entry.catalogOnly === true).length,
     blockedSkills,
     skills: entries,
   };
@@ -331,10 +347,14 @@ Relevant skills and patterns discovered by previous agents are stored in:
 
 Index: \`${indexPath}\`
 
+Cross-client skill catalogs are also discovered from repo-local paths like:
+  \`${resolve(dirname(skillsDir), "..", ".agents", "skills")}\`
+
 **Before starting work:**
 1. Read \`${indexPath}\` to see available skills.
-2. Load any skill files whose tags match your task's domain/module.
-3. Apply relevant patterns and avoid known pitfalls.
+2. Prefer metadata-first selection; only load the skill files whose tags match your task's domain/module.
+3. Treat cross-client repo skills as catalog-only unless the repo is trusted for expansion.
+4. Apply relevant patterns and avoid known pitfalls.
 
 **After completing work:**
 If you discovered a non-obvious pattern, workaround, or domain fact that would
@@ -420,36 +440,104 @@ function resolveSkillCharBudget(maxChars) {
     : DEFAULT_SKILLS_MAX_CHARS;
 }
 
+function shouldAllowCatalogOnlySkillExpansion(opts = {}) {
+  return opts.allowCatalogOnly === true || opts.trustCrossClientSkills === true;
+}
+
+function buildRuntimeOperationalProtocols(bosunHome, task = {}, opts = {}) {
+  const taskObject = task && typeof task === "object" ? task : {};
+  const taskId = String(taskObject.id || taskObject.taskId || opts.taskId || "").trim();
+  const childTasks = Array.isArray(opts.childTasks) ? opts.childTasks : (Array.isArray(taskObject.childTasks) ? taskObject.childTasks : []);
+  const relatedTasks = Array.isArray(opts.relatedTasks) ? opts.relatedTasks : (Array.isArray(taskObject.relatedTasks) ? taskObject.relatedTasks : []);
+  const auditSummary = opts.auditSummary && typeof opts.auditSummary === "object"
+    ? opts.auditSummary
+    : (taskObject.auditSummary && typeof taskObject.auditSummary === "object" ? taskObject.auditSummary : {});
+  const labels = opts.labels ?? taskObject.labels ?? [];
+
+  const replanContext = buildTaskReplanContext(taskObject, {
+    mode: opts.planningMode || taskObject.planningMode || "replan",
+    childTasks,
+    relatedTasks,
+    auditSummary,
+  });
+  const protocols = [
+    ...buildTaskReplanOperationalProtocols(replanContext, { labels }),
+  ];
+
+  const debtEntries = readTaskDebtEntries({
+    baseDir: bosunHome,
+    limit: Number.isFinite(Number(opts.debtLimit)) ? Number(opts.debtLimit) : 250,
+  });
+  protocols.push(
+    ...buildTaskDebtOperationalProtocols(debtEntries, { taskId }),
+  );
+
+  const deduped = [];
+  const seenIds = new Set();
+  for (const protocol of protocols) {
+    const id = String(protocol?.id || "").trim();
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    deduped.push({
+      ...protocol,
+      filename: `${id}.runtime-skill`,
+    });
+  }
+  return deduped;
+}
+
+function expandIndexedSkillEntry(bosunHome, entry, opts = {}) {
+  if (!entry || typeof entry !== "object") return null;
+  if (entry.catalogOnly === true && !shouldAllowCatalogOnlySkillExpansion(opts)) return null;
+
+  if (entry.sourceKind === "skillbook" || entry.sourceKind === "runtime-protocol") {
+    return {
+      ...entry,
+      content: entry.sourceKind === "skillbook"
+        ? buildSkillbookProtocolMarkdown(entry)
+        : String(entry.content || "").trim(),
+    };
+  }
+
+  const sourcePath = String(entry.sourcePath || "").trim();
+  const filePath = sourcePath
+    ? resolve(bosunHome, sourcePath)
+    : resolve(getSkillsDir(bosunHome), String(entry.filename || ""));
+  let content = "";
+  try {
+    content = readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  const safety = analyzeSkillMarkdownSafety(content);
+  if (safety.blocked) return null;
+  return {
+    ...entry,
+    content,
+  };
+}
+
 function selectRelevantSkills(bosunHome, taskTitle, taskDescription = "", opts = {}) {
   const index = loadSkillsIndex(bosunHome);
-  if (!index?.skills?.length) return [];
+  const runtimeProtocols = buildRuntimeOperationalProtocols(bosunHome, opts.task || {}, opts);
+  if (!index?.skills?.length && runtimeProtocols.length === 0) return [];
 
   const matcher = buildKeywordMatcher(taskTitle, taskDescription, opts.labels || []);
-  if (!matcher.keywordText) return [];
+  if (!matcher.keywordText && runtimeProtocols.length === 0) return [];
 
-  const skillsDir = getSkillsDir(bosunHome);
-  return index.skills
-    .map(({ filename, title, tags, important }) => {
+  const indexedMatches = (index?.skills || [])
+    .map((entry) => {
+      const { filename, title, tags, important } = entry;
       const matchCount = countSkillTagMatches(tags, matcher);
       if (matchCount <= 0) return null;
 
-      let content = "";
-      try {
-        content = readFileSync(resolve(skillsDir, filename), "utf8");
-      } catch {
-        return null;
-      }
-
-      const safety = analyzeSkillMarkdownSafety(content);
-      if (safety.blocked) return null;
-
       return {
+        ...entry,
         filename,
         title,
         tags,
         important: important === true,
         matchCount,
-        content,
       };
     })
     .filter(Boolean)
@@ -458,6 +546,20 @@ function selectRelevantSkills(bosunHome, taskTitle, taskDescription = "", opts =
       || Number(right.important === true) - Number(left.important === true)
       || String(left.filename).localeCompare(String(right.filename)),
     );
+
+  const runtimeMatches = runtimeProtocols
+    .map((entry) => ({
+      ...entry,
+      matchCount: Math.max(2, countSkillTagMatches(entry.tags || [], matcher) || 0),
+      important: entry.important === true,
+    }))
+    .sort((left, right) =>
+      Number(right.important === true) - Number(left.important === true)
+      || right.matchCount - left.matchCount
+      || String(left.title || "").localeCompare(String(right.title || "")),
+    );
+
+  return [...runtimeMatches, ...indexedMatches];
 }
 
 /**
@@ -482,15 +584,18 @@ function selectRelevantSkills(bosunHome, taskTitle, taskDescription = "", opts =
  */
 export function findRelevantSkills(bosunHome, taskTitle, taskDescription = "", opts = {}) {
   const matched = selectRelevantSkills(bosunHome, taskTitle, taskDescription, opts);
+  const expanded = matched
+    .map((entry) => expandIndexedSkillEntry(bosunHome, entry, opts))
+    .filter(Boolean);
 
   if (opts.emitAnalytics !== false) {
-    for (const skill of matched) {
+    for (const skill of expanded) {
       const skillName = skill.filename.replace(/\.md$/i, "");
       emitSkillInvokeEvent(skillName, skill.title, opts);
     }
   }
 
-  return matched;
+  return expanded;
 }
 
 export function loadSkillsForTask(bosunHome, task, opts = {}) {
@@ -499,16 +604,20 @@ export function loadSkillsForTask(bosunHome, task, opts = {}) {
   const labels = opts.labels ?? task?.labels ?? [];
   const matched = selectRelevantSkills(bosunHome, taskTitle, taskDescription, {
     ...opts,
+    task,
     labels,
   });
-  if (matched.length === 0) return "";
+  const expanded = matched
+    .map((entry) => expandIndexedSkillEntry(bosunHome, entry, opts))
+    .filter(Boolean);
+  if (expanded.length === 0) return "";
 
   const maxChars = resolveSkillCharBudget(opts.maxChars);
   if (maxChars <= 0) return "";
 
   const lines = ["## Skills Context", ""];
   const included = [];
-  for (const skill of matched) {
+  for (const skill of expanded) {
     const importantLabel = skill.important ? " [important]" : "";
     const blockLines = [
       "### Skill: " + skill.title + " (`" + skill.filename + "`)" + importantLabel,

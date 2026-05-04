@@ -91,7 +91,15 @@ jobs:
             const labelNames = (pr.labels || [])
               .map((entry) => (typeof entry === "string" ? entry : entry?.name))
               .filter(Boolean);
-            const isBosunCreated = labelNames.includes(classLabels.bosun);
+            const isBosunCreated =
+              labelNames.includes(classLabels.bosun) ||
+              // Detect Bosun-created PRs by branch name pattern (task/HEX-slug)
+              // even when the label was not applied at PR open time (race condition).
+              /^task\/[0-9a-f]{4,}-/i.test(String(pr.head?.ref || "").trim()) ||
+              // Also detect via legacy PR body markers used by action.create_pr.
+              String(pr.body || "").includes("<!-- bosun-created -->") ||
+              /Bosun-Origin:\s*created/i.test(String(pr.body || "")) ||
+              /auto-created by bosun/i.test(String(pr.body || ""));
 
             const normalizeList = (value) => {
               if (Array.isArray(value)) {

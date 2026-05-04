@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifySessionRequestError,
   formatSessionFreshnessTimestamp,
+  getSessionHistoryState,
   getSessionManualRetryState,
   getSessionListState,
   getSessionLifecycleState,
@@ -308,12 +309,177 @@ describe("session lifecycle/runtime metadata", () => {
     );
   });
 
+  it("treats no-output task sessions as non-live runtime state", () => {
+    expect(
+      getSessionRuntimeState({
+        lifecycleStatus: "active",
+        status: "no_output",
+        runtimeState: "no_output",
+        turnCount: 0,
+        lastActiveAt: "2026-03-31T19:24:37.199Z",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        key: "no_output",
+        label: "No Output",
+        isLive: false,
+        isStale: false,
+        source: "runtime",
+      }),
+    );
+  });
+
+  it("downgrades runtime-active sessions to recency when they are not live", () => {
+    const now = Date.UTC(2026, 3, 2, 6, 0, 0);
+
+    expect(
+      getSessionRuntimeState(
+        {
+          lifecycleStatus: "active",
+          status: "active",
+          runtimeState: "active",
+          runtimeIsLive: false,
+          lastActiveAt: new Date(now - 30_000).toISOString(),
+        },
+        { now },
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        key: "recent",
+        source: "runtime",
+        isLive: false,
+      }),
+    );
+
+    expect(
+      getSessionRuntimeState(
+        {
+          lifecycleStatus: "active",
+          status: "active",
+          runtimeState: "active",
+          runtimeIsLive: false,
+          lastActiveAt: new Date(now - 12 * 60_000).toISOString(),
+        },
+        { now },
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        key: "stale",
+        source: "runtime",
+        isLive: false,
+        isStale: true,
+      }),
+    );
+  });
+
+  it("derives explicit history metadata for cold-reopen and folder actions", () => {
+    expect(
+      getSessionHistoryState({
+        lifecycleStatus: "archived",
+        status: "archived",
+        metadata: {
+          selectedRepoPath: "/repo/worktree-alpha",
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        key: "archived",
+        label: "Archived history",
+        isHistoric: true,
+        canResumeWork: true,
+        canRevealFolder: true,
+        folderPath: "/repo/worktree-alpha",
+        deleteLabel: "Delete history",
+      }),
+    );
+
+    expect(
+      getSessionHistoryState({
+        lifecycleStatus: "completed",
+        status: "completed",
+        runtimeState: "stopped",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        key: "historic",
+        label: "Cold reopen ready",
+        isHistoric: true,
+        canResumeWork: false,
+        reopenLabel: "Reopen transcript",
+      }),
+    );
+  });
+
+  it("downgrades persisted running snapshots when the runtime is no longer live", () => {
+    const now = Date.UTC(2026, 3, 2, 0, 5, 0);
+
+    expect(
+      getSessionRuntimeState(
+        {
+          lifecycleStatus: "active",
+          status: "active",
+          runtimeState: "running",
+          runtimeIsLive: false,
+          lastActiveAt: new Date(now - 45_000).toISOString(),
+        },
+        { now },
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        key: "recent",
+        label: "Recent",
+        isLive: false,
+        source: "runtime",
+      }),
+    );
+
+    expect(
+      getSessionRuntimeState(
+        {
+          lifecycleStatus: "active",
+          status: "active",
+          runtimeState: "running",
+          runtimeIsLive: false,
+          lastActiveAt: new Date(now - 11 * 60_000).toISOString(),
+        },
+        { now },
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        key: "stale",
+        label: "Stale",
+        isLive: false,
+        isStale: true,
+        source: "runtime",
+      }),
+    );
+  });
+
   it("reports non-live runtime for terminal lifecycle states", () => {
     expect(
       getSessionRuntimeState({
         lifecycleStatus: "completed",
         status: "completed",
         lastActiveAt: "2026-01-02T00:00:00.000Z",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        key: "stopped",
+        label: "Not live",
+        isLive: false,
+        source: "lifecycle",
+      }),
+    );
+  });
+
+  it("prefers terminal lifecycle over stale running runtime snapshots", () => {
+    expect(
+      getSessionRuntimeState({
+        lifecycleStatus: "completed",
+        status: "completed",
+        runtimeState: "running",
+        runtimeIsLive: false,
+        lastActiveAt: "2026-04-01T10:57:15.110Z",
       }),
     ).toEqual(
       expect.objectContaining({
@@ -342,5 +508,3 @@ describe("session lifecycle/runtime metadata", () => {
     ).toBe("2026-01-02T00:00:00.000Z");
   });
 });
-
-

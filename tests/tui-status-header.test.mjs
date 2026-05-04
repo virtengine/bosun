@@ -41,6 +41,9 @@ describe("tui status header", () => {
       connectionState: "reconnecting",
       projectLabel: "linear://ENG",
       refreshCountdownSec: 1,
+      connectionSource: "saved-remote",
+      connectionEndpoint: "https://bosun.example.com:4400",
+      authMode: "api-key",
     });
 
     expect(model.row1).toContain("Agents:");
@@ -54,6 +57,8 @@ describe("tui status header", () => {
     expect(model.row3.healthLabel).toContain("near limit  1");
     expect(model.row3.projectLabel).toBe("linear://ENG");
     expect(model.row3.refreshLabel).toBe("Next refresh: 1s");
+    expect(model.row4.attachLabel).toBe("Attach: saved-remote -> https://bosun.example.com:4400");
+    expect(model.row4.authLabel).toBe("Auth: API key");
   });
 
   it("maps provider aliases and shows n/a for unconfigured providers", () => {

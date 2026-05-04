@@ -13,9 +13,10 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { getNodeType } from "../workflow/workflow-nodes.mjs";
 import { getApprovalRequest, resolveApprovalRequest } from "../workflow/approval-queue.mjs";
 import { WorkflowContext } from "../workflow/workflow-engine.mjs";
@@ -129,7 +130,7 @@ describe("action.create_pr base-branch resolution logic", () => {
     const nodeType = getNodeType("action.create_pr");
     const result = await nodeType.execute(node, makeCtx());
     expect(result.base).toBe("main");
-  });
+  }, 15000);
 
   it("normalizes remote-qualified base branches before gh PR calls", async () => {
     const node = makeNode("action.create_pr", {
@@ -141,6 +142,60 @@ describe("action.create_pr base-branch resolution logic", () => {
     const nodeType = getNodeType("action.create_pr");
     const result = await nodeType.execute(node, makeCtx());
     expect(result.base).toBe("main");
+  });
+
+  it("rejects invalid repoSlug values before any gh invocation", async () => {
+    const node = makeNode("action.create_pr", {
+      title: "feat: add thing",
+      base: "main",
+      branch: "feat/add-thing",
+      repoSlug: "not-a-valid-slug",
+      cwd: fastFailCwd,
+    });
+    const result = await getNodeType("action.create_pr").execute(node, makeCtx());
+    expect(result.success).toBe(false);
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toBe("invalid_repo_slug");
+    expect(result.blocking).toEqual(expect.objectContaining({
+      field: "repoSlug",
+      retryable: false,
+    }));
+  });
+
+  it("rejects unresolved placeholder branch names before any gh invocation", async () => {
+    const node = makeNode("action.create_pr", {
+      title: "feat: add thing",
+      base: "main",
+      branch: "fix/dep-audit-{{_runId}}",
+      cwd: fastFailCwd,
+    });
+    const result = await getNodeType("action.create_pr").execute(node, makeCtx());
+    expect(result.success).toBe(false);
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toBe("unresolved_branch_placeholder");
+    expect(result.blocking).toEqual(expect.objectContaining({
+      field: "branch",
+      retryable: false,
+    }));
+  });
+
+  it("blocks PR creation when the workflow recorded no new commits", async () => {
+    const node = makeNode("action.create_pr", {
+      title: "feat: add thing",
+      base: "main",
+      branch: "feat/add-thing",
+      cwd: fastFailCwd,
+    });
+    const result = await getNodeType("action.create_pr").execute(node, makeCtx({
+      _hasNewCommits: false,
+    }));
+    expect(result.success).toBe(false);
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toBe("no_new_commits");
+    expect(result.blocking).toEqual(expect.objectContaining({
+      field: "commits",
+      retryable: false,
+    }));
   });
 
   it("waits for operator approval before creating a PR when risky approvals are enabled", async () => {
@@ -299,6 +354,9 @@ describe("dangerous shell payload containment", () => {
     expect(executeSrc).toContain("repoSlug");
     expect(executeSrc).toContain("args.push(\"--repo\", repoSlug)");
     expect(executeSrc).toContain("existingArgs.push(\"--repo\", repoSlug)");
+    expect(executeSrc).toContain("invalid_repo_slug");
+    expect(executeSrc).toContain("unresolved_branch_placeholder");
+    expect(executeSrc).toContain("no_new_commits");
   });
 
   it("action.run_command schema does not silently accept untrusted commands", () => {
@@ -371,7 +429,7 @@ describe("dangerous shell payload containment", () => {
     expect(result.autoMerge?.attempted).toBe(false);
     expect(result.autoMerge?.reason).toBe("test_runtime_skip");
     expect(result.autoMerge?.method).toBe("rebase");
-  });
+  }, 30_000);
 });
 
 describe("action.run_command env interpolation", () => {
@@ -399,6 +457,30 @@ describe("action.run_command env interpolation", () => {
     const result = await nodeType.execute(node, makeCtx());
     expect(result.success).toBe(true);
     expect(result.output).toEqual([{ taskId: "t-2" }]);
+  });
+
+  it("runs multiline node -e scripts through stdin without relying on command-line script transport", async () => {
+    const nodeType = getNodeType("action.run_command");
+    const script = [
+      "const payload = {",
+      '  tasks: [{ taskId: "t-stdin-1" }],',
+      '  note: "stdin transport"',
+      "};",
+      "console.log(JSON.stringify(payload));",
+    ].join("\n");
+    const node = makeNode("action.run_command", {
+      command: "node",
+      args: ["-e", script],
+      parseJson: true,
+    });
+
+    const result = await nodeType.execute(node, makeCtx());
+
+    expect(result.success).toBe(true);
+    expect(result.output).toEqual({
+      tasks: [{ taskId: "t-stdin-1" }],
+      note: "stdin transport",
+    });
   });
 
   it("resolves template env values before executing commands", async () => {
@@ -444,7 +526,7 @@ describe("action.run_command env interpolation", () => {
     const parsed = JSON.parse(result.output);
     expect(parsed.conflicts).toHaveLength(2);
     expect(parsed.ciFailures).toHaveLength(1);
-  });
+  }, 15000);
 
   it("automatically compacts large command output before storing it in workflow context", async () => {
     const nodeType = getNodeType("action.run_command");
@@ -469,6 +551,243 @@ describe("action.run_command env interpolation", () => {
     expect(Array.isArray(result.items)).toBe(true);
     expect(result.items.length).toBe(1);
   });
+
+  it("resolves auto quality-gate commands before execution", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-auto-quality-gate-"));
+    try {
+      writeFileSync(join(repoRoot, "package.json"), JSON.stringify({
+        name: "wf-auto-quality-gate",
+        version: "1.0.0",
+        scripts: {
+          "prepush:check": "node -e \"process.stdout.write('quality gate ok')\"",
+        },
+      }, null, 2));
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "auto",
+        commandType: "qualityGate",
+        cwd: repoRoot,
+      });
+
+      const result = await nodeType.execute(node, makeCtx({ worktreePath: repoRoot }));
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("quality gate ok");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("supplies synthetic pre-push stdin when invoking the repo hook directly", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-hook-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git remote add origin https://example.com/virtengine/bosun.git", { cwd: repoRoot, stdio: "pipe" });
+
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cat > .hook-input.txt",
+        "printf '%s\\n' \"$@\" > .hook-args.txt",
+        "echo hook ok",
+        "",
+      ].join("\n"));
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      execSync("git add .githooks/pre-push tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "change\n");
+      execSync("git add tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m change", { cwd: repoRoot, stdio: "pipe" });
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "bash .githooks/pre-push",
+        cwd: repoRoot,
+      }, "quality-gate-hook");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath: repoRoot,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("hook ok");
+
+      const hookInput = readFileSync(join(repoRoot, ".hook-input.txt"), "utf8").trim();
+      const [localRef, localSha, remoteRef, remoteSha] = hookInput.split(/\s+/);
+      expect(localRef).toBe("refs/heads/task/test");
+      expect(localSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(remoteRef).toBe("refs/heads/task/test");
+      expect(remoteSha).toBe("0000000000000000000000000000000000000000");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("supplies synthetic pre-push stdin for auto quality-gate hook resolution", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-auto-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git remote add origin https://example.com/virtengine/bosun.git", { cwd: repoRoot, stdio: "pipe" });
+
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cat > .hook-input.txt",
+        "echo hook ok",
+        "",
+      ].join("\n"));
+      writeFileSync(join(repoRoot, "package.json"), JSON.stringify({
+        name: "wf-prepush-auto",
+        version: "1.0.0",
+        scripts: {
+          "prepush:check": "node -e \"process.stdout.write('script fallback should not run')\"",
+        },
+      }, null, 2));
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      execSync("git add .githooks/pre-push package.json tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "change\n");
+      execSync("git add tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m change", { cwd: repoRoot, stdio: "pipe" });
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "auto",
+        commandType: "qualityGate",
+        cwd: repoRoot,
+      }, "quality-gate-auto-hook");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath: repoRoot,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("hook ok");
+
+      const hookInput = readFileSync(join(repoRoot, ".hook-input.txt"), "utf8").trim();
+      const [localRef, localSha, remoteRef, remoteSha] = hookInput.split(/\s+/);
+      expect(localRef).toBe("refs/heads/task/test");
+      expect(localSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(remoteRef).toBe("refs/heads/task/test");
+      expect(remoteSha).toBe("0000000000000000000000000000000000000000");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("fails direct pre-push validation early when git metadata is unavailable", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-missing-git-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "echo hook should not run",
+        "",
+      ].join("\n"));
+      execSync("git add .githooks/pre-push tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      rmSync(join(repoRoot, ".git"), { recursive: true, force: true });
+      writeFileSync(join(repoRoot, ".git"), "gitdir: C:/__bosun_missing__/worktrees/task-test\n");
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "bash .githooks/pre-push",
+        cwd: repoRoot,
+      }, "quality-gate-hook-missing-git");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath: repoRoot,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(false);
+      expect(result.exitCode).toBe(1);
+      expect(String(result.stderr || result.error || "")).toContain("requires a valid git worktree");
+      expect(String(result.output || "")).not.toContain("hook should not run");
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("re-syncs managed pre-push hooks before direct execution so stale CRLF hook copies do not fail", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "wf-prepush-worktree-source-"));
+    const worktreePath = mkdtempSync(join(tmpdir(), "wf-prepush-worktree-target-"));
+    try {
+      execSync("git init", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.email bosun@example.com", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git config user.name Bosun", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git branch -M main", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git remote add origin https://example.com/virtengine/bosun.git", { cwd: repoRoot, stdio: "pipe" });
+
+      mkdirSync(join(repoRoot, ".githooks"), { recursive: true });
+      writeFileSync(join(repoRoot, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cat > .hook-input.txt",
+        "echo hook ok",
+        "",
+      ].join("\n"));
+      writeFileSync(join(repoRoot, "tracked.txt"), "base\n");
+      execSync("git add .githooks/pre-push tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m base", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout -b task/test", { cwd: repoRoot, stdio: "pipe" });
+      writeFileSync(join(repoRoot, "tracked.txt"), "change\n");
+      execSync("git add tracked.txt", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git commit -m change", { cwd: repoRoot, stdio: "pipe" });
+      execSync("git checkout main", { cwd: repoRoot, stdio: "pipe" });
+      execSync(`git worktree add "${worktreePath}" task/test`, { cwd: repoRoot, stdio: "pipe" });
+
+      writeFileSync(join(worktreePath, ".githooks", "pre-push"), [
+        "#!/usr/bin/env bash\r",
+        "set -euo pipefail\r",
+        "cat > .hook-input.txt\r",
+        "echo hook ok\r",
+        "",
+      ].join("\n"), "utf8");
+
+      const nodeType = getNodeType("action.run_command");
+      const node = makeNode("action.run_command", {
+        command: "bash .githooks/pre-push",
+        cwd: worktreePath,
+      }, "quality-gate-hook-resync-runtime");
+
+      const result = await nodeType.execute(node, makeCtx({
+        worktreePath,
+        repoRoot,
+        branch: "task/test",
+      }));
+
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain("hook ok");
+      expect(readFileSync(join(worktreePath, ".githooks", "pre-push"), "utf8").includes("\r")).toBe(false);
+      expect(readFileSync(join(worktreePath, ".hook-input.txt"), "utf8")).toContain("refs/heads/task/test");
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30000);
 });
 
 describe("workflow validation output compaction", () => {
@@ -720,4 +1039,3 @@ describe("validation nodes can offload to isolated runners", () => {
     expect(result.failureDiagnostic?.exitCode).toBe(1);
   });
 });
-

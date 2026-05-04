@@ -671,4 +671,233 @@ body.kanban-dragging .kanban-card {
   color: var(--text-primary);
 }
 
+.kanban-icon-cap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  max-width: 18px;
+  max-height: 18px;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.kanban-column svg,
+.kanban-column img,
+.kanban-column .MuiSvgIcon-root,
+.kanban-column .kanban-icon-cap > *,
+.kanban-column .kanban-icon-cap svg,
+.kanban-column .kanban-icon-cap img {
+  max-width: 18px;
+  max-height: 18px;
+  width: auto;
+  height: auto;
+  flex-shrink: 0;
+}
+
+.kanban-card-nested {
+  margin-bottom: 0;
+}
+
+.kanban-card-compact {
+  min-height: 0;
+}
+
+.kanban-checklist-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.kanban-checklist-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--text-secondary);
+}
+
+.kanban-checklist-mark-done {
+  background: rgba(34, 197, 94, 0.16);
+  color: var(--color-done, #22c55e);
+}
+
+.kanban-checklist-mark-blocked {
+  background: rgba(239, 68, 68, 0.16);
+  color: var(--color-error, #ef4444);
+}
+
+.kanban-checklist-body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.kanban-checklist-topline,
+.kanban-checklist-meta,
+.kanban-group-shell-pills,
+.kanban-group-shell-rollup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kanban-checklist-topline {
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.kanban-checklist-type,
+.kanban-group-shell-type {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.kanban-checklist-title,
+.kanban-group-shell-title {
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.kanban-checklist-title {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.kanban-checklist-meta {
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.kanban-checklist-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-error, #ef4444);
+  font-weight: 600;
+}
+
+.kanban-group-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+    var(--bg-card);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+}
+
+.kanban-group-shell-epic {
+  border-color: rgba(59, 130, 246, 0.24);
+}
+
+.kanban-group-shell-parent {
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+.kanban-group-shell-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.kanban-group-shell-toggle,
+.kanban-group-shell-open {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+}
+
+.kanban-group-shell-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.kanban-group-shell-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.kanban-group-shell-open.is-static {
+  cursor: default;
+}
+
+.kanban-group-shell-title {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.kanban-group-pill,
+.kanban-group-rollup-item {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-secondary);
+}
+
+.kanban-group-pill-blocked {
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--color-error, #ef4444);
+}
+
+.kanban-group-children {
+  display: flex;
+  flex-direction: column;
+}
+
+.kanban-group-children-rich {
+  gap: 10px;
+}
+
+.kanban-group-children-checklist {
+  gap: 6px;
+}
+
+.kanban-group-shell-collapsed-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 

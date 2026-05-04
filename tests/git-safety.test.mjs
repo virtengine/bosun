@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnSyncMock = vi.hoisted(() => vi.fn());
 
-vi.mock("node:child_process", () => ({
-  spawnSync: spawnSyncMock,
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    spawnSync: spawnSyncMock,
+  };
+});
 
 const { evaluateBranchSafetyForPush, normalizeBaseBranch } = await import(
   "../git/git-safety.mjs"

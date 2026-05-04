@@ -22,6 +22,11 @@ import {
   it,
   vi,
 } from "vitest";
+import {
+  flushHarnessTelemetryRuntimeForTests,
+  listHarnessTelemetryEvents,
+  resetHarnessObservabilitySpinesForTests,
+} from "../infra/session-telemetry.mjs";
 
 // ── Module-scope mock state ───────────────────────────────────────────────────
 
@@ -33,6 +38,7 @@ const mockSessionAbort = vi.fn();
 const mockEventSubscribe = vi.fn();
 const mockCreateOpencode = vi.fn();
 const mockCreateOpencodeClient = vi.fn();
+const SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 5_000;
 
 /** Build a mock client that all SDK tests share */
 function makeMockClient() {
@@ -90,11 +96,15 @@ vi.mock("../config/repo-root.mjs", () => ({
   resolveRepoRoot: vi.fn(() => "/mock/repo"),
 }));
 
-vi.mock("node:fs/promises", () => ({
-  mkdir: vi.fn().mockResolvedValue(undefined),
-  readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
-  writeFile: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    mkdir: vi.fn().mockResolvedValue(undefined),
+    readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 // Zero-delay retries so transient-retry tests don't hit real network waits
 vi.mock("../infra/stream-resilience.mjs", () => ({
@@ -134,6 +144,10 @@ function setupHappyPath() {
   defaultEventSubscribeResult();
   return client;
 }
+
+afterEach(() => {
+  resetHarnessObservabilitySpinesForTests();
+});
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -213,7 +227,7 @@ describe("execOpencodePrompt() — happy path", () => {
     expect(result.finalResponse).toContain("done!");
     expect(result.items).toBeInstanceOf(Array);
     expect(result.usage).toBeNull();
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("calls onEvent with formatted strings", async () => {
     const events = [];
@@ -245,7 +259,48 @@ describe("execOpencodePrompt() — happy path", () => {
 
     expect(result.finalResponse).toBe("response text");
     expect(events.some((e) => e.includes("Running") && e.includes("go test"))).toBe(true);
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
+
+  it("records canonical lifecycle and stream telemetry for the legacy entrypoint", async () => {
+    mockSessionCreate.mockResolvedValue({ data: { id: "uuid-telemetry" } });
+    mockSessionGet.mockResolvedValue({ data: { id: "uuid-telemetry" } });
+    mockSessionPrompt.mockResolvedValue(makePromptResult("telemetry response"));
+    mockEventSubscribe.mockResolvedValue({
+      stream: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "tool.start",
+            properties: {
+              sessionId: "uuid-telemetry",
+              tool: "bash",
+              input: { command: "npm test" },
+            },
+          };
+        },
+      },
+      destroy: vi.fn(),
+    });
+
+    const result = await execOpencodePrompt("run telemetry path", {
+      sessionId: "telemetry-session",
+      persistent: true,
+      provider: "opencode",
+      onEvent: () => {},
+    });
+
+    await flushHarnessTelemetryRuntimeForTests();
+
+    expect(result.finalResponse).toBe("telemetry response");
+    const events = listHarnessTelemetryEvents({
+      source: "shell-session-compat",
+      sessionId: "telemetry-session",
+    });
+    expect(events.some((event) => event.eventType === "shell.session.running")).toBe(true);
+    expect(events.some((event) => event.eventType === "shell.session.completed")).toBe(true);
+    expect(events.some((event) => event.eventType === "shell.stream.event")).toBe(true);
+    expect(events.some((event) => event.providerId === "openai-compatible")).toBe(true);
+    expect(getActiveSessionId()).toBe("telemetry-session");
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("enriches prompt with statusData context", async () => {
     await execOpencodePrompt("do work", {
@@ -258,7 +313,7 @@ describe("execOpencodePrompt() — happy path", () => {
     const text = body?.parts?.[0]?.text || "";
     expect(text).toContain("Orchestrator Status");
     expect(text).toContain("VE-42");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("does not enrich prompt when statusData is absent", async () => {
     await execOpencodePrompt("bare message", { sessionId: "bare-session" });
@@ -266,7 +321,7 @@ describe("execOpencodePrompt() — happy path", () => {
     const text = callArg[0]?.body?.parts?.[0]?.text || "";
     expect(text).not.toContain("Orchestrator Status");
     expect(text).toContain("bare message");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("includes model config when OPENCODE_MODEL is set", async () => {
     process.env.OPENCODE_MODEL = "anthropic/claude-sonnet-5";
@@ -275,14 +330,30 @@ describe("execOpencodePrompt() — happy path", () => {
     expect(body?.model?.providerID).toBe("anthropic");
     expect(body?.model?.modelID).toBe("claude-sonnet-5");
     delete process.env.OPENCODE_MODEL;
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 
   it("omits model when OPENCODE_MODEL is not set", async () => {
     delete process.env.OPENCODE_MODEL;
     await execOpencodePrompt("no model", { sessionId: "no-model-session" });
     const body = mockSessionPrompt.mock.calls[0][0]?.body;
     expect(body).not.toHaveProperty("model");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
+
+  it("allows Bosun-selected OpenCode runs even when agent-sdk primary is codex", async () => {
+    const { resolveAgentSdkConfig } = await import("../agent/agent-sdk.mjs");
+    resolveAgentSdkConfig.mockReturnValueOnce({
+      primary: "codex",
+      capabilities: { steering: true, subagents: true, vscodeTools: false },
+    });
+
+    const result = await execOpencodePrompt("do something", {
+      sessionId: "bosun-opencode-primary",
+      expectedPrimary: "opencode",
+    });
+
+    expect(result.finalResponse).toContain("done!");
+    expect(result.items).toBeInstanceOf(Array);
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 });
 
 describe("execOpencodePrompt() — busy guard", () => {
@@ -423,6 +494,28 @@ describe("steerOpencodePrompt()", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("not_opencode");
   });
+
+  it("allows steering when Bosun selected OpenCode despite agent-sdk primary mismatch", async () => {
+    setupHappyPath();
+    mockSessionCreate.mockResolvedValue({ data: { id: "uuid-steer-bypass" } });
+    mockSessionGet.mockResolvedValue({ data: { id: "uuid-steer-bypass" } });
+    await execOpencodePrompt("establish session", {
+      sessionId: "steer-bypass-session",
+      expectedPrimary: "opencode",
+    });
+
+    const { resolveAgentSdkConfig } = await import("../agent/agent-sdk.mjs");
+    resolveAgentSdkConfig.mockReturnValueOnce({
+      primary: "codex",
+      capabilities: { steering: true, subagents: true, vscodeTools: false },
+    });
+
+    const result = await steerOpencodePrompt("steer", {
+      expectedPrimary: "opencode",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.mode).toBe("abort");
+  });
 });
 
 describe("resetSession()", () => {
@@ -466,7 +559,7 @@ describe("Session management — listSessions / switchSession / createSession", 
     await execOpencodePrompt("test", { sessionId: "switch-a", persistent: true });
     await switchSession("switch-b");
     expect(getActiveSessionId()).toBe("switch-b");
-  });
+  }, SLOW_OPENCODE_SHELL_TEST_TIMEOUT_MS);
 });
 
 describe("Event formatting — formatOpencodeEvent (via onEvent)", () => {
@@ -601,200 +694,16 @@ describe("initOpencodeShell()", () => {
 
 describe("discoverProviders()", () => {
   afterEach(() => {
-    delete process.env.OPENCODE_PORT;
     vi.clearAllMocks();
   });
 
-  it("uses baseUrl when attaching the SDK client", async () => {
+  it("uses the registry-backed compatibility shim instead of shell-local discovery ownership", async () => {
     vi.resetModules();
-    const list = vi.fn().mockResolvedValue({
-      data: {
-        all: [{
-          id: "anthropic",
-          name: "Anthropic",
-          env: ["ANTHROPIC_API_KEY"],
-          models: {
-            "claude-sonnet-4": { id: "claude-sonnet-4", name: "Claude Sonnet 4" },
-          },
-        }],
-        connected: ["anthropic"],
-        default: { anthropic: "claude-sonnet-4" },
-      },
-    });
-    const auth = vi.fn().mockResolvedValue({
-      data: { anthropic: [{ type: "api_key", label: "API key" }] },
-    });
-    mockCreateOpencodeClient.mockReturnValue({ provider: { list, auth } });
-
     const { discoverProviders } = await import("../shell/opencode-providers.mjs");
     const snapshot = await discoverProviders({ force: true });
 
-    expect(mockCreateOpencodeClient).toHaveBeenCalledWith(
-      expect.objectContaining({
-        baseUrl: "http://127.0.0.1:4096",
-        timeout: 5_000,
-      }),
-    );
-    expect(list).toHaveBeenCalledWith({ query: { directory: process.cwd() } });
-    expect(auth).toHaveBeenCalledWith({ query: { directory: process.cwd() } });
-    expect(snapshot.connectedIds).toEqual(["anthropic"]);
-    expect(snapshot.providers[0].models[0].fullId).toBe("anthropic/claude-sonnet-4");
-  });
-
-  it("falls back to hostname/port for older SDK signatures", async () => {
-    vi.resetModules();
-    const list = vi.fn().mockResolvedValue({
-      data: { all: [], connected: [], default: {} },
-    });
-    const auth = vi.fn().mockResolvedValue({ data: {} });
-    mockCreateOpencodeClient
-      .mockImplementationOnce(() => {
-        throw new Error("unsupported option");
-      })
-      .mockReturnValueOnce({ provider: { list, auth } });
-
-    const { discoverProviders } = await import("../shell/opencode-providers.mjs");
-    await discoverProviders({ force: true });
-
-    expect(mockCreateOpencodeClient).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        hostname: "127.0.0.1",
-        port: 4096,
-        timeout: 5_000,
-      }),
-    );
-  });
-
-  it("retries provider discovery without directory query after a 400 response", async () => {
-    vi.resetModules();
-    const list = vi
-      .fn()
-      .mockRejectedValueOnce(Object.assign(new Error("Failed to list models: 400"), { status: 400 }))
-      .mockResolvedValueOnce({
-        data: {
-          all: [{
-            id: "anthropic",
-            name: "Anthropic",
-            env: ["ANTHROPIC_API_KEY"],
-            models: {
-              "claude-sonnet-4": { id: "claude-sonnet-4", name: "Claude Sonnet 4" },
-            },
-          }],
-          connected: ["anthropic"],
-          default: { anthropic: "claude-sonnet-4" },
-        },
-      });
-    const auth = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("HTTP 400 bad request for directory query"))
-      .mockResolvedValueOnce({
-        data: { anthropic: [{ type: "api_key", label: "API key" }] },
-      });
-    mockCreateOpencodeClient.mockReturnValue({ provider: { list, auth } });
-
-    const { discoverProviders } = await import("../shell/opencode-providers.mjs");
-    const snapshot = await discoverProviders({ force: true });
-
-    expect(list).toHaveBeenNthCalledWith(1, { query: { directory: process.cwd() } });
-    expect(list.mock.calls[1]).toEqual([]);
-    expect(auth).toHaveBeenNthCalledWith(1, { query: { directory: process.cwd() } });
-    expect(auth.mock.calls[1]).toEqual([]);
-    expect(snapshot.connectedIds).toEqual(["anthropic"]);
-    expect(snapshot.providers[0].models[0].fullId).toBe("anthropic/claude-sonnet-4");
-  });
-
-  it("falls back to basic CLI output when verbose model listing returns 400", async () => {
-    vi.resetModules();
-    mockCreateOpencodeClient.mockImplementation(() => {
-      throw new Error("sdk unavailable");
-    });
-
-    vi.doMock("node:child_process", () => ({
-      execFile: vi.fn((bin, args, opts, cb) => {
-        const callback = typeof opts === "function" ? opts : cb;
-        if (Array.isArray(args) && args.includes("--verbose")) {
-          callback(new Error("Failed to list models: 400"));
-          return;
-        }
-        callback(null, "openai/gpt-5\nanthropic/claude-sonnet\n", "");
-      }),
-      exec: vi.fn((command, opts, cb) => {
-        const callback = typeof opts === "function" ? opts : cb;
-        if (String(command).includes("--verbose")) {
-          callback(new Error("Failed to list models: 400"));
-          return;
-        }
-        callback(null, "openai/gpt-5\nanthropic/claude-sonnet\n", "");
-      }),
-    }));
-
-    const { discoverProviders } = await import("../shell/opencode-providers.mjs");
-    const snapshot = await discoverProviders({ force: true });
-
-    expect(snapshot.connectedIds).toEqual(["openai", "anthropic"]);
-    expect(snapshot.allModels).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ fullId: "openai/gpt-5", providerID: "openai", id: "gpt-5" }),
-        expect.objectContaining({ fullId: "anthropic/claude-sonnet", providerID: "anthropic", id: "claude-sonnet" }),
-      ]),
-    );
-  });
-
-  it("falls back to basic catalog output when verbose refresh listing returns 400", async () => {
-    vi.resetModules();
-    mockCreateOpencodeClient.mockImplementation(() => {
-      throw new Error("sdk unavailable");
-    });
-
-    vi.doMock("node:child_process", () => ({
-      execFile: vi.fn((bin, args, opts, cb) => {
-        const callback = typeof opts === "function" ? opts : cb;
-        if (Array.isArray(args) && args.includes("--refresh") && args.includes("--verbose")) {
-          callback(new Error("Failed to list models: 400"));
-          return;
-        }
-        if (Array.isArray(args) && args.includes("--verbose")) {
-          callback(null, "openai/gpt-5\n", "");
-          return;
-        }
-        if (Array.isArray(args) && args.includes("--refresh")) {
-          callback(null, "openai/gpt-5\ngoogle/gemini-2.5-pro\n", "");
-          return;
-        }
-        callback(null, "openai/gpt-5\n", "");
-      }),
-      exec: vi.fn((command, opts, cb) => {
-        const callback = typeof opts === "function" ? opts : cb;
-        const text = String(command);
-        if (text.includes("--refresh") && text.includes("--verbose")) {
-          callback(new Error("Failed to list models: 400"));
-          return;
-        }
-        if (text.includes("--verbose")) {
-          callback(null, "openai/gpt-5\n", "");
-          return;
-        }
-        if (text.includes("--refresh")) {
-          callback(null, "openai/gpt-5\ngoogle/gemini-2.5-pro\n", "");
-          return;
-        }
-        callback(null, "openai/gpt-5\n", "");
-      }),
-    }));
-
-    const { discoverProviders } = await import("../shell/opencode-providers.mjs");
-    const snapshot = await discoverProviders({ force: true, includeCatalog: true });
-
-    expect(snapshot.connectedIds).toEqual(["openai"]);
-    expect(snapshot.providers.map((provider) => provider.id)).toEqual(["openai", "google"]);
-    expect(snapshot.providers[1]).toEqual(
-      expect.objectContaining({
-        id: "google",
-        connected: false,
-        models: [expect.objectContaining({ fullId: "google/gemini-2.5-pro" })],
-      }),
-    );
+    expect(Array.isArray(snapshot.providers)).toBe(true);
+    expect(Array.isArray(snapshot.connectedIds)).toBe(true);
+    expect(snapshot.providers.every((entry) => entry.source === "registry")).toBe(true);
   });
 });
-

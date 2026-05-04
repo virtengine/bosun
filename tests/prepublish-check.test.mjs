@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   expandPublishedFiles,
+  findMissingPublishedFiles,
   findLocalImportSpecifiers,
+  getRequiredHarnessRuntimeAssets,
   validatePublishedLocalImports,
 } from "../tools/prepublish-check.mjs";
 
@@ -72,6 +74,24 @@ describe("prepublish-check", () => {
     ]);
   });
 
+  it("reports required published asset files that are missing from the manifest expansion", () => {
+    const publishedFiles = new Set([
+      "agent/skills/skill-codebase-audit.md",
+      "agent/skills/pr-workflow.md",
+    ]);
+
+    expect(
+      findMissingPublishedFiles(publishedFiles, [
+        "agent/skills/background-task-execution.md",
+        "agent/skills/pr-workflow.md",
+        "agent/skills/background-task-execution.md",
+      ]),
+    ).toEqual([
+      "agent/skills/background-task-execution.md",
+      "agent/skills/background-task-execution.md",
+    ]);
+  });
+
   it("fails when a published module imports a non-published parent-relative file", async () => {
     const root = createFixture({
       "package.json": JSON.stringify({
@@ -125,11 +145,34 @@ describe("prepublish-check", () => {
     const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
     expect(pkg.files).toEqual(
       expect.arrayContaining([
+        "agent/internal-harness-control-plane.mjs",
         "agent/internal-harness-profile.mjs",
         "agent/internal-harness-runtime.mjs",
+        "infra/storage-janitor.mjs",
+        "shell/auth-resolver.mjs",
+        "shell/mcp-client.mjs",
+        "shell/mcp-registry.mjs",
+        "shell/provider-transform.mjs",
+        "shell/session-resume.mjs",
+        "shell/session-store.mjs",
+        "shell/codex-sdk-import.mjs",
+        "kanban/gnap-projection-store.mjs",
+        "workspace/context-injector.mjs",
         "workspace/execution-journal.mjs",
         "workspace/scope-locks.mjs",
       ]),
     );
+  });
+
+  it("publishes the required step 9 shell shim and harness runtime assets", () => {
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
+    const publishedFiles = expandPublishedFiles(process.cwd(), pkg.files);
+
+    expect(
+      findMissingPublishedFiles(
+        publishedFiles,
+        getRequiredHarnessRuntimeAssets(process.cwd()),
+      ),
+    ).toEqual([]);
   });
 });

@@ -80,8 +80,8 @@ export const TOOL_DEFS = [
         },
         executor: {
           type: "string",
-          enum: ["codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
-          description: "Which agent to use. Defaults to the configured primary agent.",
+          enum: ["openai-native", "codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
+          description: "Optional executor override. Prefer omitting this unless you need a specific runtime; when omitted, Bosun uses the active workflow/runtime executor.",
         },
         mode: {
           type: "string",
@@ -135,7 +135,7 @@ export const TOOL_DEFS = [
       properties: {
         executor: {
           type: "string",
-          enum: ["codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
+          enum: ["openai-native", "codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
           description: "The executor to switch to",
         },
       },
@@ -487,8 +487,8 @@ export const TOOL_DEFS = [
         enabled: { type: "boolean", description: "When saving, set enabled state. Default: false" },
         executor: {
           type: "string",
-          enum: ["codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
-          description: "Agent executor to use for generation",
+          enum: ["openai-native", "codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
+          description: "Optional agent executor override for generation",
         },
       },
       required: ["prompt"],
@@ -723,8 +723,8 @@ export const TOOL_DEFS = [
           description:
             "Shell command to run in the workspace root. Examples: " +
             "'git status --short', 'git log --oneline -10', " +
-            "'npm test -- --passWithNoTests 2>&1 | tail -20', " +
-            "'cat package.json', 'ls src/', 'grep -r TODO . --include=*.mjs | head -20'",
+            "'git commit --amend -m \"fix(workspace): restore per-agent rate limiting\"', " +
+            "'npm test -- tests/workspace-health.test.mjs', 'cat package.json', 'ls src/'",
         },
       },
       required: ["command"],

@@ -148,7 +148,7 @@ describe("duplicate monitor lock handling", () => {
 
   it("short-circuits duplicate starts in cli before forking monitor", () => {
     const preflightMatch = cliSource.match(
-      /const existingOwner = detectExistingMonitorLockOwner\(\);[\s\S]*?if \(existingOwner\) \{[\s\S]*?exiting duplicate start\.[\s\S]*?return;[\s\S]*?\}/,
+      /const configuredCacheDirs = await getConfiguredRuntimeCacheDirs\(\);[\s\S]*?const existingOwner = detectExistingMonitorLockOwner\(null, configuredCacheDirs\);[\s\S]*?if \(existingOwner\) \{[\s\S]*?exiting duplicate start\.[\s\S]*?return;[\s\S]*?\}/,
     );
     expect(preflightMatch, "cli should skip runMonitor() when a live lock owner exists").toBeTruthy();
   });

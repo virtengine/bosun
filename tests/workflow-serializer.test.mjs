@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildWorkflowDraftFlowchart,
   serializeWorkflowToCode,
   deserializeCodeToWorkflow,
   validateWorkflowCode,
@@ -127,6 +128,44 @@ describe("serializeWorkflowToCode", () => {
     expect(edge.targetPort).toBeUndefined();
     expect(edge.label).toBeUndefined();
     expect(edge.condition).toBeUndefined();
+  });
+
+  it("serializes a linked draft flowchart map into workflow metadata", () => {
+    const wf = makeWorkflow({
+      nodes: [
+        { id: "start", type: "trigger.manual", label: "Start", position: { x: 10, y: 20 } },
+        { id: "fetch", type: "action.http_request", label: "Fetch", position: { x: 180, y: 20 } },
+        { id: "notify", type: "action.log", label: "Notify", position: { x: 360, y: 20 } },
+      ],
+      edges: [
+        { id: "edge-1", source: "start", target: "fetch" },
+        { id: "edge-2", source: "fetch", target: "notify" },
+      ],
+      groups: [{ id: "group-fetch", label: "Research", nodeIds: ["start", "fetch"] }],
+    });
+
+    const result = serializeWorkflowToCode(wf);
+    const parsed = JSON.parse(result.code);
+
+    expect(parsed.metadata?.flowchart?.steps).toEqual([
+      expect.objectContaining({
+        id: "group:group-fetch",
+        label: "Research",
+        runtimeNodeIds: ["start", "fetch"],
+      }),
+      expect.objectContaining({
+        id: "node:notify",
+        label: "Notify",
+        runtimeNodeIds: ["notify"],
+      }),
+    ]);
+    expect(parsed.metadata?.flowchart?.links).toEqual([
+      expect.objectContaining({
+        sourceStepId: "group:group-fetch",
+        targetStepId: "node:notify",
+        edgeIds: ["edge-2"],
+      }),
+    ]);
   });
 });
 
@@ -256,6 +295,38 @@ describe("deserializeCodeToWorkflow", () => {
     });
     const { errors } = deserializeCodeToWorkflow(code);
     expect(errors).toContain("'variables' must be a plain object");
+  });
+
+  it("preserves explicit flowchart metadata through deserialization", () => {
+    const code = JSON.stringify({
+      name: "Flowchart",
+      nodes: [
+        { id: "n1", type: "trigger.manual" },
+        { id: "n2", type: "action.log" },
+      ],
+      edges: [{ source: "n1", target: "n2" }],
+      metadata: {
+        flowchart: {
+          version: 1,
+          source: "user",
+          steps: [
+            { id: "plan-step", label: "Plan Step", runtimeNodeIds: ["n1", "n2"] },
+          ],
+          links: [],
+        },
+      },
+    });
+
+    const { workflow, errors } = deserializeCodeToWorkflow(code);
+
+    expect(errors).toEqual([]);
+    expect(workflow.metadata.flowchart.steps).toEqual([
+      expect.objectContaining({
+        id: "plan-step",
+        label: "Plan Step",
+        runtimeNodeIds: ["n1", "n2"],
+      }),
+    ]);
   });
 
   it("defaults enabled to true if omitted", () => {
@@ -430,5 +501,33 @@ describe("Round-trip: serialize → deserialize", () => {
     // Edge source/target preserved
     expect(workflow.edges[0].source).toBe(wf.edges[0].source);
     expect(workflow.edges[0].target).toBe(wf.edges[0].target);
+  });
+
+  it("supplements a partial saved flowchart with missing runtime nodes and links", () => {
+    const flowchart = buildWorkflowDraftFlowchart({
+      nodes: [
+        { id: "n1", type: "trigger.manual", label: "Start", position: { x: 0, y: 0 } },
+        { id: "n2", type: "action.log", label: "Log", position: { x: 150, y: 0 } },
+      ],
+      edges: [{ source: "n1", target: "n2" }],
+      metadata: {
+        flowchart: {
+          version: 1,
+          source: "user",
+          steps: [
+            { id: "manual-step", label: "Start", runtimeNodeIds: ["n1"] },
+          ],
+          links: [],
+        },
+      },
+    });
+
+    expect(flowchart.steps).toEqual([
+      expect.objectContaining({ id: "manual-step", runtimeNodeIds: ["n1"] }),
+      expect.objectContaining({ id: "node:n2", runtimeNodeIds: ["n2"] }),
+    ]);
+    expect(flowchart.links).toEqual([
+      expect.objectContaining({ sourceStepId: "manual-step", targetStepId: "node:n2" }),
+    ]);
   });
 });

@@ -78,7 +78,30 @@ for (const { relPath, source } of sourceFiles) {
     it("treats detached sessions as active based on status, not history-only placement", () => {
       expect(source).toContain("function isFleetEntryActive(entry)");
       expect(source).not.toContain("if (entry.isHistory) return false;");
-      expect(source).toContain('return status === "active" || status === "running" || status === "busy" || status === "inprogress";');
+      expect(source).toContain("return getFleetEntryStatusMeta(entry).isActive === true;");
+      expect(source).toContain('return { key: "recent", label: "Recent", tone: "warning", isActive: false };');
+      expect(source).toContain('return runtimeState?.key === "running";');
+    });
+
+    it("does not count synthetic task fallbacks as active without a live session", () => {
+      expect(source).toContain("const isSyntheticFallback = entry?.isTaskFallback || entry?.slot?.synthetic;");
+      expect(source).toContain("if (isSyntheticFallback && !entry?.session) {");
+      expect(source).toContain('key: slotStatus || "task_only"');
+      expect(source).toContain('label: slotStatus ? formatFleetStateLabel(slotStatus) : "Task only"');
+      expect(source).toContain('isActive: false,');
+    });
+
+    it("surfaces response freshness and dedupes session identities in the fleet rail", () => {
+      expect(source).toContain("function getFleetEntryResponseTimestamp(entry)");
+      expect(source).toContain("function getFleetEntryActivityLabel(entry)");
+      expect(source).toContain("function dedupeFleetEntries(entries = [])");
+      expect(source).toContain('const responsePath = resolveFleetEntrySessionId(entry) ? "stream" : "logs";');
+      expect(source).toContain('const prefix = isFleetEntryActive(entry)');
+      expect(source).toContain('if (isFleetEntryActive(entry)) return `Awaiting ${responsePath} response`;');
+      expect(source).toContain("const canonicalKey = getFleetEntryCanonicalKey(entry);");
+      expect(source).toContain("const activityLabel = getFleetEntryActivityLabel(entry);");
+      expect(source).toContain('class="fleet-slot-meta-response"');
+      expect(source).toContain("Responses via");
     });
 
     it("uses useMemo for entries array to prevent infinite render loops", () => {
@@ -147,6 +170,19 @@ for (const { relPath, source } of sourceFiles) {
       expect(source).toContain("fleet-turn-timeline");
       expect(source).toContain("formatTurnTokens(turn)");
       expect(source).toContain("formatMsDuration(turn.durationMs || 0)");
+    });
+
+    it("derives completed turn durations from timestamps when durationMs is missing", () => {
+      expect(source).toContain("function resolveTurnDurationMs(turn, pair)");
+      expect(source).toContain("endedAt >= startedAt");
+      expect(source).toContain("durationMs: resolveTurnDurationMs(turn, pair)");
+    });
+
+    it("demotes blocked or stale session states before slot status can mark them active", () => {
+      expect(source).toContain("const lifecycleState = String(");
+      expect(source).toContain('runtimeState?.key && runtimeState.key !== "running"');
+      expect(source).toContain('buildFleetStatusMeta(lifecycleState, "Not live")');
+      expect(source).toContain('"blocked_by_env"');
     });
 
     it("scopes Fleet metrics to workspace slot summaries and separates session-only activity", () => {
@@ -330,9 +366,12 @@ describe("executor workspace summary source", () => {
   const serverSource = readFileSync(resolve(process.cwd(), "server/ui-server.mjs"), "utf8");
 
   it("adds workspace-scoped slot summaries to /api/executor", () => {
-    expect(serverSource).toContain("function buildWorkspaceExecutorSummary(execStatus, workspaceContext)");
+    expect(serverSource).toContain("function buildWorkspaceExecutorSummary(execStatus, workspaceContext, workflowRunDetails = [])");
     expect(serverSource).toContain("const workspaceSummary = execStatus");
-    expect(serverSource).toContain("{ ...execStatus, workspaceSummary, activeWorkflowRuns, workflowRunDetails }");
+    expect(serverSource).toContain("buildWorkspaceExecutorSummary(execStatus, workspaceContext, workflowRunDetails)");
+    expect(serverSource).toContain("activeSlots: Math.max(Number(execStatus?.activeSlots || 0) || 0, mergedActiveSlots),");
+    expect(serverSource).toContain("slots: mergedSlots,");
+    expect(serverSource).toMatch(/\{\s*\.\.\.execStatus,[\s\S]*workspaceSummary,[\s\S]*activeWorkflowRuns,[\s\S]*workflowRunDetails: workflowRunDetails\.slice\(0, 20\),/);
   });
 
   it("uses the actual request url when augmenting executor workflow counts", () => {
@@ -578,16 +617,6 @@ for (const { relPath, source } of dashboardSourceFiles) {
     });
   });
 
-  if (relPath === "ui/tabs/dashboard.js") {
-    describe(`Dashboard durable runtime adoption (${relPath})`, () => {
-      it("renders the durable runtime status summary in the owned ui bundle", () => {
-        expect(source).toContain("Durable Runtime");
-        expect(source).toContain("Session lineage and context pressure");
-        expect(source).toContain("State ledger / SQL");
-      });
-    });
-  }
-
   it(`surfaces harness attention with deep links into the Agents tab (${relPath})`, () => {
     expect(source).toContain('apiFetch("/api/harness/runs?limit=8", { _silent: true })');
     expect(source).toContain("const [harnessRuns, setHarnessRuns] = useState([]);");
@@ -606,6 +635,16 @@ for (const { relPath, source } of dashboardSourceFiles) {
     expect(source).toContain('(e.key === "Enter" || e.key === " ")');
     expect(source).toContain('aria-label="Quick actions"');
   });
+
+  if (relPath === "ui/tabs/dashboard.js") {
+    describe(`Dashboard durable runtime adoption (${relPath})`, () => {
+      it("renders the durable runtime status summary in the owned ui bundle", () => {
+        expect(source).toContain("Durable Runtime");
+        expect(source).toContain("Session lineage and context pressure");
+        expect(source).toContain("State ledger / SQL");
+      });
+    });
+  }
 }
 
 for (const relPath of ["ui/tabs/tasks.js", "site/ui/tabs/tasks.js"]) {
@@ -617,7 +656,11 @@ for (const relPath of ["ui/tabs/tasks.js", "site/ui/tabs/tasks.js"]) {
       expect(source).toContain('Sprint nodes: <span class="numeral">${dagSprintGraphView.nodes.length}</span>');
       expect(source).toContain('Global nodes: <span class="numeral">${dagGlobalGraphView.nodes.length}</span>');
       expect(source).toContain('Epic nodes: <span class="numeral">${dagEpicGraphView.nodes.length}</span>');
-      expect(source).toContain('<span class="numeral">${visible.length}</span> shown');
+      expect(
+        source.includes('<span class="numeral">${visible.length}</span> shown')
+        || source.includes('<span class="numeral">${isList ? listVisibleCount : visible.length}</span> shown')
+        || source.includes('<span class="numeral">${visibleShownCount}</span> shown'),
+      ).toBe(true);
       expect(source).toContain('Page <span class="numeral">${page + 1}</span> / <span class="numeral">${totalPages}</span>');
     });
   });
@@ -637,16 +680,13 @@ for (const relPath of ["ui/tabs/agents.js", "site/ui/tabs/agents.js"]) {
 
 describe("TUI agents harness monitor", () => {
   it("renders harness detail, approvals, and nudge controls backed by harness APIs", () => {
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, "/api/harness/runs?limit=8")');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, "/api/agents/events/status")');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, "/api/agents/events/liveness")');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, "/api/agents/events/errors")');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, "/api/agents/events?limit=25")');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, `/api/harness/runs/${encodeURIComponent(runId)}`)');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, `/api/harness/runs/${encodeURIComponent(runId)}/events?limit=40&direction=desc`)');
-    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, `/api/harness/runs/${encodeURIComponent(runId)}/approval`)');
-    expect(tuiAgentsSource).toContain('`/api/harness/approvals/${encodeURIComponent(requestId)}/resolve`');
-    expect(tuiAgentsSource).toContain('`/api/harness/runs/${encodeURIComponent(runId)}/nudge`');
+    expect(tuiAgentsSource).toContain('fetchJson(');
+    expect(tuiAgentsSource).toContain('buildHarnessSurfacePath("agents", { limit: 25 })');
+    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, buildHarnessRunPath(runId), undefined, wsBridge)');
+    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, buildHarnessRunPath(runId, "events", { limit: 40, direction: "desc" }), undefined, wsBridge)');
+    expect(tuiAgentsSource).toContain('fetchJson(resolvedHost, resolvedPort, buildHarnessRunPath(runId, "approval"), undefined, wsBridge)');
+    expect(tuiAgentsSource).toContain('buildHarnessApprovalPath(requestId, "resolve")');
+    expect(tuiAgentsSource).toContain('buildHarnessRunPath(runId, "nudge")');
     expect(tuiAgentsSource).toContain("function HarnessDetail(");
     expect(tuiAgentsSource).toContain("function AgentMonitorDetail(");
     expect(tuiAgentsSource).toContain("Agent Live Monitor (");
@@ -681,9 +721,7 @@ describe("TUI workflows operator inbox", () => {
   it("renders merged workflow and harness approvals with inbox actions", () => {
     const workflowsTuiSource = readFileSync(resolve(process.cwd(), "tui/screens/workflows.mjs"), "utf8");
     const helpSource = readFileSync(resolve(process.cwd(), "ui/tui/HelpScreen.js"), "utf8");
-    expect(workflowsTuiSource).toContain('requestJson("/api/workflows/approvals?status=pending&limit=25")');
-    expect(workflowsTuiSource).toContain('requestJson("/api/harness/approvals?status=pending&limit=25")');
-    expect(workflowsTuiSource).toContain('requestJson("/api/harness/runs?limit=8")');
+    expect(workflowsTuiSource).toContain('requestJson("/api/harness/surface?view=workflows&limit=25")');
     expect(workflowsTuiSource).toContain("Operator Inbox (");
     expect(workflowsTuiSource).toContain("Pending workflow approvals plus waiting or stalled harness runs");
     expect(workflowsTuiSource).toContain('"/api/workflows/approvals/${encodeURIComponent(item.requestId)}/resolve"');
@@ -756,4 +794,21 @@ describe("Web workflows operator surfaces", () => {
       expect(source).toContain("Remediate Run");
     });
   }
+});
+
+describe("Telegram harness surface routing", () => {
+  it("routes fleet, telemetry, and logs through the shared UI control plane client when available", () => {
+    const telegramSource = readFileSync(resolve(process.cwd(), "telegram/telegram-bot.mjs"), "utf8");
+    const harnessClientSource = readFileSync(
+      resolve(process.cwd(), "telegram/harness-api-client.mjs"),
+      "utf8",
+    );
+    expect(harnessClientSource).toContain("async getSurface(view = \"all\", limit = 25)");
+    expect(harnessClientSource).toContain('return request(`/api/harness/surface?${query.toString()}`);');
+    expect(harnessClientSource).toContain("async getLogs(lines = 30)");
+    expect(harnessClientSource).toContain('return request(`/api/logs?lines=${count}`);');
+    expect(telegramSource).toContain('harnessApi.getSurface("agents", 12)');
+    expect(telegramSource).toContain('harnessApi.getSurface("telemetry", 12)');
+    expect(telegramSource).toContain("harnessApi.getLogs(numLines)");
+  });
 });

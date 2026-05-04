@@ -45,11 +45,7 @@ import { resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import os from "node:os";
-import {
-  execPrimaryPrompt,
-  getPrimaryAgentInfo,
-  initPrimaryAgent,
-} from "../agent/primary-agent.mjs";
+import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
 import { resolveRepoRoot } from "../config/repo-root.mjs";
 import {
   claimTelegramPollOwner,
@@ -169,6 +165,7 @@ const MONITOR_POLL_LOCK_FILE = resolve(cacheDir, "telegram-getupdates.lock");
 const STATUS_FILE = resolve(cacheDir, "orchestrator-status.json");
 
 const TAG = "[sentinel]";
+const harnessAgentRuntime = createHarnessAgentService();
 const POLL_TIMEOUT_S = 30;
 const MAX_MESSAGE_LEN = 4000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
@@ -577,8 +574,10 @@ async function runRepairAgent(triggerReason, details = "") {
         .join("\n"),
     );
 
-    await initPrimaryAgent();
-    const agentInfo = getPrimaryAgentInfo();
+    const runtimeLabel =
+      harnessAgentRuntime.getPoolSdkName?.()
+      || harnessAgentRuntime.getPrimaryAgentName?.()
+      || "harness";
     const mmHealth = await assessMonitorMonitorHealth();
     const prompt = [
       "bosun sentinel autonomous repair request.",
@@ -599,14 +598,19 @@ async function runRepairAgent(triggerReason, details = "") {
       .filter(Boolean)
       .join("\n");
 
-    const result = await execPrimaryPrompt(prompt, {
+    const result = await harnessAgentRuntime.runBackgroundPrompt(prompt, {
       timeoutMs: sentinelConfig.repairTimeoutMs,
+      sessionId: "sentinel-repair-agent",
+      scope: "telegram-sentinel:repair",
+      sessionType: "telegram-sentinel",
+      taskKey: "telegram-sentinel-repair",
+      autoRecover: true,
     });
     const summary = normalizeAgentResult(result);
     await sendTelegram(
       telegramChatId,
       [
-        `:check: Repair agent completed via ${agentInfo.adapter}.`,
+        `:check: Repair agent completed via ${runtimeLabel}.`,
         "",
         summary.slice(0, 3500),
       ].join("\n"),
@@ -629,11 +633,13 @@ async function runPrimaryAgentFallback(chatId, text, command) {
     return false;
   }
   try {
-    await initPrimaryAgent();
-    const agentInfo = getPrimaryAgentInfo();
+    const runtimeLabel =
+      harnessAgentRuntime.getPoolSdkName?.()
+      || harnessAgentRuntime.getPrimaryAgentName?.()
+      || "harness";
     await sendTelegram(
       chatId,
-      `:bot: bosun is down. Running via sentinel fallback (${agentInfo.adapter})...`,
+      `:bot: bosun is down. Running via sentinel harness fallback (${runtimeLabel})...`,
     );
 
     const prompt = [
@@ -650,8 +656,13 @@ async function runPrimaryAgentFallback(chatId, text, command) {
       "If the exact command requires monitor internals, provide the closest equivalent action and clear next steps.",
     ].join("\n");
 
-    const result = await execPrimaryPrompt(prompt, {
+    const result = await harnessAgentRuntime.runBackgroundPrompt(prompt, {
       timeoutMs: sentinelConfig.primaryAgentFallbackTimeoutMs,
+      sessionId: `sentinel-fallback-${chatId}`,
+      scope: `telegram-sentinel:${chatId}`,
+      sessionType: "telegram-sentinel",
+      taskKey: `telegram-sentinel-${chatId}`,
+      autoRecover: true,
     });
     const message = normalizeAgentResult(result).slice(0, 3600);
     await sendTelegram(chatId, message || "(fallback completed with no text output)");

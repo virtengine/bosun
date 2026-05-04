@@ -5,7 +5,7 @@
       "type": "command",
       "command": [
         "node",
-        "C:\\Users\\jON\\Documents\\source\\repos\\virtengine-gh\\bosun\\agent\\agent-hook-bridge.mjs",
+        "agent/agent-hook-bridge.mjs",
         "--agent",
         "copilot",
         "--event",
@@ -19,7 +19,7 @@
       "type": "command",
       "command": [
         "node",
-        "C:\\Users\\jON\\Documents\\source\\repos\\virtengine-gh\\bosun\\agent\\agent-hook-bridge.mjs",
+        "agent/agent-hook-bridge.mjs",
         "--agent",
         "copilot",
         "--event",
@@ -34,7 +34,7 @@
         "type": "command",
         "command": [
           "node",
-          "C:\\Users\\jON\\Documents\\source\\repos\\virtengine-gh\\bosun\\agent\\agent-hook-bridge.mjs",
+          "agent/agent-hook-bridge.mjs",
           "--agent",
           "copilot",
           "--event",
@@ -50,7 +50,7 @@
         "type": "command",
         "command": [
           "node",
-          "C:\\Users\\jON\\Documents\\source\\repos\\virtengine-gh\\bosun\\agent\\agent-hook-bridge.mjs",
+          "agent/agent-hook-bridge.mjs",
           "--agent",
           "copilot",
           "--event",

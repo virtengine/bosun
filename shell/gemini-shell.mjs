@@ -21,6 +21,7 @@ import {
   MAX_STREAM_RETRIES,
 } from "../infra/stream-resilience.mjs";
 import { resolveRepoRoot } from "../config/repo-root.mjs";
+import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 
@@ -36,6 +37,10 @@ let activeSessionId = null;
 let turnCount = 0;
 let stateLoaded = false;
 let activeTransport = "auto";
+const geminiSessionCompat = createShellSessionCompat({
+  adapterName: "gemini",
+  providerSelection: "gemini",
+});
 
 function timestamp() {
   return new Date().toISOString();
@@ -240,10 +245,19 @@ async function loadState() {
     activeSessionId = data.activeSessionId || null;
     turnCount = data.turnCount || 0;
     activeTransport = data.activeTransport || "auto";
+    geminiSessionCompat.hydrate({
+      sessionId: activeSessionId,
+      status: activeSessionId ? "idle" : "inactive",
+      metadata: {
+        transport: activeTransport,
+        turnCount,
+      },
+    });
   } catch {
     activeSessionId = null;
     turnCount = 0;
     activeTransport = "auto";
+    geminiSessionCompat.reset({ keepManagedRecord: false });
   }
 }
 
@@ -532,6 +546,21 @@ export async function execGeminiPrompt(userMessage, options = {}) {
   );
   activeTurn = true;
   let retryAttempt = 0;
+  const logicalSessionId = activeSessionId || preferredSession || "primary-gemini";
+  const providerRuntime = geminiSessionCompat.resolveProvider({
+    providerSelection: options.providerSelection || "gemini",
+    model: resolveGeminiModel(options),
+  });
+  geminiSessionCompat.beginTurn(logicalSessionId, {
+    activate: Boolean(activeSessionId || preferredSession),
+    status: "running",
+    providerSelection: providerRuntime.providerId || "gemini",
+    model: providerRuntime.providerConfig?.model || resolveGeminiModel(options),
+    metadata: {
+      transport,
+      turnCount,
+    },
+  });
 
   while (retryAttempt <= MAX_STREAM_RETRIES) {
     try {
@@ -539,6 +568,16 @@ export async function execGeminiPrompt(userMessage, options = {}) {
         const cliResult = await execGeminiCliPrompt(preparedPrompt, options);
         turnCount += 1;
         await saveState();
+        geminiSessionCompat.completeTurn(logicalSessionId, {
+          activate: Boolean(activeSessionId || preferredSession),
+          status: "completed",
+          providerSelection: providerRuntime.providerId || "gemini",
+          model: providerRuntime.providerConfig?.model || resolveGeminiModel(options),
+          metadata: {
+            transport,
+            turnCount,
+          },
+        });
         return cliResult;
       }
 
@@ -559,6 +598,16 @@ export async function execGeminiPrompt(userMessage, options = {}) {
         const cliResult = await execGeminiCliPrompt(preparedPrompt, options);
         turnCount += 1;
         await saveState();
+        geminiSessionCompat.completeTurn(logicalSessionId, {
+          activate: Boolean(activeSessionId || preferredSession),
+          status: "completed",
+          providerSelection: providerRuntime.providerId || "gemini",
+          model: providerRuntime.providerConfig?.model || resolveGeminiModel(options),
+          metadata: {
+            transport,
+            turnCount,
+          },
+        });
         return cliResult;
       }
 
@@ -574,6 +623,16 @@ export async function execGeminiPrompt(userMessage, options = {}) {
       const finalResponse = extractTextFromGeminiResponse(response);
       turnCount += 1;
       await saveState();
+      geminiSessionCompat.completeTurn(logicalSessionId, {
+        activate: Boolean(activeSessionId || preferredSession),
+        status: "completed",
+        providerSelection: providerRuntime.providerId || "gemini",
+        metadata: {
+          transport,
+          turnCount,
+          model,
+        },
+      });
       return {
         finalResponse: finalResponse || "Gemini SDK completed with no text output.",
         items: finalResponse
@@ -592,6 +651,17 @@ export async function execGeminiPrompt(userMessage, options = {}) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, delay));
         continue;
       }
+      geminiSessionCompat.failTurn(logicalSessionId, {
+        activate: Boolean(activeSessionId || preferredSession),
+        status: "failed",
+        error: err?.message || String(err),
+        providerSelection: providerRuntime.providerId || "gemini",
+        model: providerRuntime.providerConfig?.model || resolveGeminiModel(options),
+        metadata: {
+          transport,
+          turnCount,
+        },
+      });
       return {
         finalResponse: `:close: Gemini agent failed: ${err.message || String(err)}`,
         items: [],
@@ -603,6 +673,17 @@ export async function execGeminiPrompt(userMessage, options = {}) {
   }
 
   activeTurn = false;
+  geminiSessionCompat.failTurn(logicalSessionId, {
+    activate: Boolean(activeSessionId || preferredSession),
+    status: "failed",
+    error: "Gemini agent failed after all retry attempts.",
+    providerSelection: providerRuntime.providerId || "gemini",
+    model: providerRuntime.providerConfig?.model || resolveGeminiModel(options),
+    metadata: {
+      transport,
+      turnCount,
+    },
+  });
   return {
     finalResponse: ":close: Gemini agent failed after all retry attempts.",
     items: [],
@@ -625,30 +706,37 @@ export function isGeminiBusy() {
 }
 
 export function getSessionInfo() {
-  return {
+  return geminiSessionCompat.getSessionInfo({
     sessionId: activeSessionId,
     turnCount,
     isActive: Boolean(activeSessionId),
     isBusy: activeTurn,
     transport: activeTransport,
-  };
+  });
 }
 
 export function getActiveSessionId() {
-  return activeSessionId;
+  return geminiSessionCompat.getActiveSessionId();
 }
 
 export async function listSessions() {
   await loadState();
-  if (!activeSessionId) return [];
-  return [
-    {
-      id: activeSessionId,
-      title: "Gemini Session",
-      active: true,
-      turnCount,
-    },
-  ];
+  return geminiSessionCompat.listSessions({
+    extraSessions: activeSessionId
+      ? [{
+          id: activeSessionId,
+          sessionId: activeSessionId,
+          title: "Gemini Session",
+          active: true,
+          turnCount,
+          status: "idle",
+          metadata: {
+            transport: activeTransport,
+            turnCount,
+          },
+        }]
+      : [],
+  });
 }
 
 export async function switchSession(id) {
@@ -657,6 +745,12 @@ export async function switchSession(id) {
   if (!next) return;
   activeSessionId = next;
   await saveState();
+  return geminiSessionCompat.switchSession(next, {
+    metadata: {
+      transport: activeTransport,
+      turnCount,
+    },
+  });
 }
 
 export async function createSession(id) {
@@ -668,7 +762,14 @@ export async function createSession(id) {
   activeSessionId = next;
   turnCount = 0;
   await saveState();
-  return { id: next };
+  geminiSessionCompat.switchSession(next, {
+    status: "idle",
+    metadata: {
+      transport: activeTransport,
+      turnCount,
+    },
+  });
+  return { id: next, sessionId: next };
 }
 
 export async function resetSession() {
@@ -677,6 +778,13 @@ export async function resetSession() {
   turnCount = 0;
   activeTransport = "auto";
   geminiClient = null;
+  geminiSessionCompat.reset({
+    status: "idle",
+    metadata: {
+      transport: activeTransport,
+      turnCount: 0,
+    },
+  });
   await saveState();
 }
 

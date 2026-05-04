@@ -252,6 +252,32 @@ describe("flow.try_catch node", () => {
   });
 });
 
+describe("action.execute_workflow node", () => {
+  const nodeType = getNodeType("action.execute_workflow");
+
+  it("clears its timeout guard after a sync child workflow resolves", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = {
+        get: vi.fn(() => ({ id: "wf-child" })),
+        execute: vi.fn(() => Promise.resolve({ id: "run-child", errors: [], data: {} })),
+      };
+      const node = makeNode("action.execute_workflow", {
+        workflowId: "wf-child",
+        timeout: 5000,
+      });
+      const ctx = makeCtx({ _workflowId: "wf-parent" });
+
+      const result = await nodeType.execute(node, ctx, engine);
+
+      expect(result.success).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ── flow.parallel ───────────────────────────────────────────────────────────
 
 describe("flow.parallel node", () => {
@@ -330,6 +356,31 @@ describe("flow.parallel node", () => {
     expect(result.results.b.error).toContain("branch-b-failed");
   });
 
+  it("clears all-settled timeout guards after branches finish early", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = makeMockEngine((wfId) =>
+        Promise.resolve({ id: `run-${wfId}`, errors: [] }),
+      );
+      const node = makeNode("flow.parallel", {
+        branches: [
+          { name: "a", workflowId: "wf-a" },
+          { name: "b", workflowId: "wf-b" },
+        ],
+        failStrategy: "all-settled",
+        timeoutMs: 5000,
+      });
+      const ctx = makeCtx();
+
+      const result = await nodeType.execute(node, ctx, engine);
+
+      expect(result.successCount).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fail-fast reports first failure", async () => {
     const engine = {
       execute: vi.fn((wfId) => {
@@ -349,6 +400,34 @@ describe("flow.parallel node", () => {
     const result = await nodeType.execute(node, ctx, engine);
 
     expect(result.failCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("clears fail-fast timeout guards after a branch fails immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = {
+        execute: vi.fn((wfId) => {
+          if (wfId === "wf-a") return Promise.reject(new Error("fast-fail"));
+          return Promise.resolve({ id: "run-b", errors: [] });
+        }),
+      };
+      const node = makeNode("flow.parallel", {
+        branches: [
+          { name: "a", workflowId: "wf-a" },
+          { name: "b", workflowId: "wf-b" },
+        ],
+        failStrategy: "fail-fast",
+        timeoutMs: 5000,
+      });
+      const ctx = makeCtx();
+
+      const result = await nodeType.execute(node, ctx, engine);
+
+      expect(result.failCount).toBeGreaterThanOrEqual(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("passes branch-specific data overrides", async () => {

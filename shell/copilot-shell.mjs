@@ -22,6 +22,7 @@ import {
   MAX_STREAM_RETRIES,
 } from "../infra/stream-resilience.mjs";
 import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
+import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const require = createRequire(import.meta.url);
@@ -57,6 +58,10 @@ let activeSessionId = null;
 let activeTurn = false;
 let turnCount = 0;
 let workspacePath = null;
+const copilotSessionCompat = createShellSessionCompat({
+  adapterName: "copilot",
+  providerSelection: "copilot",
+});
 
 function envFlagEnabled(value) {
   const raw = String(value ?? "")
@@ -87,6 +92,43 @@ function resolveCopilotTransport() {
     `[copilot-shell] invalid COPILOT_TRANSPORT='${raw}', defaulting to 'auto'`,
   );
   return "auto";
+}
+
+export function buildCopilotProcessEnv(baseEnv = process.env) {
+  return {
+    ...baseEnv,
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+    GH_PAGER: "cat",
+    SYSTEMD_PAGER: "cat",
+  };
+}
+
+async function withTemporaryProcessEnv(overrides, fn) {
+  const saved = {};
+  for (const [key, value] of Object.entries(overrides || {})) {
+    if (Object.prototype.hasOwnProperty.call(process.env, key)) {
+      saved[key] = process.env[key];
+    } else {
+      saved[key] = undefined;
+    }
+    if (value === undefined || value === null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = String(value);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 export function resolveCopilotCliLaunchConfig({
@@ -420,28 +462,80 @@ function buildSessionHooks() {
 
 let _attemptedJsonRpcNodeCompatPatch = false;
 
-function ensureJsonRpcNodeCompatShim() {
-  if (_attemptedJsonRpcNodeCompatPatch) return false;
-  _attemptedJsonRpcNodeCompatPatch = true;
+function ensureJsonRpcNodeCompatShim(options = {}) {
+  const state = options.shimState && typeof options.shimState === "object"
+    ? options.shimState
+    : null;
+  if (state) {
+    if (state.attempted) return false;
+    state.attempted = true;
+  } else {
+    if (_attemptedJsonRpcNodeCompatPatch) return false;
+    _attemptedJsonRpcNodeCompatPatch = true;
+  }
 
   try {
-    const packageJsonPath = require.resolve("vscode-jsonrpc/package.json");
+    const resolvePackageJsonPath =
+      typeof options.resolvePackageJsonPath === "function"
+        ? options.resolvePackageJsonPath
+        : () => require.resolve("vscode-jsonrpc/package.json");
+    const fileExists =
+      typeof options.fileExists === "function"
+        ? options.fileExists
+        : existsSync;
+    const copyFile =
+      typeof options.copyFile === "function"
+        ? options.copyFile
+        : copyFileSync;
+    const log =
+      typeof options.log === "function"
+        ? options.log
+        : console.log;
+    const warn =
+      typeof options.warn === "function"
+        ? options.warn
+        : console.warn;
+    const packageJsonPath = resolvePackageJsonPath();
     const packageDir = dirname(packageJsonPath);
     const extensionlessNodePath = resolve(packageDir, "node");
     const nodeJsPath = resolve(packageDir, "node.js");
-    if (existsSync(extensionlessNodePath) || !existsSync(nodeJsPath)) {
+    if (fileExists(extensionlessNodePath) || !fileExists(nodeJsPath)) {
       return false;
     }
-    copyFileSync(nodeJsPath, extensionlessNodePath);
-    console.log(
+    copyFile(nodeJsPath, extensionlessNodePath);
+    log(
       `[copilot-shell] applied vscode-jsonrpc compatibility shim: ${extensionlessNodePath}`,
     );
     return true;
   } catch (err) {
-    console.warn(
+    const warn =
+      typeof options.warn === "function"
+        ? options.warn
+        : console.warn;
+    warn(
       `[copilot-shell] unable to apply vscode-jsonrpc compatibility shim: ${err?.message || err}`,
     );
     return false;
+  }
+}
+
+export async function importCopilotSdkModuleWithCompat(options = {}) {
+  const importer =
+    typeof options.importer === "function"
+      ? options.importer
+      : async () => await import("@github/copilot-sdk");
+  const shimApplied = ensureJsonRpcNodeCompatShim(options);
+  try {
+    return await importer();
+  } catch (err) {
+    const message = String(err?.message || err || "");
+    if (
+      message.includes("vscode-jsonrpc/node") &&
+      (shimApplied || ensureJsonRpcNodeCompatShim(options))
+    ) {
+      return await importer();
+    }
+    throw err;
   }
 }
 
@@ -452,10 +546,8 @@ async function loadCopilotSdk() {
     return null;
   }
 
-  ensureJsonRpcNodeCompatShim();
-
   try {
-    const mod = await import("@github/copilot-sdk");
+    const mod = await importCopilotSdkModuleWithCompat();
     CopilotClientClass =
       mod.CopilotClient || mod.default?.CopilotClient || null;
     if (!CopilotClientClass) {
@@ -464,67 +556,68 @@ async function loadCopilotSdk() {
     console.log("[copilot-shell] SDK loaded successfully");
     return CopilotClientClass;
   } catch (err) {
-    const message = String(err?.message || err || "");
-    if (
-      message.includes("vscode-jsonrpc/node") &&
-      ensureJsonRpcNodeCompatShim()
-    ) {
-      try {
-        const mod = await import("@github/copilot-sdk");
-        CopilotClientClass =
-          mod.CopilotClient || mod.default?.CopilotClient || null;
-        if (!CopilotClientClass) {
-          throw new Error("CopilotClient export not found");
-        }
-        console.log("[copilot-shell] SDK loaded successfully");
-        return CopilotClientClass;
-      } catch (retryErr) {
-        console.error(`[copilot-shell] failed to load SDK: ${retryErr.message}`);
-        return null;
-      }
-    }
-    console.error(`[copilot-shell] failed to load SDK: ${message}`);
+    console.error(`[copilot-shell] failed to load SDK: ${err?.message || err}`);
     return null;
   }
 }
 
+function hasAuthenticatedGhCli(exec = execSync) {
+  try {
+    exec("gh auth status", { stdio: "pipe", encoding: "utf8" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Detect GitHub token from multiple sources (auth passthrough).
- * Priority: Copilot-specific ENV > github-auth-manager (OAuth/App/gh-CLI/env) > undefined
+ * Resolve local Copilot SDK auth options without overriding a working `gh auth`
+ * user session with a generic GitHub token.
  */
-async function detectGitHubToken() {
-  // 1. Copilot-specific token env var (highest priority, no round-trips)
-  const copilotEnvToken = process.env.COPILOT_CLI_TOKEN || process.env.GITHUB_PAT;
-  if (copilotEnvToken) {
-    console.log("[copilot-shell] using Copilot token from environment");
-    return copilotEnvToken;
+export async function resolveCopilotSdkAuthOptions({
+  env = process.env,
+  getToken = getGitHubToken,
+  ghAuthChecker = hasAuthenticatedGhCli,
+} = {}) {
+  const explicitCopilotToken = String(env.COPILOT_CLI_TOKEN || env.GITHUB_PAT || "").trim();
+  if (explicitCopilotToken) {
+    return {
+      githubToken: explicitCopilotToken,
+      token: explicitCopilotToken,
+      useLoggedInUser: false,
+      source: env.COPILOT_CLI_TOKEN ? "copilot-cli-token-env" : "github-pat-env",
+    };
   }
 
-  // 2. Use unified auth manager (OAuth > App installation > gh CLI > GITHUB_TOKEN/GH_TOKEN)
+  if (await ghAuthChecker()) {
+    return {
+      useLoggedInUser: true,
+      source: "gh-cli-user",
+    };
+  }
+
   try {
-    const { token, type } = await getGitHubToken().catch(() => ({
-      token: process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "",
+    const resolved = await getToken().catch(() => ({
+      token: env.GITHUB_TOKEN || env.GH_TOKEN || "",
       type: "env",
     }));
+    const token = String(resolved?.token || "").trim();
     if (token) {
-      console.log(`[copilot-shell] using token from auth manager (${type})`);
-      return token;
+      return {
+        githubToken: token,
+        token,
+        useLoggedInUser: false,
+        source: resolved?.type || "env",
+      };
     }
   } catch {
     // fall through
   }
 
-  // 3. gh CLI is authenticated — SDK will use it automatically
-  try {
-    execSync("gh auth status", { stdio: "pipe", encoding: "utf8" });
-    console.log("[copilot-shell] gh CLI is authenticated — using SDK default auth");
-    return undefined;
-  } catch {
-    // gh not authenticated or not installed
-  }
-
-  console.log("[copilot-shell] no pre-auth detected, using SDK default auth");
-  return undefined;
+  return {
+    useLoggedInUser: true,
+    source: "sdk-default",
+  };
 }
 
 const OPENAI_ENV_KEYS = [
@@ -563,31 +656,31 @@ async function ensureClientStarted() {
   const cliPath = cliLaunch.cliPath;
   const cliArgs = cliLaunch.cliArgs;
 
-  // Auth passthrough: detect from multiple sources
   const cliUrl = process.env.COPILOT_CLI_URL || undefined;
-  const token = await detectGitHubToken();
   const transport = resolveCopilotTransport();
 
   // Session mode: "local" (default) uses stdio for full model access + MCP + sub-agents.
   // "auto" lets the SDK decide. "url" connects to remote server (potentially limited).
   const sessionMode = (process.env.COPILOT_SESSION_MODE || "local").trim().toLowerCase();
 
+  const localAuth =
+    transport === "url"
+      ? null
+      : await resolveCopilotSdkAuthOptions();
   let clientOptions;
   if (transport === "url") {
     if (!cliUrl) {
       console.warn(
         "[copilot-shell] COPILOT_TRANSPORT=url requested but COPILOT_CLI_URL is unset; falling back to local",
       );
-      clientOptions = { cliPath, token, cliArgs, useStdio: true, cwd: REPO_ROOT };
+      clientOptions = { cliPath, cliArgs, useStdio: true, cwd: REPO_ROOT };
     } else {
       clientOptions = { cliUrl };
     }
   } else if (transport === "cli") {
-    clientOptions = { cliPath: cliPath || "copilot", token, cliArgs, useStdio: true, cwd: REPO_ROOT };
+    clientOptions = { cliPath: cliPath || "copilot", cliArgs, useStdio: true, cwd: REPO_ROOT };
   } else if (transport === "sdk") {
-    clientOptions = token
-      ? { token, cliArgs, useStdio: true, cwd: REPO_ROOT }
-      : { cliArgs, useStdio: true, cwd: REPO_ROOT };
+    clientOptions = { cliArgs, useStdio: true, cwd: REPO_ROOT };
   } else {
     // "auto" transport — use cliUrl if provided, otherwise local stdio
     if (cliUrl && sessionMode !== "local") {
@@ -595,11 +688,27 @@ async function ensureClientStarted() {
     } else {
       clientOptions = {
         cliPath,
-        token,
         cliArgs,
         useStdio: true,
         cwd: REPO_ROOT,
       };
+    }
+  }
+
+  if (localAuth && !clientOptions.cliUrl) {
+    if (localAuth.githubToken) {
+      clientOptions.githubToken = localAuth.githubToken;
+      clientOptions.token = localAuth.token;
+    }
+    if (typeof localAuth.useLoggedInUser === "boolean") {
+      clientOptions.useLoggedInUser = localAuth.useLoggedInUser;
+    }
+    if (localAuth.source === "gh-cli-user") {
+      console.log("[copilot-shell] gh CLI is authenticated — preferring logged-in user auth");
+    } else if (localAuth.githubToken) {
+      console.log(`[copilot-shell] using Copilot auth from ${localAuth.source}`);
+    } else {
+      console.log("[copilot-shell] no pre-auth detected, using SDK default auth");
     }
   }
 
@@ -618,22 +727,41 @@ async function ensureClientStarted() {
   });
 
   await withSanitizedOpenAiEnv(async () => {
-    copilotClient = new Cls(clientOptions);
-    await Promise.race([
-      copilotClient.start(),
-      new Promise((_, reject) =>
-        setTimeout(
-          () =>
-            reject(
-              new Error(
-                `Copilot CLI failed to start within ${START_TIMEOUT_MS / 1000}s — ` +
-                  `verify COPILOT_CLI_PATH or run \`gh auth login\``,
-              ),
+    const cliProcessEnv = buildCopilotProcessEnv(process.env);
+    if (!clientOptions.cliUrl) {
+      clientOptions = {
+        ...clientOptions,
+        env: cliProcessEnv,
+      };
+    }
+    await withTemporaryProcessEnv(
+      !clientOptions.cliUrl
+        ? {
+            GIT_PAGER: cliProcessEnv.GIT_PAGER,
+            PAGER: cliProcessEnv.PAGER,
+            GH_PAGER: cliProcessEnv.GH_PAGER,
+            SYSTEMD_PAGER: cliProcessEnv.SYSTEMD_PAGER,
+          }
+        : null,
+      async () => {
+        copilotClient = new Cls(clientOptions);
+        await Promise.race([
+          copilotClient.start(),
+          new Promise((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Copilot CLI failed to start within ${START_TIMEOUT_MS / 1000}s — ` +
+                      `verify COPILOT_CLI_PATH or run \`gh auth login\``,
+                  ),
+                ),
+              START_TIMEOUT_MS,
             ),
-          START_TIMEOUT_MS,
-        ),
-      ),
-    ]);
+          ),
+        ]);
+      },
+    );
   });
   clientStarted = true;
   console.log("[copilot-shell] client started");
@@ -652,10 +780,20 @@ async function loadState() {
     console.log(
       `[copilot-shell] loaded state: sessionId=${activeSessionId}, turns=${turnCount}`,
     );
+    copilotSessionCompat.hydrate({
+      sessionId: activeSessionId,
+      status: activeSessionId ? "idle" : "inactive",
+      cwd: workspacePath || "",
+      metadata: {
+        workspacePath,
+        turnCount,
+      },
+    });
   } catch {
     activeSessionId = null;
     turnCount = 0;
     workspacePath = null;
+    copilotSessionCompat.reset({ keepManagedRecord: false });
   }
 }
 
@@ -914,10 +1052,36 @@ export async function execCopilotPrompt(userMessage, options = {}) {
   const items = [];
   let finalResponse = "";
   let responseFromMessage = false;
+  const logicalSessionId =
+    String(options.sessionId || activeSessionId || "").trim()
+    || "primary-copilot";
+  const providerRuntime = copilotSessionCompat.resolveProvider({
+    providerSelection: options.providerSelection || "copilot",
+    model: process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+  });
+  copilotSessionCompat.beginTurn(logicalSessionId, {
+    activate: Boolean(options.sessionId || activeSessionId),
+    status: "running",
+    cwd: workspacePath || REPO_ROOT,
+    providerSelection: providerRuntime.providerId || "copilot",
+    model: providerRuntime.providerConfig?.model || process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+    metadata: {
+      workspacePath,
+      turnCount,
+      persistent,
+      mode: mode || null,
+    },
+  });
 
   const handleEvent = async (event) => {
     if (!event) return;
     logSessionEvent(logPath, event);
+    copilotSessionCompat.recordStreamEvent(activeSessionId || logicalSessionId, event, {
+      activate: Boolean(options.sessionId || activeSessionId),
+      cwd: workspacePath || REPO_ROOT,
+      providerSelection: providerRuntime.providerId || "copilot",
+      model: providerRuntime.providerConfig?.model || process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+    });
     items.push(event);
     if (event.type === "assistant.message" && event.data?.content) {
       finalResponse = event.data.content;
@@ -933,6 +1097,19 @@ export async function execCopilotPrompt(userMessage, options = {}) {
     if (event.type === "session.idle") {
       turnCount += 1;
       await saveState();
+      copilotSessionCompat.completeTurn(activeSessionId || logicalSessionId, {
+        activate: Boolean(activeSessionId || options.sessionId),
+        status: "completed",
+        cwd: workspacePath || REPO_ROOT,
+        providerSelection: providerRuntime.providerId || "copilot",
+        model: providerRuntime.providerConfig?.model || process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+        metadata: {
+          workspacePath,
+          turnCount,
+          persistent,
+          mode: mode || null,
+        },
+      });
     }
     if (onEvent) {
       try {
@@ -995,38 +1172,52 @@ export async function execCopilotPrompt(userMessage, options = {}) {
     const sendPromise = session.sendAndWait
       ? sendFn.call(session, { prompt }, normalizedTimeoutMs)
       : sendFn.call(session, { prompt });
+    const idlePromise = new Promise((resolve, reject) => {
+      const idleHandler = (event) => {
+        if (!event) return;
+        if (event.type === "session.idle") resolve({ type: "session.idle" });
+        if (event.type === "session.error") {
+          reject(new Error(event.data?.message || "session error"));
+        }
+      };
+      const off = session.on ? session.on(idleHandler) : null;
+      const cleanup = () => {
+        if (typeof off === "function") {
+          try {
+            off();
+          } catch {
+            /* best effort */
+          }
+        } else if (typeof session.off === "function") {
+          try {
+            session.off(idleHandler);
+          } catch {
+            /* best effort */
+          }
+        }
+      };
+      Promise.resolve(sendPromise).finally(cleanup);
+      setTimeout(
+        () => {
+          cleanup();
+          resolve({ type: "idle-timeout" });
+        },
+        normalizeTimeoutMs(normalizedTimeoutMs + 1000, {
+          fallback: DEFAULT_TIMEOUT_MS,
+          label: "execCopilotPrompt.idleWaitResolveTimeoutMs",
+        }),
+      );
+    });
 
     // If send() returns before idle, wait for session.idle if available
     if (!session.sendAndWait) {
-      await new Promise((resolve, reject) => {
-        const idleHandler = (event) => {
-          if (!event) return;
-          if (event.type === "session.idle") resolve();
-          if (event.type === "session.error") {
-            reject(new Error(event.data?.message || "session error"));
-          }
-        };
-        const off = session.on ? session.on(idleHandler) : null;
-        Promise.resolve(sendPromise).catch(reject);
-        setTimeout(
-          resolve,
-          normalizeTimeoutMs(normalizedTimeoutMs + 1000, {
-            fallback: DEFAULT_TIMEOUT_MS,
-            label: "execCopilotPrompt.idleWaitResolveTimeoutMs",
-          }),
-        );
-        if (typeof off === "function") {
-          setTimeout(
-            () => off(),
-            normalizeTimeoutMs(normalizedTimeoutMs + 2000, {
-              fallback: DEFAULT_TIMEOUT_MS,
-              label: "execCopilotPrompt.idleWaitCleanupTimeoutMs",
-            }),
-          );
-        }
-      });
+      await Promise.resolve(sendPromise);
+      await idlePromise;
     } else {
-      await sendPromise;
+      await Promise.race([
+        Promise.resolve(sendPromise),
+        idlePromise,
+      ]);
     }
 
     clearTimeout(timer);
@@ -1051,6 +1242,20 @@ export async function execCopilotPrompt(userMessage, options = {}) {
         reason === "user_stop"
           ? ":close: Agent stopped by user."
           : `:clock: Agent timed out after ${normalizedTimeoutMs / 1000}s`;
+      copilotSessionCompat.abortTurn(activeSessionId || logicalSessionId, {
+        activate: Boolean(activeSessionId || options.sessionId),
+        status: reason === "user_stop" ? "aborted" : "timeout",
+        cwd: workspacePath || REPO_ROOT,
+        error: msg,
+        providerSelection: providerRuntime.providerId || "copilot",
+        model: providerRuntime.providerConfig?.model || process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+        metadata: {
+          workspacePath,
+          turnCount,
+          persistent,
+          mode: mode || null,
+        },
+      });
       return { finalResponse: msg, items: [], usage: null };
     }
     // ── Transient stream retry ──────────────────────────────────────────────────
@@ -1076,12 +1281,40 @@ export async function execCopilotPrompt(userMessage, options = {}) {
       console.error(
         `[copilot-shell] stream disconnection not resolved after ${MAX_STREAM_RETRIES} attempts`,
       );
+      copilotSessionCompat.failTurn(activeSessionId || logicalSessionId, {
+        activate: Boolean(activeSessionId || options.sessionId),
+        status: "failed",
+        cwd: workspacePath || REPO_ROOT,
+        error: err.message,
+        providerSelection: providerRuntime.providerId || "copilot",
+        model: providerRuntime.providerConfig?.model || process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+        metadata: {
+          workspacePath,
+          turnCount,
+          persistent,
+          mode: mode || null,
+        },
+      });
       return {
         finalResponse: `:close: Stream disconnected after ${MAX_STREAM_RETRIES} retries: ${err.message}`,
         items: [],
         usage: null,
       };
     }
+    copilotSessionCompat.failTurn(activeSessionId || logicalSessionId, {
+      activate: Boolean(activeSessionId || options.sessionId),
+      status: "failed",
+      cwd: workspacePath || REPO_ROOT,
+      error: err?.message || String(err),
+      providerSelection: providerRuntime.providerId || "copilot",
+      model: providerRuntime.providerConfig?.model || process.env.COPILOT_MODEL || process.env.COPILOT_SDK_MODEL || null,
+      metadata: {
+        workspacePath,
+        turnCount,
+        persistent,
+        mode: mode || null,
+      },
+    });
     throw err;
   } finally {
     // Only the outermost invocation (or the final retry) cleans up.
@@ -1116,13 +1349,14 @@ export function isCopilotBusy() {
 }
 
 export function getSessionInfo() {
-  return {
+  return copilotSessionCompat.getSessionInfo({
     sessionId: activeSessionId,
     turnCount,
     isActive: !!activeSession,
     isBusy: !!activeTurn,
     workspacePath,
-  };
+    cwd: workspacePath || REPO_ROOT,
+  });
 }
 
 export async function resetSession() {
@@ -1131,8 +1365,24 @@ export async function resetSession() {
   workspacePath = null;
   turnCount = 0;
   activeTurn = false;
+  copilotSessionCompat.reset({
+    status: "idle",
+    cwd: "",
+    metadata: {
+      workspacePath: null,
+      turnCount: 0,
+    },
+  });
   await saveState();
   console.log("[copilot-shell] session reset");
+}
+
+export function _setActiveSessionForTesting(session, input = {}) {
+  activeSession = session || null;
+  activeSessionId = String(input.sessionId || session?.sessionId || session?.id || "").trim() || null;
+  workspacePath = String(input.workspacePath || session?.workspacePath || "").trim() || null;
+  activeTurn = false;
+  clientStarted = input.clientStarted !== false;
 }
 
 export async function initCopilotShell() {

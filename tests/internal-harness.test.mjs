@@ -4,7 +4,20 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  HARNESS_EVENT_TYPES,
+  createHarnessEventContract,
+  isHarnessEventType,
+  normalizeHarnessEvent,
+} from "../agent/harness/event-contract.mjs";
+import {
+  HARNESS_RUN_ACTIONS,
+  createHarnessRunContract,
+  normalizeHarnessRunInput,
+} from "../agent/harness/run-contract.mjs";
+import { createHarnessRuntimeConfig } from "../agent/harness/runtime-config.mjs";
 import { compileInternalHarnessProfile } from "../agent/internal-harness-profile.mjs";
+import { createInternalHarnessRuntime } from "../agent/internal-harness-runtime.mjs";
 import { createInternalHarnessSession as createHarnessRuntimeSession } from "../agent/internal-harness-runtime.mjs";
 import {
   getHarnessRunApprovalRequest,
@@ -149,6 +162,149 @@ describe("internal harness profile compiler", () => {
     expect(invalidCodes).toContain("stage_timeout_invalid");
     expect(invalidCodes).toContain("stage_max_retries_invalid");
     expect(invalidCodes).toContain("stage_max_continues_invalid");
+  });
+});
+
+describe("internal harness contracts", () => {
+  it("defines explicit run verbs and normalizes run inputs with required metadata", () => {
+    const normalizedInputs = HARNESS_RUN_ACTIONS.map((action) => normalizeHarnessRunInput({
+      action,
+      prompt: `${action} prompt`,
+      metadata: {
+        runId: "run-1",
+        sessionId: "session-1",
+        taskKey: "task-1",
+      },
+    }));
+
+    const contract = createHarnessRunContract({
+      runId: "run-1",
+      sessionId: "session-1",
+      taskKey: "task-1",
+    });
+
+    expect(contract.supportedActions).toEqual(HARNESS_RUN_ACTIONS);
+    expect(contract.requiredMetadataFields).toEqual(["runId", "sessionId", "taskKey"]);
+    expect(normalizedInputs.map((entry) => entry.action)).toEqual(HARNESS_RUN_ACTIONS);
+    expect(normalizedInputs.every((entry) => entry.metadata.runId === "run-1")).toBe(true);
+    expect(normalizedInputs.every((entry) => entry.metadata.sessionId === "session-1")).toBe(true);
+    expect(normalizedInputs.every((entry) => entry.metadata.taskKey === "task-1")).toBe(true);
+  });
+
+  it("separates runtime config ownership and exposes a stable event vocabulary", () => {
+    const runtimeConfig = createHarnessRuntimeConfig({
+      agentId: "bosun-harness",
+      name: "Bosun Harness",
+      entryStageId: "plan",
+      taskKey: "profile-task",
+      sessionType: "workflow",
+      sdk: "codex",
+      model: "gpt-5.4",
+      provider: "openai-compatible",
+      allowedTools: ["run_tests"],
+    }, {
+      runId: "run-1",
+      sessionId: "session-1",
+      taskKey: "task-1",
+      requestedBy: "operator",
+      approvalMode: "manual",
+      surface: "telegram",
+      channel: "chat-1",
+      repoRoot: "C:/repo",
+    });
+    const runContract = createHarnessRunContract({
+      runtimeConfig,
+      runId: "run-1",
+      sessionId: "session-1",
+      taskKey: "task-1",
+    });
+    const eventContract = createHarnessEventContract({
+      runtimeConfig,
+      runContract,
+    });
+    const event = normalizeHarnessEvent({
+      type: "harness:stage-start",
+      stageId: "plan",
+      payload: { step: 1 },
+    }, {
+      runId: "run-1",
+      sessionId: "session-1",
+      taskKey: "task-1",
+    });
+
+    expect(runtimeConfig.profileDefaults).toEqual(expect.objectContaining({
+      agentId: "bosun-harness",
+      entryStageId: "plan",
+      sdk: "codex",
+      model: "gpt-5.4",
+      provider: "openai-compatible",
+    }));
+    expect(runtimeConfig.providerSelection).toEqual(expect.objectContaining({
+      providerId: "openai-compatible",
+    }));
+    expect(runtimeConfig.toolPolicy).toEqual(expect.objectContaining({
+      allowedTools: ["run_tests"],
+      approvalMode: "manual",
+    }));
+    expect(runtimeConfig.surface).toEqual(expect.objectContaining({
+      runId: "run-1",
+      sessionId: "session-1",
+      taskKey: "task-1",
+      surface: "telegram",
+      channel: "chat-1",
+      requestedBy: "operator",
+    }));
+    expect(eventContract.eventTypes).toEqual(HARNESS_EVENT_TYPES);
+    expect(HARNESS_EVENT_TYPES.every((type) => isHarnessEventType(type))).toBe(true);
+    expect(event).toEqual(expect.objectContaining({
+      type: "harness:stage-start",
+      runId: "run-1",
+      sessionId: "session-1",
+      taskKey: "task-1",
+      stageId: "plan",
+      payload: { step: 1 },
+    }));
+  });
+
+  it("exposes internal-harness-runtime as the composition root with contracts in session state", () => {
+    const runtime = createInternalHarnessRuntime({
+      agentId: "bosun-harness",
+      entryStageId: "plan",
+      provider: "openai-compatible",
+      stages: [{ id: "plan", type: "prompt", prompt: "Plan." }],
+    }, {
+      runId: "run-root",
+      sessionId: "session-root",
+      taskKey: "task-root",
+      dryRun: true,
+      requestedBy: "operator",
+      surface: "ui",
+    });
+
+    expect(runtime.runtimeConfig.surface).toEqual(expect.objectContaining({
+      runId: "run-root",
+      sessionId: "session-root",
+      taskKey: "task-root",
+      surface: "ui",
+      requestedBy: "operator",
+    }));
+    expect(runtime.runContract.metadata).toEqual(expect.objectContaining({
+      runId: "run-root",
+      sessionId: "session-root",
+      taskKey: "task-root",
+    }));
+    expect(runtime.eventContract.defaults).toEqual(expect.objectContaining({
+      runId: "run-root",
+      sessionId: "session-root",
+      taskKey: "task-root",
+    }));
+    expect(runtime.session.getState()).toEqual(expect.objectContaining({
+      runtimeConfig: expect.any(Object),
+      contracts: expect.objectContaining({
+        run: expect.objectContaining({ kind: "bosun-internal-harness-run-contract" }),
+        event: expect.objectContaining({ kind: "bosun-internal-harness-event-contract" }),
+      }),
+    }));
   });
 });
 
@@ -463,4 +619,63 @@ describe("internal harness runtime", () => {
     });
     expect(events.some((event) => event.type === "harness:approval-resolved" && event.stageId === "gate" && event.decision === "approved")).toBe(true);
   }, 15000);
+
+  it("falls back to the harness turn-runner/provider session path when executeTurn is not injected", async () => {
+    const session = createHarnessRuntimeSession({
+      agentId: "bosun-harness",
+      provider: "openai-compatible",
+      entryStageId: "plan",
+      stages: [
+        {
+          id: "plan",
+          type: "prompt",
+          prompt: "Plan with provider kernel.",
+        },
+      ],
+    }, {
+      runProviderTurn: async (payload) => ({
+        success: true,
+        finalResponse: `Handled: ${payload.prompt}`,
+        status: "completed",
+        outcome: "success",
+        sessionId: "provider-session-2",
+        threadId: "provider-thread-2",
+      }),
+    });
+
+    const result = await session.run();
+    const state = session.getState();
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.history[0]?.result?.output).toContain("Handled: Plan with provider kernel.");
+    expect(state.provider).toBe("openai-compatible");
+    expect(state.events.some((event) => event.type === "harness:stage-result")).toBe(true);
+  });
+
+  it("tracks queued follow-ups and pending interventions in harness session state", () => {
+    const session = createHarnessRuntimeSession({
+      agentId: "bosun-harness",
+      entryStageId: "plan",
+      stages: [{ id: "plan", type: "prompt", prompt: "Plan." }],
+    }, {
+      dryRun: true,
+    });
+
+    session.queueFollowup("Summarize after completion.", { source: "telegram" });
+    const steer = session.steer("", { kind: "nudge" });
+    const state = session.getState();
+
+    expect(session.listFollowups()).toEqual([
+      expect.objectContaining({
+        message: "Summarize after completion.",
+        meta: { source: "telegram" },
+      }),
+    ]);
+    expect(steer).toEqual(expect.objectContaining({
+      ok: false,
+      delivered: false,
+    }));
+    expect(state.events.some((event) => event.type === "harness:followup-queued")).toBe(true);
+  });
 });

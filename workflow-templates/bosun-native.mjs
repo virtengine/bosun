@@ -553,7 +553,9 @@ export const GIT_HEALTH_PIPELINE_TEMPLATE = {
 
     // Step 5: Check if churn exceeds threshold
     node("churn-check", "condition.expression", "High Churn?", {
-      expression: "{{hot-files.maxChurn}} > {{churnThreshold}}",
+      expression:
+        "Number($ctx.getNodeOutput('hot-files')?.maxChurn || 0) > " +
+        "Number($data?.churnThreshold || 0)",
     }),
 
     // Step 6a: Dispatch cleanup workflow if high churn

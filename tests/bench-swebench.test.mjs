@@ -31,13 +31,14 @@ describe("bosun SWE-bench bridge", () => {
       {
         cwd: process.cwd(),
         encoding: "utf8",
+        timeout: 30000,
       },
     );
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Bosun SWE-bench bridge");
     expect(result.stdout).toContain("Usage:");
-  });
+  }, 35000);
 
   it("imports SWE-bench instances into the internal task store", () => {
     const dir = makeTempDir("bosun-swebench-");

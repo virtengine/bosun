@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import htm from "htm";
-import { Box, Text, useInput } from "ink";
+import * as ink from "ink";
 import TextInput from "ink-text-input";
 import Ajv2020 from "ajv/dist/2020.js";
 import {
@@ -16,6 +16,10 @@ import { join } from "node:path";
 
 import { ANSI_COLORS, GLYPHS } from "./constants.js";
 import { emitConfigReload } from "./config-events.js";
+
+const Box = ink.Box ?? ink.default?.Box;
+const Text = ink.Text ?? ink.default?.Text;
+const useInput = ink.useInput ?? ink.default?.useInput;
 
 const html = htm.bind(React.createElement);
 const SCHEMA_PATH = new URL("../../bosun.schema.json", import.meta.url);

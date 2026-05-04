@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyBosunHelperProcess,
   classifyMonitorCommandLine,
   shouldAssumeMonitorForUnknownOwner,
 } from "../infra/maintenance.mjs";
@@ -46,6 +47,33 @@ describe("monitor lock command-line classification", () => {
     const cmd =
       "C:/nvm4w/nodejs/node.exe C:/Users/user/AppData/Local/nvm/v24.11.1/node_modules/bosun/infra/monitor.mjs --daemon-child";
     expect(classifyMonitorCommandLine(cmd)).toBe("monitor");
+  });
+});
+
+describe("Bosun helper-process classification", () => {
+  it("classifies temporary bosun ui probe helpers", () => {
+    const cmd =
+      "C:/nvm4w/nodejs/node.exe -e \"const mod = await import('./server/ui-server.mjs'); const { chromium } = await import('playwright'); const server = await mod.startTelegramUiServer({ port: 0, host: '127.0.0.1', skipInstanceLock: true, skipAutoOpen: true }); const browser = await chromium.launch({ headless: true });\"";
+    expect(classifyBosunHelperProcess(cmd)).toBe("bosun-ui-probe");
+  });
+
+  it("classifies playwright browser temp profiles as helper browsers", () => {
+    const cmd =
+      "\"C:/Program Files/Google/Chrome/Application/chrome.exe\" --user-data-dir=\"C:/Users/test/AppData/Local/Temp/playwright_chromiumdev_profile-abc123\" --remote-debugging-port=9222";
+    expect(classifyBosunHelperProcess(cmd)).toBe("playwright-browser");
+  });
+
+  it("does not classify regular bosun monitor or user browser processes as stale helpers", () => {
+    expect(
+      classifyBosunHelperProcess(
+        "C:/nvm4w/nodejs/node.exe C:/repos/bosun/infra/monitor.mjs --daemon-child",
+      ),
+    ).toBe(null);
+    expect(
+      classifyBosunHelperProcess(
+        "\"C:/Program Files/Google/Chrome/Application/chrome.exe\" https://192.168.0.183:4400/",
+      ),
+    ).toBe(null);
   });
 });
 

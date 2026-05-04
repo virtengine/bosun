@@ -48,6 +48,11 @@ describe("session-tracker", () => {
       expect(session.totalEvents).toBe(0);
     });
 
+    it("uses a bounded default history budget for primary chat sessions", () => {
+      const session = tracker.createSession({ id: "chat-default-budget", type: "primary" });
+      expect(session.maxMessages).toBe(600);
+    });
+
     it("ends a session with status", () => {
       tracker.startSession("task-1", "Test Task");
       tracker.endSession("task-1", "completed");
@@ -55,6 +60,43 @@ describe("session-tracker", () => {
       const session = tracker.getSession("task-1");
       expect(session.status).toBe("no_output");
       expect(session.endedAt).toBeGreaterThan(0);
+    });
+
+    it("does not classify planner handoffs mentioning optional pre-push hooks as commit-blocked", () => {
+      const status = _test.deriveTerminalSessionStatus({
+        messages: [{
+          role: "assistant",
+          content: [
+            "Editor handoff",
+            "",
+            "- Planned files:",
+            "  - `workflow/workflow-engine.mjs`",
+            "  - `tests/workflow-engine.test.mjs`",
+            "  - optional `.githooks/pre-push` only if a new test file is added",
+            "",
+            "No code changes were made in this planning phase.",
+          ].join("\n"),
+        }],
+      }, "completed");
+
+      expect(status).toBe("completed");
+    });
+
+    it("treats recovered publish summaries as completed despite earlier repo blockers", () => {
+      const status = _test.deriveTerminalSessionStatus({
+        messages: [{
+          role: "assistant",
+          content: [
+            "GitHub rejected the PR because `monitor-postmerge-sync-linux` is not a valid remote base branch.",
+            "The pre-push hook reran Bosun's targeted verification and passed.",
+            "Branch pushed: `origin/task/taskimport1-updated-title`",
+            "Draft PR: `#488`",
+            "Completion: verified existing task changes, pushed the branch, and opened draft PR #488.",
+          ].join("\n"),
+        }],
+      }, "completed");
+
+      expect(status).toBe("completed");
     });
 
     it("replaces existing session", () => {
@@ -236,6 +278,29 @@ describe("session-tracker", () => {
       expect(messages).toHaveLength(1);
       expect(messages[0].type).toBe("agent_message");
       expect(messages[0].content).toContain("Done. Changes are applied.");
+    });
+
+    it("records session.turn.complete text as an agent message and trajectory step", () => {
+      tracker.startSession("task-1", "Test");
+      tracker.recordEvent("task-1", {
+        type: "session.turn.complete",
+        text: "Done. Changes are applied.",
+      });
+
+      const messages = tracker.getLastMessages("task-1");
+      expect(messages).toHaveLength(1);
+      expect(messages[0].type).toBe("agent_message");
+      expect(messages[0].content).toContain("Done. Changes are applied.");
+
+      const session = tracker.getSession("task-1");
+      expect(session?.trajectory?.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "agent_message",
+            summary: "Done. Changes are applied.",
+          }),
+        ]),
+      );
     });
 
     it("ignores low-signal stream noise for activity tracking", () => {
@@ -613,6 +678,31 @@ describe("session-tracker", () => {
       expect(tracker.getSession("task-1")).toBeNull();
     });
 
+    it("suppresses late-event auto-recreation after a session is removed", () => {
+      tracker.createSession({ id: "task-retired", type: "primary" });
+      tracker.removeSession("task-retired");
+
+      tracker.recordEvent("task-retired", {
+        role: "assistant",
+        type: "agent_message",
+        content: "late event should be ignored",
+        timestamp: new Date().toISOString(),
+      });
+      expect(tracker.getSession("task-retired")).toBeNull();
+
+      tracker.createSession({ id: "task-retired", type: "primary" });
+      tracker.recordEvent("task-retired", {
+        role: "assistant",
+        type: "agent_message",
+        content: "fresh event should be accepted",
+        timestamp: new Date().toISOString(),
+      });
+
+      const session = tracker.getSession("task-retired");
+      expect(session).toBeTruthy();
+      expect(session.messages.at(-1)?.content).toContain("fresh event should be accepted");
+    });
+
     it("tracks stats", () => {
       tracker.startSession("task-1", "Test 1");
       tracker.startSession("task-2", "Test 2");
@@ -664,7 +754,7 @@ describe("session-tracker", () => {
             status: "idle",
             lifecycleStatus: "active",
             runtimeState: "idle",
-            runtimeIsLive: true,
+            runtimeIsLive: false,
           }),
         );
       } finally {
@@ -698,6 +788,57 @@ describe("session-tracker", () => {
         expect(session?.insights?.contextWindow?.percent).toBe(38);
         expect(listed?.insights?.contextWindow?.usedTokens).toBe(103200);
 
+        reloadedTracker.destroy();
+      } finally {
+        rmSync(persistDir, { recursive: true, force: true });
+      }
+    });
+
+    it("hydrates persisted sessions before recording events or updating status", () => {
+      const persistDir = mkdtempSync(join(tmpdir(), "bosun-session-tracker-"));
+      try {
+        const persistentTracker = createSessionTracker({ maxMessages: 10, persistDir });
+        persistentTracker.createSession({
+          id: "persisted-delegate-session",
+          type: "task-delegate",
+          metadata: {
+            title: "Persisted Delegate Session",
+            parentSessionId: "persisted-parent-session",
+          },
+        });
+        persistentTracker.recordEvent("persisted-delegate-session", {
+          role: "system",
+          content: "[Delegation] Started live session delegate-live-child",
+          timestamp: "2026-04-25T00:00:00.000Z",
+        });
+        persistentTracker.flush();
+        persistentTracker.destroy();
+
+        const reloadedTracker = createSessionTracker({ maxMessages: 10, persistDir });
+        expect(reloadedTracker.getSessionById("persisted-delegate-session")).toEqual(
+          expect.objectContaining({
+            id: "persisted-delegate-session",
+            status: "active",
+          }),
+        );
+
+        reloadedTracker.recordEvent("persisted-delegate-session", {
+          role: "system",
+          content: "[Delegation Cancelled] Session aborted because parent requested cancellation",
+          timestamp: "2026-04-25T00:01:00.000Z",
+        });
+        reloadedTracker.updateSessionStatus("persisted-delegate-session", "aborted");
+
+        const session = reloadedTracker.getSessionMessages("persisted-delegate-session");
+        expect(session?.status).toBe("aborted");
+        expect(session?.messages).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            content: "[Delegation] Started live session delegate-live-child",
+          }),
+          expect.objectContaining({
+            content: "[Delegation Cancelled] Session aborted because parent requested cancellation",
+          }),
+        ]));
         reloadedTracker.destroy();
       } finally {
         rmSync(persistDir, { recursive: true, force: true });

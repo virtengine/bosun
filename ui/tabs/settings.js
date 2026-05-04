@@ -63,6 +63,11 @@ import {
   validateSetting,
   SENSITIVE_KEYS,
 } from "../modules/settings-schema.js";
+import {
+  inferStructuredInputKind,
+  isStructuredValue,
+  toEditableTextValue,
+} from "../modules/structured-values.js";
 
 const SETTINGS_EXTERNAL_EDITORS = new Map();
 
@@ -159,6 +164,55 @@ const SETTINGS_STYLES = `
 }
 /* Search wrapper */
 .settings-search { margin-bottom: 8px; }
+.settings-arch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.settings-arch-card {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: color-mix(in srgb, var(--bg-card, rgba(17, 24, 39, 0.82)) 88%, transparent);
+}
+.settings-arch-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary, #fff);
+  margin-bottom: 6px;
+}
+.settings-arch-current {
+  font-size: 12px;
+  color: var(--accent, #5a7cff);
+  margin-bottom: 8px;
+}
+.settings-arch-note {
+  font-size: 12px;
+  color: var(--text-secondary, #94a3b8);
+  line-height: 1.5;
+}
+.settings-arch-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.settings-arch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: rgba(255,255,255,0.03);
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 11px;
+}
+.settings-arch-chip.active {
+  border-color: color-mix(in srgb, var(--accent, #5a7cff) 55%, transparent);
+  background: color-mix(in srgb, var(--accent, #5a7cff) 18%, transparent);
+  color: var(--text-primary, #fff);
+}
 /* Floating save bar */
 .settings-save-bar {
   position: fixed;
@@ -502,7 +556,11 @@ const SETTINGS_STYLES = `
   width: 100%;
   box-sizing: border-box;
   padding-bottom: calc(var(--nav-height, 56px) + var(--safe-bottom, 0px) + 48px);
-  overflow-x: clip;
+  overflow-x: auto;
+  min-width: 0;
+}
+.settings-content-constrained > * {
+  min-width: 0;
 }
 
 .setting-row .segmented-control {
@@ -783,53 +841,124 @@ function maskValue(val) {
 }
 
 const EXECUTOR_SECTION_ORDER = [
-  "Runtime & Pool",
-  "Routing & Planning",
-  "SDK Availability",
-  "Provider Credentials",
-  "Codex Models",
-  "Claude Models",
-  "Gemini Models",
+  "Primary Runtime",
+  "Harness Control Plane",
+  "Shared Provider Fallbacks",
+  "Harness Provider Credentials",
+  "Queued Task Engine",
+  "SDK/CLI Compatibility",
+  "SDK/CLI Availability",
+  "SDK/CLI Model Profiles",
   "Other",
 ];
 
 const EXECUTOR_SECTION_DESCRIPTIONS = {
-  "Runtime & Pool": "Core runtime behavior for the internal executor pool, including parallelism, SDK selection, and timeouts.",
-  "Routing & Planning": "How Bosun distributes tasks, chooses fallback executors, and shapes planning behavior.",
-  "SDK Availability": "Enable or disable SDK families from the runtime picker and task execution pool.",
-  "Provider Credentials": "API credentials used by executor backends.",
-  "Codex Models": "Codex-specific model, profile, and subagent settings.",
-  "Claude Models": "Claude-specific model settings.",
-  "Gemini Models": "Gemini-specific model settings.",
+  "Primary Runtime": "Choose whether Bosun runs primarily on the Bosun-native Harness or the legacy SDK/CLI stack.",
+  "Harness Control Plane": "Harness activation, profile source, and validation settings for the Bosun-native runtime.",
+  "Shared Provider Fallbacks": "Dormant family-level fallbacks for Harness. These matter only when a named Harness executor does not already define the runtime instance, endpoint, and model posture Bosun should use.",
+  "Harness Provider Credentials": "Shared API keys and endpoint-level credentials that Harness executors can inherit when they do not supply their own endpoint overrides.",
+  "Queued Task Engine": "Concurrency, timeouts, retries, review handoff, and planning posture for Bosun's queued task engine.",
+  "SDK/CLI Compatibility": "Legacy shell runtime selection, SDK family pinning, and routing behavior used only when SDK/CLI mode is primary.",
+  "SDK/CLI Availability": "Disable legacy SDK families you never want Bosun to consider in compatibility mode.",
+  "SDK/CLI Model Profiles": "Legacy SDK-specific model and profile settings. Hidden while Harness is primary.",
   "Other": "Additional executor settings.",
 };
 
-function getExecutorSection(def) {
-  const key = String(def?.key || "");
-  if (!key) return "Other";
-  if ([
-    "EXECUTOR_MODE",
-    "INTERNAL_EXECUTOR_PARALLEL",
-    "INTERNAL_EXECUTOR_SDK",
-    "INTERNAL_EXECUTOR_TIMEOUT_MS",
-    "INTERNAL_EXECUTOR_MAX_RETRIES",
-    "INTERNAL_EXECUTOR_POLL_MS",
+function normalizeAgentRuntimeValue(value) {
+  return String(value || "").trim().toLowerCase() === "sdk-cli"
+    ? "sdk-cli"
+    : "harness";
+}
+
+function isSdkOnlyExecutorKey(key) {
+  if (!key) return false;
+  return [
     "PRIMARY_AGENT",
-  ].includes(key)) return "Runtime & Pool";
-  if ([
-    "INTERNAL_EXECUTOR_REVIEW_AGENT_ENABLED",
-    "INTERNAL_EXECUTOR_REPLENISH_ENABLED",
+    "INTERNAL_EXECUTOR_SDK",
     "EXECUTORS",
     "EXECUTOR_DISTRIBUTION",
     "FAILOVER_STRATEGY",
     "COMPLEXITY_ROUTING_ENABLED",
+    "CODEX_SDK_DISABLED",
+    "COPILOT_SDK_DISABLED",
+    "CLAUDE_SDK_DISABLED",
+    "GEMINI_SDK_DISABLED",
+    "OPENCODE_SDK_DISABLED",
+    "CODEX_MODEL",
+    "CODEX_MODEL_PROFILE",
+    "CODEX_MODEL_PROFILE_SUBAGENT",
+    "CODEX_MODEL_PROFILE_XL_PROVIDER",
+    "CODEX_MODEL_PROFILE_XL_MODEL",
+    "CODEX_MODEL_PROFILE_XL_BASE_URL",
+    "CODEX_MODEL_PROFILE_XL_API_KEY",
+    "CODEX_MODEL_PROFILE_M_PROVIDER",
+    "CODEX_MODEL_PROFILE_M_MODEL",
+    "CODEX_MODEL_PROFILE_M_BASE_URL",
+    "CODEX_MODEL_PROFILE_M_API_KEY",
+    "CODEX_SUBAGENT_MODEL",
+    "CLAUDE_MODEL",
+    "GEMINI_MODEL",
+    "GEMINI_TRANSPORT",
+    "OPENCODE_MODEL",
+    "COPILOT_MODEL",
+    "COPILOT_CLI_TOKEN",
+  ].includes(key);
+}
+
+function isHarnessProviderFabricSetting(def) {
+  return String(def?.section || "").trim() === "Harness Provider Fabric";
+}
+
+function emitAgentInventoryRefresh(detail = {}) {
+  try {
+    if (typeof globalThis?.dispatchEvent !== "function" || typeof globalThis?.CustomEvent !== "function") return;
+    globalThis.dispatchEvent(new CustomEvent("ve:agents-refresh", { detail }));
+  } catch {
+    // Non-browser or unsupported host.
+  }
+}
+
+function isExecutorSettingVisible(def, runtime = "harness", options = {}) {
+  const key = String(def?.key || "");
+  if (!key) return true;
+  if (key === "EXECUTOR_MODE") return false;
+  if (runtime === "harness" && isSdkOnlyExecutorKey(key)) return false;
+  if (
+    runtime === "harness"
+    && options.hasExplicitHarnessExecutors === true
+    && isHarnessProviderFabricSetting(def)
+  ) return false;
+  return true;
+}
+
+function getExecutorSection(def) {
+  const key = String(def?.key || "");
+  if (!key) return "Other";
+  if (key === "BOSUN_AGENT_RUNTIME") return "Primary Runtime";
+  if (def?.section === "Harness Control Plane") return "Harness Control Plane";
+  if (def?.section === "Harness Provider Fabric") return "Shared Provider Fallbacks";
+  if (def?.section === "Harness Provider Credentials") return "Harness Provider Credentials";
+  if (def?.section === "Queued Task Execution") return "Queued Task Engine";
+  if (def?.section === "SDK/CLI Compatibility") return "SDK/CLI Compatibility";
+  if ([
+    "INTERNAL_EXECUTOR_REVIEW_AGENT_ENABLED",
+    "INTERNAL_EXECUTOR_REPLENISH_ENABLED",
+    "INTERNAL_EXECUTOR_PARALLEL",
+    "INTERNAL_EXECUTOR_TIMEOUT_MS",
+    "INTERNAL_EXECUTOR_MAX_RETRIES",
+    "INTERNAL_EXECUTOR_POLL_MS",
     "PROJECT_REQUIREMENTS_PROFILE",
-  ].includes(key)) return "Routing & Planning";
-  if (key.endsWith("_SDK_DISABLED")) return "SDK Availability";
-  if (key.endsWith("API_KEY")) return "Provider Credentials";
-  if (key.startsWith("CODEX_")) return "Codex Models";
-  if (key.startsWith("CLAUDE_")) return "Claude Models";
-  if (key.startsWith("GEMINI_") || key.startsWith("GOOGLE_")) return "Gemini Models";
+  ].includes(key)) return "Queued Task Engine";
+  if (key.endsWith("_SDK_DISABLED")) return "SDK/CLI Availability";
+  if (
+    key.startsWith("CODEX_")
+    || key.startsWith("CLAUDE_")
+    || key.startsWith("GEMINI_")
+    || key.startsWith("GOOGLE_")
+    || key === "COPILOT_MODEL"
+    || key === "COPILOT_CLI_TOKEN"
+    || key === "OPENCODE_MODEL"
+  ) return "SDK/CLI Model Profiles";
   return "Other";
 }
 
@@ -854,6 +983,1195 @@ function formatCountdownSeconds(ms) {
   return Math.ceil(remaining / 1000);
 }
 
+function AgentArchitectureGuide({ architecture }) {
+  if (!architecture) return null;
+  const sections = Array.isArray(architecture.sections)
+    ? architecture.sections.filter(Boolean)
+    : [
+        architecture.runtimeArchitecture,
+        architecture.providerFabric,
+        architecture.queuedExecution,
+        architecture.sdkCompatibility,
+      ].filter(Boolean);
+  if (sections.length === 0) return null;
+  return html`
+    <${Card}>
+      <div class="card-subtitle mb-sm" style="font-size:13px;font-weight:700">Bosun Runtime Architecture</div>
+      <div class="meta-text mb-sm">
+        Pick the primary runtime first. When Harness is primary, only harness-native provider and task controls stay visible; legacy SDK/CLI compatibility settings stay out of the way until you switch back.
+      </div>
+      <div class="settings-arch-grid">
+        ${sections.map((section) => html`
+          <div class="settings-arch-card" key=${section.title}>
+            <div class="settings-arch-title">${section.title}</div>
+            ${(section.currentLabel || section.current) && html`
+              <div class="settings-arch-current">Current: <code>${section.currentLabel || section.current}</code></div>
+            `}
+            <div class="settings-arch-note">${section.summary}</div>
+            ${section.note && html`<div class="settings-arch-note" style="margin-top:8px">${section.note}</div>`}
+            ${Array.isArray(section.items) && section.items.length > 0 && html`
+              <div class="settings-arch-list">
+                ${section.items.slice(0, 8).map((item) => html`
+                  <span class=${`settings-arch-chip ${item.selected ? "active" : ""}`.trim()}>
+                    ${item.label || item.providerId || item.id}
+                    ${item.statusLabel || (item.authenticated ? "connected" : item.selected ? "selected" : "")}
+                  </span>
+                `)}
+              </div>
+            `}
+          </div>
+        `)}
+      </div>
+    <//>
+  `;
+}
+
+const HARNESS_EXECUTOR_API_STYLE_OPTIONS = [
+  { value: "provider-default", label: "Provider default" },
+  { value: "responses", label: "Responses API" },
+  { value: "chat-completions", label: "Chat Completions API" },
+];
+
+const HARNESS_EXECUTOR_ENDPOINT_PROVIDER_IDS = new Set([
+  "azure-openai-responses",
+  "openai-responses",
+  "openai-compatible",
+  "ollama",
+  "openrouter",
+  "perplexity",
+  "deepinfra",
+  "groq",
+  "together",
+  "xai",
+  "fireworks",
+  "cerebras",
+  "sambanova",
+  "nebius",
+  "gemini-generate-content",
+]);
+
+const HARNESS_EXECUTOR_CONFIGURABLE_API_STYLE_PROVIDER_IDS = new Set([
+  "azure-openai-responses",
+  "openai-responses",
+  "openai-compatible",
+  "ollama",
+  "openrouter",
+  "perplexity",
+  "deepinfra",
+  "groq",
+  "together",
+  "xai",
+  "fireworks",
+  "cerebras",
+  "sambanova",
+  "nebius",
+]);
+
+function normalizeHarnessExecutorId(value, fallback = "harness-executor") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function normalizeHarnessExecutorWeight(value, fallback = 100) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, parsed);
+}
+
+function supportsHarnessExecutorEndpoint(providerId = "") {
+  return HARNESS_EXECUTOR_ENDPOINT_PROVIDER_IDS.has(String(providerId || "").trim());
+}
+
+function supportsHarnessExecutorConfigurableApiStyle(providerId = "") {
+  return HARNESS_EXECUTOR_CONFIGURABLE_API_STYLE_PROVIDER_IDS.has(String(providerId || "").trim());
+}
+
+function getHarnessExecutorApiStyleOptions(providerId = "") {
+  if (supportsHarnessExecutorConfigurableApiStyle(providerId)) {
+    return HARNESS_EXECUTOR_API_STYLE_OPTIONS;
+  }
+  return HARNESS_EXECUTOR_API_STYLE_OPTIONS.slice(0, 1);
+}
+
+function normalizeHarnessExecutorModelForEditor(entry = {}, index = 0, fallbackApiStyle = "provider-default") {
+  const value = entry && typeof entry === "object" ? entry : { id: entry };
+  const id = String(value.id || value.model || value.name || "").trim() || `model-${index + 1}`;
+  const label = String(value.label || value.name || "").trim();
+  const apiStyle = String(value.apiStyle || value.transport?.apiStyle || fallbackApiStyle || "provider-default").trim() || "provider-default";
+  const apiVersion = String(value.apiVersion || "").trim();
+  const numberOrEmpty = (rawValue) => (Number.isFinite(Number(rawValue)) && Number(rawValue) > 0 ? Number(rawValue) : "");
+  const booleanOrNull = (rawValue) => (typeof rawValue === "boolean" ? rawValue : null);
+  return {
+    _id: value._id || `harness-model-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
+    label,
+    apiModel: String(value.apiModel || value.api_model || value.model || id).trim() || id,
+    apiStyle,
+    apiVersion,
+    contextWindow: numberOrEmpty(value.contextWindow || value.contextLength),
+    maxInputTokens: numberOrEmpty(value.maxInputTokens),
+    maxOutputTokens: numberOrEmpty(value.maxOutputTokens),
+    toolCalling: booleanOrNull(value.toolCalling),
+    vision: booleanOrNull(value.vision),
+    supportsAttachments: booleanOrNull(value.supportsAttachments),
+    reasoning: booleanOrNull(value.reasoning),
+    streaming: booleanOrNull(value.streaming),
+    catalogSource: String(value.catalogSource || "").trim(),
+    custom: value.custom === true,
+    overrides: value.overrides && typeof value.overrides === "object" ? { ...value.overrides } : {},
+    enabled: value.enabled !== false,
+  };
+}
+
+function formatModelCapabilityBadges(model = {}) {
+  const badges = [];
+  if (model.toolCalling === true) badges.push("Tools");
+  if (model.vision === true || model.supportsAttachments === true) badges.push("Vision");
+  if (model.reasoning === true || model.reasoningEffort) badges.push("Reasoning");
+  if (model.streaming === true) badges.push("Streaming");
+  const contextWindow = Number(model.contextWindow || model.contextLength || 0);
+  if (Number.isFinite(contextWindow) && contextWindow > 0) badges.push(`${Math.round(contextWindow / 1000)}k ctx`);
+  if (model.catalogSource) badges.push(model.catalogSource);
+  if (model.custom) badges.push("Custom");
+  return badges;
+}
+
+function extractHarnessExecutorModelsForEditor(entry = {}, fallbackApiStyle = "provider-default") {
+  const input = Array.isArray(entry.models)
+    ? entry.models
+    : String(entry.modelsText || "")
+      .split(",")
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+  const seen = new Set();
+  return input
+    .map((item, index) => normalizeHarnessExecutorModelForEditor(item, index, fallbackApiStyle))
+    .filter((item) => {
+      if (!item.id || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+}
+
+function formatHarnessProviderStatus(authState = {}) {
+  if (authState?.authenticated) return "Connected";
+  if (authState?.canRun) return "Runnable";
+  if (authState?.requiresAction) return "Needs auth";
+  if (authState?.status) {
+    return String(authState.status)
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (match) => match.toUpperCase());
+  }
+  return "Unknown";
+}
+
+function formatHarnessAuthModeLabel(value = "") {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "Provider default";
+  if (normalized === "apiKey") return "API key";
+  if (normalized === "oauth") return "OAuth";
+  if (normalized === "subscription") return "Subscription";
+  if (normalized === "local") return "Local";
+  return normalized;
+}
+
+function formatHarnessAuthModeDescription(value = "") {
+  const normalized = String(value || "").trim();
+  if (normalized === "apiKey") return "Direct API key — you supply a secret key from the provider dashboard. Required for Azure OpenAI and direct OpenAI / Anthropic API access.";
+  if (normalized === "oauth") return "Browser OAuth — Bosun uses your existing logged-in account session (e.g. Codex desktop login, `gh auth login`, GitHub Copilot). No manual API key needed. The env binding below should point to the env var that holds the OAuth access token.";
+  if (normalized === "subscription") return "Paid subscription — Bosun authenticates via your ChatGPT Plus/Pro or Claude Pro subscription session, not a developer API key. The session token is usually auto-detected from ~/.codex/auth.json after signing in with the Codex desktop app.";
+  if (normalized === "local") return "Local server — no external credentials needed; requests go to a local endpoint (e.g. Ollama).";
+  return "";
+}
+
+function resolveDefaultAuthBindingEnv(authEnvMap, mode) {
+  // authEnvMap is providerInfo.auth.env — keys like { apiKey: { keys:[...], key:... }, oauth: {...}, subscription: {...} }
+  if (!authEnvMap || !mode) return "";
+  const modeMap = { apiKey: "apiKey", oauth: "oauth", subscription: "subscription" };
+  const modeKey = modeMap[mode];
+  if (!modeKey) return "";
+  const entry = authEnvMap[modeKey];
+  // Prefer the currently-detected key; fall back to first in keys list
+  return String(entry?.key || (Array.isArray(entry?.keys) ? entry.keys[0] : "") || "").trim();
+}
+
+function formatHarnessAuthWarningMessages(authState = {}) {
+  return Array.isArray(authState?.warnings)
+    ? authState.warnings
+        .map((entry) => String(entry?.message || "").trim())
+        .filter(Boolean)
+    : [];
+}
+
+function sortHarnessProviderEntries(entries = []) {
+  const rank = (entry) => {
+    if (entry?.auth?.canRun === true || entry?.authenticated === true) return 0;
+    if (entry?.auth?.authenticated === true) return 1;
+    if (entry?.enabled !== false) return 2;
+    return 3;
+  };
+  return [...entries].sort((left, right) => {
+    const rankDelta = rank(left) - rank(right);
+    if (rankDelta !== 0) return rankDelta;
+    return String(left?.label || left?.name || left?.providerId || left?.id || "")
+      .localeCompare(String(right?.label || right?.name || right?.providerId || right?.id || ""));
+  });
+}
+
+function formatHarnessRoutingModeLabel(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "fallback") return "Failover";
+  if (normalized === "spread") return "Spread";
+  return "Default only";
+}
+
+function deriveHarnessExecutorRoutingLabel(entry = {}, primaryExecutor = "", routingMode = "default-only") {
+  if (String(entry?.id || "").trim() === String(primaryExecutor || "").trim()) {
+    return "Primary";
+  }
+  if (entry?.enabled === false) return "Disabled";
+  if (routingMode === "spread") return "Spread";
+  if (routingMode === "fallback") return "Failover";
+  return "Dormant";
+}
+
+function describeHarnessExecutorEndpoint(entry = {}) {
+  const endpoint = String(entry?.endpoint || entry?.baseUrl || "").trim();
+  const deployment = String(entry?.deployment || "").trim();
+  const workspace = String(entry?.workspace || "").trim();
+  const project = String(entry?.project || "").trim();
+  return [endpoint, deployment, workspace, project].filter(Boolean).join(" · ");
+}
+
+function describeHarnessExecutorAuthBindings(entry = {}) {
+  const bindings = entry?.authBindings && typeof entry.authBindings === "object"
+    ? entry.authBindings
+    : {};
+  return [
+    bindings.apiKeyEnv ? `API key: ${bindings.apiKeyEnv}` : "",
+    bindings.oauthTokenEnv ? `OAuth: ${bindings.oauthTokenEnv}` : "",
+    bindings.subscriptionEnv ? `Subscription: ${bindings.subscriptionEnv}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function formatHarnessRuntimeOwnershipLabel(entry = {}, providerInfo = null) {
+  const runtimeLabel = String(entry?.runtimeLabel || providerInfo?.runtimeLabel || "").trim();
+  if (runtimeLabel) return runtimeLabel;
+  const adapterId = String(entry?.adapterId || providerInfo?.adapterId || "").trim().toLowerCase();
+  if (adapterId === "openai-native") return "Bosun-native";
+  if (adapterId.endsWith("-sdk")) return "External SDK";
+  return "Runtime-managed";
+}
+
+function HarnessExecutorsEditor() {
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [executors, setExecutors] = useState([]);
+  const [providerOptions, setProviderOptions] = useState([]);
+  const [providerItems, setProviderItems] = useState([]);
+  const [primaryExecutor, setPrimaryExecutor] = useState("");
+  const [routingMode, setRoutingMode] = useState("default-only");
+  const [dirty, setDirty] = useState(false);
+  const [savedState, setSavedState] = useState(null);
+
+  const normalizeExecutor = useCallback((entry = {}, index = 0) => ({
+    _id: entry._id || entry.id || `harness-executor-${Date.now()}-${index}`,
+    id: normalizeHarnessExecutorId(entry.id || entry._id || `harness-executor-${index + 1}`, `harness-executor-${index + 1}`),
+    name: String(entry.name || entry.label || `Harness Executor ${index + 1}`).trim(),
+    providerId: String(entry.providerId || "openai-responses").trim(),
+    enabled: entry.enabled !== false,
+    weight: normalizeHarnessExecutorWeight(entry.weight, 100),
+    defaultModel: String(entry.defaultModel || "").trim(),
+    modelEntries: extractHarnessExecutorModelsForEditor(
+      entry,
+      String(entry.apiStyle || "provider-default").trim() || "provider-default",
+    ),
+    authMode: String(entry.authMode || "").trim(),
+    endpoint: String(entry.endpoint || "").trim(),
+    baseUrl: String(entry.baseUrl || "").trim(),
+    deployment: String(entry.deployment || "").trim(),
+    apiVersion: String(entry.apiVersion || "").trim(),
+    workspace: String(entry.workspace || "").trim(),
+    organization: String(entry.organization || "").trim(),
+      project: String(entry.project || "").trim(),
+      apiStyle: String(entry.apiStyle || "provider-default").trim() || "provider-default",
+      authBindings: {
+        apiKeyEnv: String(entry.authBindings?.apiKeyEnv || entry.apiKeyEnv || "").trim(),
+        oauthTokenEnv: String(entry.authBindings?.oauthTokenEnv || entry.oauthTokenEnv || "").trim(),
+      subscriptionEnv: String(entry.authBindings?.subscriptionEnv || entry.subscriptionEnv || "").trim(),
+    },
+    auth: entry.auth && typeof entry.auth === "object" ? { ...entry.auth } : null,
+  }), []);
+
+  const snapshotState = useCallback((state) => JSON.stringify(state), []);
+
+  const getProviderOption = useCallback((providerId) => (
+    providerOptions.find((entry) => String(entry.id || "").trim() === String(providerId || "").trim()) || null
+  ), [providerOptions]);
+
+  const getProviderInventoryEntry = useCallback((providerId) => (
+    providerItems.find((entry) => String(entry.providerId || "").trim() === String(providerId || "").trim()) || null
+  ), [providerItems]);
+
+  const captureSavedState = useCallback((nextExecutors, nextPrimary, nextRouting) => ({
+    executors: nextExecutors.map((entry) => ({ ...entry })),
+    primaryExecutor: String(nextPrimary || "").trim(),
+    routingMode: String(nextRouting || "default-only").trim() || "default-only",
+  }), []);
+
+  const runnableCount = useMemo(() => executors.filter((entry) => {
+    const providerInfo = providerItems.find((item) => String(item?.providerId || "").trim() === String(entry?.providerId || "").trim());
+    return entry?.enabled !== false && (providerInfo?.auth?.canRun === true || providerInfo?.auth?.authenticated === true);
+  }).length, [executors, providerItems]);
+
+  const connectedProviderCount = useMemo(
+    () => providerItems.filter((item) => item?.enabled !== false && item?.auth?.authenticated === true).length,
+    [providerItems],
+  );
+  const configuredProviderCount = useMemo(
+    () => providerItems.filter((item) => item?.enabled !== false && (item?.auth?.configured === true || item?.auth?.available === true || item?.auth?.authenticated === true)).length,
+    [providerItems],
+  );
+  const sortedProviderOptions = useMemo(
+    () => sortHarnessProviderEntries(providerOptions),
+    [providerOptions],
+  );
+  const sortedProviderItems = useMemo(
+    () => sortHarnessProviderEntries(providerItems),
+    [providerItems],
+  );
+  const providerItemById = useMemo(() => {
+    const map = new Map();
+    for (const item of providerItems) {
+      map.set(String(item?.providerId || "").trim(), item);
+    }
+    return map;
+  }, [providerItems]);
+
+  const primaryExecutorLabel = useMemo(() => (
+    executors.find((entry) => entry.id === primaryExecutor)?.name
+    || executors.find((entry) => entry.id === primaryExecutor)?.id
+    || "Not set"
+  ), [executors, primaryExecutor]);
+
+  const applyLoadedState = useCallback((payload = {}) => {
+    const nextExecutors = Array.isArray(payload.executors)
+      ? payload.executors.map((entry, index) => normalizeExecutor(entry, index))
+      : [];
+    const nextPrimary = String(payload.primaryExecutorId || payload.primaryExecutor || nextExecutors[0]?.id || "").trim();
+    const nextRouting = String(payload.routingMode || "default-only").trim() || "default-only";
+    const nextSaved = captureSavedState(nextExecutors, nextPrimary, nextRouting);
+    setExecutors(nextExecutors);
+    setPrimaryExecutor(nextPrimary);
+    setRoutingMode(nextRouting);
+    setSavedState(nextSaved);
+    setDirty(false);
+  }, [captureSavedState, normalizeExecutor]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiFetch("/api/harness/executors");
+        setProviderOptions(sortHarnessProviderEntries(Array.isArray(res?.providerOptions) ? res.providerOptions : []));
+        setProviderItems(sortHarnessProviderEntries(Array.isArray(res?.providers?.items) ? res.providers.items : []));
+        applyLoadedState(res || {});
+        setLoadError("");
+      } catch (err) {
+        setLoadError(err.message || "Failed to load harness executors");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [applyLoadedState]);
+
+  useEffect(() => {
+    const key = "settings-harness-executors";
+    setPendingChange(key, dirty);
+    return () => clearPendingChange(key);
+  }, [dirty]);
+
+  const markDirty = useCallback((nextExecutors, nextPrimary, nextRouting) => {
+    const current = snapshotState(captureSavedState(nextExecutors, nextPrimary, nextRouting));
+    const saved = snapshotState(savedState || captureSavedState([], "", "default-only"));
+    setDirty(current !== saved);
+  }, [captureSavedState, savedState, snapshotState]);
+
+  const addExecutorForProvider = useCallback((providerId = "") => {
+    const fallbackProvider = String(providerId || providerOptions[0]?.id || "openai-responses").trim() || "openai-responses";
+    const providerInfo = getProviderInventoryEntry(fallbackProvider);
+    const providerOption = getProviderOption(fallbackProvider);
+    const baseName = providerOption?.label || providerInfo?.label || fallbackProvider;
+    const sequence = executors.filter((entry) => entry.providerId === fallbackProvider).length + 1;
+    const preferredMode = providerInfo?.auth?.preferredMode || "";
+    const authEnvMap = providerInfo?.auth?.env || {};
+    const created = normalizeExecutor({
+      id: `${fallbackProvider}-${Date.now()}`,
+      name: sequence > 1 ? `${baseName} ${sequence}` : baseName,
+      providerId: fallbackProvider,
+      defaultModel: providerInfo?.modelCatalog?.defaultModel || providerOptions[0]?.defaultModel || "",
+      authMode: preferredMode,
+      apiStyle: providerOption?.apiStyle || providerOptions[0]?.apiStyle || "provider-default",
+      weight: 100,
+      authBindings: {
+        apiKeyEnv: preferredMode === "apiKey" ? resolveDefaultAuthBindingEnv(authEnvMap, "apiKey") : "",
+        oauthTokenEnv: preferredMode === "oauth" ? resolveDefaultAuthBindingEnv(authEnvMap, "oauth") : "",
+        subscriptionEnv: preferredMode === "subscription" ? resolveDefaultAuthBindingEnv(authEnvMap, "subscription") : "",
+      },
+    }, executors.length);
+    const nextExecutors = [...executors, created];
+    const nextPrimary = primaryExecutor || created.id;
+    setExecutors(nextExecutors);
+    setPrimaryExecutor(nextPrimary);
+    markDirty(nextExecutors, nextPrimary, routingMode);
+    haptic("light");
+  }, [executors, getProviderInventoryEntry, getProviderOption, markDirty, normalizeExecutor, primaryExecutor, providerOptions, routingMode]);
+
+  const addExecutor = useCallback(() => addExecutorForProvider(""), [addExecutorForProvider]);
+
+  const duplicateExecutor = useCallback((_id) => {
+    const source = executors.find((entry) => entry._id === _id);
+    if (!source) return;
+    const siblingCount = executors.filter((entry) => entry.providerId === source.providerId).length + 1;
+    const next = normalizeExecutor({
+      ...source,
+      _id: undefined,
+      id: `${source.id}-${siblingCount}`,
+      name: `${source.name} ${siblingCount}`,
+    }, executors.length);
+    const nextExecutors = [...executors, next];
+    setExecutors(nextExecutors);
+    markDirty(nextExecutors, primaryExecutor, routingMode);
+    haptic("light");
+  }, [executors, markDirty, normalizeExecutor, primaryExecutor, routingMode]);
+
+  const removeExecutor = useCallback((_id) => {
+    const nextExecutors = executors.filter((entry) => entry._id !== _id);
+    const removed = executors.find((entry) => entry._id === _id);
+    const nextPrimary = removed?.id === primaryExecutor
+      ? (nextExecutors[0]?.id || "")
+      : primaryExecutor;
+    setExecutors(nextExecutors);
+    setPrimaryExecutor(nextPrimary);
+    markDirty(nextExecutors, nextPrimary, routingMode);
+    haptic("light");
+  }, [executors, markDirty, primaryExecutor, routingMode]);
+
+  const updateExecutor = useCallback((_id, field, value) => {
+    const nextExecutors = executors.map((entry, index) => {
+      if (entry._id !== _id) return entry;
+      const nextValue = field === "id"
+        ? normalizeHarnessExecutorId(value, `executor-${index + 1}`)
+        : field === "weight"
+          ? normalizeHarnessExecutorWeight(value, 100)
+          : value;
+      const next = { ...entry, [field]: nextValue };
+      if (field === "name" && (!next.id || next.id === entry.id)) {
+        next.id = normalizeHarnessExecutorId(value, `executor-${index + 1}`);
+      }
+      if (field === "providerId") {
+        const providerInfo = getProviderInventoryEntry(value);
+        const providerOption = getProviderOption(value);
+        const newPreferredMode = providerInfo?.auth?.preferredMode || "";
+        const newAuthEnvMap = providerInfo?.auth?.env || {};
+        next.authMode = newPreferredMode;
+        next.authBindings = {
+          apiKeyEnv: newPreferredMode === "apiKey" ? resolveDefaultAuthBindingEnv(newAuthEnvMap, "apiKey") : "",
+          oauthTokenEnv: newPreferredMode === "oauth" ? resolveDefaultAuthBindingEnv(newAuthEnvMap, "oauth") : "",
+          subscriptionEnv: newPreferredMode === "subscription" ? resolveDefaultAuthBindingEnv(newAuthEnvMap, "subscription") : "",
+        };
+        next.defaultModel = providerInfo?.modelCatalog?.defaultModel || providerOption?.defaultModel || "";
+        next.apiStyle = providerOption?.apiStyle || "provider-default";
+        next.modelEntries = Array.isArray(next.modelEntries)
+          ? next.modelEntries.map((model, modelIndex) => normalizeHarnessExecutorModelForEditor(
+            supportsHarnessExecutorConfigurableApiStyle(value)
+              ? model
+              : { ...model, apiStyle: "provider-default" },
+            modelIndex,
+            next.apiStyle,
+          ))
+          : [];
+        if (!String(value || "").includes("azure")) {
+          next.deployment = "";
+          next.apiVersion = "";
+        }
+        if (!supportsHarnessExecutorConfigurableApiStyle(value)) {
+          next.apiStyle = "provider-default";
+        }
+      }
+      return next;
+    });
+    let nextPrimary = primaryExecutor;
+    if (field === "id" && primaryExecutor === executors.find((entry) => entry._id === _id)?.id) {
+      nextPrimary = String(value || "").trim();
+      setPrimaryExecutor(nextPrimary);
+    }
+    setExecutors(nextExecutors);
+    markDirty(nextExecutors, nextPrimary, routingMode);
+  }, [executors, getProviderInventoryEntry, getProviderOption, markDirty, primaryExecutor, routingMode]);
+
+  const updateExecutorAuthBinding = useCallback((_id, field, value) => {
+    const nextExecutors = executors.map((entry) => (
+      entry._id === _id
+        ? {
+            ...entry,
+            authBindings: {
+              ...(entry.authBindings || {}),
+              [field]: String(value || "").trim(),
+            },
+          }
+        : entry
+    ));
+    setExecutors(nextExecutors);
+    markDirty(nextExecutors, primaryExecutor, routingMode);
+  }, [executors, markDirty, primaryExecutor, routingMode]);
+
+  const updateExecutorModel = useCallback((executorId, modelInternalId, field, value) => {
+    const nextExecutors = executors.map((entry) => {
+      if (entry._id !== executorId) return entry;
+      const nextModels = (Array.isArray(entry.modelEntries) ? entry.modelEntries : []).map((model) => (
+        model._id === modelInternalId
+          ? { ...model, [field]: value }
+          : model
+      ));
+      return { ...entry, modelEntries: nextModels };
+    });
+    setExecutors(nextExecutors);
+    markDirty(nextExecutors, primaryExecutor, routingMode);
+  }, [executors, markDirty, primaryExecutor, routingMode]);
+
+  const addExecutorModel = useCallback((executorId) => {
+    const nextExecutors = executors.map((entry) => {
+      if (entry._id !== executorId) return entry;
+      const fallbackApiStyle = supportsHarnessExecutorConfigurableApiStyle(entry.providerId)
+        ? (entry.apiStyle || "provider-default")
+        : "provider-default";
+      const nextModels = [
+        ...(Array.isArray(entry.modelEntries) ? entry.modelEntries : []),
+        normalizeHarnessExecutorModelForEditor({}, entry.modelEntries?.length || 0, fallbackApiStyle),
+      ];
+      return { ...entry, modelEntries: nextModels };
+    });
+    setExecutors(nextExecutors);
+    markDirty(nextExecutors, primaryExecutor, routingMode);
+    haptic("light");
+  }, [executors, markDirty, primaryExecutor, routingMode]);
+
+  const removeExecutorModel = useCallback((executorId, modelInternalId) => {
+    const nextExecutors = executors.map((entry) => {
+      if (entry._id !== executorId) return entry;
+      return {
+        ...entry,
+        modelEntries: (Array.isArray(entry.modelEntries) ? entry.modelEntries : []).filter((model) => model._id !== modelInternalId),
+      };
+    });
+    setExecutors(nextExecutors);
+    markDirty(nextExecutors, primaryExecutor, routingMode);
+    haptic("light");
+  }, [executors, markDirty, primaryExecutor, routingMode]);
+
+  const handleSave = useCallback(async () => {
+    const payload = executors.map((entry) => {
+      const authBindings = Object.fromEntries(
+        Object.entries(entry.authBindings || {}).map(([key, rawValue]) => [key, String(rawValue || "").trim()]).filter(([, value]) => value),
+      );
+      return {
+        id: entry.id,
+        name: entry.name,
+        providerId: entry.providerId,
+        enabled: entry.enabled !== false,
+        weight: normalizeHarnessExecutorWeight(entry.weight, 100),
+        defaultModel: entry.defaultModel || undefined,
+        models: (Array.isArray(entry.modelEntries) ? entry.modelEntries : [])
+          .map((model) => ({
+            id: String(model.id || "").trim(),
+            ...(String(model.label || "").trim() ? { label: String(model.label || "").trim() } : {}),
+            ...(String(model.apiModel || "").trim() && String(model.apiModel || "").trim() !== String(model.id || "").trim() ? { apiModel: String(model.apiModel || "").trim() } : {}),
+            ...(String(model.apiStyle || "").trim() ? { apiStyle: String(model.apiStyle || "").trim() } : {}),
+            ...(String(model.apiVersion || "").trim() ? { apiVersion: String(model.apiVersion || "").trim() } : {}),
+            ...(Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0 ? { contextWindow: Number(model.contextWindow) } : {}),
+            ...(Number.isFinite(Number(model.maxInputTokens)) && Number(model.maxInputTokens) > 0 ? { maxInputTokens: Number(model.maxInputTokens) } : {}),
+            ...(Number.isFinite(Number(model.maxOutputTokens)) && Number(model.maxOutputTokens) > 0 ? { maxOutputTokens: Number(model.maxOutputTokens) } : {}),
+            ...(typeof model.toolCalling === "boolean" ? { toolCalling: model.toolCalling } : {}),
+            ...(typeof model.vision === "boolean" ? { vision: model.vision } : {}),
+            ...(typeof model.supportsAttachments === "boolean" ? { supportsAttachments: model.supportsAttachments } : {}),
+            ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
+            ...(typeof model.streaming === "boolean" ? { streaming: model.streaming } : {}),
+            ...(String(model.catalogSource || "").trim() ? { catalogSource: String(model.catalogSource || "").trim() } : {}),
+            ...(model.custom === true ? { custom: true } : {}),
+            ...(model.enabled === false ? { enabled: false } : {}),
+          }))
+          .filter((model) => model.id),
+        authMode: entry.authMode || undefined,
+        endpoint: entry.endpoint || undefined,
+        baseUrl: entry.baseUrl || undefined,
+        deployment: entry.deployment || undefined,
+        apiVersion: entry.apiVersion || undefined,
+        workspace: entry.workspace || undefined,
+        organization: entry.organization || undefined,
+        project: entry.project || undefined,
+        apiStyle: entry.apiStyle || undefined,
+        authBindings: Object.keys(authBindings).length > 0 ? authBindings : undefined,
+      };
+    });
+    const res = await apiFetch("/api/harness/executors", {
+      method: "POST",
+      body: JSON.stringify({
+        executors: payload,
+        primaryExecutor,
+        routingMode,
+      }),
+    });
+    setProviderOptions(sortHarnessProviderEntries(Array.isArray(res?.providerOptions) ? res.providerOptions : providerOptions));
+    setProviderItems(sortHarnessProviderEntries(Array.isArray(res?.providers?.items) ? res.providers.items : providerItems));
+    applyLoadedState(res || {});
+    emitAgentInventoryRefresh({
+      source: "harness-executors-save",
+      primaryExecutor,
+    });
+  }, [applyLoadedState, executors, primaryExecutor, providerItems, providerOptions, routingMode]);
+
+  const handleDiscard = useCallback(async () => {
+    if (!savedState) return;
+    setExecutors((savedState.executors || []).map((entry, index) => normalizeExecutor(entry, index)));
+    setPrimaryExecutor(savedState.primaryExecutor || "");
+    setRoutingMode(savedState.routingMode || "default-only");
+    setDirty(false);
+    setLoadError("");
+  }, [normalizeExecutor, savedState]);
+
+  useEffect(() => {
+    return registerSettingsExternalEditor("settings-harness-executors", {
+      isDirty: () => dirty,
+      save: handleSave,
+      discard: handleDiscard,
+    });
+  }, [dirty, handleDiscard, handleSave]);
+
+  if (loading) return html`<${SkeletonCard} height="120px" />`;
+
+  return html`
+    <${Card} title="Harness Chat Executors"
+      badge=${dirty ? html`<${Badge} variant="warning">Unsaved<//>` : null}>
+      <div class="meta-text" style="margin-bottom:10px">
+        Named Bosun Harness executors are the actual runtime instances Bosun exposes to chat, workflows, Telegram, web, and TUI. Configure one executor per real endpoint or account, choose the primary one, and Bosun will route future Harness sessions through these IDs instead of legacy SDK executors.
+      </div>
+      <div class="settings-arch-grid" style="margin-bottom:12px">
+        <div class="settings-arch-card">
+          <div class="settings-arch-title">Configured Executors</div>
+          <div class="settings-arch-current">Current: <code>${executors.length}</code></div>
+          <div class="settings-arch-note">These are the IDs that appear in chat, workflows, Telegram, and other Harness-native surfaces.</div>
+        </div>
+        <div class="settings-arch-card">
+          <div class="settings-arch-title">Runnable Now</div>
+          <div class="settings-arch-current">Current: <code>${runnableCount}</code></div>
+          <div class="settings-arch-note">Runnable means the backing provider currently has enough auth and configuration to execute a Harness session.</div>
+        </div>
+        <div class="settings-arch-card">
+          <div class="settings-arch-title">Primary Selection</div>
+          <div class="settings-arch-current">Current: <code>${primaryExecutorLabel}</code></div>
+          <div class="settings-arch-note">This is the default Harness executor Bosun uses when a surface does not explicitly pick another one.</div>
+        </div>
+        <div class="settings-arch-card">
+          <div class="settings-arch-title">Shared Provider Auth</div>
+          <div class="settings-arch-current">Current: <code>${connectedProviderCount}/${configuredProviderCount || providerItems.length || 0}</code></div>
+          <div class="settings-arch-note">Connected means Bosun already has auth for the backing provider. Saving enabled executors will also align provider-kernel defaults so the instance is not left half-wired behind separate toggles.</div>
+        </div>
+      </div>
+      ${loadError && html`<div class="settings-banner settings-banner-warn" style="margin-bottom:10px">${loadError}</div>`}
+      ${providerOptions.length > 0 && html`
+        <div style="margin-bottom:12px">
+          <div class="setting-row-label" style="margin-bottom:6px">Quick Add Runtime Instance</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            ${sortedProviderOptions.map((option) => {
+              const providerInfo = providerItemById.get(String(option.id || "").trim()) || null;
+              const status = formatHarnessProviderStatus(providerInfo?.auth || {});
+              return html`
+              <${Button} key=${option.id} variant="outlined" size="small" onClick=${() => addExecutorForProvider(option.id)}>
+                + ${option.label}${status ? ` · ${status}` : ""}
+              <//>
+            `;
+            })}
+          </div>
+          <div class="meta-text" style="margin-top:6px">
+            Use one named executor per real runtime endpoint or account, for example <code>azure-us</code>, <code>azure-sweden</code>, <code>copilot-oauth</code>, <code>codex-oauth</code>, <code>openai-prod</code>, or <code>local-openai</code>. For OpenAI-compatible targets, use the instance API-style controls below to choose <code>responses</code> or <code>chat-completions</code> per executor or per model.
+          </div>
+        </div>
+      `}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+        <div>
+          <div class="setting-row-label">Primary Harness Executor</div>
+          <${Select} size="small" value=${primaryExecutor} onChange=${(e) => {
+            const nextPrimary = e.target.value;
+            setPrimaryExecutor(nextPrimary);
+            markDirty(executors, nextPrimary, routingMode);
+          }} fullWidth>
+            ${executors.length === 0 && html`<${MenuItem} value="">— No executors configured —<//>`}
+            ${executors.map((entry) => html`<${MenuItem} value=${entry.id}>${entry.name || entry.id}<//>`)}
+          <//>
+        </div>
+        <div>
+          <div class="setting-row-label">Harness Routing Mode</div>
+          <${Select} size="small" value=${routingMode} onChange=${(e) => {
+            const nextRouting = e.target.value;
+            setRoutingMode(nextRouting);
+            markDirty(executors, primaryExecutor, nextRouting);
+          }} fullWidth>
+            <${MenuItem} value="default-only">Default only<//>
+            <${MenuItem} value="fallback">Failover<//>
+            <${MenuItem} value="spread">Spread<//>
+          <//>
+        </div>
+      </div>
+      ${executors.map((entry, index) => {
+        const providerInfo = getProviderInventoryEntry(entry.providerId);
+        const providerOption = getProviderOption(entry.providerId);
+        const authState = entry.auth || providerInfo?.auth || {};
+        const supportsEndpoint = supportsHarnessExecutorEndpoint(entry.providerId);
+        const supportsConfigurableApiStyle = supportsHarnessExecutorConfigurableApiStyle(entry.providerId);
+        const supportsWorkspace = ["openai-codex-subscription", "claude-subscription-shim"].includes(entry.providerId);
+        const supportsOrgProject = entry.providerId === "openai-responses";
+        const supportsAzureDeployment = entry.providerId === "azure-openai-responses";
+        const authModeOptions = Array.isArray(authState?.supportedModes)
+          ? authState.supportedModes.filter(Boolean)
+          : [];
+        const authWarnings = formatHarnessAuthWarningMessages(authState);
+        const apiStyleOptions = getHarnessExecutorApiStyleOptions(entry.providerId);
+        const isPrimary = entry.id === primaryExecutor;
+        const routingLabel = deriveHarnessExecutorRoutingLabel(entry, primaryExecutor, routingMode);
+        const endpointSummary = describeHarnessExecutorEndpoint(entry);
+        const authBindingSummary = describeHarnessExecutorAuthBindings(entry);
+        const runtimeOwnershipLabel = formatHarnessRuntimeOwnershipLabel(entry, providerInfo);
+        return html`
+          <div key=${entry._id} style="border:1px solid var(--border-primary);border-radius:var(--radius-sm);padding:12px;margin-bottom:10px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+              <div>
+                <strong>${entry.name || `Executor ${index + 1}`}</strong>
+                <div class="meta-text">${entry.id || `executor-${index + 1}`} · ${providerOption?.label || providerInfo?.label || entry.providerId}</div>
+                ${endpointSummary && html`<div class="meta-text" style="margin-top:4px">${endpointSummary}</div>`}
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <${Toggle} checked=${entry.enabled !== false} onChange=${(value) => updateExecutor(entry._id, "enabled", value)} label="Enabled" />
+                <${Button} variant="outlined" size="small" onClick=${() => duplicateExecutor(entry._id)}>Duplicate<//>
+                <${Button} variant="outlined" size="small" onClick=${() => removeExecutor(entry._id)}>Remove<//>
+              </div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+              ${isPrimary && html`<${Chip} size="small" color="primary" label="Primary" />`}
+              <${Chip} size="small" variant="outlined" label=${routingLabel} />
+              <${Chip} size="small" variant="outlined" label=${formatHarnessProviderStatus(authState)} />
+              <${Chip} size="small" variant="outlined" label=${runtimeOwnershipLabel} />
+              <${Chip} size="small" variant="outlined" label=${(apiStyleOptions.find((option) => option.value === (entry.apiStyle || "provider-default")) || HARNESS_EXECUTOR_API_STYLE_OPTIONS[0])?.label || "Provider default"} />
+              ${routingMode === "spread" && html`<${Chip} size="small" variant="outlined" label=${`Weight ${normalizeHarnessExecutorWeight(entry.weight, 100)}`} />`}
+              ${authState.preferredMode && html`<${Chip} size="small" variant="outlined" label=${formatHarnessAuthModeLabel(authState.preferredMode)} />`}
+              ${entry.defaultModel && html`<${Chip} size="small" variant="outlined" label=${entry.defaultModel} />`}
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <div>
+                <div class="setting-row-label">Display Name</div>
+                <${TextField} size="small" variant="outlined" value=${entry.name} onInput=${(e) => updateExecutor(entry._id, "name", e.target.value)} fullWidth />
+              </div>
+              <div>
+                <div class="setting-row-label">Stable ID</div>
+                <${TextField} size="small" variant="outlined" value=${entry.id} onInput=${(e) => updateExecutor(entry._id, "id", e.target.value)} fullWidth />
+              </div>
+              <div>
+                <div class="setting-row-label">Provider Runtime</div>
+                <${Select} size="small" value=${entry.providerId} onChange=${(e) => updateExecutor(entry._id, "providerId", e.target.value)} fullWidth>
+                  ${sortedProviderOptions.map((option) => html`<${MenuItem} value=${option.id}>${option.label}<//>`)}
+                <//>
+                ${providerOption?.description ? html`<div class="meta-text" style="margin-top:4px">${providerOption.description}</div>` : null}
+              </div>
+              ${supportsConfigurableApiStyle ? html`
+                <div>
+                  <div class="setting-row-label">Executor API Style</div>
+                  <${Select} size="small" value=${entry.apiStyle || "provider-default"} onChange=${(e) => updateExecutor(entry._id, "apiStyle", e.target.value)} fullWidth>
+                    ${apiStyleOptions.map((option) => html`<${MenuItem} value=${option.value}>${option.label}<//>`)}
+                  <//>
+                  <div class="meta-text" style="margin-top:4px">Use this when a specific endpoint should default to <code>/v1/responses</code> or <code>/v1/chat/completions</code>. Model-level overrides below can still differ.</div>
+                </div>
+              ` : html`
+                <div>
+                  <div class="setting-row-label">Executor API Style</div>
+                  <${TextField} size="small" variant="outlined" value=${"Provider native transport"} disabled fullWidth />
+                </div>
+              `}
+              <div>
+                <div class="setting-row-label">Default Model</div>
+                <${TextField} size="small" variant="outlined" value=${entry.defaultModel} onInput=${(e) => updateExecutor(entry._id, "defaultModel", e.target.value)} placeholder="gpt-5.4 / claude-sonnet-4.6 / ..." fullWidth />
+              </div>
+              <div>
+                <div class="setting-row-label">Routing Weight</div>
+                <${TextField} type="number" size="small" variant="outlined" value=${normalizeHarnessExecutorWeight(entry.weight, 100)} onInput=${(e) => updateExecutor(entry._id, "weight", e.target.value)} inputProps=${{ min: 0, max: 100000 }} fullWidth />
+                <div class="meta-text" style="margin-top:4px">${routingMode === "spread" ? "Higher weights make this executor more likely to receive spread-routed work." : "Stored now so the executor is ready if you later switch the Harness runtime to spread routing."}</div>
+              </div>
+              <div style="grid-column:1/-1">
+                <div class="setting-row-label">Auth Mode</div>
+                ${authModeOptions.length > 0
+                  ? html`
+                      <${Select} size="small" value=${entry.authMode || ""} onChange=${(e) => updateExecutor(entry._id, "authMode", e.target.value)} fullWidth>
+                        <${MenuItem} value="">Provider default<//>
+                        ${authModeOptions.map((mode) => html`<${MenuItem} value=${mode}>${formatHarnessAuthModeLabel(mode)}<//>`)}
+                      <//>
+                    `
+                  : html`
+                      <${TextField} size="small" variant="outlined" value=${entry.authMode} onInput=${(e) => updateExecutor(entry._id, "authMode", e.target.value)} placeholder=${authState.preferredMode || "provider default"} fullWidth />
+                    `}
+                ${formatHarnessAuthModeDescription(entry.authMode || authState.preferredMode) && html`
+                  <div class="meta-text" style="margin-top:4px">${formatHarnessAuthModeDescription(entry.authMode || authState.preferredMode)}</div>
+                `}
+              </div>
+                ${(!entry.authMode || entry.authMode === "apiKey") && html`
+                  <div>
+                    <div class="setting-row-label">API Key Env Binding</div>
+                    <${TextField}
+                      size="small"
+                      variant="outlined"
+                      value=${entry.authBindings?.apiKeyEnv || ""}
+                      onInput=${(e) => updateExecutorAuthBinding(entry._id, "apiKeyEnv", e.target.value)}
+                      placeholder=${resolveDefaultAuthBindingEnv(authState?.env, "apiKey") || "OPENAI_API_KEY / AZURE_OPENAI_API_KEY / ..."}
+                      fullWidth
+                    />
+                    <div class="meta-text" style="margin-top:4px">${authState?.env?.apiKey?.configured ? html`<span style="color:var(--color-success,#4caf73)">&#x2713; ${authState.env.apiKey.key} is set</span>` : "Name of the env var that holds your API key. Leave blank to use the provider default."}</div>
+                  </div>
+                `}
+                ${(!entry.authMode || entry.authMode === "oauth") && html`
+                  <div>
+                    <div class="setting-row-label">OAuth Token Env Binding</div>
+                    <${TextField}
+                      size="small"
+                      variant="outlined"
+                      value=${entry.authBindings?.oauthTokenEnv || ""}
+                      onInput=${(e) => updateExecutorAuthBinding(entry._id, "oauthTokenEnv", e.target.value)}
+                      placeholder=${resolveDefaultAuthBindingEnv(authState?.env, "oauth") || "OPENAI_ACCESS_TOKEN / COPILOT_OAUTH_TOKEN / GITHUB_TOKEN / ..."}
+                      fullWidth
+                    />
+                    <div class="meta-text" style="margin-top:4px">${authState?.env?.oauth?.configured ? html`<span style="color:var(--color-success,#4caf73)">&#x2713; ${authState.env.oauth.key} is set</span>` : "Name of the env var holding your OAuth access token. Leave blank to use the provider default."}</div>
+                  </div>
+                `}
+                ${(!entry.authMode || entry.authMode === "subscription") && html`
+                  <div>
+                    <div class="setting-row-label">Subscription Env Binding</div>
+                    <${TextField}
+                      size="small"
+                      variant="outlined"
+                      value=${entry.authBindings?.subscriptionEnv || ""}
+                      onInput=${(e) => updateExecutorAuthBinding(entry._id, "subscriptionEnv", e.target.value)}
+                      placeholder=${resolveDefaultAuthBindingEnv(authState?.env, "subscription") || "OPENAI_SESSION_TOKEN / ..."}
+                      fullWidth
+                    />
+                    <div class="meta-text" style="margin-top:4px">${authState?.env?.subscription?.configured ? html`<span style="color:var(--color-success,#4caf73)">&#x2713; ${authState.env.subscription.key} is set — session auto-detected from ~/.codex/auth.json</span>` : "Name of the env var holding the subscription session token. Auto-detected from ~/.codex/auth.json after signing in with the Codex desktop app. Leave blank to use the provider default."}</div>
+                  </div>
+                `}
+              ${supportsEndpoint && html`
+                <div>
+                  <div class="setting-row-label">${supportsAzureDeployment ? "Endpoint URL" : "Base URL / Endpoint"}</div>
+                  <${TextField} size="small" variant="outlined" value=${entry.endpoint || entry.baseUrl || ""} onInput=${(e) => {
+                    const nextValue = e.target.value;
+                    if (supportsAzureDeployment) {
+                      updateExecutor(entry._id, "endpoint", nextValue);
+                    } else {
+                      updateExecutor(entry._id, "baseUrl", nextValue);
+                    }
+                  }} placeholder="https://..." fullWidth />
+                </div>
+              `}
+              ${supportsAzureDeployment && html`
+                <div>
+                  <div class="setting-row-label">Azure Deployment</div>
+                  <${TextField} size="small" variant="outlined" value=${entry.deployment} onInput=${(e) => updateExecutor(entry._id, "deployment", e.target.value)} placeholder="deployment name" fullWidth />
+                </div>
+              `}
+              ${supportsWorkspace && html`
+                <div>
+                  <div class="setting-row-label">Workspace / Org Scope</div>
+                  <${TextField} size="small" variant="outlined" value=${entry.workspace} onInput=${(e) => updateExecutor(entry._id, "workspace", e.target.value)} placeholder="optional workspace selector" fullWidth />
+                </div>
+              `}
+              ${supportsOrgProject && html`
+                <div>
+                  <div class="setting-row-label">OpenAI Organization</div>
+                  <${TextField} size="small" variant="outlined" value=${entry.organization} onInput=${(e) => updateExecutor(entry._id, "organization", e.target.value)} placeholder="org_xxx" fullWidth />
+                </div>
+                <div>
+                  <div class="setting-row-label">OpenAI Project</div>
+                  <${TextField} size="small" variant="outlined" value=${entry.project} onInput=${(e) => updateExecutor(entry._id, "project", e.target.value)} placeholder="proj_xxx" fullWidth />
+                </div>
+              `}
+            </div>
+            <div style="margin-top:12px">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+                <div>
+                  <div class="setting-row-label">Model Catalog</div>
+                  <div class="meta-text">Per-executor model list. Load known models from the provider or discover them from a live endpoint. You can then remove any you don't need.</div>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                  ${Array.isArray(providerInfo?.modelCatalog?.models) && providerInfo.modelCatalog.models.length > 0 && html`
+                    <${Button} variant="outlined" size="small" onClick=${() => {
+                      const fallbackApiStyle = supportsHarnessExecutorConfigurableApiStyle(entry.providerId)
+                        ? (entry.apiStyle || "provider-default")
+                        : "provider-default";
+                      const nextExecutors = executors.map((ex) => {
+                        if (ex._id !== entry._id) return ex;
+                        const existingIds = new Set((ex.modelEntries || []).map((m) => m.id).filter(Boolean));
+                        const toAdd = providerInfo.modelCatalog.models
+                          .map((m) => (m && typeof m === "object" ? m : { id: m }))
+                          .filter((model) => String(model?.id || "").trim() && !existingIds.has(String(model.id || "").trim()))
+                          .map((model, i) => normalizeHarnessExecutorModelForEditor(model, (ex.modelEntries?.length || 0) + i, fallbackApiStyle));
+                        return { ...ex, modelEntries: [...(ex.modelEntries || []), ...toAdd] };
+                      });
+                      setExecutors(nextExecutors);
+                      markDirty(nextExecutors, primaryExecutor, routingMode);
+                      haptic("light");
+                    }}>Load from provider<//>
+                  `}
+                  ${supportsEndpoint && html`
+                    <${Button} variant="outlined" size="small" onClick=${async () => {
+                      try {
+                        const res = await apiFetch("/api/harness/discover-models", {
+                          method: "POST",
+                          body: JSON.stringify({
+                            providerId: entry.providerId,
+                            endpoint: entry.endpoint || entry.baseUrl || "",
+                            apiKeyEnv: entry.authBindings?.apiKeyEnv || "",
+                          }),
+                        }).catch(() => null);
+                        const discovered = Array.isArray(res?.modelEntries) && res.modelEntries.length > 0
+                          ? res.modelEntries
+                          : Array.isArray(res?.models)
+                            ? res.models.map((id) => ({ id }))
+                            : [];
+                        if (!discovered.length) { haptic("heavy"); return; }
+                        const fallbackApiStyle = entry.apiStyle || "provider-default";
+                        const nextExecutors = executors.map((ex) => {
+                          if (ex._id !== entry._id) return ex;
+                          const existingIds = new Set((ex.modelEntries || []).map((m) => m.id).filter(Boolean));
+                          const toAdd = discovered
+                            .filter((model) => String(model?.id || model || "").trim() && !existingIds.has(String(model?.id || model || "").trim()))
+                            .map((model, i) => normalizeHarnessExecutorModelForEditor(model, (ex.modelEntries?.length || 0) + i, fallbackApiStyle));
+                          return { ...ex, modelEntries: [...(ex.modelEntries || []), ...toAdd] };
+                        });
+                        setExecutors(nextExecutors);
+                        markDirty(nextExecutors, primaryExecutor, routingMode);
+                        haptic("light");
+                      } catch { haptic("heavy"); }
+                    }}>Discover models<//>
+                  `}
+                  <${Button} variant="outlined" size="small" onClick=${() => addExecutorModel(entry._id)}>Add model<//>
+                </div>
+              </div>
+              ${(Array.isArray(entry.modelEntries) ? entry.modelEntries : []).length === 0
+                ? html`<div class="meta-text">No explicit model list. Use "Load from provider" to populate from the known model catalog, or add manually. Bosun will fall back to the provider catalog.</div>`
+                : html`
+                    ${(entry.modelEntries || []).map((model, modelIndex) => html`
+                      <div key=${model._id} style="display:grid;grid-template-columns:minmax(160px,1.5fr) minmax(120px,1fr) ${supportsAzureDeployment ? "minmax(150px,1fr)" : ""} minmax(160px,1fr) minmax(170px,1fr) auto;gap:8px;align-items:end;margin-bottom:8px">
+                        <div>
+                          <div class="setting-row-label">Model ID</div>
+                          <${TextField} size="small" variant="outlined" value=${model.id} onInput=${(e) => updateExecutorModel(entry._id, model._id, "id", e.target.value)} placeholder=${modelIndex === 0 ? "gpt-5.4" : "model id"} fullWidth />
+                        </div>
+                        <div>
+                          <div class="setting-row-label">Label</div>
+                          <${TextField} size="small" variant="outlined" value=${model.label} onInput=${(e) => updateExecutorModel(entry._id, model._id, "label", e.target.value)} placeholder="Optional UI label" fullWidth />
+                        </div>
+                        ${supportsAzureDeployment && html`
+                          <div>
+                            <div class="setting-row-label">API Version</div>
+                            <${TextField} size="small" variant="outlined" value=${model.apiVersion || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "apiVersion", e.target.value)} placeholder="e.g. 2025-03-01-preview" fullWidth />
+                          </div>
+                        `}
+                        <div>
+                          <div class="setting-row-label">${supportsConfigurableApiStyle ? "API Style For This Model" : "Model Transport"}</div>
+                          ${supportsConfigurableApiStyle
+                            ? html`
+                                <${Select} size="small" value=${model.apiStyle || "provider-default"} onChange=${(e) => updateExecutorModel(entry._id, model._id, "apiStyle", e.target.value)} fullWidth>
+                                  ${apiStyleOptions.map((option) => html`<${MenuItem} value=${option.value}>${option.label}<//>`)}
+                                <//>
+                              `
+                            : html`<${TextField} size="small" variant="outlined" value=${"Provider native transport"} disabled fullWidth />`}
+                        </div>
+                        <div>
+                          <div class="setting-row-label">Capability Defaults</div>
+                          <div style="display:flex;gap:4px;flex-wrap:wrap;min-height:32px;align-items:center">
+                            ${formatModelCapabilityBadges(model).map((badge) => html`<${Chip} size="small" variant="outlined" label=${badge} />`)}
+                            ${formatModelCapabilityBadges(model).length === 0 && html`<span class="meta-text">Auto</span>`}
+                          </div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <${Toggle} checked=${model.enabled !== false} onChange=${(value) => updateExecutorModel(entry._id, model._id, "enabled", value)} label="Enabled" />
+                          <${Button} variant="text" color="error" size="small" onClick=${() => removeExecutorModel(entry._id, model._id)}>Remove<//>
+                        </div>
+                        <div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:-2px">
+                          <${TextField} size="small" variant="outlined" label="API model" value=${model.apiModel || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "apiModel", e.target.value)} placeholder=${model.id} fullWidth />
+                          <${TextField} type="number" size="small" variant="outlined" label="Context" value=${model.contextWindow || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "contextWindow", e.target.value)} fullWidth />
+                          <${TextField} type="number" size="small" variant="outlined" label="Input cap" value=${model.maxInputTokens || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "maxInputTokens", e.target.value)} fullWidth />
+                          <${TextField} type="number" size="small" variant="outlined" label="Output cap" value=${model.maxOutputTokens || ""} onInput=${(e) => updateExecutorModel(entry._id, model._id, "maxOutputTokens", e.target.value)} fullWidth />
+                        </div>
+                      </div>
+                    `)}
+                  `}
+            </div>
+            <div class="meta-text" style="margin-top:8px">
+              Provider auth: <strong>${authState.status || "unknown"}</strong>
+              ${authState.authenticated ? " · connected" : authState.requiresAction ? " · needs auth" : ""}
+              ${authState.canRun ? " · runnable" : ""}
+              ${runtimeOwnershipLabel ? ` · ${runtimeOwnershipLabel.toLowerCase()}` : ""}
+              ${authBindingSummary ? ` · bindings ${authBindingSummary}` : ""}
+              ${authState.connection?.accountId ? ` · account ${authState.connection.accountId}` : ""}
+              ${authState.preferredMode ? ` · ${authState.preferredMode}` : ""}
+              ${providerInfo?.description ? ` · ${providerInfo.description}` : ""}
+            </div>
+            ${authWarnings.length > 0 && html`
+              <div class="settings-banner settings-banner-warn" style="margin-top:10px">
+                <span>${resolveIcon(":alert:")}</span>
+                <span class="settings-banner-text">${authWarnings.join(" ")}</span>
+              </div>
+            `}
+          </div>
+        `;
+      })}
+      <${Button} variant="outlined" size="small" onClick=${addExecutor}>+ Add Harness Executor<//>
+      ${executors.length === 0 && !loadError && html`
+        <div class="meta-text" style="margin-top:8px">
+          No named Harness executors yet. Add one here to make it appear as a selectable chat/runtime executor. Bosun will still keep shared provider defaults below, but named executors are the first-class runtime objects that direct sessions and future tasks actually choose from.
+        </div>
+      `}
+    <//>
+  `;
+}
+
+function parseExecutorRoutingPool(rawValue = "") {
+  const chunks = Array.isArray(rawValue)
+    ? rawValue
+    : isStructuredValue(rawValue)
+      ? (String(rawValue.executor || rawValue.type || "").trim()
+        ? [rawValue]
+        : Array.isArray(rawValue.entries)
+          ? rawValue.entries
+          : Object.values(rawValue))
+      : String(rawValue || "").trim().split(",");
+  if (!Array.isArray(chunks) || chunks.length === 0) return [];
+  return chunks
+    .map((chunk, index) => {
+      if (chunk && typeof chunk === "object" && !Array.isArray(chunk)) {
+        const models = Array.isArray(chunk.models)
+          ? chunk.models.map((entry) => String(entry || "").trim()).filter(Boolean)
+          : String(chunk.modelsText || chunk.model || "")
+            .split(/[|,]/)
+            .map((entry) => String(entry || "").trim())
+            .filter(Boolean);
+        return {
+          id: `executor-pool-${index}`,
+          executor: String(chunk.executor || chunk.type || "").trim().toUpperCase() || "CODEX",
+          variant: String(chunk.variant || chunk.family || "").trim().toUpperCase() || "DEFAULT",
+          weight: Math.max(0, Number.parseInt(String(chunk.weight || "0"), 10) || 0),
+          modelsText: models.join(", "),
+        };
+      }
+      const [executor = "", variant = "", weight = "", ...modelParts] = String(chunk || "").split(":");
+      const models = modelParts.join(":").split("|").map((entry) => String(entry || "").trim()).filter(Boolean);
+      return {
+        id: `executor-pool-${index}`,
+        executor: String(executor || "").trim().toUpperCase() || "CODEX",
+        variant: String(variant || "").trim().toUpperCase() || "DEFAULT",
+        weight: Math.max(0, Number.parseInt(String(weight || "0"), 10) || 0),
+        modelsText: models.join(", "),
+      };
+    })
+    .filter((entry) => entry.executor);
+}
+
+function serializeExecutorRoutingPool(entries = []) {
+  return entries
+    .map((entry) => {
+      const executor = String(entry?.executor || "").trim().toUpperCase();
+      const variant = String(entry?.variant || "").trim().toUpperCase();
+      const weight = Math.max(0, Number.parseInt(String(entry?.weight || "0"), 10) || 0);
+      const models = String(entry?.modelsText || "")
+        .split(",")
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .join("|");
+      if (!executor || !variant) return "";
+      return `${executor}:${variant}:${weight}${models ? `:${models}` : ""}`;
+    })
+    .filter(Boolean)
+    .join(",");
+}
+
+function ExecutorRoutingPoolEditor({ value = "", onChange }) {
+  const entries = useMemo(() => parseExecutorRoutingPool(value), [value]);
+  const totalWeight = entries.reduce((sum, entry) => sum + (Number(entry?.weight || 0) || 0), 0);
+  const syncEntries = useCallback((nextEntries) => {
+    onChange(serializeExecutorRoutingPool(nextEntries));
+  }, [onChange]);
+  const updateEntry = useCallback((entryId, field, nextValue) => {
+    syncEntries(entries.map((entry) => (
+      entry.id === entryId
+        ? { ...entry, [field]: nextValue }
+        : entry
+    )));
+  }, [entries, syncEntries]);
+  const removeEntry = useCallback((entryId) => {
+    syncEntries(entries.filter((entry) => entry.id !== entryId));
+  }, [entries, syncEntries]);
+  const addEntry = useCallback(() => {
+    syncEntries([
+      ...entries,
+      {
+        id: `executor-pool-${Date.now()}-${entries.length}`,
+        executor: "CODEX",
+        variant: "DEFAULT",
+        weight: entries.length === 0 ? 100 : 0,
+        modelsText: "",
+      },
+    ]);
+  }, [entries, syncEntries]);
+
+  return html`
+    <div style="display:grid;gap:10px">
+      <div class="meta-text">
+        Build the queued-task routing pool here instead of hand-editing the raw <code>EXECUTORS</code> string. This does not affect direct chat sessions.
+      </div>
+      ${entries.length === 0
+        ? html`<div class="meta-text">No routing entries yet. Add one if you want queued tasks distributed across multiple runtimes.</div>`
+        : entries.map((entry, index) => html`
+            <div key=${entry.id} style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;padding:10px;border:1px solid var(--border, rgba(255,255,255,0.1));border-radius:12px;background:color-mix(in srgb, var(--bg-card, #222) 88%, transparent)">
+              <div>
+                <div class="setting-row-label">Runtime</div>
+                <${Select} size="small" value=${entry.executor} onChange=${(e) => updateEntry(entry.id, "executor", e.target.value)} fullWidth>
+                  ${["CODEX", "CLAUDE", "COPILOT", "OPENCODE", "GEMINI"].map((option) => html`<${MenuItem} value=${option}>${option}<//>`)}
+                <//>
+              </div>
+              <div>
+                <div class="setting-row-label">Variant</div>
+                <${TextField} size="small" value=${entry.variant} onInput=${(e) => updateEntry(entry.id, "variant", e.target.value)} placeholder="DEFAULT" fullWidth />
+              </div>
+              <div>
+                <div class="setting-row-label">Weight</div>
+                <${TextField} type="number" size="small" value=${entry.weight} inputProps=${{ min: 0, max: 1000 }} onInput=${(e) => updateEntry(entry.id, "weight", e.target.value)} fullWidth />
+              </div>
+              <div style="grid-column:1/-1">
+                <div class="setting-row-label">Model allow-list</div>
+                <${TextField} size="small" value=${entry.modelsText} onInput=${(e) => updateEntry(entry.id, "modelsText", e.target.value)} placeholder="Optional comma-separated models" fullWidth />
+                <div class="meta-text" style="margin-top:4px">Entry ${index + 1}. Use commas here; Bosun stores them as <code>|</code> internally.</div>
+              </div>
+              <div style="grid-column:1/-1;display:flex;justify-content:flex-end">
+                <${Button} variant="text" color="error" size="small" onClick=${() => removeEntry(entry.id)}>Remove runtime<//>
+              </div>
+            </div>
+          `)}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div class="meta-text">Total configured weight: <strong>${totalWeight}</strong></div>
+        <${Button} variant="outlined" size="small" onClick=${addEntry}>Add runtime<//>
+      </div>
+      <div class="meta-text"><strong>Stored value:</strong> <code>${value || "(empty)"}</code></div>
+    </div>
+  `;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  ServerConfigMode — .env management UI
  * ═══════════════════════════════════════════════════════════════ */
@@ -862,6 +2180,8 @@ function ServerConfigMode() {
   const [serverData, setServerData] = useState(null);     // { KEY: "value" } from API
   const [serverSources, setServerSources] = useState(null); // { KEY: "env" | "config" | "default" | "derived" | ... }
   const [serverMeta, setServerMeta] = useState(null);     // { envPath, configPath, configDir }
+  const [agentArchitecture, setAgentArchitecture] = useState(null);
+  const [harnessExecutorsState, setHarnessExecutorsState] = useState(null);
   const [configSync, setConfigSync] = useState(null);     // { total, updated, skipped, configPath }
   const [loadError, setLoadError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -890,6 +2210,10 @@ function ServerConfigMode() {
 
   const tooltipTimer = useRef(null);
   const restartCountdownTimer = useRef(null);
+  const settingsSchemaByKey = useMemo(
+    () => new Map(SETTINGS_SCHEMA.map((def) => [def.key, def])),
+    [],
+  );
 
   /* ─── Load server settings on mount ─── */
   const fetchSettings = useCallback(async (opts = {}) => {
@@ -916,12 +2240,16 @@ function ServerConfigMode() {
             : null,
         );
         setServerMeta(res.meta || null);
+        setAgentArchitecture(res.agentArchitecture || null);
+        setHarnessExecutorsState(res.harnessExecutors || null);
         if (!preserveConfigSync) setConfigSync(null);
       } else if (isLegacyObject) {
         // Demo/legacy compatibility: /api/settings may return a plain object.
         setServerData(res);
         setServerSources(null);
         setServerMeta(null);
+        setAgentArchitecture(null);
+        setHarnessExecutorsState(null);
         if (!preserveConfigSync) setConfigSync(null);
       } else {
         throw new Error(res?.error || "Unexpected response format");
@@ -931,6 +2259,8 @@ function ServerConfigMode() {
       setServerData(null);
       setServerSources(null);
       setServerMeta(null);
+      setAgentArchitecture(null);
+      setHarnessExecutorsState(null);
       setConfigSync(null);
     } finally {
       if (!silent) setLoading(false);
@@ -955,6 +2285,18 @@ function ServerConfigMode() {
     const category = String(def?.category || "").toLowerCase();
     return category === "context-shredding" || category === "context_shredding";
   }, []);
+  const activeAgentRuntime = useMemo(
+    () => normalizeAgentRuntimeValue(
+      Object.prototype.hasOwnProperty.call(edits, "BOSUN_AGENT_RUNTIME")
+        ? edits.BOSUN_AGENT_RUNTIME
+        : serverData?.BOSUN_AGENT_RUNTIME,
+    ),
+    [edits, serverData],
+  );
+  const hasExplicitHarnessExecutors = useMemo(
+    () => harnessExecutorsState?.hasExplicitExecutors === true,
+    [harnessExecutorsState],
+  );
 
   /* Filtered settings when searching */
   const filteredSettings = useMemo(() => {
@@ -962,20 +2304,42 @@ function ServerConfigMode() {
     const results = [];
     for (const def of SETTINGS_SCHEMA) {
       if (!showAdvanced && def.advanced && !isContextShreddingSetting(def)) continue;
+      if (
+        def.category === "executor"
+        && !isExecutorSettingVisible(def, activeAgentRuntime, { hasExplicitHarnessExecutors })
+      ) continue;
       const haystack = `${def.key} ${def.label} ${def.description || ""}`;
       if (fuzzyMatch(searchQuery, haystack)) results.push(def);
     }
     return results;
-  }, [searchQuery, showAdvanced, isContextShreddingSetting]);
+  }, [searchQuery, showAdvanced, isContextShreddingSetting, activeAgentRuntime, hasExplicitHarnessExecutors]);
 
   /* ─── Value resolution: edited value → server value → empty ─── */
-  const getValue = useCallback(
-    (key) => {
-      if (key in edits) return edits[key];
-      if (serverData && key in serverData) return String(serverData[key] ?? "");
-      return "";
+  const normalizeSettingTextValue = useCallback(
+    (key, rawValue, options = {}) => {
+      const def = settingsSchemaByKey.get(key) || null;
+      const inputKind = inferStructuredInputKind({
+        type: def?.type,
+        value: rawValue,
+        defaultValue: def?.defaultVal,
+      });
+      return toEditableTextValue(rawValue, {
+        pretty: options.pretty ?? inputKind === "json",
+        fallback: options.fallback ?? "",
+      });
     },
-    [edits, serverData],
+    [settingsSchemaByKey],
+  );
+
+  const getValue = useCallback(
+    (key) => normalizeSettingTextValue(
+      key,
+      key in edits
+        ? edits[key]
+        : (serverData && key in serverData ? serverData[key] : ""),
+      { fallback: "" },
+    ),
+    [edits, normalizeSettingTextValue, serverData],
   );
 
   const getReloadDelayMs = useCallback(
@@ -995,7 +2359,13 @@ function ServerConfigMode() {
       if (source && source !== "unset") return false;
       if (def.defaultVal == null) return false;
       const current = getValue(def.key);
-      return current === "" || current === String(def.defaultVal);
+      return current === "" || current === toEditableTextValue(def.defaultVal, {
+        pretty: inferStructuredInputKind({
+          type: def.type,
+          defaultValue: def.defaultVal,
+        }) === "json",
+        fallback: "",
+      });
     },
     [getValue, serverSources],
   );
@@ -1061,7 +2431,7 @@ function ServerConfigMode() {
     (key, value) => {
       haptic("light");
       setEdits((prev) => {
-        const original = serverData?.[key] != null ? String(serverData[key]) : "";
+        const original = normalizeSettingTextValue(key, serverData?.[key], { fallback: "" });
         // If the new value matches the original, remove the edit
         if (value === original) {
           const next = { ...prev };
@@ -1084,7 +2454,7 @@ function ServerConfigMode() {
         });
       }
     },
-    [serverData],
+    [normalizeSettingTextValue, serverData],
   );
 
   const handleDiscard = useCallback(async () => {
@@ -1188,6 +2558,10 @@ function ServerConfigMode() {
         // Refresh from backend so derived/runtime-resolved values stay accurate.
         await fetchSettings({ silent: true, preserveConfigSync: true });
         setEdits({});
+        emitAgentInventoryRefresh({
+          source: "settings-save",
+          keys: changeKeys,
+        });
       }
       await runSettingsExternalEditorAction("save");
       showToast("Settings saved successfully", "success");
@@ -1260,9 +2634,10 @@ function ServerConfigMode() {
   const diffEntries = useMemo(() => {
     const serverDiffs = Object.entries(edits).map(([key, newVal]) => {
       const def = SETTINGS_SCHEMA.find((s) => s.key === key);
-      const oldVal = serverData?.[key] != null ? String(serverData[key]) : "(unset)";
+      const oldVal = normalizeSettingTextValue(key, serverData?.[key], { fallback: "" });
+      const normalizedNewVal = normalizeSettingTextValue(key, newVal, { fallback: "" });
       const displayOld = def?.sensitive ? maskValue(oldVal) : oldVal || "(unset)";
-      const displayNew = def?.sensitive ? maskValue(newVal) : newVal || "(unset)";
+      const displayNew = def?.sensitive ? maskValue(normalizedNewVal) : normalizedNewVal || "(unset)";
       return { key, label: def?.label || key, oldVal: displayOld, newVal: displayNew };
     });
     const externalDiffs = externalPendingKeys.map((key) => ({
@@ -1279,7 +2654,7 @@ function ServerConfigMode() {
       newVal: "Will be saved",
     }));
     return [...serverDiffs, ...externalDiffs];
-  }, [edits, serverData, externalPendingKeys]);
+  }, [edits, serverData, externalPendingKeys, normalizeSettingTextValue]);
 
   /* ═══════════════════════════════════════════════
    *  Render a single setting control
@@ -1292,11 +2667,20 @@ function ServerConfigMode() {
       const error = errors[def.key];
       const isSensitive = def.sensitive;
       const secretVisible = visibleSecrets[def.key];
+      const rawValue =
+        def.key in edits
+          ? edits[def.key]
+          : (serverData && def.key in serverData ? serverData[def.key] : "");
+      const effectiveType = inferStructuredInputKind({
+        type: def.type,
+        value: rawValue,
+        defaultValue: def.defaultVal,
+      });
 
       /* Choose input control based on type */
       let control = null;
 
-      switch (def.type) {
+      switch (effectiveType) {
         case "boolean": {
           const checked =
             value === "true" || value === "1" || value === true;
@@ -1440,20 +2824,44 @@ function ServerConfigMode() {
           break;
         }
 
-        default: {
-          // string type
+        case "json": {
           control = html`
             <div class="setting-input-wrap">
               <${TextField}
+                multiline
+                minRows=${6}
                 size="small"
                 variant="outlined"
                 fullWidth
                 value=${value}
-                placeholder=${def.defaultVal != null ? String(def.defaultVal) : "Enter value…"}
+                placeholder=${def.defaultVal != null ? toEditableTextValue(def.defaultVal, { pretty: true }) : "{\n  \n}"}
                 onInput=${(e) => handleChange(def.key, e.target.value)}
+                helperText="JSON object or array"
+                InputProps=${{
+                  sx: { fontFamily: "'Fira Code', monospace", fontSize: "0.82rem" },
+                }}
               />
             </div>
           `;
+          break;
+        }
+
+        default: {
+          // string type
+          control = def.key === "EXECUTORS"
+            ? html`<${ExecutorRoutingPoolEditor} value=${rawValue || value} onChange=${(nextValue) => handleChange(def.key, nextValue)} />`
+            : html`
+                <div class="setting-input-wrap">
+                  <${TextField}
+                    size="small"
+                    variant="outlined"
+                    fullWidth
+                    value=${value}
+                    placeholder=${def.defaultVal != null ? String(def.defaultVal) : "Enter value…"}
+                    onInput=${(e) => handleChange(def.key, e.target.value)}
+                  />
+                </div>
+              `;
           break;
         }
       }
@@ -1485,7 +2893,7 @@ function ServerConfigMode() {
         </div>
       `;
     },
-    [getValue, isModified, isDefault, errors, visibleSecrets, activeTooltip, handleChange, toggleSecret, showTooltipFor, customSelectMode],
+    [getValue, isModified, isDefault, errors, visibleSecrets, activeTooltip, handleChange, toggleSecret, showTooltipFor, customSelectMode, edits, serverData],
   );
 
   /* ═══════════════════════════════════════════════
@@ -1633,7 +3041,10 @@ function ServerConfigMode() {
       /* ── Category browsing mode ── */
       const catDefs = activeCategory === "context-shredding"
         ? SETTINGS_SCHEMA.filter((def) => isContextShreddingSetting(def))
-        : (grouped.get(activeCategory) || []);
+        : (grouped.get(activeCategory) || []).filter((def) => (
+            activeCategory !== "executor"
+            || isExecutorSettingVisible(def, activeAgentRuntime, { hasExplicitHarnessExecutors })
+          ));
       const activeCat = CATEGORIES.find((c) => c.id === activeCategory);
 
       return html`
@@ -1675,6 +3086,11 @@ function ServerConfigMode() {
         <!-- Category description -->
         ${activeCat?.description &&
         html`<div class="settings-cat-desc">${activeCat.description}</div>`}
+
+        ${activeCategory === "executor" && html`
+          <${AgentArchitectureGuide} architecture=${agentArchitecture} />
+          <${HarnessExecutorsEditor} />
+        `}
 
         <!-- GitHub Device Flow login card -->
         ${activeCategory === "github" && html`<${GitHubDeviceFlowCard} config=${serverData} />`}
@@ -1785,8 +3201,8 @@ function ServerConfigMode() {
               (d) => html`
                 <div class="settings-diff-row" key=${d.key}>
                   <div class="settings-diff-key">${d.label}</div>
-                  <div class="settings-diff-old">− ${d.oldVal}</div>
-                  <div class="settings-diff-new">+ ${d.newVal}</div>
+                  <div class="settings-diff-old" style=${{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>− ${d.oldVal}</div>
+                  <div class="settings-diff-new" style=${{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>+ ${d.newVal}</div>
                 </div>
               `,
             )}
@@ -3086,7 +4502,10 @@ function VoiceEndpointsEditor() {
                   <div class="meta-text" style="margin-top:3px;color:var(--color-success,#22c55e)">✓ Connected — will use your ${ep.provider === "openai" ? "OpenAI" : ep.provider === "claude" ? "Claude" : "Gemini"} account.</div>
                 `}
                 ${ep.authSource === "oauth" && !(oauthStatus[ep.provider]?.status === "connected" || oauthStatus[ep.provider]?.status === "complete" || oauthStatus[ep.provider]?.hasToken) && html`
-                  <div class="meta-text" style="margin-top:3px;color:var(--color-warning,#f59e0b)">⚠ Not connected. Sign in via Connected Accounts above to use OAuth.</div>
+                  <div class="meta-text" style="margin-top:3px;color:var(--color-warning,#f59e0b)">⚠ Not connected. Sign in via the shared OAuth account cards above to use OAuth.</div>
+                `}
+                ${ep.provider === "claude" && ep.authSource === "oauth" && html`
+                  <div class="meta-text" style="margin-top:3px;color:var(--color-warning,#f59e0b)">Claude OAuth with Bosun may violate Anthropic terms. Switch this endpoint to API key mode if you need the warning gone.</div>
                 `}
               </div>
             `}
@@ -3600,7 +5019,7 @@ function _OAuthLoginCard({ displayName, emoji, statusRoute, loginRoute, cancelRo
           <span style="font-size:22px">${emoji}</span>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:var(--text-primary)">${displayName} Connected</div>
-            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">Signed in via OAuth. Token used for API access.</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">Signed in via OAuth. Shared by Bosun Harness and Voice.</div>
           </div>
           <${Button} variant="outlined" size="small" onClick=${handleLogout}>Sign out<//>
         </div>
@@ -3673,7 +5092,7 @@ function OpenAICodexLoginCard() {
     loginRoute="/api/voice/auth/openai/login"
     cancelRoute="/api/voice/auth/openai/cancel"
     logoutRoute="/api/voice/auth/openai/logout"
-    description="Use your ChatGPT Plus, Pro, or Team subscription to access OpenAI Realtime Audio without managing API keys. Uses the same OAuth flow as the Codex CLI."
+    description="Use your ChatGPT Plus, Pro, or Team subscription across Bosun Harness and Voice without managing API keys. Uses the same OAuth flow as the Codex CLI."
     successMsg="Signed in with OpenAI!"
     signOutMsg="Signed out from OpenAI"
   />`;
@@ -3690,7 +5109,7 @@ function ClaudeLoginCard() {
     loginRoute="/api/voice/auth/claude/login"
     cancelRoute="/api/voice/auth/claude/cancel"
     logoutRoute="/api/voice/auth/claude/logout"
-    description="Sign in with your Claude.ai account to use Claude models for vision and analysis tasks. Uses the same OAuth PKCE flow as the official Claude desktop app."
+    description="Sign in with your Claude.ai account for shared Bosun Harness and Voice access. Warning: using Claude OAuth with third-party tools may violate Anthropic terms; switch Claude integrations to API keys if you want the warning to disappear."
     successMsg="Signed in with Claude!"
     signOutMsg="Signed out from Claude"
   />`;

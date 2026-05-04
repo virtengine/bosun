@@ -1,1 +1,7 @@
-export { Codex } from "@openai/codex-sdk";
+const dynamicImport = new Function("specifier", "return import(specifier);");
+
+export async function loadBareCodexSdkModule() {
+  return dynamicImport("@openai/codex-sdk");
+}
+
+export default loadBareCodexSdkModule;

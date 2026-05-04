@@ -1,6 +1,10 @@
 import React from "react";
 import htm from "htm";
-import { Box, Text, useInput } from "ink";
+import * as ink from "ink";
+
+const Box = ink.Box ?? ink.default?.Box;
+const Text = ink.Text ?? ink.default?.Text;
+const useInput = ink.useInput ?? ink.default?.useInput;
 
 import { rankCommandPaletteActions } from "./lib/command-palette.mjs";
 

@@ -236,6 +236,23 @@ describe("AnomalyDetector", () => {
       const loops = anomalies.filter((a) => a.type === AnomalyType.TOOL_CALL_LOOP);
       expect(loops.length).toBeGreaterThanOrEqual(1);
     });
+
+    it("detects near-identical non-iterative tool calls with only volatile arg drift", () => {
+      const lines = [
+        '{"ToolCall":{"toolCallId":"tc1","title":"run_in_terminal","kind":"execute","rawInput":{"command":"npm test -- --shard 101 --tmp C:/tmp/run-1234567890"}}}',
+        '{"ToolCall":{"toolCallId":"tc2","title":"run_in_terminal","kind":"execute","rawInput":{"command":"npm test -- --shard 102 --tmp C:/tmp/run-1234567891"}}}',
+        '{"ToolCall":{"toolCallId":"tc3","title":"run_in_terminal","kind":"execute","rawInput":{"command":"npm test -- --shard 103 --tmp C:/tmp/run-1234567892"}}}',
+      ];
+
+      for (const line of lines) {
+        detector.processLine(line, META);
+      }
+
+      const loops = anomalies.filter((a) => a.type === AnomalyType.TOOL_CALL_LOOP);
+      expect(loops.length).toBeGreaterThanOrEqual(1);
+      expect(loops[0].message).toContain("near-identical");
+      expect(loops[0].data.loopKind).toBe("near_identical");
+    });
   });
 
   describe("Rebase Spiral (P1)", () => {
@@ -348,6 +365,27 @@ describe("AnomalyDetector", () => {
         (a) => a.type === AnomalyType.THOUGHT_SPINNING,
       );
       expect(spinAnomalies).toHaveLength(0);
+    });
+
+    it("detects near-identical reasoning summaries in Codex format", () => {
+      const lines = [
+        '{"method":"item/completed","params":{"item":{"type":"reasoning","summary":["Retrying build verification for shard 101 in tmp 555000111"]}}}',
+        '{"method":"item/completed","params":{"item":{"type":"reasoning","summary":["Retrying build verification for shard 102 in tmp 555000222"]}}}',
+        '{"method":"item/completed","params":{"item":{"type":"reasoning","summary":["Retrying build verification for shard 103 in tmp 555000333"]}}}',
+        '{"method":"item/completed","params":{"item":{"type":"reasoning","summary":["Retrying build verification for shard 104 in tmp 555000444"]}}}',
+        '{"method":"item/completed","params":{"item":{"type":"reasoning","summary":["Retrying build verification for shard 105 in tmp 555000555"]}}}',
+      ];
+
+      for (const line of lines) {
+        detector.processLine(line, META);
+      }
+
+      const spinAnomalies = anomalies.filter(
+        (a) =>
+          a.type === AnomalyType.THOUGHT_SPINNING &&
+          a.data?.loopKind === "near_identical_reasoning",
+      );
+      expect(spinAnomalies.length).toBeGreaterThanOrEqual(1);
     });
   });
 

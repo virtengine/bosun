@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 
 import {
   BUILTIN_FLOW_TEMPLATES,
@@ -38,10 +39,12 @@ async function makeTempRoot() {
 
 describe("manual-flows", () => {
   beforeEach(async () => {
+    resetStateLedgerCache();
     testRoot = await makeTempRoot();
   });
 
   afterEach(async () => {
+    resetStateLedgerCache();
     if (testRoot && existsSync(testRoot)) {
       await rm(testRoot, { recursive: true, force: true });
     }
@@ -60,6 +63,7 @@ describe("manual-flows", () => {
       expect(ids).toContain("prepare-agents-md");
       expect(ids).toContain("codebase-health-check");
       expect(ids).toContain("context-index-full");
+      expect(ids).toContain("queued-execution-plan");
       expect(ids).toContain("release-notes-draft");
       expect(ids).toContain("pre-pr-readiness");
       expect(ids).toContain("security-secret-audit");
@@ -86,7 +90,7 @@ describe("manual-flows", () => {
         for (const field of tpl.fields) {
           expect(field.id).toBeTruthy();
           expect(field.label).toBeTruthy();
-          expect(["text", "textarea", "select", "toggle", "number"]).toContain(field.type);
+          expect(["text", "textarea", "select", "toggle", "number", "json"]).toContain(field.type);
           // Select fields must have options
           if (field.type === "select") {
             expect(Array.isArray(field.options)).toBe(true);
@@ -304,6 +308,8 @@ describe("manual-flows", () => {
         projectId: "internal",
         triggerSource: "manual-ui",
       });
+      expect(run.workflowId).toBe("manual-flow.codebase-annotation-audit");
+      expect(run.observability?.summary?.eventCount).toBeGreaterThan(0);
     });
   });
 
@@ -798,6 +804,91 @@ describe("manual-flows", () => {
       expect(run.result.action).toBe("instructions");
       expect(run.result.instructions).toContain("docs");
       expect(run.result.instructions).toContain("Custom Action Instructions");
+    });
+
+    it("executes queued execution plan with lane-aware observability only", async () => {
+      const run = await executeFlow(
+        "queued-execution-plan",
+        {
+          planTitle: "Internal Harness Adoption",
+          objective: "Deliver the first Bosun-native queued harness implementation",
+          queueStrategy: "agent-lane-queue",
+          createTasks: false,
+          taskPriority: "high",
+          planDocument: [
+            "## Step 1 A: Build runtime contracts",
+            "Create the contracts and composition root.",
+            "",
+            "## Step 2 B: Build provider kernel",
+            "Normalize providers and registry ownership.",
+            "",
+            "## Step 3 A: Rebuild sessions",
+            "Move lifecycle ownership into the new session graph.",
+          ].join("\n"),
+        },
+        testRoot,
+      );
+
+      expect(run.status).toBe("completed");
+      expect(run.result.mode).toBe("queued-plan");
+      expect(run.result.stepCount).toBe(3);
+      expect(run.observability?.summary?.stepCount).toBe(3);
+      expect(run.observability?.steps?.[0]?.status).toBe("ready");
+      expect(run.observability?.steps?.[2]?.dependsOnStepIds).toEqual(["step-1-a"]);
+      expect(run.observability?.summary?.blockedStepCount).toBe(1);
+      expect(run.observability?.timeline?.some((event) => event.eventType === "manual-flow.plan.parsed")).toBe(true);
+    });
+
+    it("executes queued execution plan and creates a task graph when available", async () => {
+      let graphSpec = null;
+      const mockTaskManager = {
+        createTaskGraph: async (spec) => {
+          graphSpec = spec;
+          return {
+            ok: true,
+            parentTaskId: "task-parent-1",
+            taskCount: 2,
+            dependencyCount: 1,
+            tasks: [
+              { clientId: "step-1-a", taskId: "task-step-1", title: "[A] Step 1: Runtime" },
+              { clientId: "step-2-b", taskId: "task-step-2", title: "[B] Step 2: Provider" },
+            ],
+          };
+        },
+      };
+
+      const run = await executeFlow(
+        "queued-execution-plan",
+        {
+          planTitle: "Harness Queue",
+          objective: "Create a queued plan with tasks",
+          queueStrategy: "agent-lane-queue",
+          createTasks: true,
+          taskPriority: "high",
+          sprintId: "sprint-internal-harness",
+          planDocument: [
+            "## Step 1 A: Runtime",
+            "Compose the runtime spine.",
+            "",
+            "## Step 2 B: Provider",
+            "Compose the provider kernel.",
+          ].join("\n"),
+        },
+        testRoot,
+        { taskManager: mockTaskManager },
+      );
+
+      expect(run.status).toBe("completed");
+      expect(run.result.mode).toBe("task-graph-created");
+      expect(run.result.taskGraph.parentTaskId).toBe("task-parent-1");
+      expect(graphSpec.parentTask.title).toContain("Harness Queue");
+      expect(graphSpec.tasks[0].clientId).toBe("step-1-a");
+      expect(graphSpec.tasks[1].clientId).toBe("step-2-b");
+      expect(run.observability?.related?.taskIds).toEqual(
+        expect.arrayContaining(["task-parent-1", "task-step-1", "task-step-2"]),
+      );
+      expect(run.observability?.steps?.[0]?.taskId).toBe("task-step-1");
+      expect(run.observability?.timeline?.some((event) => event.eventType === "manual-flow.plan.tasks-created")).toBe(true);
     });
   });
 });

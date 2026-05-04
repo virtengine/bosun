@@ -187,6 +187,7 @@ function normalizeWorkspaceRepoEntry(repo, index = 0) {
       ? { slug: repo }
       : (repo && typeof repo === "object" ? repo : null);
   if (!raw) return null;
+  const explicitPath = String(raw.path || "").trim();
   const slug = String(raw.slug || extractGithubSlug(raw.url) || "").trim();
   const url = String(raw.url || resolveRepoUrl({ slug }) || "").trim();
   const name = String(raw.name || raw.id || extractRepoName(slug || url || raw.path || ""))
@@ -195,6 +196,7 @@ function normalizeWorkspaceRepoEntry(repo, index = 0) {
   if (!name && !slug && !url) return null;
   return {
     name: name || `repo-${index + 1}`,
+    ...(explicitPath ? { path: resolve(explicitPath) } : {}),
     slug,
     url,
     primary: raw.primary === true || index === 0,
@@ -228,6 +230,7 @@ function normalizeWorkspaceEntry(workspace, index = 0) {
   const fallbackId = `workspace-${index + 1}`;
   const id = normalizeId(workspace.id || workspace.name || fallbackId);
   if (!id) return null;
+  const explicitPath = String(workspace.path || "").trim();
   const repos = Array.isArray(workspace.repos)
     ? workspace.repos
         .map((repo, repoIndex) => normalizeWorkspaceRepoEntry(repo, repoIndex))
@@ -242,6 +245,7 @@ function normalizeWorkspaceEntry(workspace, index = 0) {
     ...workspace,
     id,
     name: String(workspace.name || workspace.id || id).trim() || id,
+    ...(explicitPath ? { path: resolve(explicitPath) } : {}),
     state: normalizeWorkspaceState(workspace.state),
     repos,
     executors: normalizeExecutorsConfig(workspace.executors),
@@ -348,7 +352,7 @@ function normalizeSingleLine(value) {
 }
 
 function isGenericGitPullFailure(text) {
-  return /^command failed:\s*git pull --rebase$/i.test(
+  return /^command failed:\s*git pull --no-rebase$/i.test(
     normalizeSingleLine(text),
   );
 }
@@ -363,11 +367,11 @@ function buildGitPullFailureDetails(err, repoPath, childProcess) {
   if (err?.signal) parts.push(`signal=${err.signal}`);
   if (err?.code) parts.push(`code=${err.code}`);
 
-  let details = preferred || stderr || stdout || message || "git pull --rebase failed";
+  let details = preferred || stderr || stdout || message || "git pull --no-rebase failed";
   if (!details || isGenericGitPullFailure(details)) {
     const fallback = message && !isGenericGitPullFailure(message)
       ? message
-      : "git pull --rebase failed";
+      : "git pull --no-rebase failed";
     details = fallback;
     // Generic execSync failures can omit stderr; include concise repo state.
     try {
@@ -444,9 +448,11 @@ export function listWorkspaces(configDir, opts = {}) {
   const repoRootOverride = opts.repoRoot || null;
 
   return workspaces.map((ws) => {
-    const wsPath = resolve(wsDir, ws.id);
+    const configuredWorkspacePath = String(ws.path || "").trim();
+    const wsPath = configuredWorkspacePath ? resolve(configuredWorkspacePath) : resolve(wsDir, ws.id);
     const repos = (ws.repos || []).map((repo) => {
-      const standardPath = resolve(wsPath, repo.name);
+      const configuredRepoPath = String(repo.path || "").trim();
+      const standardPath = configuredRepoPath ? resolve(configuredRepoPath) : resolve(wsPath, repo.name);
       const standardExists = existsSync(standardPath);
       let effectivePath = standardPath;
       let exists = standardExists;
@@ -968,7 +974,7 @@ export function pullWorkspaceRepos(configDir, workspaceId) {
       }
     }
     try {
-      childProcess.execSync("git pull --rebase", {
+      childProcess.execSync("git pull --no-rebase", {
         cwd: repoPath,
         encoding: "utf8",
         timeout: 120000,
@@ -981,7 +987,7 @@ export function pullWorkspaceRepos(configDir, workspaceId) {
       results.push({
         name: repo.name,
         success: false,
-        error: details || "git pull --rebase failed",
+        error: details || "git pull --no-rebase failed",
       });
     }
   }
@@ -1003,7 +1009,7 @@ export function getWorkspaceRepositories(configDir, workspaceId = "") {
   return ws.repos.map((repo) => ({
     name: repo.name,
     id: normalizeId(repo.name),
-    path: resolve(ws.path, repo.name),
+    path: repo.path ? resolve(repo.path) : resolve(ws.path, repo.name),
     slug: repo.slug || "",
     url: repo.url || "",
     primary: repo.primary || false,

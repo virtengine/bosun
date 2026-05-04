@@ -8,7 +8,7 @@ describe("async safety guards", () => {
     resolve(process.cwd(), "agent/agent-work-analyzer.mjs"),
     "utf8",
   );
-  const poolSource = readFileSync(resolve(process.cwd(), "agent/agent-pool.mjs"), "utf8");
+  const launcherSource = readFileSync(resolve(process.cwd(), "agent/agent-launcher.mjs"), "utf8");
   const updateSource = readFileSync(resolve(process.cwd(), "infra/update-check.mjs"), "utf8");
 
   it("handles monitor failure promises with explicit catch guards", () => {
@@ -40,11 +40,11 @@ describe("async safety guards", () => {
     expect(analyzerSource).toContain("runStuckSweep().catch((err) => {");
   });
 
-  it("guards agent-pool fire-and-forget registry operations", () => {
-    expect(poolSource).toContain(
+  it("guards agent-launcher fire-and-forget registry operations", () => {
+    expect(launcherSource).toContain(
       "ensureThreadRegistryLoaded().catch((err) => {",
     );
-    expect(poolSource).toContain(
+    expect(launcherSource).toContain(
       "invalidateThreadAsync(taskKey).catch((err) => {",
     );
   });

@@ -1,6 +1,13 @@
 /**
  * primary-agent.mjs — Adapter that selects the primary agent implementation.
  *
+ * Transitional architecture note:
+ * Canonical harness lifecycle, session ownership, and per-turn orchestration
+ * live in `session-manager.mjs`, `internal-harness-runtime.mjs`, and
+ * `agent/harness/*`. Shell transport parity lives in
+ * `shell/shell-adapter-registry.mjs`. Do not add new long-term lifecycle
+ * ownership here.
+ *
  * Supports Codex SDK, Copilot SDK, and Claude SDK.
  * Includes timeout detection and automatic failover between adapters.
  */
@@ -10,64 +17,23 @@ import { ensureCodexConfig, printConfigSummary } from "../shell/codex-config.mjs
 import { ensureRepoConfigs, printRepoConfigSummary } from "../config/repo-config.mjs";
 import { resolveRepoRoot } from "../config/repo-root.mjs";
 import { buildArchitectEditorFrame } from "../lib/repo-map.mjs";
-import { getAgentToolConfig, getEffectiveTools } from "./agent-tool-config.mjs";
 import { getSessionTracker } from "../infra/session-tracker.mjs";
-import { buildContextEnvelope } from "../workspace/context-cache.mjs";
+import { buildContextEnvelope, maybeCompressSessionItems } from "../workspace/context-cache.mjs";
 import { getEntry, getEntryContent, resolveAgentProfileLibraryMetadata } from "../infra/library-manager.mjs";
 import { execPooledPrompt } from "./agent-pool.mjs";
+import { executorToAdapterName, normalizeProviderAdapterName } from "./provider-registry.mjs";
+import { createProviderKernel } from "./provider-kernel.mjs";
+import { readHarnessExecutorFabric } from "./harness-executor-config.mjs";
+import { createQueryEngine } from "./query-engine.mjs";
 import {
-  execCodexPrompt,
-  steerCodexPrompt,
-  isCodexBusy,
-  getThreadInfo,
-  resetThread,
-  initCodexShell,
-  getActiveSessionId as getCodexSessionId,
-  listSessions as listCodexSessions,
-  switchSession as switchCodexSession,
-  createSession as createCodexSession,
-} from "../shell/codex-shell.mjs";
-import {
-  execCopilotPrompt,
-  steerCopilotPrompt,
-  isCopilotBusy,
-  getSessionInfo as getCopilotSessionInfo,
-  resetSession as resetCopilotSession,
-  initCopilotShell,
-} from "../shell/copilot-shell.mjs";
-import {
-  execClaudePrompt,
-  steerClaudePrompt,
-  isClaudeBusy,
-  getSessionInfo as getClaudeSessionInfo,
-  resetClaudeSession,
-  initClaudeShell,
-} from "../shell/claude-shell.mjs";
-import {
-  execOpencodePrompt,
-  steerOpencodePrompt,
-  isOpencodeBusy,
-  getSessionInfo as getOpencodeSessionInfo,
-  resetSession as resetOpencodeSession,
-  initOpencodeShell,
-  getActiveSessionId as getOpencodeSessionId,
-  listSessions as listOpencodeSessions,
-  switchSession as switchOpencodeSession,
-  createSession as createOpencodeSession,
-} from "../shell/opencode-shell.mjs";
-import {
-  execGeminiPrompt,
-  steerGeminiPrompt,
-  isGeminiBusy,
-  getSessionInfo as getGeminiSessionInfo,
-  resetSession as resetGeminiSession,
-  initGeminiShell,
-  getActiveSessionId as getGeminiSessionId,
-  listSessions as listGeminiSessions,
-  switchSession as switchGeminiSession,
-  createSession as createGeminiSession,
-} from "../shell/gemini-shell.mjs";
-import { getModelsForExecutor, normalizeExecutorKey } from "../task/task-complexity.mjs";
+  createHarnessFailoverController,
+  createHarnessProviderSessionRuntime,
+} from "./internal-harness-control-plane.mjs";
+import { getBosunSessionManager } from "./session-manager.mjs";
+import { buildToolCapabilityContract } from "./tool-orchestrator.mjs";
+import { normalizeProviderDefinitionId } from "./providers/index.mjs";
+import { createShellSessionCompat } from "../shell/shell-session-compat.mjs";
+import { createShellAdapterRegistry } from "../shell/shell-adapter-registry.mjs";
 
 /** Valid agent interaction modes */
 const CORE_MODES = ["ask", "agent", "plan", "web", "instant"];
@@ -89,6 +55,7 @@ const MODE_ALIASES = Object.freeze({
 
 /** Current interaction mode — affects how prompts are framed */
 let agentMode = "agent";
+const primarySessionManager = getBosunSessionManager();
 
 /**
  * Mode-specific prompt prefixes prepended to user messages.
@@ -116,6 +83,133 @@ const MODE_EXEC_POLICIES = Object.freeze({
     maxFailoverAttempts: Number(process.env.PRIMARY_AGENT_INSTANT_FAILOVER_ATTEMPTS) || 0,
   },
 });
+
+function normalizePrimarySessionScope(sessionType = "primary", explicitScope = "") {
+  const normalizedScope = String(explicitScope || "").trim();
+  if (normalizedScope) return normalizedScope;
+  const normalizedType = String(sessionType || "primary").trim() || "primary";
+  return normalizedType === "primary" ? "primary" : normalizedType;
+}
+
+function getPrimarySessionCompat(sessionType = "primary", scope = "") {
+  return createShellSessionCompat({
+    adapterName: activeAdapter.name,
+    providerSelection: activeExecutorSelection || activeAdapter.name,
+    scope: normalizePrimarySessionScope(sessionType, scope),
+    sessionType,
+    sessionManager: primarySessionManager,
+  });
+}
+
+const primarySessionAbortControllers = new Map();
+
+function setPrimarySessionAbortController(sessionId, controller = null) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) return null;
+  if (!controller) {
+    primarySessionAbortControllers.delete(normalizedSessionId);
+    return null;
+  }
+  primarySessionAbortControllers.set(normalizedSessionId, controller);
+  return controller;
+}
+
+function getPrimarySessionAbortController(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  return normalizedSessionId ? (primarySessionAbortControllers.get(normalizedSessionId) || null) : null;
+}
+
+function normalizePrimaryControllerPrompt(runRequest = {}) {
+  return String(
+    runRequest.prompt
+    || runRequest.message
+    || runRequest.userMessage
+    || "",
+  ).trim();
+}
+
+function bindPrimarySessionController(sessionId, defaults = {}) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  const primarySessionCompat = getPrimarySessionCompat(
+    defaults.sessionType || "primary",
+    defaults.scope || "",
+  );
+  if (!normalizedSessionId || typeof primarySessionCompat?.bindController !== "function") {
+    return null;
+  }
+  return primarySessionCompat.bindController(normalizedSessionId, {
+    abort(reason = "aborted") {
+      const abortController = getPrimarySessionAbortController(normalizedSessionId);
+      if (abortController && !abortController.signal.aborted) {
+        try {
+          abortController.abort(reason);
+        } catch {
+          /* best effort */
+        }
+      }
+    },
+    steer(prompt, meta = {}) {
+      if (typeof activeAdapter?.steer !== "function") {
+        return {
+          ok: false,
+          delivered: false,
+          reason: "not_steerable",
+          interventionType: String(meta?.kind || meta?.type || "steer").trim() || "steer",
+          stageId: null,
+          targetTaskKey: normalizedSessionId,
+        };
+      }
+      try {
+        const response = activeAdapter.steer(prompt);
+        return {
+          ok: response !== false,
+          delivered: response !== false,
+          reason: response === false ? "adapter_rejected" : null,
+          interventionType: String(meta?.kind || meta?.type || "steer").trim() || "steer",
+          stageId: null,
+          targetTaskKey: normalizedSessionId,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          delivered: false,
+          reason: String(error?.message || error || "steer_failed"),
+          interventionType: String(meta?.kind || meta?.type || "steer").trim() || "steer",
+          stageId: null,
+          targetTaskKey: normalizedSessionId,
+        };
+      }
+    },
+    async run(runRequest = {}) {
+      const prompt = normalizePrimaryControllerPrompt(runRequest);
+      if (!prompt) {
+        throw new Error(`Primary session "${normalizedSessionId}" continuation requires a prompt`);
+      }
+      const abortController =
+        runRequest.abortController instanceof AbortController
+          ? runRequest.abortController
+          : new AbortController();
+      setPrimarySessionAbortController(normalizedSessionId, abortController);
+      try {
+        return await execPrimaryPrompt(prompt, {
+          ...defaults,
+          ...runRequest,
+          sessionId: normalizedSessionId,
+          abortController,
+          metadata: {
+            ...(defaults.metadata && typeof defaults.metadata === "object" ? defaults.metadata : {}),
+            ...(runRequest.metadata && typeof runRequest.metadata === "object" ? runRequest.metadata : {}),
+          },
+          skipUserMessageRecord: runRequest.skipUserMessageRecord ?? false,
+        });
+      } finally {
+        if (getPrimarySessionAbortController(normalizedSessionId) === abortController) {
+          setPrimarySessionAbortController(normalizedSessionId, null);
+        }
+      }
+    },
+  });
+}
 
 function normalizeAgentMode(rawMode, fallback = "agent") {
   const normalized = String(rawMode || "").trim().toLowerCase();
@@ -212,50 +306,7 @@ function summarizeContextCompressionItems(items) {
 }
 
 function buildPrimaryToolCapabilityContract(options = {}) {
-  let rootDir = "";
-  try {
-    rootDir = String(options.cwd || resolveRepoRoot() || process.cwd()).trim();
-  } catch {
-    rootDir = String(options.cwd || process.cwd()).trim();
-  }
-  const agentProfileId = String(options.agentProfileId || "").trim();
-  const toolState = agentProfileId
-    ? getEffectiveTools(rootDir, agentProfileId)
-    : getEffectiveTools(rootDir, "__default__");
-  const rawCfg = agentProfileId ? getAgentToolConfig(rootDir, agentProfileId) : null;
-  const enabledBuiltinTools = (Array.isArray(toolState?.builtinTools) ? toolState.builtinTools : [])
-    .filter((tool) => tool?.enabled)
-    .map((tool) => ({
-      id: String(tool?.id || "").trim(),
-      name: String(tool?.name || "").trim(),
-      description: String(tool?.description || "").trim(),
-    }))
-    .filter((tool) => tool.id);
-  const enabledMcpServers = Array.isArray(rawCfg?.enabledMcpServers)
-    ? rawCfg.enabledMcpServers.map((id) => String(id || "").trim()).filter(Boolean)
-    : [];
-  const manifest = {
-    agentProfileId: agentProfileId || null,
-    enabledBuiltinTools,
-    enabledMcpServers,
-    toolBridge: {
-      module: "./voice-tools.mjs",
-      function: "executeToolCall(toolName, args, context)",
-      quickUse: [
-        "node -e \"import('../voice/voice-tools.mjs').then(async m=>{const r=await m.executeToolCall('get_workspace_context', {}, {});console.log(r?.result||r);})\"",
-        "node -e \"import('../voice/voice-tools.mjs').then(async m=>{const r=await m.executeToolCall('list_tasks', {limit:10}, {});console.log(r?.result||r);})\"",
-      ],
-    },
-  };
-  return [
-    "## Tool Capability Contract",
-    "Use enabled tools by default. Do not claim tools are unavailable without first trying them.",
-    "Enabled tools JSON:",
-    "```json",
-    JSON.stringify(manifest, null, 2),
-    "```",
-    "When uncertain about tool inputs/outputs, call get_admin_help via executeToolCall first.",
-  ].join("\n");
+  return buildToolCapabilityContract(options);
 }
 
 function toStringArray(value) {
@@ -360,160 +411,13 @@ function buildPrimaryAgentProfileContract(options = {}) {
   };
 }
 
-const ADAPTERS = {
-  "codex-sdk": {
-    name: "codex-sdk",
-    provider: "CODEX",
-    displayName: "Codex",
-    exec: (msg, opts) => execCodexPrompt(msg, { persistent: true, ...opts }),
-    steer: steerCodexPrompt,
-    isBusy: isCodexBusy,
-    getInfo: () => {
-      const info = getThreadInfo();
-      return { ...info, sessionId: info.sessionId || info.threadId };
-    },
-    reset: resetThread,
-    init: async () => {
-      await initCodexShell();
-      return true;
-    },
-    getSessionId: getCodexSessionId,
-    listSessions: listCodexSessions,
-    switchSession: switchCodexSession,
-    createSession: createCodexSession,
-    sdkCommands: ["/compact", "/status", "/context", "/mcp", "/model", "/clear"],
-    /**
-     * Forward an SDK-native command to the Codex shell.
-     * /clear is handled specially as a reset; others are sent as user input.
-     */
-    execSdkCommand: async (command, args, options = {}) => {
-      const cmd = command.startsWith("/") ? command : `/${command}`;
-      if (cmd === "/clear") {
-        await resetThread();
-        return "Session cleared.";
-      }
-      const fullCmd = args ? `${cmd} ${args}` : cmd;
-      return execCodexPrompt(fullCmd, {
-        persistent: true,
-        cwd: options.cwd,
-        sessionId: options.sessionId || null,
-      });
-    },
+const ADAPTERS = createShellAdapterRegistry({
+  withRuntimeOptions(adapterName, options = {}) {
+    return normalizeProviderAdapterName(adapterName) === "opencode-sdk"
+      ? withProviderRuntimeOptions(options)
+      : options;
   },
-  "copilot-sdk": {
-    name: "copilot-sdk",
-    provider: "COPILOT",
-    displayName: "Copilot",
-    exec: (msg, opts) => execCopilotPrompt(msg, { persistent: true, ...opts }),
-    steer: steerCopilotPrompt,
-    isBusy: isCopilotBusy,
-    getInfo: () => getCopilotSessionInfo(),
-    reset: resetCopilotSession,
-    init: async () => initCopilotShell(),
-    sdkCommands: ["/status", "/model", "/clear"],
-    execSdkCommand: async (command, args, options = {}) => {
-      const cmd = command.startsWith("/") ? command : `/${command}`;
-      if (cmd === "/clear") {
-        await resetCopilotSession();
-        return "Session cleared.";
-      }
-      const fullCmd = args ? `${cmd} ${args}` : cmd;
-      return execCopilotPrompt(fullCmd, {
-        persistent: true,
-        cwd: options.cwd,
-        sessionId: options.sessionId || null,
-      });
-    },
-  },
-  "claude-sdk": {
-    name: "claude-sdk",
-    provider: "CLAUDE",
-    displayName: "Claude",
-    exec: execClaudePrompt,
-    steer: steerClaudePrompt,
-    isBusy: isClaudeBusy,
-    getInfo: () => getClaudeSessionInfo(),
-    reset: resetClaudeSession,
-    init: async () => {
-      await initClaudeShell();
-      return true;
-    },
-    sdkCommands: ["/compact", "/status", "/model", "/clear"],
-    execSdkCommand: async (command, args, options = {}) => {
-      const cmd = command.startsWith("/") ? command : `/${command}`;
-      if (cmd === "/clear") {
-        await resetClaudeSession();
-        return "Session cleared.";
-      }
-      const fullCmd = args ? `${cmd} ${args}` : cmd;
-      return execClaudePrompt(fullCmd, {
-        cwd: options.cwd,
-        sessionId: options.sessionId || null,
-      });
-    },
-  },
-  "gemini-sdk": {
-    name: "gemini-sdk",
-    provider: "GEMINI",
-    displayName: "Gemini",
-    exec: (msg, opts) => execGeminiPrompt(msg, { persistent: true, ...opts }),
-    steer: steerGeminiPrompt,
-    isBusy: isGeminiBusy,
-    getInfo: () => getGeminiSessionInfo(),
-    reset: resetGeminiSession,
-    init: async () => initGeminiShell(),
-    getSessionId: getGeminiSessionId,
-    listSessions: listGeminiSessions,
-    switchSession: switchGeminiSession,
-    createSession: createGeminiSession,
-    sdkCommands: ["/status", "/model", "/clear"],
-    execSdkCommand: async (command, args, options = {}) => {
-      const cmd = command.startsWith("/") ? command : `/${command}`;
-      if (cmd === "/clear") {
-        await resetGeminiSession();
-        return "Session cleared.";
-      }
-      const fullCmd = args ? `${cmd} ${args}` : cmd;
-      return execGeminiPrompt(fullCmd, {
-        persistent: true,
-        cwd: options.cwd,
-        sessionId: options.sessionId || null,
-      });
-    },
-  },
-  "opencode-sdk": {
-    name: "opencode-sdk",
-    provider: "OPENCODE",
-    displayName: "OpenCode",
-    exec: (msg, opts) => execOpencodePrompt(msg, { persistent: true, ...opts }),
-    steer: steerOpencodePrompt,
-    isBusy: isOpencodeBusy,
-    getInfo: () => getOpencodeSessionInfo(),
-    reset: resetOpencodeSession,
-    init: async () => {
-      await initOpencodeShell();
-      return true;
-    },
-    getSessionId: getOpencodeSessionId,
-    listSessions: listOpencodeSessions,
-    switchSession: switchOpencodeSession,
-    createSession: createOpencodeSession,
-    sdkCommands: ["/status", "/model", "/sessions", "/clear"],
-    execSdkCommand: async (command, args, options = {}) => {
-      const cmd = command.startsWith("/") ? command : `/${command}`;
-      if (cmd === "/clear") {
-        await resetOpencodeSession();
-        return "Session cleared.";
-      }
-      const fullCmd = args ? `${cmd} ${args}` : cmd;
-      return execOpencodePrompt(fullCmd, {
-        persistent: true,
-        cwd: options.cwd,
-        sessionId: options.sessionId || null,
-      });
-    },
-  },
-};
+});
 
 function envFlagEnabled(value) {
   const raw = String(value ?? "")
@@ -527,6 +431,19 @@ let activeExecutorSelection = "codex-sdk";
 let primaryProfile = null;
 let primaryFallbackReason = null;
 let initialized = false;
+const primaryQueryEngine = createQueryEngine();
+const primaryFailoverController = createHarnessFailoverController({
+  queryEngine: primaryQueryEngine,
+});
+const primaryProviderSessionRuntime = createHarnessProviderSessionRuntime();
+const primaryProviderKernel = createProviderKernel({
+  adapters: ADAPTERS,
+  getConfig: () => loadConfig() || {},
+  env: process.env,
+  readBusy: readAdapterBusy,
+  getAdapterCapabilities,
+  sessionManager: primarySessionManager,
+});
 
 const CONFIG_WARNING_THROTTLE_MS = 5 * 60 * 1000;
 const _configWarningCache = new Map();
@@ -612,16 +529,29 @@ function normalizePrimaryAgent(value) {
     .trim()
     .toLowerCase();
   if (!raw) return "codex-sdk";
-  if (["codex", "codex-sdk"].includes(raw)) return "codex-sdk";
-  if (["copilot", "copilot-sdk", "github-copilot"].includes(raw))
-    return "copilot-sdk";
-  if (["claude", "claude-sdk", "claude_code", "claude-code"].includes(raw))
-    return "claude-sdk";
-  if (["gemini", "gemini-sdk", "google-gemini"].includes(raw))
-    return "gemini-sdk";
-  if (["opencode", "opencode-sdk", "open-code"].includes(raw))
-    return "opencode-sdk";
+  const normalized = normalizeProviderAdapterName(raw);
+  if (normalized !== "codex-sdk" || raw === "codex" || raw === "codex-sdk") {
+    return normalized;
+  }
+  if (["copilot", "copilot-sdk", "github-copilot"].includes(raw)) return "copilot-sdk";
+  if (["claude", "claude-sdk", "claude_code", "claude-code"].includes(raw)) return "claude-sdk";
+  if (["gemini", "gemini-sdk", "google-gemini"].includes(raw)) return "gemini-sdk";
+  if (["opencode", "opencode-sdk", "open-code"].includes(raw)) return "opencode-sdk";
   return raw;
+}
+
+function resolvePrimarySelectionToken(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const normalizedProviderId = normalizeProviderDefinitionId(raw, "");
+  if (normalizedProviderId && normalizedProviderId === raw.toLowerCase()) {
+    return normalizedProviderId;
+  }
+  const resolvedSelection = resolveAgentSelection(raw);
+  if (resolvedSelection?.selectionId === raw) {
+    return raw;
+  }
+  return normalizePrimaryAgent(raw);
 }
 
 function selectPrimaryExecutor(config) {
@@ -634,12 +564,7 @@ function selectPrimaryExecutor(config) {
 }
 
 function executorToAdapter(executor) {
-  const key = normalizeExecutorKey(executor);
-  if (key === "copilot") return "copilot-sdk";
-  if (key === "claude") return "claude-sdk";
-  if (key === "gemini") return "gemini-sdk";
-  if (key === "opencode") return "opencode-sdk";
-  return "codex-sdk";
+  return executorToAdapterName(executor);
 }
 
 function readAdapterBusy(adapter) {
@@ -659,42 +584,100 @@ function getAdapterCapabilities(adapter) {
 }
 
 function resolveAgentSelection(name) {
-  const raw = String(name || "").trim();
-  if (!raw) return null;
-  const normalized = normalizePrimaryAgent(raw);
-  if (ADAPTERS[normalized]) {
-    return { adapterName: normalized, selectionId: normalized };
-  }
-
-  const configured = getAvailableAgents();
-  const match = configured.find((agent) => agent.id === raw);
-  if (!match) return null;
-  const adapterName = normalizePrimaryAgent(
-    match.adapterId || executorToAdapter(match.executor || match.provider),
-  );
-  if (!ADAPTERS[adapterName]) return null;
-  return { adapterName, selectionId: match.id };
+  return primaryProviderKernel.resolveSelection(name);
 }
 
 function resolvePrimaryAgent(nameOrConfig) {
   if (typeof nameOrConfig === "string" && nameOrConfig.trim()) {
-    return normalizePrimaryAgent(nameOrConfig);
+    return resolvePrimarySelectionToken(nameOrConfig);
   }
   if (nameOrConfig && typeof nameOrConfig === "object") {
-    const direct = normalizePrimaryAgent(nameOrConfig.primaryAgent);
+    const harnessPrimary = resolvePrimarySelectionToken(nameOrConfig?.harness?.primaryExecutor || "");
+    if (harnessPrimary) return harnessPrimary;
+    const configuredDefault = normalizeProviderDefinitionId(
+      nameOrConfig?.providers?.defaultProvider || "",
+      "",
+    );
+    if (configuredDefault) return configuredDefault;
+    const direct = resolvePrimarySelectionToken(nameOrConfig.primaryAgent);
     if (direct) return direct;
   }
   if (process.env.PRIMARY_AGENT || process.env.PRIMARY_AGENT_SDK) {
-    return normalizePrimaryAgent(
+    return resolvePrimarySelectionToken(
       process.env.PRIMARY_AGENT || process.env.PRIMARY_AGENT_SDK,
     );
   }
   const cfg = loadConfig();
-  const direct = normalizePrimaryAgent(cfg?.primaryAgent || "");
+  const harnessPrimary = resolvePrimarySelectionToken(cfg?.harness?.primaryExecutor || "");
+  if (harnessPrimary) return harnessPrimary;
+  const configuredDefault = normalizeProviderDefinitionId(
+    cfg?.providers?.defaultProvider || process.env.BOSUN_PROVIDER_DEFAULT || "",
+    "",
+  );
+  if (configuredDefault) return configuredDefault;
+  const direct = resolvePrimarySelectionToken(cfg?.primaryAgent || "");
   if (direct) return direct;
   primaryProfile = selectPrimaryExecutor(cfg);
+  const profileName = String(primaryProfile?.name || "").trim();
+  if (profileName) return profileName;
   const mapped = executorToAdapter(primaryProfile?.executor);
   return mapped || "codex-sdk";
+}
+
+function resolveActiveProviderRuntimeConfig() {
+  const runtime = primaryProviderKernel.resolveRuntime(
+    activeExecutorSelection,
+    activeAdapter?.name,
+  );
+  if (!runtime.providerId || !runtime.providerConfig) {
+    return null;
+  }
+  return {
+    providerId: runtime.providerId,
+    providerConfig: runtime.providerConfig,
+  };
+}
+
+function withProviderRuntimeOptions(options = {}) {
+  return primaryProviderKernel.withRuntimeOptions(
+    activeAdapter?.name,
+    activeExecutorSelection,
+    options,
+  );
+}
+
+function createPrimaryExecutionSession(adapterName = "", options = {}) {
+  return primaryProviderKernel.createExecutionSession({
+    adapterName: adapterName || activeAdapter.name,
+    selectionId: activeExecutorSelection || adapterName || activeAdapter?.name || "",
+    sessionId: options.sessionId || null,
+    threadId: options.threadId || options.sessionId || null,
+    model: options.model || null,
+    metadata: options.metadata || {},
+    cwd: options.cwd || null,
+    repoRoot: options.repoRoot || options.cwd || null,
+    sessionManager: options.sessionManager || primarySessionManager,
+    onEvent: options.onEvent,
+    subagentMaxParallel: options.subagentMaxParallel,
+  });
+}
+
+function finalizePrimaryTurnResult(result) {
+  if (result == null || typeof result !== "object") return result;
+  const text =
+    String(
+      result.finalResponse
+      || result.output
+      || result.text
+      || result.message
+      || "",
+    ).trim();
+  return {
+    ...result,
+    finalResponse: result.finalResponse || text,
+    text: result.text || text,
+    message: result.message || text,
+  };
 }
 
 export function setPrimaryAgent(name) {
@@ -812,6 +795,30 @@ export async function initPrimaryAgent(nameOrConfig = null) {
   }
 
   initialized = true;
+  try {
+    const cfg = loadConfig() || {};
+    const harness = cfg.harness || {};
+    const executors = Array.isArray(harness.executors) ? harness.executors : [];
+    const enabledExecutors = executors.filter((e) => e?.enabled !== false);
+    const primaryExecutor = harness.primaryExecutor || "<unset>";
+    const defaultProvider = cfg.providers?.defaultProvider || "<unset>";
+    const adapterName = getPrimaryAgentName();
+    const runtime = String(cfg.agentRuntime || "harness").toLowerCase();
+    const nativeRouting = runtime === "harness" ? "openai-native-adapter" : "sdk-cli";
+    console.log(
+      `[harness] active: agentRuntime=${runtime} ` +
+      `harness.enabled=${harness.enabled !== false} ` +
+      `primaryExecutor=${primaryExecutor} ` +
+      `defaultProvider=${defaultProvider} ` +
+      `executors=${enabledExecutors.length}/${executors.length} ` +
+      `primaryAdapter=${adapterName} ` +
+      `routing=${nativeRouting}` +
+      (primaryFallbackReason ? ` fallback="${primaryFallbackReason}"` : "")
+    );
+  } catch (err) {
+    // Banner is best-effort; never block agent init on logging failure
+    console.warn(`[harness] startup banner failed: ${err?.message || err}`);
+  }
   return getPrimaryAgentName();
 }
 
@@ -829,114 +836,6 @@ const FALLBACK_ORDER = [
   "gemini-sdk",
   "opencode-sdk",
 ];
-
-const FAILOVER_CONSECUTIVE_INFRA_ERRORS = Math.max(
-  1,
-  Number(process.env.PRIMARY_AGENT_FAILOVER_CONSECUTIVE_INFRA_ERRORS) || 3,
-);
-const FAILOVER_ERROR_WINDOW_MS = Math.max(
-  10_000,
-  Number(process.env.PRIMARY_AGENT_FAILOVER_ERROR_WINDOW_MS) ||
-    10 * 60 * 1000,
-);
-const _primaryRecoveryRetryEnv = Number(
-  process.env.PRIMARY_AGENT_RECOVERY_RETRY_ATTEMPTS,
-);
-const PRIMARY_RECOVERY_RETRY_ATTEMPTS = Number.isFinite(
-  _primaryRecoveryRetryEnv,
-)
-  ? Math.max(0, _primaryRecoveryRetryEnv)
-  : 1;
-
-const _adapterFailureState = new Map();
-
-function adapterErrorText(err) {
-  const message = String(err?.message || err || "");
-  const code = String(err?.code || "");
-  return `${code} ${message}`.trim();
-}
-
-function isSessionScopedAdapterError(err) {
-  const text = adapterErrorText(err).toLowerCase();
-  if (!text) return false;
-  return (
-    /\b(session|thread|conversation|context)\b.*\b(not found|expired|invalid|closed|corrupt)\b/.test(
-      text,
-    ) ||
-    /\bfailed to resume session\b/.test(text) ||
-    /\bsession does not exist\b/.test(text)
-  );
-}
-
-function isInfrastructureAdapterError(err) {
-  const text = adapterErrorText(err).toLowerCase();
-  if (!text) return false;
-  return (
-    /\bagent_timeout\b/.test(text) ||
-    /\bcodex exec exited with code\b/.test(text) ||
-    /\btransport channel closed\b/.test(text) ||
-    /\bstream disconnected\b/.test(text) ||
-    /\brate limit|too many requests|429\b/.test(text) ||
-    /\bservice unavailable|temporarily unavailable|overloaded\b/.test(text) ||
-    /\bcannot find module\b/.test(text) ||
-    /\bsdk not available|failed to load sdk\b/.test(text) ||
-    /\beconnreset|econnrefused|etimedout|network error\b/.test(text) ||
-    /\bsegfault|crash|killed\b/.test(text)
-  );
-}
-
-function clearAdapterFailureState(adapterName) {
-  if (!adapterName) return;
-  _adapterFailureState.delete(adapterName);
-}
-
-function noteAdapterFailure(adapterName, err) {
-  const now = Date.now();
-  const infrastructure = isInfrastructureAdapterError(err);
-  const previous = _adapterFailureState.get(adapterName) || {
-    streak: 0,
-    lastAt: 0,
-    lastError: "",
-    infrastructure: false,
-  };
-
-  const next = {
-    streak: 0,
-    lastAt: now,
-    lastError: adapterErrorText(err),
-    infrastructure,
-  };
-
-  if (infrastructure) {
-    const withinWindow =
-      now - Number(previous.lastAt || 0) <= FAILOVER_ERROR_WINDOW_MS;
-    next.streak =
-      withinWindow && previous.infrastructure ? previous.streak + 1 : 1;
-  }
-
-  _adapterFailureState.set(adapterName, next);
-  return {
-    ...next,
-    allowFailover:
-      infrastructure && next.streak >= FAILOVER_CONSECUTIVE_INFRA_ERRORS,
-  };
-}
-
-async function recoverAdapterSession(adapter, adapterName) {
-  if (!adapter) return;
-  if (typeof adapter.reset === "function") {
-    try {
-      await adapter.reset();
-    } catch (err) {
-      console.warn(
-        `[primary-agent] recovery reset failed for ${adapterName}: ${err?.message || err}`,
-      );
-    }
-  }
-  if (typeof adapter.init === "function") {
-    await adapter.init();
-  }
-}
 
 function mapAdapterToPoolSdk(adapterName) {
   const normalized = String(adapterName || "").trim().toLowerCase();
@@ -991,16 +890,50 @@ export async function execPrimaryPrompt(userMessage, options = {}) {
     await initPrimaryAgent();
   }
   const selectedProfile = buildPrimaryAgentProfileContract(options);
-  const sessionId =
-    (options && options.sessionId ? String(options.sessionId) : "") ||
-    `primary-${activeAdapter.name}`;
   const sessionType =
     (options && options.sessionType ? String(options.sessionType) : "") ||
     "primary";
+  const sessionScope = normalizePrimarySessionScope(sessionType, options.scope);
+  const existingPrimarySessionId = primarySessionManager.getActiveSessionId(sessionScope);
+  const defaultSessionId = existingPrimarySessionId || `primary-${activeAdapter.name}`;
+  const sessionId =
+    (options && options.sessionId ? String(options.sessionId) : "") ||
+    defaultSessionId;
   const effectiveMode = normalizeAgentMode(
     options.mode || selectedProfile.preferredMode || agentMode,
     agentMode,
   );
+  const primarySessionCompat = getPrimarySessionCompat(sessionType, sessionScope);
+  const sessionRecord = primarySessionCompat.ensureManagedSession(sessionId, {
+    sessionType,
+    taskKey: sessionId,
+    cwd: options.cwd || "",
+    status: "idle",
+    metadata: {
+      mode: effectiveMode,
+    },
+  });
+  primarySessionCompat.switchSession(sessionRecord.sessionId, {
+    sessionType,
+    taskKey: sessionRecord.taskKey,
+    cwd: options.cwd || sessionRecord.cwd || "",
+    status: "active",
+    metadata: {
+      mode: effectiveMode,
+    },
+  });
+  bindPrimarySessionController(sessionRecord.sessionId, {
+    ...options,
+    sessionId: sessionRecord.sessionId,
+    sessionType,
+    scope: sessionScope,
+    cwd: options.cwd || sessionRecord.cwd || "",
+    model: options.model,
+    metadata: {
+      mode: effectiveMode,
+      ...(options.metadata && typeof options.metadata === "object" ? options.metadata : {}),
+    },
+  });
   const effectiveModel = options.model || selectedProfile.preferredModel || undefined;
   const modePolicy = getModeExecPolicy(effectiveMode);
   const timeoutMs = options.timeoutMs || modePolicy?.timeoutMs || PRIMARY_EXEC_TIMEOUT_MS;
@@ -1024,14 +957,16 @@ export async function execPrimaryPrompt(userMessage, options = {}) {
   const framedMessage = modePrefix ? modePrefix + messageWithToolContract : messageWithToolContract;
 
   // Record user message (original, without mode prefix)
-  tracker.recordEvent(sessionId, {
-    role: "user",
-    content: userMessage,
-    attachments: attachments.length ? attachments : undefined,
-    timestamp: new Date().toISOString(),
-    _sessionType: sessionType,
-    _mode: effectiveMode,
-  });
+  if (options.skipUserMessageRecord !== true) {
+    tracker.recordEvent(sessionId, {
+      role: "user",
+      content: userMessage,
+      attachments: attachments.length ? attachments : undefined,
+      timestamp: new Date().toISOString(),
+      _sessionType: sessionType,
+      _mode: effectiveMode,
+    });
+  }
 
   if (shouldUseIsolatedPoolExecution(activeAdapter, options)) {
     const pooled = await execPooledPrompt(framedMessage, {
@@ -1065,58 +1000,101 @@ export async function execPrimaryPrompt(userMessage, options = {}) {
         },
       });
     }
+    primarySessionCompat.registerExecution(sessionId, {
+      sessionType,
+      taskKey: sessionId,
+      cwd: options.cwd || "",
+      status: "active",
+      threadId: pooled?.threadId || null,
+      metadata: {
+        isolatedPool: true,
+        mode: effectiveMode,
+      },
+    });
     return pooled;
   }
 
-  // Build ordered list of adapters to try: current first, then fallbacks
-  const adaptersToTry = [activeAdapter.name];
-  for (const name of FALLBACK_ORDER) {
-    if (name !== activeAdapter.name && ADAPTERS[name]) {
-      const envDisabledKey = `${name.replace("-sdk", "").toUpperCase()}_SDK_DISABLED`;
-      if (!envFlagEnabled(process.env[envDisabledKey])) {
-        adaptersToTry.push(name);
-      }
+  const recordAssistantTurn = (result, extraMetadata = {}) => {
+    if (!result) return;
+    const text = typeof result === "string"
+      ? result
+      : result.finalResponse || result.text || result.message || JSON.stringify(result);
+    const assistantItems = Array.isArray(result?.items) ? result.items : [];
+    const latestAssistantItem = [...assistantItems]
+      .reverse()
+      .find((item) => String(item?.role || "").toLowerCase() === "assistant" && String(item?.text || "").trim());
+    tracker.recordEvent(sessionId, {
+      id: latestAssistantItem?.id || undefined,
+      role: "assistant",
+      content: text,
+      timestamp: new Date().toISOString(),
+      _sessionType: sessionType,
+      meta: result?.usage
+        ? {
+            usage: { ...result.usage },
+          }
+        : undefined,
+      _compressed: latestAssistantItem?._compressed || undefined,
+      _originalLength:
+        Number.isFinite(Number(latestAssistantItem?._originalLength))
+          ? Number(latestAssistantItem._originalLength)
+          : undefined,
+      _cachedLogId: latestAssistantItem?._cachedLogId || undefined,
+    });
+    const compressionSummary = summarizeContextCompressionItems(result?.items);
+    if (compressionSummary) {
+      tracker.recordEvent(sessionId, {
+        role: "system",
+        type: "system",
+        content: compressionSummary.content,
+        timestamp: new Date().toISOString(),
+        meta: {
+          contextCompression: compressionSummary,
+          ...extraMetadata,
+        },
+      });
     }
-  }
+  };
 
-  let lastError = null;
-  const maxAdaptersToTry = Math.min(
-    adaptersToTry.length,
-    maxFailoverAttempts + 1,
-  );
-
-  for (let attempt = 0; attempt < maxAdaptersToTry; attempt++) {
-    const adapterName = adaptersToTry[attempt];
-    const adapter = ADAPTERS[adapterName];
-    if (!adapter) continue;
-
-    // If failing over to a different adapter, switch and init
-    if (attempt > 0) {
+  const outcome = await primaryFailoverController.executeTurn({
+    adapters: ADAPTERS,
+    initialAdapterName: activeAdapter.name,
+    fallbackOrder: FALLBACK_ORDER,
+    maxFailoverAttempts,
+    includeAdapter(name) {
+      const envDisabledKey = `${name.replace("-sdk", "").toUpperCase()}_SDK_DISABLED`;
+      return !envFlagEnabled(process.env[envDisabledKey]);
+    },
+    async prepareAdapter({ adapterName, attempt, previousAdapterName, lastError }) {
+      if (attempt === 0) return;
       console.warn(
-        `[primary-agent] :alert: Failing over from ${adaptersToTry[attempt - 1]} to ${adapterName} (reason: ${lastError?.message || "unknown"})`,
+        `[primary-agent] :alert: Failing over from ${previousAdapterName} to ${adapterName} (reason: ${lastError?.message || "unknown"})`,
       );
       tracker.recordEvent(sessionId, {
         role: "system",
         type: "failover",
-        content: `:alert: Agent "${adaptersToTry[attempt - 1]}" failed — switching to "${adapterName}": ${lastError?.message || "timeout/error"}`,
+        content: `:alert: Agent "${previousAdapterName}" failed — switching to "${adapterName}": ${lastError?.message || "timeout/error"}`,
         timestamp: new Date().toISOString(),
       });
       setPrimaryAgent(adapterName);
-      primaryFallbackReason = `Failover from ${adaptersToTry[attempt - 1]}: ${lastError?.message || "timeout"}`;
-      try {
-        await adapter.init();
-      } catch (initErr) {
-        console.error(`[primary-agent] Failed to init ${adapterName}:`, initErr.message);
-        lastError = initErr;
-        continue;
-      }
-    }
-
-    try {
-      // Create an AbortController so withTimeout can signal the adapter to
-      // cancel its in-flight work (reset activeTurn, unsubscribe events, etc.).
-      // If the caller already provided an AbortController, forward its abort
-      // to our timeout controller so both caller-initiated and timeout aborts work.
+      primaryFallbackReason = `Failover from ${previousAdapterName}: ${lastError?.message || "timeout"}`;
+      await ADAPTERS[adapterName].init();
+    },
+    async executeAdapterTurn({ adapterName, recovered }) {
+      const providerSession = createPrimaryExecutionSession(adapterName, {
+        sessionId,
+        threadId: sessionId,
+        model: effectiveModel,
+        cwd: options.cwd || null,
+        repoRoot: options.repoRoot || options.cwd || null,
+        sessionManager: primarySessionManager,
+        onEvent: options.onEvent,
+        subagentMaxParallel: options.subagentMaxParallel,
+        metadata: {
+          mode: effectiveMode,
+          ...(recovered ? { recovered: true } : {}),
+        },
+      });
       const timeoutAbort = new AbortController();
       if (options.abortController?.signal) {
         const callerSignal = options.abortController.signal;
@@ -1128,154 +1106,144 @@ export async function execPrimaryPrompt(userMessage, options = {}) {
           }, { once: true });
         }
       }
-      const result = await withTimeout(
-        adapter.exec(framedMessage, { ...options, sessionId, model: effectiveModel, abortController: timeoutAbort }),
+      const rawResult = await withTimeout(
+        providerSession.runTurn(framedMessage, {
+          ...options,
+          sessionId,
+          threadId: sessionId,
+          model: effectiveModel,
+          abortController: timeoutAbort,
+          metadata: {
+            mode: effectiveMode,
+            ...(recovered ? { recovered: true } : {}),
+          },
+          sessionManager: primarySessionManager,
+          subagentMaxParallel: options.subagentMaxParallel,
+        }),
         timeoutMs,
-        `${adapterName}.exec`,
+        recovered ? `${adapterName}.exec.retry` : `${adapterName}.exec`,
         timeoutAbort,
       );
-
-      if (result) {
-        // Extract human-readable text from structured responses
-        const text = typeof result === "string"
-          ? result
-          : result.finalResponse || result.text || result.message || JSON.stringify(result);
-        tracker.recordEvent(sessionId, {
-          role: "assistant",
-          content: text,
-          timestamp: new Date().toISOString(),
-          _sessionType: sessionType,
-        });
-        const compressionSummary = summarizeContextCompressionItems(result?.items);
-        if (compressionSummary) {
-          tracker.recordEvent(sessionId, {
-            role: "system",
-            type: "system",
-            content: compressionSummary.content,
-            timestamp: new Date().toISOString(),
-            meta: {
-              contextCompression: compressionSummary,
-            },
-          });
-        }
-      }
-      clearAdapterFailureState(adapterName);
-      return result;
-    } catch (err) {
-      lastError = err;
-      const isTimeout = err.message?.startsWith("AGENT_TIMEOUT");
-      const isPrimaryAttempt = attempt === 0;
-      console.error(
-        `[primary-agent] ${isTimeout ? ":clock: Timeout" : ":close: Error"} with ${adapterName}: ${err.message}`,
+      const compressedItems = await maybeCompressSessionItems(rawResult?.items, {
+        sessionType,
+        agentType: adapterName,
+        sessionId,
+        force: options.forceContextShredding === true,
+        skip: options.skipContextShredding === true,
+      });
+      return finalizePrimaryTurnResult({
+        ...rawResult,
+        items: compressedItems,
+      });
+    },
+    async recoverAdapter({ adapterName, adapter, retry, maxRetries }) {
+      console.warn(
+        `[primary-agent] :arrows_counterclockwise: recovering ${adapterName} session (${retry}/${maxRetries})`,
       );
+      tracker.recordEvent(sessionId, {
+        role: "system",
+        type: "recovery",
+        content: `:arrows_counterclockwise: Recovering ${adapterName} session (${retry}/${maxRetries}) before any failover.`,
+        timestamp: new Date().toISOString(),
+      });
+      await primaryProviderSessionRuntime.recoverSession({
+        adapterName,
+        adapter,
+        retry,
+        maxRetries,
+      });
+    },
+    onFailure({ adapterName, error }) {
+      const isTimeout = error?.message?.startsWith("AGENT_TIMEOUT");
+      console.error(
+        `[primary-agent] ${isTimeout ? ":clock: Timeout" : ":close: Error"} with ${adapterName}: ${error.message}`,
+      );
+    },
+    onRecoveryFailure({ adapterName, retry, maxRetries, error }) {
+      console.error(
+        `[primary-agent] :close: recovery attempt ${retry}/${maxRetries} failed for ${adapterName}: ${error?.message || error}`,
+      );
+    },
+    onSuccess({ adapterName, result, recovered }) {
+      recordAssistantTurn(result, recovered ? { recovered: true } : {});
+      primarySessionCompat.registerExecution(sessionId, {
+        sessionType,
+        providerSelection: activeExecutorSelection || adapterName,
+        adapterName,
+        taskKey: sessionId,
+        cwd: options.cwd || "",
+        status: "active",
+        threadId: result?.threadId || result?.sessionId || null,
+        metadata: {
+          mode: effectiveMode,
+          ...(recovered ? { recovered: true } : {}),
+          providerSessionId: result?.sessionId || null,
+        },
+      });
+    },
+    onFailoverSuppressed({ adapterName, error, waitReason }) {
+      console.warn(
+        `[primary-agent] failover suppressed for ${adapterName}: ${waitReason}`,
+      );
+      tracker.recordEvent(sessionId, {
+        role: "system",
+        type: "error",
+        content: `:warning: ${adapterName} error: ${error?.message || "unknown error"}. Failover suppressed (${waitReason}).`,
+        timestamp: new Date().toISOString(),
+      });
+    },
+    onExhausted({ error, isTimeout }) {
+      tracker.recordEvent(sessionId, {
+        role: "system",
+        type: "error",
+        content: isTimeout
+          ? `:clock: All agents timed out. The AI service may be experiencing issues. Your message was saved — please try again shortly.`
+          : `:close: Agent error: ${error?.message || error}. Your message was saved — please try again.`,
+        timestamp: new Date().toISOString(),
+      });
+    },
+  });
 
-      if (
-        isPrimaryAttempt &&
-        PRIMARY_RECOVERY_RETRY_ATTEMPTS > 0 &&
-        (isSessionScopedAdapterError(err) || isInfrastructureAdapterError(err))
-      ) {
-        for (let retry = 1; retry <= PRIMARY_RECOVERY_RETRY_ATTEMPTS; retry++) {
-          try {
-            console.warn(
-              `[primary-agent] :arrows_counterclockwise: recovering ${adapterName} session (${retry}/${PRIMARY_RECOVERY_RETRY_ATTEMPTS})`,
-            );
-            tracker.recordEvent(sessionId, {
-              role: "system",
-              type: "recovery",
-              content: `:arrows_counterclockwise: Recovering ${adapterName} session (${retry}/${PRIMARY_RECOVERY_RETRY_ATTEMPTS}) before any failover.`,
-              timestamp: new Date().toISOString(),
-            });
-            await recoverAdapterSession(adapter, adapterName);
-            const timeoutAbort = new AbortController();
-            if (options.abortController?.signal) {
-              const callerSignal = options.abortController.signal;
-              if (callerSignal.aborted) {
-                timeoutAbort.abort(callerSignal.reason);
-              } else {
-                callerSignal.addEventListener("abort", () => {
-                  timeoutAbort.abort(callerSignal.reason || "user_stop");
-                }, { once: true });
-              }
-            }
-            const retryResult = await withTimeout(
-              adapter.exec(framedMessage, { ...options, sessionId, model: effectiveModel, abortController: timeoutAbort }),
-              timeoutMs,
-              `${adapterName}.exec.retry`,
-              timeoutAbort,
-            );
-            const retryText = typeof retryResult === "string"
-              ? retryResult
-              : retryResult.finalResponse || retryResult.text || retryResult.message || JSON.stringify(retryResult);
-            tracker.recordEvent(sessionId, {
-              role: "assistant",
-              content: retryText,
-              timestamp: new Date().toISOString(),
-              _sessionType: sessionType,
-            });
-            const compressionSummary = summarizeContextCompressionItems(retryResult?.items);
-            if (compressionSummary) {
-              tracker.recordEvent(sessionId, {
-                role: "system",
-                type: "system",
-                content: compressionSummary.content,
-                timestamp: new Date().toISOString(),
-                meta: {
-                  contextCompression: compressionSummary,
-                },
-              });
-            }
-            clearAdapterFailureState(adapterName);
-            return retryResult;
-          } catch (retryErr) {
-            lastError = retryErr;
-            console.error(
-              `[primary-agent] :close: recovery attempt ${retry}/${PRIMARY_RECOVERY_RETRY_ATTEMPTS} failed for ${adapterName}: ${retryErr?.message || retryErr}`,
-            );
-          }
-        }
-      }
-
-      const failureState = noteAdapterFailure(adapterName, lastError);
-      const shouldBlockPrimaryFailover =
-        isPrimaryAttempt && !failureState.allowFailover;
-
-      if (shouldBlockPrimaryFailover) {
-        const waitReason = failureState.infrastructure
-          ? `holding failover until ${FAILOVER_CONSECUTIVE_INFRA_ERRORS} consecutive infrastructure failures (${failureState.streak}/${FAILOVER_CONSECUTIVE_INFRA_ERRORS})`
-          : "error classified as session-scoped/non-infrastructure";
-        console.warn(
-          `[primary-agent] failover suppressed for ${adapterName}: ${waitReason}`,
-        );
-        tracker.recordEvent(sessionId, {
-          role: "system",
-          type: "error",
-          content: `:warning: ${adapterName} error: ${lastError?.message || "unknown error"}. Failover suppressed (${waitReason}).`,
-          timestamp: new Date().toISOString(),
-        });
-        return {
-          finalResponse: `:warning: ${adapterName} error: ${lastError?.message || "unknown error"}. Failover suppressed (${waitReason}).`,
-          items: [],
-          usage: null,
-        };
-      }
-
-      // If this is the last adapter, report to user
-      if (attempt >= maxAdaptersToTry - 1) {
-        tracker.recordEvent(sessionId, {
-          role: "system",
-          type: "error",
-          content: isTimeout
-            ? `:clock: All agents timed out. The AI service may be experiencing issues. Your message was saved — please try again shortly.`
-            : `:close: Agent error: ${err.message}. Your message was saved — please try again.`,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    }
+  if (outcome.ok) {
+    return outcome.result;
   }
 
-  // All adapters failed
+  if (outcome.suppressed) {
+    primarySessionCompat.registerExecution(sessionId, {
+      sessionType,
+      providerSelection: activeExecutorSelection || outcome.adapterName,
+      adapterName: outcome.adapterName,
+      taskKey: sessionId,
+      cwd: options.cwd || "",
+      status: "failed",
+      error: outcome.error?.message || "unknown error",
+      metadata: {
+        mode: effectiveMode,
+        failoverSuppressed: true,
+      },
+    });
+    return {
+      finalResponse: `:warning: ${outcome.adapterName} error: ${outcome.error?.message || "unknown error"}. Failover suppressed (${outcome.waitReason}).`,
+      items: [],
+      usage: null,
+    };
+  }
+
+  primarySessionCompat.registerExecution(sessionId, {
+    sessionType,
+    providerSelection: activeExecutorSelection || activeAdapter.name,
+    adapterName: activeAdapter.name,
+    taskKey: sessionId,
+    cwd: options.cwd || "",
+    status: "failed",
+    error: outcome.error?.message || "unknown",
+    metadata: {
+      mode: effectiveMode,
+      allAdaptersFailed: true,
+    },
+  });
   return {
-    finalResponse: `:close: All agent adapters failed. Last error: ${lastError?.message || "unknown"}`,
+    finalResponse: `:close: All agent adapters failed. Last error: ${outcome.error?.message || "unknown"}`,
     items: [],
     usage: null,
   };
@@ -1318,19 +1286,39 @@ export async function resetPrimaryAgent() {
 }
 
 export function getPrimarySessionId() {
-  return activeAdapter.getSessionId ? activeAdapter.getSessionId() : null;
+  return getPrimarySessionCompat().getActiveSessionId()
+    || (activeAdapter.getSessionId ? activeAdapter.getSessionId() : null);
 }
 
 export async function listPrimarySessions() {
-  return activeAdapter.listSessions ? activeAdapter.listSessions() : [];
+  const primarySessionCompat = getPrimarySessionCompat();
+  const adapterSessions = activeAdapter.listSessions ? await activeAdapter.listSessions() : [];
+  return primarySessionCompat.listSessions({ extraSessions: adapterSessions });
 }
 
 export async function switchPrimarySession(id) {
-  return activeAdapter.switchSession ? activeAdapter.switchSession(id) : undefined;
+  const result = activeAdapter.switchSession ? await activeAdapter.switchSession(id) : undefined;
+  getPrimarySessionCompat().switchSession(id, {
+    sessionType: "primary",
+    taskKey: id,
+    status: "active",
+  });
+  return result;
 }
 
 export async function createPrimarySession(id) {
-  return activeAdapter.createSession ? activeAdapter.createSession(id) : undefined;
+  const result = activeAdapter.createSession ? await activeAdapter.createSession(id) : undefined;
+  const createdId = String(result?.id || result?.sessionId || id || "").trim() || id;
+  const primarySessionCompat = getPrimarySessionCompat();
+  primarySessionCompat.createSession(createdId, {
+    taskKey: createdId,
+    status: "idle",
+  });
+  primarySessionCompat.switchSession(createdId, {
+    taskKey: createdId,
+    status: "active",
+  });
+  return result;
 }
 
 // ── Agent mode & SDK command API ─────────────────────────────────────────────
@@ -1414,63 +1402,24 @@ export function getCustomModes() {
  * @returns {Array<{id:string, name:string, provider:string, available:boolean, busy:boolean, capabilities:object}>}
  */
 export function getAvailableAgents() {
-  let configExecutors = [];
-  try {
-    const cfg = loadConfig();
-    configExecutors = Array.isArray(cfg?.executorConfig?.executors)
-      ? cfg.executorConfig.executors
-      : [];
-  } catch {
-    configExecutors = [];
-  }
+  return primaryProviderKernel.listProviders().map((entry) => ({
+    ...entry,
+    adapterId: normalizeProviderAdapterName(entry.adapterId || entry.id),
+  }));
+}
 
-  if (configExecutors.length > 0) {
-    return configExecutors.map((entry, index) => {
-      const adapterId = executorToAdapter(entry?.executor);
-      const adapter = ADAPTERS[adapterId] || ADAPTERS["codex-sdk"];
-      const envDisabledKey = `${adapterId.replace("-sdk", "").toUpperCase()}_SDK_DISABLED`;
-      const sdkDisabled = envFlagEnabled(process.env[envDisabledKey]);
-      const profileEnabled = entry?.enabled !== false;
-      const configuredModels = Array.isArray(entry?.models)
-        ? entry.models
-            .map((model) => String(model || "").trim())
-            .filter(Boolean)
-        : [];
-      const models = configuredModels.length > 0
-        ? configuredModels
-        : getModelsForExecutor(entry?.executor || adapter.provider);
-      const name = String(entry?.name || "").trim() || adapter.displayName || adapter.name;
-      return {
-        id: name || `${adapterId}-${index + 1}`,
-        name,
-        provider: adapter.provider,
-        executor: String(entry?.executor || "").toUpperCase() || adapter.provider,
-        variant: String(entry?.variant || "DEFAULT"),
-        adapterId,
-        available: profileEnabled && !sdkDisabled,
-        busy: profileEnabled && !sdkDisabled ? readAdapterBusy(adapter) : false,
-        models,
-        capabilities: getAdapterCapabilities(adapter),
-      };
-    });
+try {
+  const bootConfig = loadConfig() || {};
+  const preferredSelection = resolvePrimaryAgent(bootConfig);
+  if (preferredSelection) {
+    setPrimaryAgent(preferredSelection);
+  } else {
+    const fabric = readHarnessExecutorFabric(bootConfig);
+    if (fabric.primaryExecutorId) {
+      setPrimaryAgent(fabric.primaryExecutorId);
+    }
   }
-
-  return Object.entries(ADAPTERS).map(([id, adapter]) => {
-    const envDisabledKey = `${id.replace("-sdk", "").toUpperCase()}_SDK_DISABLED`;
-    const disabled = envFlagEnabled(process.env[envDisabledKey]);
-    return {
-      id,
-      name: adapter.displayName || adapter.name,
-      provider: adapter.provider,
-      executor: adapter.provider,
-      variant: "DEFAULT",
-      adapterId: id,
-      available: !disabled,
-      busy: readAdapterBusy(adapter),
-      models: getModelsForExecutor(adapter.provider), // use provider ("CODEX"/"COPILOT"/"CLAUDE") — always in the alias map
-      capabilities: getAdapterCapabilities(adapter),
-    };
-  });
+} catch {
 }
 
 /**
@@ -1479,7 +1428,8 @@ export function getAvailableAgents() {
  * @returns {string[]}
  */
 export function getSdkCommands(adapterName) {
-  const adapter = adapterName ? ADAPTERS[adapterName] : activeAdapter;
+  const normalized = adapterName ? normalizeProviderAdapterName(adapterName) : null;
+  const adapter = normalized ? ADAPTERS[normalized] : activeAdapter;
   return adapter?.sdkCommands || [];
 }
 
@@ -1492,7 +1442,8 @@ export function getSdkCommands(adapterName) {
  * @returns {Promise<string|object>}
  */
 export async function execSdkCommand(command, args = "", adapterName, options = {}) {
-  const adapter = adapterName ? ADAPTERS[adapterName] : activeAdapter;
+  const normalized = adapterName ? normalizeProviderAdapterName(adapterName) : null;
+  const adapter = normalized ? ADAPTERS[normalized] : activeAdapter;
   if (!adapter) {
     throw new Error(`Unknown adapter: ${adapterName || "(none)"}`);
   }
@@ -1505,7 +1456,3 @@ export async function execSdkCommand(command, args = "", adapterName, options = 
   }
   return adapter.execSdkCommand(cmd, args, options);
 }
-
-
-
-

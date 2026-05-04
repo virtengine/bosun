@@ -395,4 +395,144 @@ describe("codebase-annotation-audit skill", () => {
     expect(block).not.toContain("Offer K-Dense Web");
     expect(block).not.toContain("free credits");
   });
+
+  it("indexes cross-client repo skills as catalog-only by default", () => {
+    mkdirSync(resolve(testHome, ".agents", "skills", "incident-response"), { recursive: true });
+    writeFileSync(
+      resolve(testHome, ".agents", "skills", "incident-response", "SKILL.md"),
+      [
+        "<!-- tags: incident response runbook -->",
+        "# Skill: Incident Response",
+        "",
+        "Use the incident response runbook.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const indexPath = buildSkillsIndex(getSkillsDir(testHome));
+    const index = JSON.parse(readFileSync(indexPath, "utf8"));
+    const entry = index.skills.find((skill) => skill.sourcePath === ".agents/skills/incident-response/SKILL.md");
+
+    expect(entry).toBeTruthy();
+    expect(entry.sourceKind).toBe("cross-client");
+    expect(entry.catalogOnly).toBe(true);
+    expect(entry.trustState).toBe("catalog-only");
+  });
+
+  it("does not expand cross-client repo skills unless trust is granted", () => {
+    mkdirSync(resolve(testHome, ".agents", "skills", "incident-response"), { recursive: true });
+    writeFileSync(
+      resolve(testHome, ".agents", "skills", "incident-response", "SKILL.md"),
+      [
+        "<!-- tags: incident response runbook -->",
+        "# Skill: Incident Response",
+        "",
+        "Use the incident response runbook.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    buildSkillsIndex(getSkillsDir(testHome));
+
+    const untrusted = findRelevantSkills(testHome, "incident response runbook");
+    const trusted = findRelevantSkills(testHome, "incident response runbook", "", {
+      trustCrossClientSkills: true,
+    });
+
+    expect(untrusted.some((skill) => skill.title === "Incident Response")).toBe(false);
+    expect(trusted.some((skill) => skill.title === "Incident Response")).toBe(true);
+  });
+
+  it("surfaces promoted skillbook strategies as protocol-style skills", () => {
+    const skillbookDir = resolve(testHome, ".bosun", "skillbook");
+    mkdirSync(skillbookDir, { recursive: true });
+    writeFileSync(
+      resolve(skillbookDir, "strategies.json"),
+      JSON.stringify({
+        version: "1.0.0",
+        updatedAt: new Date().toISOString(),
+        strategies: [
+          {
+            strategyId: "incident:rollback",
+            recommendation: "Prefer rollback before adding new moving parts.",
+            rationale: "Rollback usually restores service faster.",
+            tags: ["incident", "rollback"],
+            relatedPaths: ["ops/runbooks/incident.md"],
+            confidence: 0.92,
+            status: "promoted",
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+
+    buildSkillsIndex(getSkillsDir(testHome));
+
+    const block = buildRelevantSkillsPromptBlock(
+      testHome,
+      "incident rollback plan",
+      "stabilize production service quickly",
+    );
+
+    expect(block).toContain("Prefer rollback before adding new moving parts.");
+    expect(block).toContain("Rollback usually restores service faster.");
+    expect(block).toContain("ops/runbooks/incident.md");
+  });
+
+  it("injects runtime operational protocols for batch task runs with debt evidence", () => {
+    const workflowRunsDir = resolve(testHome, ".bosun", "workflow-runs");
+    mkdirSync(workflowRunsDir, { recursive: true });
+    writeFileSync(
+      resolve(workflowRunsDir, "task-debt-ledger.jsonl"),
+      [
+        JSON.stringify({
+          recordedAt: new Date().toISOString(),
+          taskId: "TASK-BATCH-1",
+          taskTitle: "Research sweep and patch cycle",
+          action: "accept_with_debt",
+          reason: "verification deferred after compile fix",
+          debtItems: [
+            { type: "missing_tests", severity: "high", description: "Add regression tests" },
+          ],
+          metadata: {},
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    buildSkillsIndex(getSkillsDir(testHome));
+
+    const block = loadSkillsForTask(
+      testHome,
+      {
+        id: "TASK-BATCH-1",
+        title: "Research sweep and patch cycle",
+        description: "Investigate multiple related failures, patch the code, and preserve state for the next run.",
+        labels: ["research", "batch"],
+        tags: ["research", "batch"],
+        timeline: [
+          { type: "task.failed", source: "workflow", message: "compile failed" },
+          { type: "task.retry", source: "workflow", message: "retry queued" },
+          { type: "task.note", source: "operator", message: "hold context for handoff" },
+        ],
+        workflowRuns: [{ runId: "run-1", status: "failed", summary: "compile failed" }],
+      },
+      {
+        childTasks: [],
+        relatedTasks: [
+          { id: "TASK-BATCH-2", title: "Sibling A", status: "todo" },
+          { id: "TASK-BATCH-3", title: "Sibling B", status: "todo" },
+        ],
+        auditSummary: { eventCount: 5, artifactCount: 2, toolCallCount: 7 },
+        maxChars: 4000,
+      },
+    );
+
+    expect(block).toContain("Task Decomposition Protocol");
+    expect(block).toContain("Context Preservation Protocol");
+    expect(block).toContain("Batch Ledger Protocol");
+    expect(block).toContain("Quality Monitoring Protocol");
+    expect(block).toContain("Error Recovery Protocol");
+  });
 });

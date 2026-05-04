@@ -208,4 +208,60 @@ describe.skipIf(skip)("CredentialStore", () => {
     expect(store.get("k").createdAt).toBe(t1);
     expect(store.resolve("k")).toBe("v2");
   });
+
+  it("validates provider lifecycle metadata and resolves request templates", () => {
+    const store = new CredentialStore({ configDir: tmpDir });
+    store.set("openai-api-key", {
+      type: "static",
+      value: "sk-live-1234567890",
+      provider: "openai-responses",
+      validation: { prefix: "sk-", minLength: 12 },
+      lifecycle: { authMode: "apiKey", refreshable: false },
+      templates: {
+        headers: { Authorization: "Bearer {{credential.value}}" },
+        body: { provider: "{{provider.id}}" },
+      },
+    });
+
+    const resolved = store.resolveEntry("openai-api-key", { includeValue: true });
+    const templates = store.resolveTemplates("openai-api-key", null, {
+      providerId: "openai-responses",
+    });
+
+    expect(resolved).toEqual(expect.objectContaining({
+      provider: "openai-responses",
+      status: "ready",
+      value: "sk-live-1234567890",
+      lifecycle: expect.objectContaining({ authMode: "apiKey" }),
+    }));
+    expect(templates).toEqual({
+      headers: { Authorization: "Bearer sk-live-1234567890" },
+      query: {},
+      body: { provider: "openai-responses" },
+    });
+  });
+
+  it("reads config-backed credentials from nested config objects and reports validation failures", () => {
+    const store = new CredentialStore({ configDir: tmpDir });
+    store.set("azure-token", {
+      type: "config",
+      value: "providers.azure.token",
+      provider: "azure-openai-responses",
+      validation: { prefix: "tok_" },
+      lifecycle: { authMode: "oauth", refreshable: true },
+    });
+
+    expect(store.resolve("azure-token", {
+      config: { providers: { azure: { token: "tok_valid_123" } } },
+    })).toBe("tok_valid_123");
+
+    const invalid = store.validate("azure-token", {
+      config: { providers: { azure: { token: "bad" } } },
+    });
+    expect(invalid).toEqual(expect.objectContaining({
+      ok: false,
+      status: "invalid",
+    }));
+    expect(invalid.errors[0]).toMatch(/start with "tok_"/i);
+  });
 });

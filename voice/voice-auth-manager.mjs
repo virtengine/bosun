@@ -1,15 +1,15 @@
 import { createHash, randomBytes } from "node:crypto";
 import { exec as childExec } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-
-const VOICE_AUTH_STATE_PATH = join(homedir(), ".bosun", "voice-auth-state.json");
-const STATE_TTL_MS = 15_000;
-
-let _cachedState = null;
-let _cachedStateAt = 0;
+import { CredentialStore } from "../workflow/credential-store.mjs";
+import {
+  clearSharedOAuthToken,
+  getProviderAuthStatePath,
+  hasSharedOAuthToken,
+  readProviderAuthState,
+  resolveSharedOAuthToken,
+  saveSharedOAuthToken,
+} from "../agent/provider-auth-state.mjs";
 
 function normalizeProvider(provider) {
   return String(provider || "").trim().toLowerCase();
@@ -32,32 +32,24 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function readStateFile() {
-  if (!existsSync(VOICE_AUTH_STATE_PATH)) return {};
-  const raw = readFileSync(VOICE_AUTH_STATE_PATH, "utf8");
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== "object") return {};
-  return parsed;
-}
-
-function getCachedState(forceReload = false) {
-  const isFresh = !forceReload && _cachedState && Date.now() - _cachedStateAt < STATE_TTL_MS;
-  if (isFresh) return _cachedState;
-
-  try {
-    _cachedState = readStateFile();
-  } catch {
-    _cachedState = {};
-  }
-  _cachedStateAt = Date.now();
-  return _cachedState;
-}
-
 function isExpired(expiresAt) {
   if (!expiresAt) return false;
   const ts = Number(new Date(expiresAt).getTime());
   if (Number.isNaN(ts)) return false;
   return ts <= Date.now() + 30_000;
+}
+
+function resolveCredentialStore(options = {}) {
+  if (options.credentialStore) return options.credentialStore;
+  if (!options.configDir) return null;
+  try {
+    return new CredentialStore({
+      configDir: options.configDir,
+      secretKey: options.secretKey,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function getProviderEnvCandidates(provider) {
@@ -89,98 +81,22 @@ function getProviderEnvCandidates(provider) {
   }
 }
 
-function getStateTokenCandidates(provider, state) {
-  const byProvider = state?.providers?.[provider] || state?.[provider] || {};
-  return [
-    {
-      token: byProvider?.accessToken,
-      expiresAt: byProvider?.expiresAt,
-      source: "state",
-    },
-    {
-      token: byProvider?.access_token,
-      expiresAt: byProvider?.expires_at,
-      source: "state",
-    },
-  ];
-}
-
 export function resolveVoiceOAuthToken(provider, forceReload = false) {
   const normalizedProvider = normalizeProvider(provider);
   if (!normalizedProvider) return null;
-
-  const envToken = getProviderEnvCandidates(normalizedProvider)
-    .map((token) => normalizeEnvValue(token))
-    .find(Boolean);
-  if (envToken) {
-    return {
-      token: envToken,
-      source: "env",
-      provider: normalizedProvider,
-    };
-  }
-
-  const state = getCachedState(forceReload);
-  const candidates = getStateTokenCandidates(normalizedProvider, state);
-  for (const candidate of candidates) {
-    const token = String(candidate?.token || "").trim();
-    if (!token) continue;
-    if (isExpired(candidate?.expiresAt)) continue;
-    return {
-      token,
-      source: candidate.source,
-      provider: normalizedProvider,
-      expiresAt: candidate?.expiresAt || null,
-    };
-  }
-
-  return null;
+  return resolveSharedOAuthToken(normalizedProvider, forceReload);
 }
 
 export function hasVoiceOAuthToken(provider, forceReload = false) {
-  return Boolean(resolveVoiceOAuthToken(provider, forceReload));
+  return hasSharedOAuthToken(provider, forceReload);
 }
 
 export function saveVoiceOAuthToken(provider, payload = {}) {
-  const normalizedProvider = normalizeProvider(provider);
-  if (!normalizedProvider) {
-    throw new Error("provider is required");
-  }
-
-  const token = String(payload?.accessToken || payload?.access_token || "").trim();
-  if (!token) {
-    throw new Error("access token is required");
-  }
-
-  const current = getCachedState(true);
-  const next = {
-    ...current,
-    providers: {
-      ...(current?.providers || {}),
-      [normalizedProvider]: {
-        accessToken: token,
-        expiresAt: payload?.expiresAt || payload?.expires_at || null,
-        refreshToken: payload?.refreshToken || payload?.refresh_token || null,
-        tokenType: payload?.tokenType || payload?.token_type || "Bearer",
-        updatedAt: new Date().toISOString(),
-      },
-    },
-  };
-
-  mkdirSync(dirname(VOICE_AUTH_STATE_PATH), { recursive: true });
-  writeFileSync(VOICE_AUTH_STATE_PATH, JSON.stringify(next, null, 2));
-  _cachedState = next;
-  _cachedStateAt = Date.now();
-
-  return {
-    ok: true,
-    path: VOICE_AUTH_STATE_PATH,
-    provider: normalizedProvider,
-  };
+  return saveSharedOAuthToken(provider, payload);
 }
 
 export function getVoiceAuthStatePath() {
-  return VOICE_AUTH_STATE_PATH;
+  return getProviderAuthStatePath();
 }
 
 // ── Generic OAuth PKCE provider registry ─────────────────────────────────────
@@ -285,6 +201,80 @@ const OAUTH_PROVIDERS = {
     accentColor: "#1a73e8",
   },
 };
+
+function resolveVoiceProviderCredentialRecord(provider, options = {}) {
+  const credentialStore = resolveCredentialStore(options);
+  if (!credentialStore) return { record: null, validation: null };
+  const candidates = credentialStore.listByProvider(provider);
+  const record = candidates.find((entry) => {
+    const authMode = normalizeProvider(entry?.lifecycle?.authMode || entry?.metadata?.authMode || "oauth");
+    return !authMode || authMode === "oauth";
+  }) || null;
+  if (!record) return { record: null, validation: null };
+  return {
+    record,
+    validation: credentialStore.validate(record.name, {
+      env: options.env || process.env,
+      config: options.config || null,
+      workflowId: options.workflowId,
+    }),
+  };
+}
+
+export function describeVoiceProviderLifecycle(provider, options = {}) {
+  const normalizedProvider = normalizeProvider(provider);
+  const cfg = OAUTH_PROVIDERS[normalizedProvider];
+  if (!cfg) {
+    return {
+      provider: normalizedProvider,
+      status: "unknown",
+      missingActions: [],
+      envKeys: [],
+      refreshable: false,
+    };
+  }
+
+  const token = resolveVoiceOAuthToken(normalizedProvider, options.forceReload === true);
+  const loginStatus = _providerPendingLogin.get(normalizedProvider)?.status || "idle";
+  const clientIdConfigured = normalizeEnvValue(cfg.clientId).length >= 8;
+  const { record, validation } = resolveVoiceProviderCredentialRecord(normalizedProvider, options);
+  const refreshable = Boolean(token?.refreshToken || validation?.refreshable);
+  const missingActions = [];
+
+  if (!clientIdConfigured) missingActions.push("configure_client");
+  if (!token?.token && !record?.name) missingActions.push("sign_in");
+  if (token?.expiresAt && isExpired(token.expiresAt) && refreshable) missingActions.push("refresh_token");
+
+  return {
+    provider: normalizedProvider,
+    status: token?.token
+      ? (isExpired(token.expiresAt) ? "expired" : "connected")
+      : (loginStatus === "pending" ? "pending" : "idle"),
+    hasToken: Boolean(token?.token),
+    expiresAt: token?.expiresAt || validation?.expiresAt || null,
+    refreshable,
+    connectedSource: token?.source || (record?.name ? "credential-store" : null),
+    pendingStatus: loginStatus,
+    clientIdConfigured,
+    requiredEnvKeys: cfg.clientSecret
+      ? [`BOSUN_${normalizedProvider.toUpperCase()}_OAUTH_CLIENT_ID`, `BOSUN_${normalizedProvider.toUpperCase()}_OAUTH_CLIENT_SECRET`]
+      : [`BOSUN_${normalizedProvider.toUpperCase()}_OAUTH_CLIENT_ID`],
+    missingActions,
+    credentialName: record?.name || null,
+    validationErrors: validation?.errors || [],
+  };
+}
+
+export function validateVoiceProviderLifecycle(provider, options = {}) {
+  const lifecycle = describeVoiceProviderLifecycle(provider, options);
+  return {
+    ok: lifecycle.missingActions.length === 0 && lifecycle.validationErrors.length === 0,
+    status: lifecycle.status,
+    missingActions: lifecycle.missingActions,
+    validationErrors: lifecycle.validationErrors,
+    refreshable: lifecycle.refreshable,
+  };
+}
 
 // Module-scope per-provider pending login state (never inside a function — hard rule).
 const _providerPendingLogin = new Map();
@@ -498,25 +488,14 @@ function _cancelProviderLogin(provider) {
 }
 
 function _logoutProvider(provider) {
-  const curr = getCachedState(true);
-  if (!curr?.providers?.[provider]) return { ok: true, wasLoggedIn: false };
-  const next = {
-    ...curr,
-    providers: { ...(curr.providers || {}) },
-  };
-  delete next.providers[provider];
-  mkdirSync(dirname(VOICE_AUTH_STATE_PATH), { recursive: true });
-  writeFileSync(VOICE_AUTH_STATE_PATH, JSON.stringify(next, null, 2));
-  _cachedState = next;
-  _cachedStateAt = Date.now();
-  return { ok: true, wasLoggedIn: true };
+  return clearSharedOAuthToken(provider);
 }
 
 async function _refreshProviderToken(provider) {
   const cfg = OAUTH_PROVIDERS[provider];
   if (!cfg) throw new Error(`Unknown OAuth provider: ${provider}`);
 
-  const state = getCachedState(true);
+  const state = readProviderAuthState(true);
   const providerData = state?.providers?.[provider] || {};
   const refreshToken = providerData.refreshToken || providerData.refresh_token;
   if (!refreshToken) throw new Error(`No refresh token stored for ${provider}`);

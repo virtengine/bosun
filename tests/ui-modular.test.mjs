@@ -18,6 +18,7 @@ import {
   validateSetting as validateAppSetting,
 } from "../ui/modules/settings-schema.js";
 import {
+  guardrailsData,
   isPlaceholderTaskDescription,
   sanitizeTaskText,
 } from "../ui/modules/state.js";
@@ -25,6 +26,8 @@ import {
   SETTINGS_SCHEMA as siteSettingsSchema,
   validateSetting as validateSiteSetting,
 } from "../site/ui/modules/settings-schema.js";
+import { getSessionPhaseState } from "../ui/modules/session-surface.js";
+import { getSessionPhaseState as getSiteSessionPhaseState } from "../site/ui/modules/session-surface.js";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -297,6 +300,25 @@ function normalizeTaskWorkflowRunEntry(entry) {
   };
 }
 
+describe("modular UI state regressions", () => {
+  it("exports guardrails state and keeps the mirrored site loader wired", () => {
+    expect(guardrailsData).toBeDefined();
+    expect(typeof guardrailsData).toBe("object");
+    expect("value" in guardrailsData).toBe(true);
+
+    const appStateSource = readFileSync(resolve(process.cwd(), "ui/modules/state.js"), "utf8");
+    const siteStateSource = readFileSync(resolve(process.cwd(), "site/ui/modules/state.js"), "utf8");
+
+    expect(appStateSource).toContain("export const guardrailsData = signal(null);");
+    expect(appStateSource).toContain("export async function loadGuardrails()");
+    expect(appStateSource).toContain("guardrails: () => loadGuardrails()");
+
+    expect(siteStateSource).toContain("export const guardrailsData = signal(null);");
+    expect(siteStateSource).toContain("export async function loadGuardrails()");
+    expect(siteStateSource).toContain("guardrails: () => loadGuardrails()");
+  });
+});
+
 function buildTaskWorkflowRunLineageBadges(run) {
   const runGraph = run?.runGraph && typeof run.runGraph === "object" ? run.runGraph : null;
   if (!runGraph) return [];
@@ -418,11 +440,13 @@ const integrationsSource = readFileSync(resolve(process.cwd(), "ui/tabs/integrat
 const siteIntegrationsSource = readFileSync(resolve(process.cwd(), "site/ui/tabs/integrations.js"), "utf8");
 const {
   buildOperatorVisibilityModel,
+  summarizeCredentialLifecycle,
   summarizeIntegrationCoverage,
   summarizeOperatorSessions,
 } = await import("../ui/tabs/integrations.js");
 const {
   buildOperatorVisibilityModel: buildSiteOperatorVisibilityModel,
+  summarizeCredentialLifecycle: summarizeSiteCredentialLifecycle,
   summarizeIntegrationCoverage: summarizeSiteIntegrationCoverage,
   summarizeOperatorSessions: summarizeSiteOperatorSessions,
 } = await import("../site/ui/tabs/integrations.js");
@@ -481,6 +505,35 @@ describe("dashboard accessibility regressions", () => {
     expect(uiComponentsCss).toContain('.dashboard-health-grid,');
     expect(uiComponentsCss).toContain('.dashboard-metric:focus-visible,');
     expect(uiComponentsCss).toContain('.dashboard-action-btn:focus-visible');
+  });
+});
+
+describe("session phase helpers", () => {
+  it("keeps ui and site session phase heuristics aligned", () => {
+    const sampleSession = {
+      sessionType: "workflow-overseer",
+      status: "running",
+      insights: {
+        runtimeHealth: {
+          state: "editing",
+          hasEdits: true,
+        },
+      },
+      metadata: {
+        source: "workflow-engine-run",
+      },
+    };
+
+    expect(getSessionPhaseState(sampleSession)).toEqual(expect.objectContaining({
+      id: "editing",
+      label: "Editing",
+      tone: "secondary",
+    }));
+    expect(getSiteSessionPhaseState(sampleSession)).toEqual(expect.objectContaining({
+      id: "editing",
+      label: "Editing",
+      tone: "secondary",
+    }));
   });
 });
 describe("workflow canvas helpers", () => {
@@ -1016,6 +1069,25 @@ describe("restart delay settings", () => {
   });
 });
 
+describe("executor routing settings", () => {
+  it("accepts weighted EXECUTORS values with dotted variants and optional model allow-lists in both schemas", () => {
+    const appExecutors = appSettingsSchema.find((def) => def.key === "EXECUTORS");
+    const siteExecutors = siteSettingsSchema.find((def) => def.key === "EXECUTORS");
+    const dottedVariant = "CODEX:GPT-5.4:70,COPILOT:DEFAULT:30";
+    const withModels = "CODEX:GPT-5.4:70:gpt-5.4|gpt-5.3-codex,COPILOT:DEFAULT:30";
+
+    expect(validateAppSetting(appExecutors, dottedVariant)).toEqual({ valid: true });
+    expect(validateSiteSetting(siteExecutors, dottedVariant)).toEqual({ valid: true });
+    expect(validateAppSetting(appExecutors, withModels)).toEqual({ valid: true });
+    expect(validateSiteSetting(siteExecutors, withModels)).toEqual({ valid: true });
+  });
+
+  it("keeps executor pool row ids stable by index so typing does not remount the active input", () => {
+    const settingsSource = readFileSync(resolve(process.cwd(), "ui/tabs/settings.js"), "utf8");
+    expect(settingsSource).toContain("id: `executor-pool-${index}`");
+  });
+});
+
 describe("integrations operator visibility", () => {
   it("summarizes live sessions consistently across ui and hosted bundles", () => {
     const sessions = [
@@ -1129,14 +1201,22 @@ describe("integrations operator visibility", () => {
           permissions: { agents: [], workflows: ["wf-retry"] },
         },
       ],
+      settings: {
+        BOSUN_PROVIDER_OPENAI_ENABLED: "true",
+        OPENAI_API_KEY: "sk-test-1234567890",
+        BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_ENABLED: "true",
+      },
     };
 
     const uiModel = buildOperatorVisibilityModel(input);
     const siteModel = buildSiteOperatorVisibilityModel(input);
+    const uiCredentialLifecycle = summarizeCredentialLifecycle(input);
+    const siteCredentialLifecycle = summarizeSiteCredentialLifecycle(input);
     const uiCoverage = summarizeIntegrationCoverage(input.integrations, input.secrets);
     const siteCoverage = summarizeSiteIntegrationCoverage(input.integrations, input.secrets);
 
     expect(uiModel).toEqual(siteModel);
+    expect(uiCredentialLifecycle).toEqual(siteCredentialLifecycle);
     expect(uiCoverage).toEqual(siteCoverage);
     expect(uiModel.runtime).toMatchObject({
       attemptCount: 14,
@@ -1165,6 +1245,21 @@ describe("integrations operator visibility", () => {
       secretCount: 2,
       permissionCount: 3,
     });
+    expect(uiCredentialLifecycle).toEqual(expect.objectContaining({
+      readyCount: expect.any(Number),
+      missingCount: expect.any(Number),
+    }));
+    expect(uiCredentialLifecycle.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "openai-responses",
+        status: "ready",
+      }),
+      expect.objectContaining({
+        id: "claude-subscription-shim",
+        status: "missing",
+      }),
+    ]));
+    expect(uiModel.credentials).toEqual(uiCredentialLifecycle);
   });
 
   it("keeps both integration tabs wired to telemetry, audit, and session endpoints", () => {
@@ -1172,7 +1267,9 @@ describe("integrations operator visibility", () => {
       expect(source).toContain("/api/telemetry/summary");
       expect(source).toContain("/api/audit/summary?limit=8&recentLimit=8");
       expect(source).toContain("/api/sessions?includeHidden=1");
+      expect(source).toContain("/api/settings");
       expect(source).toContain("Operator Visibility");
+      expect(source).toContain("Credential Lifecycle");
       expect(source).toContain("Live Sessions");
       expect(source).toContain("Audit Trail");
       expect(source).toContain("Coverage");

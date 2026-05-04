@@ -376,6 +376,7 @@ registerAction("agent.delegate", async (params, context) => {
       model,
       cwd,
       sessionId,
+      scope: `voice-dispatch:${sessionId}`,
       sessionType: "voice-dispatch",
       timeoutMs: 5 * 60 * 1000,
     });
@@ -554,19 +555,20 @@ registerAction("system.fleet", async () => {
 registerAction("system.config", async (params) => {
   const cfg = loadConfig();
   const key = String(params.key || "").trim();
-  if (key) {
-    const value = cfg[key];
-    return value !== undefined ? { [key]: value } : { error: `Config key "${key}" not found.` };
-  }
-  return {
-    primaryAgent: cfg.primaryAgent,
-    mode: cfg.mode,
-    kanbanBackend: cfg.kanbanBackend || cfg.kanban?.backend,
-    projectName: cfg.projectName,
+  const normalizedConfig = {
+    primaryAgent: cfg.primaryAgent || getPrimaryAgentName(),
+    mode: cfg.mode || "generic",
+    kanbanBackend: cfg.kanbanBackend || cfg.kanban?.backend || "internal",
+    projectName: cfg.projectName || cfg.project || process.env.PROJECT_NAME || "unknown",
     autoFixEnabled: cfg.autoFixEnabled,
     watchEnabled: cfg.watchEnabled,
     voiceEnabled: cfg.voice?.enabled !== false,
   };
+  if (key) {
+    const value = normalizedConfig[key] ?? cfg[key];
+    return value !== undefined ? { [key]: value } : { error: `Config key "${key}" not found.` };
+  }
+  return normalizedConfig;
 });
 
 registerAction("system.health", async () => {
@@ -857,18 +859,43 @@ registerAction("workflow.retry", async (params) => {
   const retryOptions = typeof engine.getRetryOptions === "function"
     ? engine.getRetryOptions(runId)
     : null;
+  const safeInterruptedResume =
+    mode === "from_failed" &&
+    retryOptions?.guardedState?.code === "create_tasks_pending" &&
+    retryOptions?.guardedState?.safeResume === true &&
+    retryOptions?.recommendedMode === "from_failed";
   const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
   if (mode === "from_failed" && currentStatus !== "failed" && !createTasksPendingGuard) {
     throw new Error(`retry mode "from_failed" requires a failed run (current=${currentRun?.status || "unknown"})`);
   }
-  const resolvedRetry =
-    createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
-      ? engine.resolveOperatorRetry(runId, mode)
-      : null;
+  const resolvedRetry = safeInterruptedResume
+    ? {
+        mode,
+        operatorAction: "resume",
+        decisionReason: retryOptions?.recommendedReason || "create_tasks_pending.resume_only",
+        blocked: false,
+        guardedState: retryOptions?.guardedState || null,
+        retryArgs: {
+          mode,
+          _resumeInterrupted: true,
+          ...(retryOptions?.recommendedReason
+            ? { _decisionReason: retryOptions.recommendedReason }
+            : {}),
+        },
+      }
+    : (
+        createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+          ? engine.resolveOperatorRetry(runId, mode)
+          : null
+      );
   if (resolvedRetry?.blocked) {
     throw new Error(resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.");
   }
   const retryArgs = resolvedRetry?.retryArgs || { mode };
+  if (safeInterruptedResume && !resolvedRetry?.retryArgs) {
+    retryArgs._resumeInterrupted = true;
+    if (retryOptions?.recommendedReason) retryArgs._decisionReason = retryOptions.recommendedReason;
+  }
   const result = await engine.retryRun(runId, retryArgs);
   return {
     ...result,

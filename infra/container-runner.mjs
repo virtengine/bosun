@@ -18,7 +18,8 @@
 
 import { spawn, spawnSync, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve, basename, join } from "node:path";
+import { resolve, basename, join, isAbsolute } from "node:path";
+import { isBosunModuleRoot, resolveRepoRoot } from "../config/repo-root.mjs";
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -82,6 +83,14 @@ const activeRunnerLeases = new Map(); // leaseId → lease metadata
 let containerIdCounter = 0;
 let runnerLeaseCounter = 0;
 
+function samePath(left, right) {
+  const leftResolved = resolve(String(left || ""));
+  const rightResolved = resolve(String(right || ""));
+  return process.platform === "win32"
+    ? leftResolved.toLowerCase() === rightResolved.toLowerCase()
+    : leftResolved === rightResolved;
+}
+
 function runContainerRuntimeSync(args, options = {}) {
   const res = spawnSync(containerRuntime, args, {
     encoding: "utf8",
@@ -114,8 +123,33 @@ export function formatArtifactRetrieveCommand(filePath, platform = process.platf
   return `cat '${normalizedPath.replace(/'/g, `'"'"'`)}'`;
 }
 
-function buildIsolatedArtifactRoot(cwd) {
-  return resolve(cwd || process.cwd(), isolatedRunnerArtifactDirName);
+export function buildIsolatedArtifactRoot(cwd) {
+  if (isAbsolute(isolatedRunnerArtifactDirName)) {
+    return resolve(isolatedRunnerArtifactDirName);
+  }
+
+  const requestedCwd = resolve(cwd || process.cwd());
+  let repoRoot = requestedCwd;
+  try {
+    const activeCwd = resolve(process.cwd());
+    const useActiveCheckout =
+      !samePath(requestedCwd, activeCwd) &&
+      isBosunModuleRoot(requestedCwd) &&
+      isBosunModuleRoot(activeCwd);
+    if (!existsSync(requestedCwd) || useActiveCheckout) {
+      repoRoot = execSync("git rev-parse --show-toplevel", {
+        encoding: "utf8",
+        cwd: activeCwd,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } else {
+      repoRoot = resolveRepoRoot({ cwd: requestedCwd });
+    }
+  } catch {
+    repoRoot = process.cwd();
+  }
+  if (!repoRoot || !existsSync(repoRoot)) repoRoot = process.cwd();
+  return resolve(repoRoot, isolatedRunnerArtifactDirName);
 }
 
 function persistIsolatedRunArtifacts({

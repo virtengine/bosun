@@ -1,33 +1,11 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const readFileMock = vi.hoisted(() => vi.fn());
-const homedirMock = vi.hoisted(() => vi.fn(() => "/home/tester"));
-const isAppConfiguredMock = vi.hoisted(() => vi.fn());
-const getInstallationTokenForRepoMock = vi.hoisted(() => vi.fn());
-const execFileSyncMock = vi.hoisted(() => vi.fn());
-const fetchMock = vi.hoisted(() => vi.fn());
-
-vi.mock("node:fs/promises", () => ({
-  readFile: readFileMock,
-}));
-
-vi.mock("node:os", () => ({
-  homedir: homedirMock,
-}));
-
-vi.mock("../github/github-app-auth.mjs", () => ({
-  isAppConfigured: isAppConfiguredMock,
-  getInstallationTokenForRepo: getInstallationTokenForRepoMock,
-}));
-
-vi.mock("node:child_process", () => ({
-  execFileSync: execFileSyncMock,
-}));
-
-const { getGitHubToken } = await import("../github/github-auth-manager.mjs");
-const { isAppConfigured, getInstallationTokenForRepo } = await import("../github/github-app-auth.mjs");
-const { execFileSync } = await import("node:child_process");
-const { readFile } = await import("node:fs/promises");
+const readFileMock = vi.fn();
+const homedirMock = vi.fn(() => "/home/tester");
+const isAppConfiguredMock = vi.fn();
+const getInstallationTokenForRepoMock = vi.fn();
+const execFileSyncMock = vi.fn();
+const fetchMock = vi.fn();
 
 const originalFetch = globalThis.fetch;
 
@@ -63,6 +41,14 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  vi.unmock("node:fs/promises");
+  vi.unmock("node:os");
+  vi.unmock("node:child_process");
+  vi.unmock("../github/github-app-auth.mjs");
+  vi.resetModules();
+});
+
 afterAll(() => {
   for (const key of envKeys) {
     if (originalEnv[key] == null) {
@@ -74,8 +60,43 @@ afterAll(() => {
   globalThis.fetch = originalFetch;
 });
 
+async function loadSubject() {
+  vi.resetModules();
+  vi.doMock("node:fs/promises", async () => {
+    const actual = await vi.importActual("node:fs/promises");
+    return {
+      ...actual,
+      readFile: readFileMock,
+    };
+  });
+  vi.doMock("node:os", async () => {
+    const actual = await vi.importActual("node:os");
+    return {
+      ...actual,
+      homedir: homedirMock,
+    };
+  });
+  vi.doMock("../github/github-app-auth.mjs", async () => {
+    const actual = await vi.importActual("../github/github-app-auth.mjs");
+    return {
+      ...actual,
+      isAppConfigured: isAppConfiguredMock,
+      getInstallationTokenForRepo: getInstallationTokenForRepoMock,
+    };
+  });
+  vi.doMock("node:child_process", async () => {
+    const actual = await vi.importActual("node:child_process");
+    return {
+      ...actual,
+      execFileSync: execFileSyncMock,
+    };
+  });
+  return import("../github/github-auth-manager.mjs");
+}
+
 describe("github-auth-manager getGitHubToken", () => {
   it("prefers OAuth env override and returns verified login when requested", async () => {
+    const { getGitHubToken } = await loadSubject();
     process.env.BOSUN_GITHUB_USER_TOKEN = "oauth-env-token";
     fetchMock.mockResolvedValue({
       ok: true,
@@ -89,13 +110,14 @@ describe("github-auth-manager getGitHubToken", () => {
     const result = await getGitHubToken({ owner: "virtengine", repo: "bosun", verify: true });
 
     expect(result).toEqual({ token: "oauth-env-token", type: "oauth", login: "octo-env" });
-    expect(readFile).not.toHaveBeenCalled();
-    expect(getInstallationTokenForRepo).not.toHaveBeenCalled();
-    expect(execFileSync).not.toHaveBeenCalled();
+    expect(readFileMock).not.toHaveBeenCalled();
+    expect(getInstallationTokenForRepoMock).not.toHaveBeenCalled();
+    expect(execFileSyncMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to installation token when verify rejects OAuth token", async () => {
+    const { getGitHubToken } = await loadSubject();
     readFileMock.mockResolvedValue(JSON.stringify({ accessToken: "file-oauth-token" }));
     fetchMock.mockResolvedValue({ ok: false });
 
@@ -106,11 +128,12 @@ describe("github-auth-manager getGitHubToken", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ token: "install-token", type: "installation" });
-    expect(getInstallationTokenForRepo).toHaveBeenCalledWith("virtengine", "bosun");
-    expect(execFileSync).not.toHaveBeenCalled();
+    expect(getInstallationTokenForRepoMock).toHaveBeenCalledWith("virtengine", "bosun");
+    expect(execFileSyncMock).not.toHaveBeenCalled();
   });
 
   it("uses gh CLI token after installation lookup fails", async () => {
+    const { getGitHubToken } = await loadSubject();
     isAppConfiguredMock.mockReturnValue(true);
     getInstallationTokenForRepoMock.mockRejectedValue(new Error("no installation"));
     execFileSyncMock.mockReturnValue("gh-cli-token");
@@ -118,10 +141,11 @@ describe("github-auth-manager getGitHubToken", () => {
     const result = await getGitHubToken({ owner: "virtengine", repo: "bosun" });
 
     expect(result).toEqual({ token: "gh-cli-token", type: "gh-cli" });
-    expect(execFileSync).toHaveBeenCalled();
+    expect(execFileSyncMock).toHaveBeenCalled();
   });
 
   it("uses env token after gh CLI token is unavailable", async () => {
+    const { getGitHubToken } = await loadSubject();
     process.env.GITHUB_TOKEN = "env-fallback-token";
     execFileSyncMock.mockImplementation(() => {
       throw new Error("gh missing");
@@ -133,6 +157,7 @@ describe("github-auth-manager getGitHubToken", () => {
   });
 
   it("throws when no authentication sources are available", async () => {
+    const { getGitHubToken } = await loadSubject();
     await expect(getGitHubToken()).rejects.toThrow("No GitHub auth available");
   });
 });

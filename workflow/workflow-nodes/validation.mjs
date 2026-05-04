@@ -24,8 +24,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { getAgentToolConfig, getEffectiveTools } from "../../agent/agent-tool-config.mjs";
 import { getToolsPromptBlock } from "../../agent/agent-custom-tools.mjs";
 import { buildRelevantSkillsPromptBlock, findRelevantSkills } from "../../agent/bosun-skills.mjs";
+import { createHarnessAgentService } from "../../agent/harness-agent-service.mjs";
 import { getSessionTracker } from "../../infra/session-tracker.mjs";
+import { compactCommandOutputPayload } from "../../workspace/context-cache.mjs";
 import { fixGitConfigCorruption } from "../../workspace/worktree-manager.mjs";
+import { resolveHeavyRunnerPolicy, runCommandInHeavyRunnerLease } from "../heavy-runner-pool.mjs";
 
 import {
   registerNodeType,
@@ -75,6 +78,338 @@ import {
   summarizePathListingBlock,
   trimLogText,
 } from "./definitions.mjs";
+
+function combineValidationOutput(stdout = "", stderr = "") {
+  const trimmedStdout = String(stdout || "").trim();
+  const trimmedStderr = String(stderr || "").trim();
+  return [trimmedStdout, trimmedStderr && trimmedStderr !== trimmedStdout ? trimmedStderr : ""]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function normalizeValidationExitCode(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function buildValidationFailureDiagnostic({ category, summary, retryable = false, status = "error", exitCode = null }) {
+  return {
+    category,
+    retryable: retryable === true,
+    summary,
+    status,
+    exitCode: normalizeValidationExitCode(exitCode),
+  };
+}
+
+function buildValidationResultBase({
+  command,
+  passed,
+  exitCode = null,
+  durationMs = null,
+  output = "",
+  executionLane = "main",
+}) {
+  return {
+    passed,
+    command,
+    exitCode: normalizeValidationExitCode(exitCode),
+    durationMs: Number.isFinite(Number(durationMs)) ? Number(durationMs) : null,
+    output,
+    executionLane,
+  };
+}
+
+async function attachCompactedValidationOutput(baseResult, {
+  command,
+  stdout = "",
+  stderr = "",
+  exitCode = null,
+  durationMs = null,
+} = {}) {
+  const compacted = await compactCommandOutputPayload({
+    command,
+    output: String(stdout || ""),
+    stderr: String(stderr || ""),
+    exitCode: normalizeValidationExitCode(exitCode),
+    durationMs: Number.isFinite(Number(durationMs)) ? Number(durationMs) : undefined,
+  });
+  return {
+    ...baseResult,
+    output: compacted.text || baseResult.output || "",
+    outputCompacted: compacted.compacted === true,
+    rawOutputChars: compacted.originalChars,
+    compactedOutputChars: compacted.compactedChars,
+    outputBudgetPolicy: compacted.budgetPolicy || null,
+    outputBudgetReason: compacted.budgetReason || "",
+    outputContextEnvelope: compacted.contextEnvelope || null,
+    outputDiagnostics: compacted.commandDiagnostics || null,
+    outputSuggestedRerun: compacted.commandDiagnostics?.suggestedRerun || null,
+    outputHint: compacted.commandDiagnostics?.summary || compacted.commandDiagnostics?.hint || null,
+  };
+}
+
+function mapIsolatedRunnerFailure(status, timeoutMs, runnerResult = {}) {
+  if (runnerResult?.failureDiagnostic && typeof runnerResult.failureDiagnostic === "object") {
+    return {
+      failureKind: String(runnerResult.failureDiagnostic.category || status || "command_failure"),
+      retryable: runnerResult.failureDiagnostic.retryable === true,
+      failureDiagnostic: runnerResult.failureDiagnostic,
+    };
+  }
+  if (runnerResult?.blocked === true || status === "blocked") {
+    return {
+      failureKind: "runner_lease_failed",
+      retryable: true,
+      failureDiagnostic: buildValidationFailureDiagnostic({
+        category: "runner_lease_failed",
+        retryable: true,
+        status: "blocked",
+        summary: String(runnerResult?.error || "Failed to obtain an isolated runner lease."),
+      }),
+    };
+  }
+  if (status === "timeout") {
+    return {
+      failureKind: "timeout",
+      retryable: true,
+      failureDiagnostic: buildValidationFailureDiagnostic({
+        category: "timeout",
+        retryable: true,
+        status,
+        summary: `Validation timed out after ${Number(timeoutMs) || 0}ms.`,
+      }),
+    };
+  }
+  return {
+    failureKind: "command_failure",
+    retryable: false,
+    failureDiagnostic: buildValidationFailureDiagnostic({
+      category: "command_failure",
+      retryable: false,
+      status,
+      exitCode: runnerResult?.exitCode,
+      summary: `Validation command exited with code ${normalizeValidationExitCode(runnerResult?.exitCode) ?? "unknown"}.`,
+    }),
+  };
+}
+
+async function executeValidationCommand(node, ctx, engine, {
+  nodeType,
+  defaultCommand,
+  timeoutMs,
+  normalizeCommand = (value) => value,
+  zeroWarnings = false,
+} = {}) {
+  const resolvedCommand = ctx.resolve(node.config?.command || defaultCommand);
+  const command = normalizeCommand(resolvedCommand);
+  const cwd = ctx.resolve(node.config?.cwd || ctx.data?.worktreePath || process.cwd());
+  const timeout = node.config?.timeoutMs || timeoutMs;
+  if (!String(command || "").trim()) {
+    return {
+      passed: true,
+      skipped: true,
+      reason: "skipped",
+      command: "",
+      output: "Validation skipped: no command configured.",
+      executionLane: "main",
+    };
+  }
+  const schedulerDecision = engine?.services?.scheduler?.selectWorkflowLane?.({
+    nodeType,
+    command,
+    timeoutMs: timeout,
+  }) || null;
+
+  if (schedulerDecision?.lane === "isolated" && typeof engine?.services?.isolatedRunner?.run === "function") {
+    const runnerResult = await engine.services.isolatedRunner.run({
+      nodeType,
+      command,
+      cwd,
+      timeoutMs: timeout,
+      context: ctx.data || {},
+    });
+    const status = String(runnerResult?.status || "").trim().toLowerCase() || "error";
+    const stdout = String(runnerResult?.stdout || "");
+    const stderr = String(runnerResult?.stderr || "");
+    const output = combineValidationOutput(stdout, stderr);
+    const passed = status === "success" && normalizeValidationExitCode(runnerResult?.exitCode) !== 1;
+    let result = buildValidationResultBase({
+      command,
+      passed,
+      exitCode: runnerResult?.exitCode,
+      durationMs: runnerResult?.duration,
+      output,
+      executionLane: "isolated",
+    });
+    result = await attachCompactedValidationOutput(result, {
+      command,
+      stdout,
+      stderr,
+      exitCode: runnerResult?.exitCode,
+      durationMs: runnerResult?.duration,
+    });
+    result.isolatedRunner = runnerResult;
+    result.artifactRetrieveCommands = Array.isArray(runnerResult?.artifacts)
+      ? runnerResult.artifacts.map((artifact) => artifact?.retrieveCommand).filter(Boolean)
+      : [];
+    result.blocked = runnerResult?.blocked === true || status === "blocked";
+    if (!passed) {
+      const failure = mapIsolatedRunnerFailure(status, timeout, runnerResult);
+      result.failureKind = failure.failureKind;
+      result.retryable = failure.retryable;
+      result.failureDiagnostic = failure.failureDiagnostic;
+      if (result.blocked && !result.reason) {
+        result.reason = failure.failureKind;
+      }
+    }
+    return result;
+  }
+
+  const policy = resolveHeavyRunnerPolicy({
+    nodeType,
+    command,
+    timeoutMs: timeout,
+    runner: node.config?.runner ?? null,
+  });
+
+  if (policy.lane === "runner-pool") {
+    const leaseResult = await runCommandInHeavyRunnerLease({
+      nodeType,
+      command,
+      cwd,
+      timeoutMs: timeout,
+      runner: node.config?.runner ?? null,
+    });
+    const output = combineValidationOutput(leaseResult?.stdout, leaseResult?.stderr);
+    const exitCode = normalizeValidationExitCode(leaseResult?.exitCode);
+    const hasWarnings = /warning/i.test(output || "");
+    const passed = leaseResult?.ok === true && !(zeroWarnings && hasWarnings);
+    let result = buildValidationResultBase({
+      command,
+      passed,
+      exitCode,
+      durationMs: leaseResult?.durationMs,
+      output,
+      executionLane: policy.lane,
+    });
+    result = await attachCompactedValidationOutput(result, {
+      command,
+      stdout: leaseResult?.stdout,
+      stderr: leaseResult?.stderr,
+      exitCode,
+      durationMs: leaseResult?.durationMs,
+    });
+    result.runnerLease = leaseResult?.lease || null;
+    result.runnerArtifactPointers = Array.isArray(leaseResult?.artifactPointers) ? leaseResult.artifactPointers : [];
+    result.blocked = leaseResult?.blocked === true;
+    if (result.blocked) {
+      result.reason = String(leaseResult?.failureKind || "runner_lease_failed");
+      result.failureKind = String(leaseResult?.failureKind || "runner_lease_failed");
+      result.retryable = true;
+      result.failureDiagnostic = buildValidationFailureDiagnostic({
+        category: result.failureKind,
+        retryable: true,
+        status: "blocked",
+        exitCode,
+        summary: output || "Failed to obtain a heavy runner lease.",
+      });
+      return result;
+    }
+    if (zeroWarnings && hasWarnings) {
+      result.reason = "warnings_found";
+      result.failureKind = "warnings_found";
+      result.retryable = false;
+      result.failureDiagnostic = buildValidationFailureDiagnostic({
+        category: "warnings_found",
+        retryable: false,
+        status: "error",
+        exitCode,
+        summary: "Build completed with warnings while zeroWarnings was enabled.",
+      });
+      return result;
+    }
+    if (!passed) {
+      const timeoutFailure = exitCode === 124;
+      result.failureKind = timeoutFailure ? "timeout" : "command_failure";
+      result.retryable = timeoutFailure;
+      result.failureDiagnostic = buildValidationFailureDiagnostic({
+        category: result.failureKind,
+        retryable: timeoutFailure,
+        status: timeoutFailure ? "timeout" : "error",
+        exitCode,
+        summary: timeoutFailure
+          ? `Validation timed out after ${Number(timeout) || 0}ms.`
+          : `Validation command exited with code ${exitCode ?? "unknown"}.`,
+      });
+    }
+    return result;
+  }
+
+  try {
+    const stdout = execSync(command, { cwd, timeout, encoding: "utf8", stdio: "pipe" });
+    const output = String(stdout || "").trim();
+    const hasWarnings = /warning/i.test(output || "");
+    let result = buildValidationResultBase({
+      command,
+      passed: !(zeroWarnings && hasWarnings),
+      exitCode: 0,
+      output,
+      executionLane: policy.lane,
+    });
+    result = await attachCompactedValidationOutput(result, {
+      command,
+      stdout,
+      stderr: "",
+      exitCode: 0,
+    });
+    if (zeroWarnings && hasWarnings) {
+      result.reason = "warnings_found";
+      result.failureKind = "warnings_found";
+      result.retryable = false;
+      result.failureDiagnostic = buildValidationFailureDiagnostic({
+        category: "warnings_found",
+        retryable: false,
+        status: "error",
+        exitCode: 0,
+        summary: "Build completed with warnings while zeroWarnings was enabled.",
+      });
+    }
+    return result;
+  } catch (err) {
+    const stdout = err.stdout?.toString() || "";
+    const stderr = err.stderr?.toString() || err.message || "";
+    const output = combineValidationOutput(stdout, stderr);
+    const exitCode = normalizeValidationExitCode(err.status);
+    const timedOut = exitCode === 124 || /timed out/i.test(String(err.message || ""));
+    let result = buildValidationResultBase({
+      command,
+      passed: false,
+      exitCode,
+      output,
+      executionLane: policy.lane,
+    });
+    result = await attachCompactedValidationOutput(result, {
+      command,
+      stdout,
+      stderr,
+      exitCode,
+    });
+    result.failureKind = timedOut ? "timeout" : "command_failure";
+    result.retryable = timedOut;
+    result.failureDiagnostic = buildValidationFailureDiagnostic({
+      category: result.failureKind,
+      retryable: timedOut,
+      status: timedOut ? "timeout" : "error",
+      exitCode,
+      summary: timedOut
+        ? `Validation timed out after ${Number(timeout) || 0}ms.`
+        : `Validation command exited with code ${exitCode ?? "unknown"}.`,
+    });
+    return result;
+  }
+}
 
 registerNodeType("validation.screenshot", {
   describe: () => "Take a screenshot for visual verification and store in evidence",
@@ -260,7 +595,8 @@ Respond with exactly one of:
     // Use the agent pool for a non-agent model review
     const agentPool = engine.services?.agentPool;
     if (agentPool?.launchEphemeralThread) {
-      const result = await agentPool.launchEphemeralThread(
+      const harnessAgentService = createHarnessAgentService({ agentPool });
+      const result = await harnessAgentService.launchEphemeralThread(
         reviewPrompt,
         process.cwd(),
         5 * 60 * 1000, // 5-minute timeout for review
@@ -318,21 +654,16 @@ registerNodeType("validation.tests", {
       requiredPassRate: { type: "number", default: 1.0, description: "Minimum pass rate (0-1)" },
     },
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
     const command = ctx.resolve(node.config?.command || "npm test");
-    const cwd = ctx.resolve(node.config?.cwd || ctx.data?.worktreePath || process.cwd());
-    const timeout = node.config?.timeoutMs || 600000;
-
     ctx.log(node.id, `Running tests: ${command}`);
-    try {
-      const output = execSync(command, { cwd, timeout, encoding: "utf8", stdio: "pipe" });
-      ctx.log(node.id, "Tests passed");
-      return { passed: true, output: output?.trim() };
-    } catch (err) {
-      const output = (err.stdout?.toString() || "") + (err.stderr?.toString() || "");
-      ctx.log(node.id, "Tests failed", "error");
-      return { passed: false, output, exitCode: err.status };
-    }
+    const result = await executeValidationCommand(node, ctx, engine, {
+      nodeType: "validation.tests",
+      defaultCommand: "npm test",
+      timeoutMs: 600000,
+    });
+    ctx.log(node.id, result.passed ? "Tests passed" : "Tests failed", result.passed ? "info" : "error");
+    return result;
   },
 });
 
@@ -347,26 +678,21 @@ registerNodeType("validation.build", {
       zeroWarnings: { type: "boolean", default: false, description: "Fail on warnings too" },
     },
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
     const resolvedCommand = ctx.resolve(node.config?.command || "npm run build");
     const command = normalizeLegacyWorkflowCommand(resolvedCommand);
-    const cwd = ctx.resolve(node.config?.cwd || ctx.data?.worktreePath || process.cwd());
-    const timeout = node.config?.timeoutMs || 600000;
 
     if (command !== resolvedCommand) {
       ctx.log(node.id, `Normalized legacy command for portability: ${command}`);
     }
     ctx.log(node.id, `Building: ${command}`);
-    try {
-      const output = execSync(command, { cwd, timeout, encoding: "utf8", stdio: "pipe" });
-      const hasWarnings = /warning/i.test(output || "");
-      if (node.config?.zeroWarnings && hasWarnings) {
-        return { passed: false, reason: "warnings_found", output: output?.trim() };
-      }
-      return { passed: true, output: output?.trim() };
-    } catch (err) {
-      return { passed: false, output: err.stderr?.toString() || err.message, exitCode: err.status };
-    }
+    return await executeValidationCommand(node, ctx, engine, {
+      nodeType: "validation.build",
+      defaultCommand: "npm run build",
+      timeoutMs: 600000,
+      normalizeCommand: normalizeLegacyWorkflowCommand,
+      zeroWarnings: node.config?.zeroWarnings === true,
+    });
   },
 });
 
@@ -380,15 +706,14 @@ registerNodeType("validation.lint", {
       timeoutMs: { type: "number", default: 120000 },
     },
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
     const command = ctx.resolve(node.config?.command || "npm run lint");
-    const cwd = ctx.resolve(node.config?.cwd || ctx.data?.worktreePath || process.cwd());
-    try {
-      const output = execSync(command, { cwd, timeout: node.config?.timeoutMs || 120000, encoding: "utf8", stdio: "pipe" });
-      return { passed: true, output: output?.trim() };
-    } catch (err) {
-      return { passed: false, output: err.stderr?.toString() || err.message };
-    }
+    ctx.log(node.id, `Linting: ${command}`);
+    return await executeValidationCommand(node, ctx, engine, {
+      nodeType: "validation.lint",
+      defaultCommand: "npm run lint",
+      timeoutMs: 120000,
+    });
   },
 });
 

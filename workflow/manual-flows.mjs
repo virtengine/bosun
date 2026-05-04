@@ -5,11 +5,13 @@
 // executor function. Runs are persisted to .bosun/manual-flows/runs/.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { executeAnnotationAudit } from "./manual-flow-audit.mjs";
 import { resolveResearchEvidenceSidecarConfig } from "./research-evidence-sidecar.mjs";
 import { RESEARCH_EVIDENCE_AGENT_TEMPLATE } from "../workflow-templates/research-evidence.mjs";
+import { WorkflowExecutionLedger } from "./execution-ledger.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -68,9 +70,282 @@ function getTemplatesDir(rootDir) {
   return resolve(getFlowsDir(rootDir), "templates");
 }
 
+function getWorkflowRunsDir(rootDir) {
+  return resolve(rootDir, ".bosun", "workflow-runs");
+}
+
 function ensureDirs(rootDir) {
   mkdirSync(getRunsDir(rootDir), { recursive: true });
   mkdirSync(getTemplatesDir(rootDir), { recursive: true });
+}
+
+function getManualFlowWorkflowId(templateId) {
+  const src = String(templateId || "custom").trim();
+  let result = "";
+  for (const ch of src) {
+    const lower = ch.toLowerCase();
+    if (
+      (lower >= "a" && lower <= "z") ||
+      (lower >= "0" && lower <= "9") ||
+      ch === "_" || ch === "." || ch === "-"
+    ) {
+      result += ch;
+    } else if (result.length > 0 && result[result.length - 1] !== "-") {
+      result += "-";
+    }
+  }
+  while (result.startsWith("-")) result = result.slice(1);
+  while (result.endsWith("-")) result = result.slice(0, -1);
+  return `manual-flow.${result || "custom"}`;
+}
+
+function cloneJson(value) {
+  try {
+    return JSON.parse(JSON.stringify(value ?? null));
+  } catch {
+    return null;
+  }
+}
+
+function uniqueTextList(values = []) {
+  const seen = new Set();
+  const normalized = [];
+  const list = Array.isArray(values) ? values : [values];
+  for (const value of list) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    normalized.push(text);
+  }
+  return normalized;
+}
+
+function normalizeIsoTimestamp(value, fallback = null) {
+  const text = String(value || "").trim();
+  if (text) return text;
+  return fallback || new Date().toISOString();
+}
+
+function toEpochMs(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function mapManualFlowStatusToLedgerStatus(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "failed") return "failed";
+  if (normalized === "running") return "running";
+  if (normalized === "completed") return "completed";
+  return "pending";
+}
+
+function createManualFlowTimelineEvent(eventType, payload = {}) {
+  const timestamp = normalizeIsoTimestamp(payload.timestamp);
+  return {
+    id: String(payload.id || `mfe-${randomUUID()}`),
+    timestamp,
+    eventType: String(eventType || "event").trim() || "event",
+    status: payload.status ? String(payload.status).trim() : undefined,
+    message: payload.message ? String(payload.message).trim() : undefined,
+    stepId: payload.stepId ? String(payload.stepId).trim() : undefined,
+    stepTitle: payload.stepTitle ? String(payload.stepTitle).trim() : undefined,
+    lane: payload.lane ? String(payload.lane).trim() : undefined,
+    taskId: payload.taskId ? String(payload.taskId).trim() : undefined,
+    workflowRunId: payload.workflowRunId ? String(payload.workflowRunId).trim() : undefined,
+    details: payload.details && typeof payload.details === "object" ? cloneJson(payload.details) : undefined,
+  };
+}
+
+function normalizeManualFlowStep(step = {}, fallbackOrder = 0) {
+  const dependsOnStepIds = uniqueTextList(step.dependsOnStepIds || step.dependsOn || []);
+  const status = String(step.status || "").trim().toLowerCase();
+  const normalizedStatus = status || (dependsOnStepIds.length > 0 ? "blocked" : "ready");
+  return {
+    id: String(step.id || `step-${fallbackOrder || 1}`).trim(),
+    title: String(step.title || step.label || `Step ${fallbackOrder || 1}`).trim(),
+    prompt: String(step.prompt || step.instructions || "").trim(),
+    order: Number.isFinite(Number(step.order)) ? Number(step.order) : fallbackOrder,
+    lane: String(step.lane || step.agent || "").trim().toUpperCase() || null,
+    status: normalizedStatus,
+    dependsOnStepIds,
+    ready: normalizedStatus === "ready",
+    taskId: step.taskId ? String(step.taskId).trim() : null,
+    taskTitle: step.taskTitle ? String(step.taskTitle).trim() : null,
+    workflowRunId: step.workflowRunId ? String(step.workflowRunId).trim() : null,
+    summary: step.summary ? String(step.summary).trim() : "",
+  };
+}
+
+function normalizeManualFlowObservability(raw = {}, run = {}) {
+  const timeline = Array.isArray(raw.timeline)
+    ? raw.timeline
+        .map((entry) => createManualFlowTimelineEvent(entry?.eventType || "event", entry || {}))
+        .sort((left, right) => toEpochMs(left.timestamp) - toEpochMs(right.timestamp))
+    : [];
+  const steps = Array.isArray(raw.steps)
+    ? raw.steps.map((step, index) => normalizeManualFlowStep(step, index + 1))
+    : [];
+  const taskIds = uniqueTextList([
+    ...(Array.isArray(raw?.related?.taskIds) ? raw.related.taskIds : []),
+    ...steps.map((step) => step.taskId),
+  ]);
+  const workflowRunIds = uniqueTextList([
+    ...(Array.isArray(raw?.related?.workflowRunIds) ? raw.related.workflowRunIds : []),
+    ...steps.map((step) => step.workflowRunId),
+  ]);
+  const laneIds = uniqueTextList(steps.map((step) => step.lane).filter(Boolean));
+  const statusCounts = {
+    ready: 0,
+    blocked: 0,
+    queued: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    pending: 0,
+  };
+  for (const step of steps) {
+    if (statusCounts[step.status] === undefined) {
+      statusCounts.pending += 1;
+    } else {
+      statusCounts[step.status] += 1;
+    }
+  }
+  const lastEventAt = timeline.at(-1)?.timestamp || raw.lastEventAt || run.completedAt || run.startedAt || null;
+  return {
+    version: 1,
+    queueStrategy: String(raw.queueStrategy || "").trim() || null,
+    parseMode: String(raw.parseMode || "").trim() || null,
+    planTitle: String(raw.planTitle || run.templateName || "").trim() || null,
+    objective: String(raw.objective || "").trim() || null,
+    updatedAt: normalizeIsoTimestamp(raw.updatedAt || lastEventAt || run.startedAt),
+    lastEventAt: lastEventAt ? normalizeIsoTimestamp(lastEventAt) : null,
+    timeline,
+    steps,
+    related: {
+      taskIds,
+      workflowRunIds,
+    },
+    summary: {
+      eventCount: timeline.length,
+      stepCount: steps.length,
+      readyStepCount: statusCounts.ready,
+      blockedStepCount: statusCounts.blocked,
+      queuedStepCount: statusCounts.queued,
+      runningStepCount: statusCounts.running,
+      completedStepCount: statusCounts.completed,
+      failedStepCount: statusCounts.failed,
+      pendingStepCount: statusCounts.pending,
+      laneCount: laneIds.length,
+      taskCount: taskIds.length,
+      workflowRunCount: workflowRunIds.length,
+    },
+  };
+}
+
+function normalizeManualFlowRun(run = {}) {
+  const normalized = {
+    ...run,
+    id: String(run.id || "").trim(),
+    templateId: String(run.templateId || "").trim(),
+    templateName: String(run.templateName || run.templateId || "Manual Flow").trim(),
+    workflowId: String(run.workflowId || getManualFlowWorkflowId(run.templateId)).trim(),
+    runKind: "manual-flow",
+    status: String(run.status || "pending").trim().toLowerCase() || "pending",
+    startedAt: normalizeIsoTimestamp(run.startedAt),
+    completedAt: run.completedAt ? normalizeIsoTimestamp(run.completedAt) : null,
+    result: run.result ?? null,
+    error: run.error ?? null,
+    metadata: normalizeManualFlowRunMetadata(run.metadata) || null,
+  };
+  normalized.observability = normalizeManualFlowObservability(run.observability || {}, normalized);
+  return normalized;
+}
+
+function addManualFlowEvent(run, eventType, payload = {}) {
+  const normalized = normalizeManualFlowRun(run);
+  const event = createManualFlowTimelineEvent(eventType, {
+    ...payload,
+    status: payload.status || normalized.status,
+  });
+  normalized.observability.timeline = [
+    ...normalized.observability.timeline,
+    event,
+  ];
+  normalized.observability = normalizeManualFlowObservability({
+    ...normalized.observability,
+    timeline: normalized.observability.timeline,
+  }, normalized);
+  return normalized;
+}
+
+function setManualFlowPlan(run, plan = {}) {
+  const normalized = normalizeManualFlowRun(run);
+  normalized.observability = normalizeManualFlowObservability({
+    ...normalized.observability,
+    queueStrategy: plan.queueStrategy || normalized.observability.queueStrategy,
+    parseMode: plan.parseMode || normalized.observability.parseMode,
+    planTitle: plan.planTitle || normalized.observability.planTitle,
+    objective: plan.objective || normalized.observability.objective,
+    steps: Array.isArray(plan.steps) ? plan.steps : normalized.observability.steps,
+    related: {
+      taskIds: uniqueTextList([
+        ...(normalized.observability.related?.taskIds || []),
+        ...(plan.relatedTaskIds || []),
+      ]),
+      workflowRunIds: uniqueTextList([
+        ...(normalized.observability.related?.workflowRunIds || []),
+        ...(plan.relatedWorkflowRunIds || []),
+      ]),
+    },
+  }, normalized);
+  return normalized;
+}
+
+function syncManualFlowLedger(run, rootDir, eventType = null, payload = {}) {
+  try {
+    const normalized = normalizeManualFlowRun(run);
+    const ledger = new WorkflowExecutionLedger({ runsDir: getWorkflowRunsDir(rootDir) });
+    ledger.ensureRun({
+      runId: normalized.id,
+      workflowId: normalized.workflowId,
+      workflowName: normalized.templateName,
+      runKind: normalized.runKind,
+      startedAt: normalized.startedAt,
+      endedAt: normalized.completedAt || null,
+      status: mapManualFlowStatusToLedgerStatus(normalized.status),
+      actor: "manual-flow",
+    });
+    if (!eventType) return;
+    ledger.appendEvent({
+      runId: normalized.id,
+      workflowId: normalized.workflowId,
+      workflowName: normalized.templateName,
+      runKind: normalized.runKind,
+      category: "workflow",
+      eventType,
+      status: mapManualFlowStatusToLedgerStatus(normalized.status),
+      timestamp: normalizeIsoTimestamp(payload.timestamp),
+      summary: String(payload.message || payload.summary || "").trim() || null,
+      reason: String(payload.reason || "").trim() || null,
+      executionKind: payload.executionKind || null,
+      executionLabel: payload.stepTitle || null,
+      childTaskId: payload.taskId || null,
+      childRunId: payload.workflowRunId || null,
+      workspaceId: normalized.metadata?.workspaceId || null,
+      repoRoot: normalized.metadata?.workspaceDir || rootDir,
+      surface: "manual-flow",
+      channel: "manual-flow",
+      meta: {
+        manualFlowTemplateId: normalized.templateId,
+        manualFlowRunId: normalized.id,
+        stepId: payload.stepId || null,
+        lane: payload.lane || null,
+        order: payload.order || null,
+      },
+    });
+  } catch (err) {
+    console.warn(`[manual-flows] ledger sync failed for ${run?.id || "unknown"}: ${String(err?.message || err)}`);
+  }
 }
 
 // ── Built-in Templates ───────────────────────────────────────────────────────
@@ -328,6 +603,90 @@ export const BUILTIN_FLOW_TEMPLATES = [
         type: "toggle",
         defaultValue: true,
         helpText: "Build an optional Zoekt index when zoekt-index is installed.",
+      },
+    ],
+  },
+  {
+    id: "queued-execution-plan",
+    name: "Queued Execution Plan",
+    description:
+      "Turn a large implementation plan into a Bosun-native queued run with step-level observability, lane ownership, dependency edges, and optional task-graph creation.",
+    icon: "workflow",
+    category: "planning",
+    tags: ["planning", "queue", "dag", "sprint", "subtasks", "agents"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "planTitle",
+        label: "Plan Title",
+        type: "text",
+        placeholder: "Bosun Internal Harness Adoption",
+        defaultValue: "",
+        required: true,
+        helpText: "Human-readable title for the queued plan and any tasks created from it.",
+      },
+      {
+        id: "objective",
+        label: "Objective",
+        type: "textarea",
+        placeholder: "Describe the end state this queue is intended to deliver.",
+        defaultValue: "",
+        required: true,
+        helpText: "Used in observability, run summaries, and generated task descriptions.",
+      },
+      {
+        id: "planDocument",
+        label: "Plan Document",
+        type: "textarea",
+        placeholder: "Paste headings like ## Step 1 A: ... with the prompt body beneath each heading.",
+        defaultValue: "",
+        required: true,
+        helpText:
+          "Accepts the 12-step queue format used in Bosun planning docs, or a JSON array of step objects. " +
+          "Headings like '## Step 1 A: Title' are parsed automatically.",
+      },
+      {
+        id: "queueStrategy",
+        label: "Queue Strategy",
+        type: "select",
+        defaultValue: "agent-lane-queue",
+        options: [
+          { label: "Agent Lane Queue", value: "agent-lane-queue" },
+          { label: "Global Sequential", value: "global-sequential" },
+          { label: "Explicit Dependencies Only", value: "explicit-only" },
+        ],
+        required: true,
+        helpText: "Controls default dependencies when the plan document does not declare them explicitly.",
+      },
+      {
+        id: "createTasks",
+        label: "Create Task Graph",
+        type: "toggle",
+        defaultValue: true,
+        helpText: "Create Bosun tasks and dependency edges for each parsed step when task APIs are available.",
+      },
+      {
+        id: "taskPriority",
+        label: "Task Priority",
+        type: "select",
+        defaultValue: "high",
+        options: [
+          { label: "Critical", value: "critical" },
+          { label: "High", value: "high" },
+          { label: "Medium", value: "medium" },
+          { label: "Low", value: "low" },
+        ],
+        required: true,
+      },
+      {
+        id: "sprintId",
+        label: "Sprint ID",
+        type: "text",
+        placeholder: "optional-sprint-id",
+        defaultValue: "",
+        required: false,
+        helpText: "Optional sprint assignment applied to created step tasks when Bosun sprint APIs are available.",
       },
     ],
   },
@@ -912,9 +1271,13 @@ export function createRun(templateId, formValues, rootDir, opts = {}) {
 
   validateRequiredManualFlowFields(template, formValues);
   const resolved = resolveManualFlowValues(template, formValues);
-  const run = createManualFlowRunRecord(templateId, template.name, resolved, opts);
+  const run = normalizeManualFlowRun(createManualFlowRunRecord(templateId, template.name, resolved, opts));
 
   writeRunToDisk(run, rootDir);
+  syncManualFlowLedger(run, rootDir, "manual-flow.created", {
+    timestamp: run.startedAt,
+    message: `${run.templateName} queued`,
+  });
   return run;
 }
 
@@ -968,18 +1331,27 @@ function normalizeManualFlowRunMetadata(metadata = {}) {
 }
 
 function createManualFlowRunRecord(templateId, templateName, formValues, opts = {}) {
-  return {
+  const startedAt = new Date().toISOString();
+  let run = {
     id: `mfr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     templateId,
     templateName,
+    workflowId: getManualFlowWorkflowId(templateId),
+    runKind: "manual-flow",
     formValues,
     status: "pending",
-    startedAt: new Date().toISOString(),
+    startedAt,
     completedAt: null,
     result: null,
     error: null,
     metadata: normalizeManualFlowRunMetadata(opts?.metadata),
   };
+  run = addManualFlowEvent(run, "manual-flow.created", {
+    timestamp: startedAt,
+    status: "pending",
+    message: `${templateName} queued`,
+  });
+  return run;
 }
 
 /**
@@ -990,10 +1362,18 @@ function createManualFlowRunRecord(templateId, templateName, formValues, opts = 
  * @returns {ManualFlowRun}
  */
 export function startRun(runId, rootDir) {
-  const run = getRun(runId, rootDir);
+  let run = getRun(runId, rootDir);
   if (!run) throw new Error(`Run not found: ${runId}`);
   run.status = "running";
+  run = addManualFlowEvent(run, "manual-flow.started", {
+    status: "running",
+    message: `${run.templateName} started`,
+  });
   writeRunToDisk(run, rootDir);
+  syncManualFlowLedger(run, rootDir, "run.start", {
+    timestamp: run.observability?.lastEventAt,
+    message: `${run.templateName} started`,
+  });
   return run;
 }
 
@@ -1006,12 +1386,41 @@ export function startRun(runId, rootDir) {
  * @returns {ManualFlowRun}
  */
 export function completeRun(runId, result, rootDir) {
-  const run = getRun(runId, rootDir);
+  let run = getRun(runId, rootDir);
   if (!run) throw new Error(`Run not found: ${runId}`);
   run.status = "completed";
   run.completedAt = new Date().toISOString();
   run.result = result || {};
+  if (run.result?.taskGraph && typeof run.result.taskGraph === "object") {
+    run = setManualFlowPlan(run, {
+      relatedTaskIds: [
+        run.result.taskGraph.parentTaskId,
+        ...(Array.isArray(run.result.taskGraph.tasks)
+          ? run.result.taskGraph.tasks.map((task) => task?.taskId || task?.id)
+          : []),
+      ],
+    });
+  }
+  if (run.result?.workflowRunId || run.result?.runId) {
+    run = setManualFlowPlan(run, {
+      relatedWorkflowRunIds: [run.result.workflowRunId || run.result.runId],
+    });
+  }
+  run = addManualFlowEvent(run, "manual-flow.completed", {
+    timestamp: run.completedAt,
+    status: "completed",
+    message: `${run.templateName} completed`,
+    details: {
+      mode: run.result?.mode || null,
+    },
+  });
   writeRunToDisk(run, rootDir);
+  syncManualFlowLedger(run, rootDir, "run.end", {
+    timestamp: run.completedAt,
+    message: `${run.templateName} completed`,
+    workflowRunId: run.result?.workflowRunId || run.result?.runId || null,
+    taskId: run.result?.taskId || run.result?.taskGraph?.parentTaskId || null,
+  });
   return run;
 }
 
@@ -1024,12 +1433,22 @@ export function completeRun(runId, result, rootDir) {
  * @returns {ManualFlowRun}
  */
 export function failRun(runId, error, rootDir) {
-  const run = getRun(runId, rootDir);
+  let run = getRun(runId, rootDir);
   if (!run) throw new Error(`Run not found: ${runId}`);
   run.status = "failed";
   run.completedAt = new Date().toISOString();
   run.error = error;
+  run = addManualFlowEvent(run, "manual-flow.failed", {
+    timestamp: run.completedAt,
+    status: "failed",
+    message: String(error || "Execution failed"),
+  });
   writeRunToDisk(run, rootDir);
+  syncManualFlowLedger(run, rootDir, "run.error", {
+    timestamp: run.completedAt,
+    message: String(error || "Execution failed"),
+    reason: String(error || "Execution failed"),
+  });
   return run;
 }
 
@@ -1040,7 +1459,7 @@ export function getRun(runId, rootDir) {
   const filePath = resolve(getRunsDir(rootDir), `${runId}.json`);
   if (!existsSync(filePath)) return null;
   try {
-    return JSON.parse(readFileSync(filePath, "utf8"));
+    return normalizeManualFlowRun(JSON.parse(readFileSync(filePath, "utf8")));
   } catch {
     return null;
   }
@@ -1079,7 +1498,7 @@ export function listRuns(rootDir, opts = {}) {
       const run = JSON.parse(readFileSync(resolve(dir, f), "utf8"));
       if (opts.templateId && run.templateId !== opts.templateId) continue;
       if (opts.status && run.status !== opts.status) continue;
-      results.push(run);
+      results.push(normalizeManualFlowRun(run));
     } catch { /* skip */ }
   }
 
@@ -1105,7 +1524,24 @@ export async function executeFlow(templateId, formValues, rootDir, context = {})
   });
 
   try {
-    startRun(run.id, rootDir);
+    let activeRun = startRun(run.id, rootDir);
+    const updateActiveRun = (mutator, eventSpec = null) => {
+      const current = getRun(activeRun.id, rootDir);
+      if (!current) throw new Error(`Run not found: ${activeRun.id}`);
+      const draft = cloneJson(current) || current;
+      const mutated = typeof mutator === "function"
+        ? (mutator(draft) || draft)
+        : draft;
+      const normalized = eventSpec?.eventType
+        ? addManualFlowEvent(mutated, eventSpec.eventType, eventSpec)
+        : normalizeManualFlowRun(mutated);
+      writeRunToDisk(normalized, rootDir);
+      if (eventSpec?.eventType) {
+        syncManualFlowLedger(normalized, rootDir, eventSpec.eventType, eventSpec);
+      }
+      activeRun = normalized;
+      return activeRun;
+    };
 
     const template = getFlowTemplate(templateId, rootDir);
     if (!template) throw new Error(`Template not found: ${templateId}`);
@@ -1128,8 +1564,19 @@ export async function executeFlow(templateId, formValues, rootDir, context = {})
       case "context-index-full":
         result = await executeContextIndexFull(run.formValues, rootDir, context);
         break;
+      case "queued-execution-plan":
+        result = await executeQueuedExecutionPlan(run.formValues, rootDir, {
+          ...context,
+          runId: activeRun.id,
+          updateRun: updateActiveRun,
+        });
+        break;
       case "research-agent":
-        result = await executeResearchAgent(run.formValues, rootDir, context);
+        result = await executeResearchAgent(run.formValues, rootDir, {
+          ...context,
+          runId: activeRun.id,
+          updateRun: updateActiveRun,
+        });
         break;
       default:
         // For custom templates, create a Bosun task
@@ -1137,7 +1584,7 @@ export async function executeFlow(templateId, formValues, rootDir, context = {})
         break;
     }
 
-    return completeRun(run.id, result, rootDir);
+    return completeRun(activeRun.id, result, rootDir);
   } catch (err) {
     console.warn("[manual-flows] execution failed for " + run.id + ": " + (err?.message || String(err)));
     return failRun(run.id, err?.message || "Execution failed", rootDir);
@@ -1227,6 +1674,281 @@ async function executeContextIndexFull(formValues, rootDir, _context = {}) {
   };
 }
 
+function normalizeQueueStrategy(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["global-sequential", "explicit-only", "agent-lane-queue"].includes(normalized)) {
+    return normalized;
+  }
+  return "agent-lane-queue";
+}
+
+function parseDependsOnLine(block = "") {
+  const match = block.match(/^depends\s*on\s*:\s*(.+)$/im);
+  if (!match) return [];
+  return uniqueTextList(
+    String(match[1] || "")
+      .split(/[,\n]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  );
+}
+
+function parseQueuedExecutionPlanDocument(planDocument = "") {
+  const raw = String(planDocument || "").trim();
+  if (!raw) {
+    throw new Error("Plan document is required.");
+  }
+
+  if (raw.startsWith("[")) {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new Error("Plan JSON must be a non-empty array of steps.");
+    }
+    return {
+      mode: "json",
+      steps: parsed.map((entry, index) => ({
+        id: String(entry?.id || `step-${index + 1}`).trim(),
+        title: String(entry?.title || entry?.name || `Step ${index + 1}`).trim(),
+        prompt: String(entry?.prompt || entry?.instructions || "").trim(),
+        lane: String(entry?.lane || entry?.agent || "").trim().toUpperCase() || null,
+        order: Number.isFinite(Number(entry?.order)) ? Number(entry.order) : index + 1,
+        dependsOnStepIds: uniqueTextList(entry?.dependsOnStepIds || entry?.dependsOn || []),
+      })),
+    };
+  }
+
+  const headingRe = /^##\s*Step\s+(\d+)(?:\s+([A-Za-z]))?\s*:\s*(.+)$/gim;
+  const matches = Array.from(raw.matchAll(headingRe));
+  if (matches.length > 0) {
+    const steps = matches.map((match, index) => {
+      const blockStart = match.index + match[0].length;
+      const blockEnd = index + 1 < matches.length ? matches[index + 1].index : raw.length;
+      const block = raw.slice(blockStart, blockEnd).trim();
+      const order = Number(match[1] || index + 1);
+      const lane = String(match[2] || "").trim().toUpperCase() || null;
+      const title = String(match[3] || `Step ${order}`).trim();
+      const explicitDepends = parseDependsOnLine(block);
+      const prompt = block
+        .replace(/^depends\s*on\s*:.+$/gim, "")
+        .trim();
+      return {
+        id: `step-${order}${lane ? `-${lane.toLowerCase()}` : ""}`,
+        title,
+        prompt,
+        lane,
+        order,
+        dependsOnStepIds: explicitDepends,
+      };
+    });
+    return { mode: "markdown-headings", steps };
+  }
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    throw new Error("Plan document does not contain any steps.");
+  }
+  return {
+    mode: "line-list",
+    steps: lines.map((line, index) => {
+      const laneMatch = line.match(/^\[([A-Za-z])\]\s*(.+)$/);
+      const lane = laneMatch ? String(laneMatch[1] || "").trim().toUpperCase() : null;
+      const title = laneMatch ? laneMatch[2] : line.replace(/^\d+[\).\s-]+/, "").trim();
+      return {
+        id: `step-${index + 1}${lane ? `-${lane.toLowerCase()}` : ""}`,
+        title: title || `Step ${index + 1}`,
+        prompt: title || `Step ${index + 1}`,
+        lane,
+        order: index + 1,
+        dependsOnStepIds: [],
+      };
+    }),
+  };
+}
+
+function buildQueuedExecutionPlan(parsed, formValues = {}) {
+  const queueStrategy = normalizeQueueStrategy(formValues.queueStrategy);
+  const ordered = [...parsed.steps]
+    .map((step, index) => ({
+      ...step,
+      order: Number.isFinite(Number(step.order)) ? Number(step.order) : index + 1,
+    }))
+    .sort((left, right) => Number(left.order || 0) - Number(right.order || 0));
+  const lastByLane = new Map();
+  let previousGlobalStepId = null;
+
+  const steps = ordered.map((step, index) => {
+    let dependsOnStepIds = uniqueTextList(step.dependsOnStepIds || []);
+    if (dependsOnStepIds.length === 0) {
+      if (queueStrategy === "global-sequential" && previousGlobalStepId) {
+        dependsOnStepIds = [previousGlobalStepId];
+      } else if (queueStrategy === "agent-lane-queue") {
+        const laneKey = String(step.lane || "_default").trim().toUpperCase();
+        const previousLaneStepId = lastByLane.get(laneKey);
+        if (previousLaneStepId) {
+          dependsOnStepIds = [previousLaneStepId];
+        }
+      }
+    }
+    const status = dependsOnStepIds.length > 0 ? "blocked" : "ready";
+    const normalized = normalizeManualFlowStep({
+      ...step,
+      order: step.order || index + 1,
+      dependsOnStepIds,
+      status,
+    }, index + 1);
+    lastByLane.set(String(normalized.lane || "_default").trim().toUpperCase(), normalized.id);
+    previousGlobalStepId = normalized.id;
+    return normalized;
+  });
+
+  const laneCount = uniqueTextList(steps.map((step) => step.lane).filter(Boolean)).length;
+  return {
+    planTitle: String(formValues.planTitle || "").trim(),
+    objective: String(formValues.objective || "").trim(),
+    parseMode: parsed.mode,
+    queueStrategy,
+    laneCount,
+    steps,
+    readyStepIds: steps.filter((step) => step.status === "ready").map((step) => step.id),
+    blockedStepIds: steps.filter((step) => step.status === "blocked").map((step) => step.id),
+  };
+}
+
+function buildQueuedStepTaskDescription(plan, step) {
+  const dependencySummary = step.dependsOnStepIds.length > 0
+    ? step.dependsOnStepIds.join(", ")
+    : "none";
+  return [
+    `Plan: ${plan.planTitle}`,
+    "",
+    `Objective: ${plan.objective}`,
+    "",
+    `Step ID: ${step.id}`,
+    `Order: ${step.order}`,
+    `Lane: ${step.lane || "unassigned"}`,
+    `Depends On: ${dependencySummary}`,
+    "",
+    "Prompt:",
+    step.prompt || step.title,
+  ].join("\n");
+}
+
+async function executeQueuedExecutionPlan(formValues, _rootDir, context = {}) {
+  const parsed = parseQueuedExecutionPlanDocument(formValues.planDocument);
+  const plan = buildQueuedExecutionPlan(parsed, formValues);
+
+  if (typeof context.updateRun === "function") {
+    context.updateRun((draft) => setManualFlowPlan(draft, plan), {
+      eventType: "manual-flow.plan.parsed",
+      executionKind: "plan",
+      message: `Parsed ${plan.steps.length} queued step(s)`,
+      summary: `Parsed ${plan.steps.length} queued step(s)`,
+    });
+  }
+
+  let taskGraph = null;
+  const createTasks = parseManualFlowBoolean(formValues.createTasks, true);
+  if (createTasks && context.taskManager && typeof context.taskManager.createTaskGraph === "function") {
+    taskGraph = await context.taskManager.createTaskGraph({
+      parentTask: {
+        title: `plan: ${plan.planTitle}`,
+        description: [
+          plan.objective,
+          "",
+          `Queue strategy: ${plan.queueStrategy}`,
+          `Parsed from: ${plan.parseMode}`,
+          `Step count: ${plan.steps.length}`,
+        ].join("\n"),
+        priority: formValues.taskPriority || "high",
+        labels: ["manual-plan", "queued-plan", "planning"],
+        meta: {
+          manualPlan: true,
+          manualFlowRunId: context.runId || null,
+          queueStrategy: plan.queueStrategy,
+        },
+      },
+      tasks: plan.steps.map((step) => ({
+        clientId: step.id,
+        title: `${step.lane ? `[${step.lane}] ` : ""}Step ${step.order}: ${step.title}`,
+        description: buildQueuedStepTaskDescription(plan, step),
+        priority: formValues.taskPriority || "high",
+        labels: ["manual-plan-step", "queued-plan", step.lane ? `agent-${step.lane.toLowerCase()}` : null].filter(Boolean),
+        dependsOnTaskClientIds: step.dependsOnStepIds,
+        sprintId: String(formValues.sprintId || "").trim() || undefined,
+        meta: {
+          manualPlan: true,
+          manualFlowRunId: context.runId || null,
+          stepId: step.id,
+          stepOrder: step.order,
+          stepLane: step.lane,
+          queueStrategy: plan.queueStrategy,
+          stepPrompt: step.prompt,
+        },
+      })),
+    });
+    const taskMap = new Map(
+      (Array.isArray(taskGraph?.tasks) ? taskGraph.tasks : [])
+        .filter((entry) => entry?.clientId)
+        .map((entry) => [entry.clientId, entry]),
+    );
+    const planWithTasks = {
+      ...plan,
+      relatedTaskIds: [
+        taskGraph?.parentTaskId || null,
+        ...(Array.isArray(taskGraph?.tasks) ? taskGraph.tasks.map((entry) => entry?.taskId || entry?.id) : []),
+      ],
+      steps: plan.steps.map((step) => {
+        const linked = taskMap.get(step.id);
+        return normalizeManualFlowStep({
+          ...step,
+          taskId: linked?.taskId || linked?.id || null,
+          taskTitle: linked?.title || null,
+          status: step.status === "ready" ? "queued" : step.status,
+        }, step.order);
+      }),
+    };
+    if (typeof context.updateRun === "function") {
+      context.updateRun((draft) => setManualFlowPlan(draft, planWithTasks), {
+        eventType: "manual-flow.plan.tasks-created",
+        executionKind: "task-graph",
+        message: `Created ${taskGraph?.taskCount || plan.steps.length} queued task(s)`,
+        taskId: taskGraph?.parentTaskId || null,
+      });
+    }
+    return {
+      mode: "task-graph-created",
+      accepted: true,
+      planTitle: plan.planTitle,
+      objective: plan.objective,
+      queueStrategy: plan.queueStrategy,
+      parseMode: plan.parseMode,
+      laneCount: plan.laneCount,
+      stepCount: plan.steps.length,
+      readyStepIds: plan.readyStepIds,
+      blockedStepIds: plan.blockedStepIds,
+      steps: planWithTasks.steps,
+      taskGraph,
+    };
+  }
+
+  return {
+    mode: "queued-plan",
+    accepted: true,
+    planTitle: plan.planTitle,
+    objective: plan.objective,
+    queueStrategy: plan.queueStrategy,
+    parseMode: plan.parseMode,
+    laneCount: plan.laneCount,
+    stepCount: plan.steps.length,
+    readyStepIds: plan.readyStepIds,
+    blockedStepIds: plan.blockedStepIds,
+    steps: plan.steps,
+  };
+}
+
 async function executeResearchAgent(formValues, rootDir, context = {}) {
   const researchConfig = resolveResearchAgentConfig(formValues, rootDir);
   const {
@@ -1282,6 +2004,20 @@ async function executeResearchAgent(formValues, rootDir, context = {}) {
 
   Promise.resolve()
     .then(() => engine.execute(templateId, input, { force: true, triggerSource: "manual" }))
+    .then((workflowResult) => {
+      const workflowRunId = String(workflowResult?.runId || workflowResult?.workflowRunId || "").trim();
+      if (workflowRunId && typeof context.updateRun === "function") {
+        context.updateRun((draft) => setManualFlowPlan(draft, {
+          relatedWorkflowRunIds: [workflowRunId],
+        }), {
+          eventType: "manual-flow.workflow-dispatched",
+          executionKind: "workflow",
+          message: `Workflow run ${workflowRunId} dispatched`,
+          workflowRunId,
+        });
+      }
+      return workflowResult;
+    })
     .catch((err) => {
       console.error(`[manual-flows] research-agent dispatch failed: ${err.message}`);
     });
@@ -1592,5 +2328,6 @@ function renderTemplateString(templateText = "", values = {}) {
 function writeRunToDisk(run, rootDir) {
   const dir = getRunsDir(rootDir);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(resolve(dir, `${run.id}.json`), JSON.stringify(run, null, 2) + "\n", "utf8");
+  const normalized = normalizeManualFlowRun(run);
+  writeFileSync(resolve(dir, `${normalized.id}.json`), JSON.stringify(normalized, null, 2) + "\n", "utf8");
 }

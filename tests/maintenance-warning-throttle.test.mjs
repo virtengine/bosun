@@ -7,6 +7,11 @@ const source = readFileSync(resolve(process.cwd(), "infra/maintenance.mjs"), "ut
 // ── evaluateThrottledWarning (new pure helper export) ──────────────────────
 
 describe("maintenance evaluateThrottledWarning pure helper", () => {
+  it("exports setMaintenanceWorkflowEventQueue for monitor-owned wiring", async () => {
+    const mod = await import("../infra/maintenance.mjs");
+    expect(typeof mod.setMaintenanceWorkflowEventQueue).toBe("function");
+  });
+
   it("is exported from maintenance.mjs", async () => {
     const mod = await import("../infra/maintenance.mjs");
     expect(typeof mod.evaluateThrottledWarning).toBe("function");
@@ -100,6 +105,12 @@ describe("maintenance resetBranchSyncWarningStateForTests", () => {
 });
 
 describe("maintenance branch sync warning throttle", () => {
+  it("keeps maintenance workflow events as a no-op until a queue is injected", () => {
+    expect(source).toMatch(
+      /function\s+emitMaintenanceEvent\s*\(\s*eventType,\s*data\s*=\s*\{\}\s*\)\s*\{\s*if\s*\(!_queueWorkflowEvent\)\s*return;\s*_queueWorkflowEvent\(eventType,\s*data\);\s*\}/,
+    );
+  });
+
   it("defines logThrottledBranchSync function", () => {
     expect(source).toMatch(/function\s+logThrottledBranchSync\s*\(/);
   });

@@ -38,6 +38,8 @@ import {
   scanRepositoryForImport,
   importAgentProfilesFromRepository,
   syncAutoDiscoveredLibraryEntries,
+  discoverLocalSkillCatalog,
+  resolveRepositorySkillTrust,
 } from "../infra/library-manager.mjs";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -198,6 +200,34 @@ describe("manifest CRUD", () => {
     expect(getEntry(tmpDir, "nonexistent")).toBeNull();
   });
 
+  it("getEntryContent returns null instead of throwing for malformed manifest filenames", () => {
+    mkdirSync(resolve(tmpDir, SKILL_DIR), { recursive: true });
+    writeFileSync(resolve(tmpDir, SKILL_DIR, "broken.md"), "# Broken Skill\n", "utf8");
+    saveManifest(tmpDir, {
+      entries: [
+        {
+          id: "broken-skill",
+          type: "skill",
+          name: "Broken Skill",
+          filename: ["broken.md"],
+          description: "legacy malformed filename payload",
+          tags: [],
+          scope: "global",
+          workspace: null,
+          meta: {},
+          createdAt: "2026-04-02T00:00:00.000Z",
+          updatedAt: "2026-04-02T00:00:00.000Z",
+        },
+      ],
+      generated: "2026-04-02T00:00:00.000Z",
+    });
+
+    const entry = getEntry(tmpDir, "broken-skill");
+    expect(entry).not.toBeNull();
+    expect(() => getEntryContent(tmpDir, entry)).not.toThrow();
+    expect(getEntryContent(tmpDir, entry)).toBeNull();
+  });
+
   it("deleteEntry removes from manifest", () => {
     upsertEntry(tmpDir, { type: "prompt", name: "To Delete" }, "content");
     expect(loadManifest(tmpDir).entries).toHaveLength(1);
@@ -209,6 +239,31 @@ describe("manifest CRUD", () => {
 
   it("deleteEntry returns false for non-existent id", () => {
     expect(deleteEntry(tmpDir, "nope")).toBe(false);
+  });
+
+  it("deleteEntry tolerates malformed filenames when deleting files", () => {
+    mkdirSync(resolve(tmpDir, SKILL_DIR), { recursive: true });
+    saveManifest(tmpDir, {
+      entries: [
+        {
+          id: "broken-skill",
+          type: "skill",
+          name: "Broken Skill",
+          filename: ["broken.md"],
+          description: "legacy malformed filename payload",
+          tags: [],
+          scope: "global",
+          workspace: null,
+          meta: {},
+          createdAt: "2026-04-02T00:00:00.000Z",
+          updatedAt: "2026-04-02T00:00:00.000Z",
+        },
+      ],
+      generated: "2026-04-02T00:00:00.000Z",
+    });
+
+    expect(() => deleteEntry(tmpDir, "broken-skill", { deleteFile: true })).not.toThrow();
+    expect(loadManifest(tmpDir).entries).toHaveLength(0);
   });
 
   it("deleteEntry removes imported source artifacts and stale skill refs when deleting an imported skill", () => {
@@ -938,6 +993,8 @@ describe("well-known source import", () => {
       expect(prompts.length).toBeGreaterThan(0);
       expect(skills.length).toBeGreaterThan(0);
       expect(mcps.length).toBeGreaterThan(0);
+      expect(mcps[0].stabilityTier).toBe("experimental");
+      expect(mcps[0].installSurface).toBe("repository-import");
 
       const taskPlanner = agents.find((entry) => entry.id.includes("task-planner"));
       expect(taskPlanner).toBeTruthy();
@@ -1255,14 +1312,115 @@ describe("syncAutoDiscoveredLibraryEntries", () => {
     const result = syncAutoDiscoveredLibraryEntries(tmpDir);
     expect(result.mcpEntriesUpserted).toBeGreaterThan(0);
 
-    const entry = getEntry(tmpDir, "github");
-    expect(entry).not.toBeNull();
-    expect(entry.type).toBe("mcp");
-    const mcp = getEntryContent(tmpDir, entry);
-    expect(mcp.transport).toBe("stdio");
-    expect(mcp.command).toBe("npx");
-    expect(Array.isArray(mcp.args)).toBe(true);
-    expect(mcp.env).toEqual(expect.objectContaining({ GITHUB_TOKEN: "" }));
+      const entry = getEntry(tmpDir, "github");
+      expect(entry).not.toBeNull();
+      expect(entry.type).toBe("mcp");
+      expect(entry.stabilityTier).toBe("experimental");
+      expect(entry.installSurface).toBe("autodiscovered");
+      const mcp = getEntryContent(tmpDir, entry);
+      expect(mcp.transport).toBe("stdio");
+      expect(mcp.command).toBe("npx");
+      expect(Array.isArray(mcp.args)).toBe(true);
+      expect(mcp.env).toEqual(expect.objectContaining({ GITHUB_TOKEN: "" }));
+      expect(mcp.stabilityTier).toBe("experimental");
+      expect(mcp.installSurface).toBe("autodiscovered");
+    });
+
+    it("filters curated verified entries separately from experimental imported entries", () => {
+      upsertEntry(tmpDir, {
+        id: "verified-github",
+        type: "mcp",
+        name: "Verified GitHub",
+        description: "Verified curated MCP",
+        tags: ["mcp", "github"],
+        stabilityTier: "verified",
+        installSurface: "curated",
+      }, {
+        id: "verified-github",
+        name: "Verified GitHub",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@anthropic/mcp-github"],
+        stabilityTier: "verified",
+        installSurface: "curated",
+      });
+      upsertEntry(tmpDir, {
+        id: "experimental-repo",
+        type: "mcp",
+        name: "Experimental Repo MCP",
+        description: "Imported MCP",
+        tags: ["mcp", "imported"],
+        stabilityTier: "experimental",
+        installSurface: "repository-import",
+      }, {
+        id: "experimental-repo",
+        name: "Experimental Repo MCP",
+        transport: "stdio",
+        command: "node",
+        args: ["server.js"],
+        stabilityTier: "experimental",
+        installSurface: "repository-import",
+      });
+
+      const verifiedOnly = listEntries(tmpDir, { type: "mcp", includeExperimental: false });
+      const experimentalOnly = listEntries(tmpDir, { type: "mcp", stabilityTier: "experimental" });
+      const curatedOnly = listEntries(tmpDir, { type: "mcp", installSurface: "curated" });
+
+      expect(verifiedOnly.map((entry) => entry.id)).toEqual(["verified-github"]);
+      expect(experimentalOnly.map((entry) => entry.id)).toEqual(["experimental-repo"]);
+      expect(curatedOnly.map((entry) => entry.id)).toEqual(["verified-github"]);
+    });
+});
+
+describe("local skill discovery trust gating", () => {
+  beforeEach(() => fresh());
+  afterEach(() => cleanup());
+
+  it("catalogs cross-client repo skills without trusting them by default", () => {
+    mkdirSync(join(tmpDir, ".agents", "skills", "incident-response"), { recursive: true });
+    writeFileSync(
+      join(tmpDir, ".agents", "skills", "incident-response", "SKILL.md"),
+      [
+        "<!-- tags: incident response runbook -->",
+        "# Skill: Incident Response",
+        "",
+        "Use the incident response runbook.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const catalog = discoverLocalSkillCatalog(tmpDir);
+    const entry = catalog.entries.find((item) => item.sourcePath === ".agents/skills/incident-response/SKILL.md");
+
+    expect(entry).toBeTruthy();
+    expect(entry.catalogOnly).toBe(true);
+    expect(entry.trusted).toBe(false);
+    expect(entry.trustState).toBe("catalog-only");
+    expect(catalog.trust.allowCrossClientExpansion).toBe(false);
+  });
+
+  it("allows cross-client repo skills when operator trust mode is allow", () => {
+    mkdirSync(join(tmpDir, ".agents", "skills", "incident-response"), { recursive: true });
+    writeFileSync(
+      join(tmpDir, ".agents", "skills", "incident-response", "SKILL.md"),
+      [
+        "<!-- tags: incident response runbook -->",
+        "# Skill: Incident Response",
+        "",
+        "Use the incident response runbook.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const trust = resolveRepositorySkillTrust(tmpDir, { trustMode: "allow" });
+    const catalog = discoverLocalSkillCatalog(tmpDir, { trustMode: "allow" });
+    const entry = catalog.entries.find((item) => item.sourcePath === ".agents/skills/incident-response/SKILL.md");
+
+    expect(trust.allowCrossClientExpansion).toBe(true);
+    expect(entry).toBeTruthy();
+    expect(entry.catalogOnly).toBe(false);
+    expect(entry.trusted).toBe(true);
+    expect(entry.trustReason).toBe("operator-trusted");
   });
 });
 
@@ -1338,4 +1496,3 @@ describe("renderPromptTemplate with library resolver", () => {
     expect(result).toBe("Hello World");
   });
 });
-

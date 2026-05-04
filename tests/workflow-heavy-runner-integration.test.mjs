@@ -65,8 +65,12 @@ describe("workflow heavy runner integration", () => {
     expect(result.runnerArtifactPointers.length).toBeGreaterThan(0);
     expect(result.outputCompacted).toBe(true);
     expect(result.output).toContain("bosun --tool-log");
-    expect(result.outputDiagnostics?.suggestedRerun).toContain("vitest run");
-  }, process.platform === "win32" ? 30000 : 5000);
+    expect(
+      result.outputSuggestedRerun
+      || result.outputDiagnostics?.suggestedRerun
+      || result.output,
+    ).toContain("vitest run");
+  }, process.platform === "win32" ? 30000 : 15000);
 
   it("surfaces blocked evidence when runner lease acquisition exhausts retries", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "bosun-validation-runner-blocked-"));

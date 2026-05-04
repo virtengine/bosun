@@ -4,9 +4,10 @@
  * ────────────────────────────────────────────────────────────── */
 
 import { signal } from "@preact/signals";
-import { apiFetch, onWsMessage, withLoadingSuppressed, withLoadingTracked } from "../../../ui/modules/api.js";
-import { generateId } from "../../../ui/modules/utils.js";
-import { cloudStorageGet } from "../../../ui/modules/telegram.js";
+import { apiFetch, onWsMessage, withLoadingSuppressed, withLoadingTracked } from "./api.js";
+import { cloneValue } from "./utils.js";
+import { generateId } from "./utils.js";
+import { cloudStorageGet } from "./telegram.js";
 
 /* ═══════════════════════════════════════════════════════════════
  *  CLOUD STORAGE HELPER — mirrors settings.js pattern
@@ -359,6 +360,7 @@ export function classifyTaskLifecycleAction(currentStatus, nextStatus) {
 // ── Agents
 export const agentsData = signal([]);
 export const agentWorkspaceTarget = signal(null);
+export const guardrailsData = signal(null);
 
 // ── Infra
 export const worktreeData = signal([]);
@@ -665,7 +667,7 @@ export async function loadExecutor() {
 }
 
 /** Large page size for kanban mode to load all tasks in one request */
-export const KANBAN_PAGE_SIZE = 200;
+export const KANBAN_PAGE_SIZE = 500;
 
 /** Load tasks with current filter/page/sort → tasksData + tasksTotalPages */
 export async function loadTasks(options = {}) {
@@ -687,6 +689,17 @@ export async function loadTasks(options = {}) {
     params.set("priority", tasksPriority.value);
   if (tasksSearch.value) params.set("search", tasksSearch.value);
   if (tasksSort.value) params.set("sort", tasksSort.value);
+  if (options?.fullRuntime === true) {
+    params.set("includeStartGuards", "1");
+    params.set("includeBlockedDiagnostics", "1");
+    params.set("includeWorkflowRuns", "1");
+    params.set("includeSupervisorDiagnostics", "1");
+  } else {
+    params.set("includeStartGuards", "0");
+    params.set("includeBlockedDiagnostics", "0");
+    params.set("includeWorkflowRuns", "0");
+    params.set("includeSupervisorDiagnostics", "0");
+  }
 
   const res = await apiFetch(`/api/tasks?${params}`, { _silent: true }).catch(
     (err) => {
@@ -1099,6 +1112,17 @@ export async function loadBenchmarks(providerId = "") {
   _markFresh("benchmarks");
 }
 
+export async function loadGuardrails() {
+  const url = "/api/guardrails";
+  const cached = _cacheGet(url);
+  if (_cacheFresh(url, "config")) return;
+  if (cached) guardrailsData.value = cached.data;
+  const res = await apiFetch(url, { _silent: true }).catch(() => ({ ok: false }));
+  guardrailsData.value = res?.snapshot ?? null;
+  _cacheSet(url, guardrailsData.value);
+  _markFresh("config");
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  TAB REFRESH — map tab names to their required loaders
  * ═══════════════════════════════════════════════════════════════ */
@@ -1114,7 +1138,8 @@ const TAB_LOADERS = {
     ]),
   tasks: () => loadTasks({ pageSize: KANBAN_PAGE_SIZE }),
   benchmarks: () => loadBenchmarks(),
-  agents: () => Promise.all([loadAgents(), loadExecutor(), import("../../../ui/components/session-list.js").then((m) => m.loadSessions()).catch(() => {})]),
+  agents: () => Promise.all([loadAgents(), loadExecutor(), import("../components/session-list.js").then((m) => m.loadSessions()).catch(() => {})]),
+  guardrails: () => loadGuardrails(),
   infra: () =>
     Promise.all([
       loadWorktrees(),
@@ -1207,7 +1232,7 @@ export function scheduleRefresh(ms = 5000) {
     _scheduleTimer = null;
     // Dynamic import to avoid circular dependency at module load time
     try {
-      const { activeTab } = await import("../../../ui/modules/router.js");
+      const { activeTab } = await import("./router.js");
       await refreshTab(activeTab.value, { background: true, manual: false });
     } catch {
       await refreshTab("dashboard", { background: true, manual: false });
@@ -1246,7 +1271,7 @@ export function initWsInvalidationListener() {
     channels.forEach((ch) => _cacheClearGroup(ch));
 
     // Determine interested channels based on active tab
-    import("../../../ui/modules/router.js")
+    import("./router.js")
       .then(({ activeTab }) => {
         const interested = WS_CHANNEL_MAP[activeTab.value] || ["*"];
         if (

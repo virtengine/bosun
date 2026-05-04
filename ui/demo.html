@@ -3794,6 +3794,141 @@
           };
         }
 
+        const buildDemoWorkflowApprovals = () => {
+          const primaryRun = (STATE.workflowRuns || [])[0] || {};
+          return [
+            {
+              requestId: 'approval-demo-1',
+              id: 'approval-demo-1',
+              workflowId: primaryRun.workflowId || 'wf-demo',
+              workflowName: primaryRun.workflowName || 'Demo Workflow',
+              runId: primaryRun.runId || 'run-001',
+              stageId: 'review',
+              status: 'pending',
+              title: 'Approve workflow continuation',
+              requestedAt: new Date(Date.now() - 5 * min).toISOString(),
+              note: 'Demo workflow is waiting for operator approval before merge.',
+            },
+          ];
+        };
+
+        const buildDemoHarnessApprovals = () => ([
+          {
+            requestId: 'demo-approval-1',
+            stageId: 'review',
+            stageType: 'approval',
+            taskId: 'bosun-42',
+            title: 'Approve harness patch application',
+            status: 'pending',
+            createdAt: new Date(Date.now() - 10 * min).toISOString(),
+            note: 'Harness needs explicit operator approval before it can apply the patch.',
+          },
+        ]);
+
+        const buildDemoHarnessSurface = (limitValue) => {
+          const limit = Math.max(1, Number(limitValue || 25));
+          return {
+            workflows: {
+              approvals: buildDemoWorkflowApprovals(),
+              runs: (STATE.workflowRuns || [])
+                .slice(0, limit)
+                .map((run) => {
+                  const workflow = (STATE.workflows || []).find((entry) => entry.id === run.workflowId);
+                  return {
+                    ...run,
+                    workflowName: run.workflowName || workflow?.name || run.workflowId,
+                  };
+                }),
+            },
+            harness: {
+              approvals: buildDemoHarnessApprovals(),
+              runs: (STATE.harness?.runs || [])
+                .slice(0, limit)
+                .map((run) => ({ ...run, compiledProfile: { ...run.compiledProfile } })),
+              active: STATE.harness?.activeState
+                ? {
+                    ...STATE.harness.activeState,
+                    compiledProfile: { ...STATE.harness.activeState.compiledProfile },
+                  }
+                : null,
+            },
+          };
+        };
+
+        const buildDemoHarnessTelemetryEvents = (limitValue) => {
+          const limit = Math.max(1, Number(limitValue || 25));
+          const events = [];
+          for (const run of STATE.harness?.runs || []) {
+            for (const event of run?.events || []) {
+              events.push({
+                id: `${run.runId}:${event.stageId || event.type}:${event.at || event.timestamp || ''}`,
+                type: event.type || 'stage:event',
+                category: 'harness',
+                source: 'demo-harness',
+                runId: run.runId,
+                taskId: run.taskId || 'bosun-42',
+                sessionId: run.sessionId || null,
+                timestamp: event.at || event.timestamp || run.finishedAt || run.startedAt || new Date().toISOString(),
+                summary: event.message || `${event.type || 'event'} ${event.stageId || ''}`.trim(),
+                stageId: event.stageId || null,
+              });
+            }
+          }
+          for (const request of buildDemoHarnessApprovals()) {
+            events.push({
+              id: `approval:${request.requestId}`,
+              type: 'approval:pending',
+              category: 'approval',
+              source: 'demo-harness',
+              runId: null,
+              taskId: request.taskId || 'bosun-42',
+              sessionId: null,
+              timestamp: request.createdAt || new Date().toISOString(),
+              summary: request.title,
+              stageId: request.stageId || null,
+              requestId: request.requestId,
+            });
+          }
+          return events
+            .sort((left, right) => Date.parse(right.timestamp || 0) - Date.parse(left.timestamp || 0))
+            .slice(0, limit);
+        };
+
+        const buildDemoHarnessTelemetrySummary = () => {
+          const harnessRuns = STATE.harness?.runs || [];
+          const completedRuns = harnessRuns.filter((run) => String(run?.result?.status || '').toLowerCase() === 'completed');
+          return {
+            generatedAt: new Date().toISOString(),
+            runCount: harnessRuns.length,
+            activeRunCount: harnessRuns.filter((run) => !run.finishedAt).length,
+            approvalPendingCount: buildDemoHarnessApprovals().length,
+            completedRunCount: completedRuns.length,
+            successRate: harnessRuns.length ? completedRuns.length / harnessRuns.length : 1,
+            providerCount: 2,
+            providers: ['openai-responses', 'claude-oauth'],
+          };
+        };
+
+        const buildDemoHarnessProviderSummary = () => ({
+          generatedAt: new Date().toISOString(),
+          items: [
+            {
+              providerId: 'openai-responses',
+              label: 'OpenAI Responses API',
+              runCount: 1,
+              successCount: 1,
+              lastRunAt: STATE.harness?.runs?.[0]?.finishedAt || STATE.harness?.runs?.[0]?.startedAt || null,
+            },
+            {
+              providerId: 'claude-oauth',
+              label: 'Claude OAuth',
+              runCount: 0,
+              successCount: 0,
+              lastRunAt: null,
+            },
+          ],
+        });
+
         if (route === '/api/harness/active') {
           return {
             ok: true,
@@ -3815,6 +3950,27 @@
           return {
             ok: true,
             items: (STATE.harness.runs || []).slice(0, limit).map((run) => ({ ...run, compiledProfile: { ...run.compiledProfile } })),
+          };
+        }
+        if (route === '/api/harness/surface') {
+          const limit = Math.max(1, Number(params.get('limit') || 25));
+          return {
+            ok: true,
+            ...buildDemoHarnessSurface(limit),
+          };
+        }
+        if (route === '/api/harness/sessions') {
+          return {
+            ok: true,
+            sessions: (STATE.harness?.runs || []).map((run, index) => ({
+              sessionId: `demo-harness-session-${index + 1}`,
+              runId: run.runId,
+              taskId: run.taskId || 'bosun-42',
+              status: run?.result?.status || 'completed',
+              startedAt: run.startedAt,
+              updatedAt: run.finishedAt || run.startedAt,
+              providerSelection: 'openai-responses',
+            })),
           };
         }
         const harnessRunMatch = route.match(/^\/api\/harness\/runs\/([^/]+)$/);
@@ -4285,6 +4441,8 @@
               blockPushOnCritical: true,
               allowOverride: true,
             },
+            updatedAt: new Date().toISOString(),
+            source: 'demo',
           };
         }
         if (route === '/api/guardrails/runtime') {
@@ -4385,16 +4543,15 @@
             },
           };
         }
-        const vaultSecretMatch = route.match(/^\/api\/vault\/([^/]+)$/);
-        if (vaultSecretMatch) {
-          const secretId = decodeURIComponent(vaultSecretMatch[1] || 'demo-secret');
+        if (route.match(/^\/api\/vault\/[^/]+$/)) {
+          const secretId = decodeURIComponent(route.split('/').pop() || '');
           return {
             ok: true,
             secret: {
               id: secretId,
-              label: secretId.replace(/[-_]/g, ' '),
-              provider: 'demo',
+              label: secretId || 'demo-secret',
               masked: true,
+              provider: 'demo',
             },
           };
         }
@@ -4406,6 +4563,42 @@
           return { data: STATE.executors.map((e) => ({ ...e, status: e.enabled ? 'active' : 'disabled' })) };
         if (route === '/api/telemetry/alerts')
           return { data: [] };
+        if (route === '/api/telemetry/harness/summary')
+          return { ok: true, data: buildDemoHarnessTelemetrySummary() };
+        if (route === '/api/telemetry/harness/live') {
+          return {
+            ok: true,
+            data: {
+              generatedAt: new Date().toISOString(),
+              ...buildDemoHarnessSurface(params.get('limit') || 12),
+            },
+          };
+        }
+        if (route === '/api/telemetry/harness/events')
+          return { ok: true, events: buildDemoHarnessTelemetryEvents(params.get('limit') || 25) };
+        if (route === '/api/telemetry/harness/providers')
+          return { ok: true, data: buildDemoHarnessProviderSummary() };
+        if (route === '/api/telemetry/harness/trace') {
+          return {
+            ok: true,
+            data: {
+              generatedAt: new Date().toISOString(),
+              events: buildDemoHarnessTelemetryEvents(params.get('limit') || 50),
+            },
+          };
+        }
+        if (route === '/api/telemetry/harness/native') {
+          return {
+            ok: true,
+            data: {
+              enabled: true,
+              hotPathState: 'ready',
+              generatedAt: new Date().toISOString(),
+              scanLagMs: 420,
+              lastCompactionAt: new Date(Date.now() - 42 * min).toISOString(),
+            },
+          };
+        }
         if (route === '/api/analytics/usage') {
           const daysParam = Number(params.get('days') || '30');
           // Build mock usage analytics from demo STATE
@@ -5341,17 +5534,7 @@
         if (route === '/api/harness/approvals') {
           return {
             ok: true,
-            approvals: [
-              {
-                requestId: 'demo-approval-1',
-                stageId: 'review',
-                stageType: 'approval',
-                taskId: 'bosun-42',
-                title: 'Approve harness patch application',
-                status: 'pending',
-                createdAt: new Date(Date.now() - 600000).toISOString(),
-              },
-            ],
+            approvals: buildDemoHarnessApprovals(),
           };
         }
         if (route === '/api/agent-runs') {
@@ -5939,14 +6122,64 @@
 
         // ── Settings & Config ──
         if (route === '/api/settings') {
+          const providers = {
+            defaultProviderId: 'openai-responses',
+            items: [
+              {
+                providerId: 'openai-responses',
+                label: 'OpenAI Responses API',
+                enabled: true,
+                advanced: false,
+                auth: { status: 'authenticated', authenticated: true, canRun: true, preferredMode: 'apiKey' },
+                modelCatalog: { defaultModel: 'gpt-5.4', models: [{ id: 'gpt-5.4', label: 'gpt-5.4', default: true }] },
+                capabilities: { streaming: true, tools: true, reasoning: true, apiKey: true },
+              },
+              {
+                providerId: 'ollama',
+                label: 'Ollama',
+                enabled: true,
+                advanced: true,
+                auth: { status: 'ready', authenticated: true, canRun: true, preferredMode: 'local' },
+                modelCatalog: { defaultModel: 'qwen2.5-coder:latest', models: [{ id: 'qwen2.5-coder:latest', label: 'qwen2.5-coder:latest', default: true }] },
+                capabilities: { streaming: true, tools: true, reasoning: true, local: true, openaiCompatible: true },
+              },
+            ],
+          };
           return {
             ok: true,
             data: { ...STATE.settings },
+            providers,
             meta: {
               envPath: '.env',
               configPath: 'bosun.config.json',
               configDir: '/demo',
             },
+          };
+        }
+        if (route === '/api/providers') {
+          return {
+            ok: true,
+            defaultProviderId: 'openai-responses',
+            items: [
+              {
+                providerId: 'openai-responses',
+                label: 'OpenAI Responses API',
+                enabled: true,
+                advanced: false,
+                auth: { status: 'authenticated', authenticated: true, canRun: true, preferredMode: 'apiKey' },
+                modelCatalog: { defaultModel: 'gpt-5.4', models: [{ id: 'gpt-5.4', label: 'gpt-5.4', default: true }] },
+                capabilities: { streaming: true, tools: true, reasoning: true, apiKey: true },
+              },
+              {
+                providerId: 'ollama',
+                label: 'Ollama',
+                enabled: true,
+                advanced: true,
+                auth: { status: 'ready', authenticated: true, canRun: true, preferredMode: 'local' },
+                modelCatalog: { defaultModel: 'qwen2.5-coder:latest', models: [{ id: 'qwen2.5-coder:latest', label: 'qwen2.5-coder:latest', default: true }] },
+                capabilities: { streaming: true, tools: true, reasoning: true, local: true, openaiCompatible: true },
+              },
+            ],
           };
         }
         if (route === '/api/settings/update') {
@@ -6106,15 +6339,7 @@
         if (route === '/api/workflows/approvals') {
           return {
             ok: true,
-            approvals: [
-              {
-                id: 'approval-demo-1',
-                workflowId: 'wf-demo',
-                workflowName: 'Demo Workflow',
-                status: 'pending',
-                requestedAt: new Date(now - 5 * min).toISOString(),
-              },
-            ],
+            approvals: buildDemoWorkflowApprovals(),
           };
         }
 

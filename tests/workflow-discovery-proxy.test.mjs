@@ -14,6 +14,11 @@ import {
   searchCatalogEntries,
 } from "../workflow/mcp-discovery-proxy.mjs";
 import {
+  getResearchToolBundle,
+  installMcpServer,
+  listCatalog,
+  listInstalledMcpServers,
+  listResearchToolBundles,
   resolveMcpServersForAgent,
   wrapServersWithDiscoveryProxy,
 } from "../workflow/mcp-registry.mjs";
@@ -303,6 +308,50 @@ describe("mcp discovery proxy helpers", () => {
     expect(existsSync(wrapped[0].env.BOSUN_DISCOVERY_PROXY_CONFIG_PATH)).toBe(true);
   });
 
+  it("defaults curated catalog listings to verified servers while allowing experimental opt-in", async () => {
+    const verifiedOnly = listCatalog();
+    const allEntries = listCatalog({ includeExperimental: true });
+    const experimentalOnly = listCatalog({ stabilityTier: "experimental", includeExperimental: true });
+
+    expect(verifiedOnly.length).toBeGreaterThan(0);
+    expect(verifiedOnly.every((entry) => entry.stabilityTier === "verified")).toBe(true);
+    expect(allEntries.length).toBeGreaterThan(verifiedOnly.length);
+    expect(experimentalOnly.length).toBeGreaterThan(0);
+    expect(experimentalOnly.every((entry) => entry.stabilityTier === "experimental")).toBe(true);
+  });
+
+  it("exposes a scientific-evidence research bundle with MCP and native capability recommendations", async () => {
+    const bundles = listResearchToolBundles();
+    const bundle = getResearchToolBundle("scientific-evidence", { includeExperimental: true });
+
+    expect(bundles.some((entry) => entry.id === "scientific-evidence")).toBe(true);
+    expect(bundle).toBeTruthy();
+    expect(bundle.recommendedServerIds).toEqual(
+      expect.arrayContaining(["fetch", "filesystem", "context7"]),
+    );
+    expect(bundle.optionalServerIds).toEqual(
+      expect.arrayContaining(["exa", "brave-search"]),
+    );
+    expect(bundle.nativeCapabilities.map((entry) => entry.id)).toEqual(
+      expect.arrayContaining(["pdf-corpus-ingestion", "runtime-log-query", "reviewed-finding-promotion"]),
+    );
+  });
+
+  it("persists stability tier and install surface for curated MCP installs", async () => {
+    const root = await makeRoot();
+    const installed = await installMcpServer(root, "github");
+    expect(installed.stabilityTier).toBe("verified");
+    expect(installed.installSurface).toBe("curated");
+
+    const servers = await listInstalledMcpServers(root);
+    expect(servers).toHaveLength(1);
+    expect(servers[0]).toMatchObject({
+      id: "github",
+      stabilityTier: "verified",
+      installSurface: "curated",
+    });
+  });
+
   it("skips curated MCP servers with missing required auth by default", async () => {
     const root = await makeRoot();
     const resolved = await resolveMcpServersForAgent(root, ["linear"]);
@@ -319,6 +368,8 @@ describe("mcp discovery proxy helpers", () => {
       expect(resolved[0]).toMatchObject({
         id: "linear",
         command: "npx",
+        stabilityTier: "experimental",
+        installSurface: "curated",
         env: {
           LINEAR_API_KEY: "test-linear-key",
         },

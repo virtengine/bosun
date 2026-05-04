@@ -10,8 +10,6 @@ vi.mock("node:child_process", async () => {
   };
 });
 
-const { getGitHubAuthScopes } = await import("../setup.mjs");
-
 function isGhProbe(command) {
   return (
     typeof command === "string" &&
@@ -19,8 +17,13 @@ function isGhProbe(command) {
   );
 }
 
+async function loadSetupModule() {
+  vi.resetModules();
+  return import("../setup.mjs");
+}
+
 describe("getGitHubAuthScopes runtime guardrails", () => {
-  it("returns empty scopes when gh is unavailable", () => {
+  it("returns empty scopes when gh is unavailable", async () => {
     execSyncMock.mockReset();
     execSyncMock.mockImplementation((command) => {
       if (isGhProbe(command)) {
@@ -29,11 +32,12 @@ describe("getGitHubAuthScopes runtime guardrails", () => {
       return "";
     });
 
+    const { getGitHubAuthScopes } = await loadSetupModule();
     const scopes = getGitHubAuthScopes(process.cwd());
     expect(scopes).toEqual([]);
   });
 
-  it("parses scopes and disables gh prompts with a bounded timeout", () => {
+  it("parses scopes and disables gh prompts with a bounded timeout", async () => {
     execSyncMock.mockReset();
     execSyncMock.mockImplementation((command) => {
       if (isGhProbe(command)) return "";
@@ -45,6 +49,7 @@ describe("getGitHubAuthScopes runtime guardrails", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
+    const { getGitHubAuthScopes } = await loadSetupModule();
     const scopes = getGitHubAuthScopes(process.cwd());
     expect(scopes).toEqual(["repo", "read:org"]);
 

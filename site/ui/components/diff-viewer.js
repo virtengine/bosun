@@ -1,9 +1,9 @@
 import { h } from "preact";
-import { useState, useEffect, useCallback, useMemo } from "preact/hooks";
+import { useState, useEffect, useCallback, useMemo, useRef } from "preact/hooks";
 import htm from "htm";
-import { apiFetch } from "../../../ui/modules/api.js";
-import { resolveIcon } from "../../../ui/modules/icon-utils.js";
-import { buildSessionApiPath } from "../../../ui/modules/session-api.js";
+import { apiFetch } from "../modules/api.js";
+import { resolveIcon } from "../modules/icon-utils.js";
+import { buildSessionApiPath } from "../modules/session-api.js";
 import {
   Accordion,
   AccordionSummary,
@@ -21,14 +21,25 @@ import {
 
 const html = htm.bind(h);
 
-function buildDiffApiPath({ sessionId = "", taskId = "", workspace = "active" } = {}) {
+function buildDiffApiPath({
+  sessionId = "",
+  taskId = "",
+  workspace = "active",
+  turnId = "",
+  turnIndex = null,
+} = {}) {
   if (taskId) {
     const params = new URLSearchParams({ taskId: String(taskId).trim() });
     const normalizedWorkspace = String(workspace || "").trim();
     if (normalizedWorkspace) params.set("workspace", normalizedWorkspace);
     return `/api/tasks/diff?${params.toString()}`;
   }
-  return buildSessionApiPath(sessionId, "diff", { workspace }) || "";
+  const normalizedTurnId = String(turnId || "").trim();
+  const normalizedTurnIndex = Number.isFinite(Number(turnIndex)) ? Number(turnIndex) : null;
+  const params = { workspace };
+  if (normalizedTurnId) params.turnId = normalizedTurnId;
+  if (normalizedTurnIndex != null) params.turnIndex = normalizedTurnIndex;
+  return buildSessionApiPath(sessionId, "diff", params) || "";
 }
 
 function buildDiffRequest({ diffPath = "", taskSnapshot = null, taskId = "" } = {}) {
@@ -359,15 +370,31 @@ function DiffFile({ file, defaultExpanded = false }) {
   `;
 }
 
-export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", activitySummary = null, title = "", taskSnapshot = null }) {
+export function DiffViewer({
+  sessionId = "",
+  taskId = "",
+  workspace = "active",
+  activitySummary = null,
+  title = "",
+  taskSnapshot = null,
+  turnId = "",
+  turnIndex = null,
+  embedded = false,
+  hideSummary = false,
+  defaultExpandedFiles = 2,
+}) {
   const [diffData, setDiffData] = useState(null);
   const [sourceMeta, setSourceMeta] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // In-flight guard so concurrent renders / rapid prop churn don't fan out
+  // duplicate diff fetches (the diff endpoint is one of the most expensive
+  // on the server side).
+  const inFlightRef = useRef(false);
 
   const diffPath = useMemo(
-    () => buildDiffApiPath({ sessionId, taskId, workspace }),
-    [sessionId, taskId, workspace],
+    () => buildDiffApiPath({ sessionId, taskId, workspace, turnId, turnIndex }),
+    [sessionId, taskId, workspace, turnId, turnIndex],
   );
   const diffRequest = useMemo(
     () => buildDiffRequest({ diffPath, taskSnapshot, taskId }),
@@ -382,6 +409,8 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
       setError("unavailable");
       return Promise.resolve();
     }
+    if (inFlightRef.current) return Promise.resolve();
+    inFlightRef.current = true;
     setLoading(true);
     setError(null);
     return apiFetch(diffRequest.path, diffRequest.options)
@@ -394,11 +423,13 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
       })
       .finally(() => {
         setLoading(false);
+        inFlightRef.current = false;
       });
   }, [diffRequest]);
 
   useEffect(() => {
     let active = true;
+    let abortCtl = null;
     if (!diffRequest?.path) {
       setDiffData(null);
       setSourceMeta(null);
@@ -408,22 +439,38 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
         active = false;
       };
     }
+    if (inFlightRef.current) {
+      // Coalesce: a previous fetch is still pending; let it complete instead
+      // of racing a second request to the same expensive endpoint.
+      return () => {
+        active = false;
+      };
+    }
+    inFlightRef.current = true;
     setLoading(true);
     setError(null);
-    apiFetch(diffRequest.path, diffRequest.options)
+    abortCtl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const requestOptions = abortCtl
+      ? { ...(diffRequest.options || {}), signal: abortCtl.signal }
+      : diffRequest.options;
+    apiFetch(diffRequest.path, requestOptions)
       .then((res) => {
         if (!active) return;
         setDiffData(res?.diff || null);
         setSourceMeta(res?.source || null);
       })
-      .catch(() => {
-        if (active) setError("unavailable");
+      .catch((err) => {
+        if (active && err?.name !== "AbortError") setError("unavailable");
       })
       .finally(() => {
         if (active) setLoading(false);
+        inFlightRef.current = false;
       });
     return () => {
       active = false;
+      if (abortCtl) {
+        try { abortCtl.abort(); } catch { /* noop */ }
+      }
     };
   }, [diffRequest]);
 
@@ -462,32 +509,34 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
   const summaryLabel = diffData?.sourceRange || sourceMeta?.label || title || "";
 
   return html`
-    <div class="diff-viewer">
-      <${Paper} variant="outlined" sx=${{
-        mb: 2,
-        p: 2,
-        borderRadius: "16px",
-        borderColor: "rgba(148, 163, 184, 0.14)",
-        background: "rgba(15, 23, 42, 0.42)",
-      }}>
-        <${Stack} direction="row" spacing=${1} alignItems="center" useFlexGap flexWrap="wrap">
-          <${Typography} variant="body2" sx=${{ fontWeight: 600 }}>
-            ${renderedFiles.length
-              ? `${renderedFiles.length} file${renderedFiles.length === 1 ? "" : "s"} ${usingActivityFallback ? "touched" : "changed"}`
-              : "No changes yet"}
+    <div class=${embedded ? "diff-viewer diff-viewer-embedded" : "diff-viewer"}>
+      ${!hideSummary && html`
+        <${Paper} variant="outlined" sx=${{
+          mb: 2,
+          p: embedded ? 1.5 : 2,
+          borderRadius: "16px",
+          borderColor: "rgba(148, 163, 184, 0.14)",
+          background: "rgba(15, 23, 42, 0.42)",
+        }}>
+          <${Stack} direction="row" spacing=${1} alignItems="center" useFlexGap flexWrap="wrap">
+            <${Typography} variant="body2" sx=${{ fontWeight: 600 }}>
+              ${renderedFiles.length
+                ? `${renderedFiles.length} file${renderedFiles.length === 1 ? "" : "s"} ${usingActivityFallback ? "touched" : "changed"}`
+                : "No changes yet"}
+            <//>
+            ${usingActivityFallback && html`<${Chip} label="activity fallback" size="small" color="warning" variant="outlined" />`}
+            ${summaryLabel && html`<${Chip} label=${summaryLabel} size="small" variant="outlined" />`}
+            ${sourceMeta?.kind && html`<${Chip} label=${sourceMeta.kind} size="small" color="info" variant="outlined" />`}
+            ${totalAdditions > 0 && html`<${Chip} label=${`+${totalAdditions}`} size="small" color="success" variant="outlined" />`}
+            ${totalDeletions > 0 && html`<${Chip} label=${`-${totalDeletions}`} size="small" color="error" variant="outlined" />`}
           <//>
-          ${usingActivityFallback && html`<${Chip} label="activity fallback" size="small" color="warning" variant="outlined" />`}
-          ${summaryLabel && html`<${Chip} label=${summaryLabel} size="small" variant="outlined" />`}
-          ${sourceMeta?.kind && html`<${Chip} label=${sourceMeta.kind} size="small" color="info" variant="outlined" />`}
-          ${totalAdditions > 0 && html`<${Chip} label=${`+${totalAdditions}`} size="small" color="success" variant="outlined" />`}
-          ${totalDeletions > 0 && html`<${Chip} label=${`-${totalDeletions}`} size="small" color="error" variant="outlined" />`}
+          ${sourceMeta?.detail && html`
+            <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mt: 1 }}>
+              ${sourceMeta.detail}
+            <//>
+          `}
         <//>
-        ${sourceMeta?.detail && html`
-          <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mt: 1 }}>
-            ${sourceMeta.detail}
-          <//>
-        `}
-      <//>
+      `}
 
       ${renderedFiles.length
         ? html`
@@ -496,7 +545,7 @@ export function DiffViewer({ sessionId = "", taskId = "", workspace = "active", 
                 <${DiffFile}
                   key=${file.filename}
                   file=${file}
-                  defaultExpanded=${index < 2}
+                  defaultExpanded=${index < defaultExpandedFiles}
                 />
               `)}
             </div>

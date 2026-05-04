@@ -1,13 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="color-scheme" content="dark light" />
   <title>Bosun — Task Orchestrator</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
   <script>
-    (function() {
+    (function () {
       var supportsImportMaps = !!(window.HTMLScriptElement
         && typeof HTMLScriptElement.supports === "function"
         && HTMLScriptElement.supports("importmap"));
@@ -16,11 +18,11 @@
       var shim = document.createElement("script");
       shim.async = true;
       shim.src = "/vendor/es-module-shims.js";
-      shim.onerror = function() {
+      shim.onerror = function () {
         var fallback = document.createElement("script");
         fallback.async = true;
         fallback.src = "https://cdn.jsdelivr.net/npm/es-module-shims@2.8.0/dist/es-module-shims.min.js";
-        fallback.onerror = function() {
+        fallback.onerror = function () {
           var fallback2 = document.createElement("script");
           fallback2.async = true;
           fallback2.src = "https://unpkg.com/es-module-shims@2.8.0/dist/es-module-shims.min.js";
@@ -36,7 +38,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <!-- Native import maps must be registered before app.js boots. -->
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Sora:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet" />
   <!-- Critical CSS: loaded as parallel <link> tags instead of @import waterfall -->
   <link rel="stylesheet" href="/styles/variables.css" />
   <link rel="stylesheet" href="/styles/base.css" />
@@ -57,7 +61,7 @@
       } else {
         document.documentElement.setAttribute('data-theme-lock', 'system');
       }
-    } catch(e) {}
+    } catch (e) { }
   </script>
   <!-- Import map: ensures all modules share a single Preact instance.
        Primary source: /vendor/ (served from local node_modules — works offline/LAN).
@@ -103,7 +107,7 @@
   }
   </script>
   <script>
-    (function() {
+    (function () {
       if (!window.__bosunNeedsImportShim) return;
       var shimMap = document.getElementById("importmap-shim-data");
       if (!shimMap) return;
@@ -133,22 +137,128 @@
   }
   </script>
 </head>
+
 <body>
   <div id="app">
-    <div id="boot-loader" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:'Sora',sans-serif;color:#9aa3b2;background:#09090b;overflow:hidden">
+    <div id="boot-loader"
+      style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:'Sora',sans-serif;color:#9aa3b2;background:#09090b;overflow:hidden">
       <style>
-        .boot-logo{position:relative;width:80px;height:80px;margin-bottom:24px}
-        .boot-ring{position:absolute;inset:0;border-radius:50%;border:2px solid rgba(99,102,241,.15);animation:boot-spin 3s linear infinite}
-        .boot-ring-inner{position:absolute;inset:8px;border-radius:50%;border:2px solid transparent;border-top-color:#6366f1;border-right-color:rgba(99,102,241,.3);animation:boot-spin 1.5s linear infinite reverse}
-        .boot-dot{position:absolute;top:50%;left:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#6366f1;box-shadow:0 0 16px rgba(99,102,241,.4);animation:boot-pulse 2s ease-in-out infinite}
-        .boot-title{font-size:22px;font-weight:700;letter-spacing:-.02em;color:#f4f4f5;margin-bottom:6px;animation:boot-fadeUp .6s ease .2s both}
-        .boot-subtitle{font-size:13px;color:#52525b;animation:boot-fadeUp .6s ease .4s both}
-        .boot-progress{width:120px;height:2px;background:rgba(255,255,255,.06);border-radius:2px;margin-top:20px;overflow:hidden;animation:boot-fadeUp .6s ease .6s both}
-        .boot-progress-bar{height:100%;width:0;background:#6366f1;border-radius:2px;animation:boot-load 2s ease-in-out .8s forwards}
-        @keyframes boot-spin{to{transform:rotate(360deg)}}
-        @keyframes boot-pulse{0%,100%{transform:scale(1);opacity:.8}50%{transform:scale(1.2);opacity:1}}
-        @keyframes boot-fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes boot-load{0%{width:0}60%{width:70%}100%{width:100%}}
+        .boot-logo {
+          position: relative;
+          width: 80px;
+          height: 80px;
+          margin-bottom: 24px
+        }
+
+        .boot-ring {
+          position: absolute;
+          inset: 0;
+          border-radius: 50%;
+          border: 2px solid rgba(99, 102, 241, .15);
+          animation: boot-spin 3s linear infinite
+        }
+
+        .boot-ring-inner {
+          position: absolute;
+          inset: 8px;
+          border-radius: 50%;
+          border: 2px solid transparent;
+          border-top-color: #6366f1;
+          border-right-color: rgba(99, 102, 241, .3);
+          animation: boot-spin 1.5s linear infinite reverse
+        }
+
+        .boot-dot {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: 16px;
+          height: 16px;
+          margin: -8px 0 0 -8px;
+          border-radius: 50%;
+          background: #6366f1;
+          box-shadow: 0 0 16px rgba(99, 102, 241, .4);
+          animation: boot-pulse 2s ease-in-out infinite
+        }
+
+        .boot-title {
+          font-size: 22px;
+          font-weight: 700;
+          letter-spacing: -.02em;
+          color: #f4f4f5;
+          margin-bottom: 6px;
+          animation: boot-fadeUp .6s ease .2s both
+        }
+
+        .boot-subtitle {
+          font-size: 13px;
+          color: #52525b;
+          animation: boot-fadeUp .6s ease .4s both
+        }
+
+        .boot-progress {
+          width: 120px;
+          height: 2px;
+          background: rgba(255, 255, 255, .06);
+          border-radius: 2px;
+          margin-top: 20px;
+          overflow: hidden;
+          animation: boot-fadeUp .6s ease .6s both
+        }
+
+        .boot-progress-bar {
+          height: 100%;
+          width: 0;
+          background: #6366f1;
+          border-radius: 2px;
+          animation: boot-load 2s ease-in-out .8s forwards
+        }
+
+        @keyframes boot-spin {
+          to {
+            transform: rotate(360deg)
+          }
+        }
+
+        @keyframes boot-pulse {
+
+          0%,
+          100% {
+            transform: scale(1);
+            opacity: .8
+          }
+
+          50% {
+            transform: scale(1.2);
+            opacity: 1
+          }
+        }
+
+        @keyframes boot-fadeUp {
+          from {
+            opacity: 0;
+            transform: translateY(10px)
+          }
+
+          to {
+            opacity: 1;
+            transform: translateY(0)
+          }
+        }
+
+        @keyframes boot-load {
+          0% {
+            width: 0
+          }
+
+          60% {
+            width: 70%
+          }
+
+          100% {
+            width: 100%
+          }
+        }
       </style>
       <div class="boot-logo">
         <div class="boot-ring"></div>
@@ -157,26 +267,56 @@
       </div>
       <div class="boot-title">Bosun</div>
       <div class="boot-subtitle" id="boot-status">Initializing Task Orchestrator…</div>
-      <div class="boot-progress"><div class="boot-progress-bar"></div></div>
+      <div class="boot-progress">
+        <div class="boot-progress-bar"></div>
+      </div>
     </div>
   </div>
+  <script>
+    window.__bosunAppModuleState = {
+      loaded: false,
+      failed: false,
+      error: null,
+    };
+  </script>
   <script type="module">
-    import "/app.js";
+    import(new URL("/app.js", window.location.origin).href)
+      .then(() => {
+        if (window.__bosunAppModuleState) {
+          window.__bosunAppModuleState.loaded = true;
+        }
+      })
+      .catch((error) => {
+        if (window.__bosunAppModuleState) {
+          window.__bosunAppModuleState.failed = true;
+          window.__bosunAppModuleState.error = error;
+        }
+        throw error;
+      });
   </script>
   <script>
     // Signal Telegram that the page has loaded (before ES modules finish loading)
-    try { if (window.Telegram && Telegram.WebApp) Telegram.WebApp.ready(); } catch(e) {}
-    // Fallback: if the ES module fails to load within 12s, show an error
-    setTimeout(function() {
+    try { if (window.Telegram && Telegram.WebApp) Telegram.WebApp.ready(); } catch (e) { }
+    // Fallback: if the ES module is still loading after 12s, show a slow-load
+    // message. Only show a failure message when the module import actually rejects.
+    setTimeout(function () {
       var el = document.getElementById('boot-loader');
+      var state = window.__bosunAppModuleState || {};
+      if (!el || state.loaded) return;
       if (el) {
         var s = document.getElementById('boot-status');
-        if (s) s.innerHTML = ':alert: Failed to load app modules.<br><small style="color:#888">Try refreshing. If this persists, run <code>npm install</code> in the bosun directory.</small>';
+        if (s) {
+          if (state.failed) {
+            s.innerHTML = ':alert: Failed to load app modules.<br><small style="color:#888">Try refreshing. If this persists, run <code>npm install</code> in the bosun directory.</small>';
+          } else {
+            s.innerHTML = ':hourglass: Loading app modules is taking longer than expected.<br><small style="color:#888">Bosun is still waiting for the browser module graph to finish loading.</small>';
+          }
+        }
       }
     }, 12000);
   </script>
   <script defer src="https://cloud.umami.is/script.js" data-website-id="24c5d605-7f25-4be5-875e-25c8f3cb4059"></script>
   <img src="https://cloud.umami.is/p/dSHELgZaC" alt="" width="1" height="1" style="display:none;" />
 </body>
-</html>
 
+</html>

@@ -2,7 +2,7 @@
  *  Agent display helpers
  *  - Normalizes SDK/executor metadata to icons + labels
  * ───────────────────────────────────────────────────────────── */
-import { resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { resolveIcon } from "./icon-utils.js";
 
 const AGENT_SDKS = [
   {

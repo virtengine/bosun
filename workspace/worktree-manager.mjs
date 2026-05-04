@@ -21,6 +21,7 @@ import {
   rmSync,
   statSync,
   readdirSync,
+  realpathSync,
   symlinkSync,
 } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -107,22 +108,39 @@ function ensureWorktreeRuntimeReady(repoRoot, worktreePath) {
  */
 function fixGitConfigCorruption(repoRoot) {
   try {
+    const worktreeDirExists = existsSync(resolve(repoRoot, ".git", "worktrees"));
     const bareResult = spawnSync("git", ["config", "--bool", "--get", "core.bare"], {
       cwd: repoRoot,
       encoding: "utf8",
       timeout: 5000,
       env: gitEnv(),
     });
-    if (bareResult.stdout?.trim() === "true") {
+    const coreWorktreeResult = spawnSync("git", ["config", "--local", "--get", "core.worktree"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      env: gitEnv(),
+    });
+    const configuredWorktree = coreWorktreeResult.stdout?.trim() || "";
+    const bareCorrupt = bareResult.stdout?.trim() === "true";
+    const sharedWorktreeCorrupt = worktreeDirExists && configuredWorktree.length > 0;
+
+    if (bareCorrupt || sharedWorktreeCorrupt) {
+      const reasons = [
+        bareCorrupt ? "core.bare=true" : null,
+        sharedWorktreeCorrupt ? `shared core.worktree=${configuredWorktree}` : null,
+      ].filter(Boolean);
       console.warn(
-        `${TAG} :alert: Detected core.bare=true on main repo — fixing git config corruption`,
+        `${TAG} :alert: Detected git config corruption (${reasons.join(", ")}) — repairing common repo config`,
       );
-      spawnSync("git", ["config", "--local", "core.bare", "false"], {
-        cwd: repoRoot,
-        encoding: "utf8",
-        timeout: 5000,
-        env: gitEnv(),
-      });
+      if (bareCorrupt) {
+        spawnSync("git", ["config", "--local", "core.bare", "false"], {
+          cwd: repoRoot,
+          encoding: "utf8",
+          timeout: 5000,
+          env: gitEnv(),
+        });
+      }
       spawnSync("git", ["config", "--local", "--unset-all", "core.worktree"], {
         cwd: repoRoot,
         encoding: "utf8",
@@ -292,7 +310,7 @@ function buildBootstrapPlan(worktreePath, policy, detection, repoRoot) {
     const hasReadySharedPathsInWorktree =
       stackSharedPaths.length > 0 &&
       stackSharedPaths.every((relativePath) =>
-        existsSync(resolve(worktreePath, relativePath)),
+        isSharedPathReady(repoRoot, worktreePath, relativePath),
       );
     let willLinkSharedPathsFromRepoRoot = false;
     if (!hasReadySharedPathsInWorktree && policy?.linkSharedPaths && repoRoot) {
@@ -300,8 +318,7 @@ function buildBootstrapPlan(worktreePath, policy, detection, repoRoot) {
         stackSharedPaths.length > 0 &&
         stackSharedPaths.every((relativePath) => {
           const sourcePath = resolve(repoRoot, relativePath);
-          const targetPath = resolve(worktreePath, relativePath);
-          return existsSync(sourcePath) && !existsSync(targetPath);
+          return existsSync(sourcePath) && !isSharedPathReady(repoRoot, worktreePath, relativePath);
         });
     }
     const hasReadySharedPaths =
@@ -318,14 +335,39 @@ function buildBootstrapPlan(worktreePath, policy, detection, repoRoot) {
   };
 }
 
+function isSharedPathReady(repoRoot, worktreePath, relativePath) {
+  const targetPath = resolve(worktreePath, relativePath);
+  if (!existsSync(targetPath)) {
+    return false;
+  }
+  if (!repoRoot) {
+    return true;
+  }
+  const sourcePath = resolve(repoRoot, relativePath);
+  if (!existsSync(sourcePath)) {
+    return true;
+  }
+  try {
+    return realpathSync(sourcePath) === realpathSync(targetPath);
+  } catch {
+    return false;
+  }
+}
+
 function ensureWorktreeSharedPath(repoRoot, worktreePath, relativePath) {
   const sourcePath = resolve(repoRoot, relativePath);
   const targetPath = resolve(worktreePath, relativePath);
-  if (!existsSync(sourcePath) || existsSync(targetPath)) {
+  if (!existsSync(sourcePath)) {
+    return false;
+  }
+  if (isSharedPathReady(repoRoot, worktreePath, relativePath)) {
     return false;
   }
 
   try {
+    if (existsSync(targetPath)) {
+      rmSync(targetPath, { recursive: true, force: true });
+    }
     mkdirSync(dirname(targetPath), { recursive: true });
     let linkType = process.platform === "win32" ? "junction" : "dir";
     try {

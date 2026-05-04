@@ -14,6 +14,34 @@ import {
   projectSessionRow,
   reconcileSessionEntries,
 } from "./agents-screen-helpers.mjs";
+import { buildSessionApiPath } from "../../ui/modules/session-api.js";
+import {
+  buildHarnessApprovalPath,
+  buildHarnessRunPath,
+  buildHarnessSubagentPath,
+  buildHarnessSurfacePath,
+} from "../../ui/modules/harness-client.js";
+import { buildTuiHttpUrl } from "../lib/ws-bridge.mjs";
+import {
+  buildHarnessMonitorDetailLines,
+  describeHarnessErrorPatternRow,
+  describeHarnessLivenessRow,
+  normalizeHarnessErrorPatterns,
+  normalizeHarnessLiveness,
+} from "./harness-telemetry.mjs";
+import {
+  formatHarnessStage,
+  getHarnessApprovalRequestId,
+  getHarnessAttentionDetail,
+  getHarnessLatestEventSummary,
+  getHarnessRunState,
+  getHarnessStateColor,
+  getHarnessStateLabel,
+  normalizeHarnessRuns,
+  projectHarnessRow,
+} from "./harness-sessions.mjs";
+import { getHarnessApprovalStatusLabel } from "./harness-approvals.mjs";
+import { buildSubagentSummaryLines } from "./harness-subagents.mjs";
 
 const html = htm.bind(React.createElement);
 const FIXED_TABLE_WIDTH = 2 + 8 + 12 + 8 + 10 + 12 + 14 + 7;
@@ -45,11 +73,39 @@ function describeSelection(session) {
 }
 
 function sessionActionPath(sessionId, action) {
-  return `/api/sessions/${encodeURIComponent(String(sessionId || "").trim())}/${action}?workspace=all`;
+  return buildSessionApiPath(sessionId, action, { workspace: "all" });
 }
 
-async function fetchJson(host, port, path, init) {
-  const response = await fetch(`http://${host}:${port}${path}`, init);
+async function fetchJson(host, port, path, init, wsBridge = null) {
+  if (typeof wsBridge?.requestJson === "function") {
+    const headers = init?.headers || {};
+    let body = init?.body;
+    if (typeof body === "string" && headers["content-type"] === "application/json") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        // leave the original string body in place if parsing fails
+      }
+    }
+    return wsBridge.requestJson(path, {
+      method: init?.method,
+      headers,
+      body,
+    });
+  }
+  const headers = { ...(init?.headers || {}) };
+  if (wsBridge?.apiKey && !headers["x-api-key"] && !headers["X-API-Key"]) {
+    headers["x-api-key"] = wsBridge.apiKey;
+  }
+  const response = await fetch(buildTuiHttpUrl({
+    host,
+    port,
+    path,
+    protocol: wsBridge?.protocol || "ws",
+  }), {
+    ...init,
+    headers,
+  });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.ok === false) {
     throw new Error(payload?.error || `Request failed: ${response.status}`);
@@ -81,51 +137,6 @@ function formatMsDuration(ms) {
   return formatDuration(value);
 }
 
-function normalizeAgentLiveness(payload) {
-  if (Array.isArray(payload?.agents)) return payload.agents;
-  if (Array.isArray(payload)) return payload;
-  return [];
-}
-
-function normalizeAgentErrorPatterns(payload) {
-  if (Array.isArray(payload?.patterns)) return payload.patterns;
-  if (Array.isArray(payload?.errors)) return payload.errors;
-  return [];
-}
-
-function describeLivenessRow(entry, width = 72) {
-  const id = String(entry?.agentId || entry?.sessionId || entry?.taskId || "agent").trim();
-  const state = String(entry?.status || entry?.state || entry?.health || "unknown").trim();
-  const heartbeat = String(entry?.lastHeartbeatAt || entry?.updatedAt || entry?.lastSeenAt || "").trim();
-  const detail = String(entry?.summary || entry?.reason || entry?.taskTitle || "").replace(/\s+/g, " ").trim();
-  return pad(`${truncate(id, 16).padEnd(17, " ")} ${truncate(state, 12).padEnd(12, " ")} ${truncate(heartbeat || "n/a", 24).padEnd(24, " ")} ${truncate(detail || "-", width - 55)}`, width);
-}
-
-function describeErrorPatternRow(entry, width = 72) {
-  const label = String(entry?.pattern || entry?.error || entry?.message || entry?.reason || "error").replace(/\s+/g, " ").trim();
-  const count = Number(entry?.count || entry?.hits || entry?.occurrences || 0);
-  const scope = String(entry?.taskId || entry?.sessionId || entry?.agentId || entry?.source || "").trim();
-  return pad(`${truncate(label, 44).padEnd(45, " ")} ${String(count).padStart(4, " ")} ${truncate(scope || "-", width - 51)}`, width);
-}
-
-function buildAgentMonitorDetailLines(statusPayload, livenessItems, errorItems) {
-  const status = statusPayload && typeof statusPayload === "object" ? statusPayload : {};
-  const listenerCount = Number(status?.listenerCount || 0);
-  const eventLogSize = Number(status?.eventLogSize || 0);
-  const trackedAgents = Number(status?.trackedAgents || livenessItems.length || 0);
-  const started = status?.started === true ? "yes" : "no";
-  const lines = [
-    `Started       ${started}`,
-    `Tracked agents ${trackedAgents}`,
-    `Event log size ${eventLogSize}`,
-    `Listeners     ${listenerCount}`,
-    `Alive agents  ${livenessItems.filter((entry) => entry?.alive !== false).length}`,
-    `Stale agents  ${livenessItems.filter((entry) => entry?.alive === false).length}`,
-    `Error patterns ${errorItems.length}`,
-  ];
-  return lines;
-}
-
 function AgentMonitorDetail({ statusPayload, livenessItems, errorItems, recentEvents }) {
   const metadataLines = buildAgentMonitorDetailLines(statusPayload, livenessItems, errorItems);
   const visibleLiveness = (Array.isArray(livenessItems) ? livenessItems : []).slice(0, 10);
@@ -141,7 +152,7 @@ function AgentMonitorDetail({ statusPayload, livenessItems, errorItems, recentEv
         ${visibleLiveness.length
           ? visibleLiveness.map((entry, index) => html`
               <${Text} key=${entry?.agentId || entry?.sessionId || entry?.taskId || index} wrap="truncate-end">
-                ${describeLivenessRow(entry, 96)}
+                ${describeHarnessLivenessRow(entry, 96)}
               <//>
             `)
           : html`<${Text} dimColor>No liveness detail reported<//>`}
@@ -151,7 +162,7 @@ function AgentMonitorDetail({ statusPayload, livenessItems, errorItems, recentEv
         ${visibleErrors.length
           ? visibleErrors.map((entry, index) => html`
               <${Text} key=${entry?.pattern || entry?.error || index} wrap="truncate-end">
-                ${describeErrorPatternRow(entry, 96)}
+                ${describeHarnessErrorPatternRow(entry, 96)}
               <//>
             `)
           : html`<${Text} dimColor>No recurring error patterns<//>`}
@@ -171,117 +182,6 @@ function AgentMonitorDetail({ statusPayload, livenessItems, errorItems, recentEv
       <//>
     <//>
   `;
-}
-
-function getHarnessRunState(run) {
-  return String(
-    run?.health?.state
-    || run?.status
-    || run?.outcome
-    || run?.result?.status
-    || run?.result?.outcome
-    || "unknown",
-  ).trim().toLowerCase();
-}
-
-function getHarnessStateColor(state) {
-  if (state === "working") return "blue";
-  if (state === "waiting") return "yellow";
-  if (state === "stalled" || state === "failed" || state === "aborted") return "red";
-  if (state === "completed") return "green";
-  return undefined;
-}
-
-function getHarnessStateLabel(state) {
-  if (!state) return "unknown";
-  return state.replace(/[_-]+/g, " ");
-}
-
-function getHarnessRunTimestamp(run) {
-  const value = run?.updatedAt || run?.endedAt || run?.startedAt || run?.createdAt || 0;
-  const timestamp = new Date(value).getTime();
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function normalizeHarnessRuns(items) {
-  const deduped = new Map();
-  for (const run of Array.isArray(items) ? items : []) {
-    if (!run || typeof run !== "object") continue;
-    const runId = String(run?.runId || "").trim();
-    if (!runId) continue;
-    const existing = deduped.get(runId);
-    if (!existing || getHarnessRunTimestamp(run) >= getHarnessRunTimestamp(existing)) {
-      deduped.set(runId, run);
-    }
-  }
-  return Array.from(deduped.values()).sort((a, b) => getHarnessRunTimestamp(b) - getHarnessRunTimestamp(a));
-}
-
-function formatHarnessStage(run) {
-  return String(
-    run?.currentStageId
-    || run?.health?.approvalStageId
-    || run?.stageId
-    || run?.completedStageId
-    || run?.result?.completedStageId
-    || "—",
-  ).trim() || "—";
-}
-
-function getHarnessApprovalRequestId(run) {
-  return String(
-    run?.health?.approvalRequestId
-    || run?.approvalRequestId
-    || run?.requestId
-    || run?.latestApproval?.requestId
-    || "",
-  ).trim();
-}
-
-function getHarnessLatestEventSummary(run) {
-  return String(
-    run?.health?.lastEventSummary
-    || run?.latestEvent?.summary
-    || run?.summary
-    || "",
-  ).trim();
-}
-
-function getHarnessAttentionDetail(run) {
-  const state = getHarnessRunState(run);
-  const approvalRequestId = getHarnessApprovalRequestId(run);
-  const detail = String(run?.health?.attentionReason || run?.summary || "").trim();
-  if (state === "waiting") {
-    const base = detail || "Awaiting operator approval.";
-    return approvalRequestId ? `${base} · ${approvalRequestId}` : base;
-  }
-  return detail || getHarnessLatestEventSummary(run) || "No summary yet";
-}
-
-function getHarnessApprovalStatusLabel(approval) {
-  const request = approval?.request || approval || {};
-  const status = String(request?.status || "").trim().toLowerCase();
-  if (status) return status;
-  if (approval?.approvalPending === true) return "pending";
-  return "none";
-}
-
-function projectHarnessRow(run, isSelected, width = 72) {
-  const runId = String(run?.runId || "").trim();
-  const state = getHarnessRunState(run);
-  const stage = formatHarnessStage(run);
-  const idleMs = Number(run?.health?.idleMs || 0) || 0;
-  const summary = getHarnessLatestEventSummary(run) || getHarnessAttentionDetail(run);
-  const left = `${runId.slice(0, 8) || "unknown"} ${stage} ${getHarnessStateLabel(state)}`;
-  const right = idleMs > 0 ? `idle ${formatMsDuration(idleMs)}` : (run?.active ? "live" : "history");
-  const head = `${left} ${right}`.trim();
-  const text = `${head} · ${summary}`.trim();
-  return {
-    key: runId || head,
-    color: getHarnessStateColor(state),
-    inverse: isSelected,
-    text: pad(text, width),
-  };
 }
 
 function summarizeDiff(diffPayload) {
@@ -422,6 +322,7 @@ function HarnessDetail({
   harnessPayload,
   harnessEvents,
   harnessApproval,
+  harnessSubagents,
   harnessNudgeMode,
   harnessNudgeValue,
 }) {
@@ -430,6 +331,7 @@ function HarnessDetail({
   const approvalRequestId = getHarnessApprovalRequestId(run);
   const approvalStatus = getHarnessApprovalStatusLabel(harnessApproval);
   const canApprove = approvalStatus === "pending" || run?.health?.waitingForOperator === true || run?.approvalPending === true;
+  const subagentLines = buildSubagentSummaryLines(harnessSubagents);
   const lines = [
     `Run ID        ${run?.runId || "-"}`,
     `Name          ${run?.name || "-"}`,
@@ -455,6 +357,12 @@ function HarnessDetail({
               return html`<${Text} key=${event?.id || `${index}-${eventLine}`} wrap="truncate-end">${eventLine}<//>`;
             })
           : html`<${Text} dimColor>No harness events yet<//>`}
+      <//>
+      <${Box} marginTop=${1} flexDirection="column" borderStyle="single" paddingX=${1}>
+        <${Text} bold>Subagents<//>
+        ${subagentLines.map((line, index) => html`
+          <${Text} key=${`subagent-${index}`} wrap="truncate-end">${line}<//>
+        `)}
       <//>
       <${Box} marginTop=${1} flexDirection="column">
         <${Text} dimColor>
@@ -580,6 +488,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
   const [harnessDetailView, setHarnessDetailView] = React.useState(null);
   const [harnessEvents, setHarnessEvents] = React.useState([]);
   const [harnessApprovalView, setHarnessApprovalView] = React.useState(null);
+  const [harnessSubagentsView, setHarnessSubagentsView] = React.useState(null);
   const [agentMonitorDetailOpen, setAgentMonitorDetailOpen] = React.useState(false);
   const [harnessNudgeMode, setHarnessNudgeMode] = React.useState(false);
   const [harnessNudgeValue, setHarnessNudgeValue] = React.useState("");
@@ -606,8 +515,8 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
 
   const applyAgentMonitoring = React.useCallback((statusPayload, livenessPayload, errorPayload, recentEventsPayload) => {
     setAgentEventStatus(statusPayload || null);
-    setAgentLiveness(normalizeAgentLiveness(livenessPayload));
-    setAgentErrorPatterns(normalizeAgentErrorPatterns(errorPayload));
+    setAgentLiveness(normalizeHarnessLiveness(livenessPayload));
+    setAgentErrorPatterns(normalizeHarnessErrorPatterns(errorPayload));
     setAgentRecentEvents(Array.isArray(recentEventsPayload?.events) ? recentEventsPayload.events : []);
   }, []);
 
@@ -661,6 +570,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     setHarnessDetailView(null);
     setHarnessEvents([]);
     setHarnessApprovalView(null);
+    setHarnessSubagentsView(null);
     setAgentMonitorDetailOpen(false);
     setHarnessNudgeMode(false);
     setHarnessNudgeValue("");
@@ -668,20 +578,23 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
 
   const refreshData = React.useCallback(async () => {
     try {
-      const [sessionsPayload, retryPayload, harnessPayload, eventStatusPayload, livenessPayload, errorPayload, recentEventsPayload] = await Promise.all([
-        fetchJson(resolvedHost, resolvedPort, "/api/sessions?workspace=all"),
-        fetchJson(resolvedHost, resolvedPort, "/api/retry-queue"),
-        fetchJson(resolvedHost, resolvedPort, "/api/harness/runs?limit=8"),
-        fetchJson(resolvedHost, resolvedPort, "/api/agents/events/status"),
-        fetchJson(resolvedHost, resolvedPort, "/api/agents/events/liveness"),
-        fetchJson(resolvedHost, resolvedPort, "/api/agents/events/errors"),
-        fetchJson(resolvedHost, resolvedPort, "/api/agents/events?limit=25"),
-      ]);
+      const surfacePayload = await fetchJson(
+        resolvedHost,
+        resolvedPort,
+        buildHarnessSurfacePath("agents", { limit: 25 }),
+        undefined,
+        wsBridge,
+      );
       const now = Date.now();
-      applyRetryQueue(retryPayload);
-      applyAgentMonitoring(eventStatusPayload, livenessPayload, errorPayload, recentEventsPayload);
-      applySessionSnapshot(sessionsPayload.sessions || [], now);
-      const nextHarnessRuns = normalizeHarnessRuns(harnessPayload?.items || harnessPayload?.runs || []);
+      applyRetryQueue(surfacePayload?.retryQueue || {});
+      applyAgentMonitoring(
+        surfacePayload?.agent?.status || null,
+        { agents: surfacePayload?.agent?.liveness || [] },
+        { patterns: surfacePayload?.agent?.patterns || {} },
+        { events: surfacePayload?.agent?.events || [] },
+      );
+      applySessionSnapshot(surfacePayload?.sessions || [], now);
+      const nextHarnessRuns = normalizeHarnessRuns(surfacePayload?.harness?.runs || []);
       setHarnessRuns(nextHarnessRuns);
       setSelectedHarnessRunId((current) => {
         if (current && nextHarnessRuns.some((run) => String(run?.runId || "").trim() === current)) return current;
@@ -691,7 +604,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [applyAgentMonitoring, applyRetryQueue, applySessionSnapshot, resolvedHost, resolvedPort]);
+  }, [applyAgentMonitoring, applyRetryQueue, applySessionSnapshot, resolvedHost, resolvedPort, wsBridge]);
 
   React.useEffect(() => {
     applySessionSnapshot(sessions, Date.now());
@@ -782,35 +695,53 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
   const loadLogs = React.useCallback(async () => {
     if (!selectedSession?.id) return;
     try {
-      const payload = await fetchJson(resolvedHost, resolvedPort, `/api/sessions/${encodeURIComponent(selectedSession.id)}?workspace=all`);
+      const payload = await fetchJson(
+        resolvedHost,
+        resolvedPort,
+        buildSessionApiPath(selectedSession.id, "", { workspace: "all" }),
+        undefined,
+        wsBridge,
+      );
       setLogLines(sessionMessagesToLogLines(payload));
       setStatusLine(`Loaded logs for ${describeSelection(selectedSession)}`);
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [resolvedHost, resolvedPort, selectedSession]);
+  }, [resolvedHost, resolvedPort, selectedSession, wsBridge]);
 
   const loadDiff = React.useCallback(async () => {
     if (!selectedSession?.id) return;
     try {
-      const payload = await fetchJson(resolvedHost, resolvedPort, `/api/sessions/${encodeURIComponent(selectedSession.id)}/diff?workspace=all`);
+      const payload = await fetchJson(
+        resolvedHost,
+        resolvedPort,
+        buildSessionApiPath(selectedSession.id, "diff", { workspace: "all" }),
+        undefined,
+        wsBridge,
+      );
       setDiffView(summarizeDiff(payload));
       setStatusLine(`Loaded diff for ${describeSelection(selectedSession)}`);
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [resolvedHost, resolvedPort, selectedSession]);
+  }, [resolvedHost, resolvedPort, selectedSession, wsBridge]);
 
   const loadDetail = React.useCallback(async () => {
     if (!selectedSession?.id) return;
     try {
-      const payload = await fetchJson(resolvedHost, resolvedPort, `/api/sessions/${encodeURIComponent(selectedSession.id)}?workspace=all`);
+      const payload = await fetchJson(
+        resolvedHost,
+        resolvedPort,
+        buildSessionApiPath(selectedSession.id, "", { workspace: "all" }),
+        undefined,
+        wsBridge,
+      );
       setDetailView(payload);
       setStatusLine("");
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [resolvedHost, resolvedPort, selectedSession]);
+  }, [resolvedHost, resolvedPort, selectedSession, wsBridge]);
 
   const openDetail = React.useCallback(async () => {
     if (!selectedSession?.id) return;
@@ -828,14 +759,14 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
   const runAction = React.useCallback(async (action) => {
     if (!selectedSession?.id) return;
     try {
-      await fetchJson(resolvedHost, resolvedPort, sessionActionPath(selectedSession.id, action), { method: "POST" });
+      await fetchJson(resolvedHost, resolvedPort, sessionActionPath(selectedSession.id, action), { method: "POST" }, wsBridge);
       setStatusLine(`${action} sent to ${describeSelection(selectedSession)}`);
       if (action === "kill") setConfirmKill(false);
       await refreshData();
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [refreshData, resolvedHost, resolvedPort, selectedSession]);
+  }, [refreshData, resolvedHost, resolvedPort, selectedSession, wsBridge]);
 
   const sendSteer = React.useCallback(async () => {
     if (!selectedSession?.id || !steerValue.trim()) return;
@@ -843,12 +774,13 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
       await fetchJson(
         resolvedHost,
         resolvedPort,
-        `/api/sessions/${encodeURIComponent(selectedSession.id)}/message?workspace=all`,
+        buildSessionApiPath(selectedSession.id, "message", { workspace: "all" }),
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message: steerValue.trim() }),
+          body: JSON.stringify({ content: steerValue.trim() }),
         },
+        wsBridge,
       );
       setStatusLine("Steer sent ✓");
       setSteerMode(false);
@@ -857,19 +789,35 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [loadDetail, resolvedHost, resolvedPort, selectedSession, steerValue]);
+  }, [loadDetail, resolvedHost, resolvedPort, selectedSession, steerValue, wsBridge]);
 
   const loadHarnessDetail = React.useCallback(async (runId) => {
     if (!runId) return;
     const [runPayload, eventPayload, approvalPayload] = await Promise.all([
-      fetchJson(resolvedHost, resolvedPort, `/api/harness/runs/${encodeURIComponent(runId)}`),
-      fetchJson(resolvedHost, resolvedPort, `/api/harness/runs/${encodeURIComponent(runId)}/events?limit=40&direction=desc`),
-      fetchJson(resolvedHost, resolvedPort, `/api/harness/runs/${encodeURIComponent(runId)}/approval`),
+      fetchJson(resolvedHost, resolvedPort, buildHarnessRunPath(runId), undefined, wsBridge),
+      fetchJson(resolvedHost, resolvedPort, buildHarnessRunPath(runId, "events", { limit: 40, direction: "desc" }), undefined, wsBridge),
+      fetchJson(resolvedHost, resolvedPort, buildHarnessRunPath(runId, "approval"), undefined, wsBridge),
     ]);
+    const subagentSessionId = String(
+      runPayload?.run?.sessionId
+      || runPayload?.run?.rootSessionId
+      || runPayload?.run?.taskId
+      || "",
+    ).trim();
+    const subagentPayload = subagentSessionId
+      ? await fetchJson(
+          resolvedHost,
+          resolvedPort,
+          buildHarnessSubagentPath("", { sessionId: subagentSessionId, includeThreads: true }),
+          undefined,
+          wsBridge,
+        ).catch(() => null)
+      : null;
     setHarnessDetailView(runPayload);
     setHarnessEvents(Array.isArray(eventPayload?.items) ? eventPayload.items : Array.isArray(eventPayload?.events) ? eventPayload.events : []);
     setHarnessApprovalView(approvalPayload || null);
-  }, [resolvedHost, resolvedPort]);
+    setHarnessSubagentsView(subagentPayload || null);
+  }, [resolvedHost, resolvedPort, wsBridge]);
 
   const openHarnessDetail = React.useCallback(async () => {
     const runId = String(selectedHarnessRun?.runId || "").trim();
@@ -898,7 +846,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
       await fetchJson(
         resolvedHost,
         resolvedPort,
-        `/api/harness/approvals/${encodeURIComponent(requestId)}/resolve`,
+        buildHarnessApprovalPath(requestId, "resolve"),
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -910,6 +858,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
               : `Denied from harness monitor for stage ${formatHarnessStage(run)}.`,
           }),
         },
+        wsBridge,
       );
       setStatusLine(decision === "approved" ? "Harness approval granted." : "Harness approval denied.");
       await refreshData();
@@ -917,7 +866,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [harnessDetailView, loadHarnessDetail, refreshData, resolvedHost, resolvedPort, selectedHarnessRun]);
+  }, [harnessDetailView, loadHarnessDetail, refreshData, resolvedHost, resolvedPort, selectedHarnessRun, wsBridge]);
 
   const sendHarnessNudge = React.useCallback(async () => {
     const run = harnessDetailView?.run || harnessDetailView || selectedHarnessRun;
@@ -928,7 +877,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
       await fetchJson(
         resolvedHost,
         resolvedPort,
-        `/api/harness/runs/${encodeURIComponent(runId)}/nudge`,
+        buildHarnessRunPath(runId, "nudge"),
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -940,6 +889,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
             stageId: formatHarnessStage(run),
           }),
         },
+        wsBridge,
       );
       setHarnessNudgeMode(false);
       setHarnessNudgeValue("");
@@ -949,7 +899,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
-  }, [harnessDetailView, harnessNudgeValue, loadHarnessDetail, refreshData, resolvedHost, resolvedPort, selectedHarnessRun]);
+  }, [harnessDetailView, harnessNudgeValue, loadHarnessDetail, refreshData, resolvedHost, resolvedPort, selectedHarnessRun, wsBridge]);
 
   useInput((input, key) => {
     if (confirmKill) {
@@ -1191,6 +1141,7 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
                 harnessPayload=${harnessDetailView}
                 harnessEvents=${harnessEvents}
                 harnessApproval=${harnessApprovalView}
+                harnessSubagents=${harnessSubagentsView}
                 harnessNudgeMode=${harnessNudgeMode}
                 harnessNudgeValue=${harnessNudgeValue}
               />`

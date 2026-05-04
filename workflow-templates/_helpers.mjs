@@ -73,7 +73,7 @@ export function node(id, type, label, config = {}, opts = {}) {
  */
 export function edge(source, target, opts = {}) {
   const e = {
-    id: `${source}->${target}`,
+    id: opts.id || `${source}->${target}`,
     source,
     target,
     sourcePort: opts.port || "default",
@@ -242,10 +242,8 @@ export function normalizeTemplateLayoutInPlace(template, opts = {}) {
  */
 export function agentDefaults(extra = {}) {
   return {
-    taskId: "{{taskId}}",
     sdk: "{{resolvedSdk}}",
     model: "{{resolvedModel}}",
-    agentProfile: "{{agentProfile}}",
     cwd: "{{worktreePath}}",
     timeoutMs: "{{taskTimeoutMs}}",
     maxRetries: "{{maxRetries}}",

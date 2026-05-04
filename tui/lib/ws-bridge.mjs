@@ -1,34 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { resolve } from "node:path";
 
 import { resolveTuiAuthToken as resolveSharedTuiAuthToken } from "../../infra/tui-bridge.mjs";
-
-function defaultConfigDir() {
-	const explicit = String(
-		process.env.BOSUN_DIR
-			|| process.env.BOSUN_HOME
-			|| "",
-	).trim();
-	if (explicit) return resolve(explicit);
-	return resolve(process.cwd(), ".bosun");
-}
-
-function normalizeProtocol(protocol) {
-	const value = String(protocol || "").trim().toLowerCase();
-	return value === "wss" ? "wss" : "ws";
-}
-
-function readUiInstanceLock(configDir = defaultConfigDir()) {
-	try {
-		const lockPath = resolve(configDir, ".cache", "ui-server.instance.lock.json");
-		if (!existsSync(lockPath)) return null;
-		const parsed = JSON.parse(readFileSync(lockPath, "utf8"));
-		if (!parsed || typeof parsed !== "object") return null;
-		return parsed;
-	} catch {
-		return null;
-	}
-}
+import {
+	defaultConfigDir,
+	normalizeWsProtocol,
+	normalizeHttpProtocol,
+	readUiInstanceLock,
+} from "./connection-target.mjs";
 
 function resolveWebSocketProtocol({ protocol, configDir } = {}) {
 	const explicit = String(protocol || "").trim().toLowerCase();
@@ -37,6 +17,25 @@ function resolveWebSocketProtocol({ protocol, configDir } = {}) {
 	}
 	const instance = readUiInstanceLock(configDir);
 	return String(instance?.protocol || "").trim().toLowerCase() === "https" ? "wss" : "ws";
+}
+
+function isPrivateOrLoopbackHost(host) {
+	const normalized = String(host || "").trim().toLowerCase();
+	if (!normalized) return false;
+	if (normalized === "localhost" || normalized === "::1") return true;
+	if (/^127\./.test(normalized)) return true;
+	if (/^10\./.test(normalized)) return true;
+	if (/^192\.168\./.test(normalized)) return true;
+	if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(normalized)) return true;
+	return false;
+}
+
+function shouldSkipTlsVerification({ host, protocol } = {}) {
+	if (String(protocol || "").trim().toLowerCase() !== "wss") return false;
+	if (["1", "true", "yes"].includes(String(process.env.BOSUN_TUI_INSECURE_TLS || "").toLowerCase())) {
+		return true;
+	}
+	return isPrivateOrLoopbackHost(host);
 }
 
 function resolveTuiAuthToken(options = {}) {
@@ -48,7 +47,7 @@ function resolveTuiAuthToken(options = {}) {
 }
 
 function buildTuiWebSocketUrl({ host, port, token = "", protocol = "ws" }) {
-	const url = new URL(`${normalizeProtocol(protocol)}://${host}:${port}/ws`);
+	const url = new URL(`${normalizeWsProtocol(protocol)}://${host}:${port}/ws`);
 	const normalizedToken = String(token || "").trim();
 	if (normalizedToken) {
 		url.searchParams.set("token", normalizedToken);
@@ -60,7 +59,7 @@ function buildTuiHttpUrl({ host, port, path = "/", protocol = "ws" }) {
 	const normalizedPath = String(path || "/").startsWith("/")
 		? String(path || "/")
 		: `/${String(path || "")}`;
-	const httpProtocol = normalizeProtocol(protocol) === "wss" ? "https" : "http";
+	const httpProtocol = normalizeHttpProtocol(protocol);
 	return new URL(`${httpProtocol}://${host}:${port}${normalizedPath}`).toString();
 }
 
@@ -75,11 +74,12 @@ async function parseJsonResponse(response) {
 }
 
 class TuiWsBridge {
-	constructor({ host, port, configDir, protocol = "ws", WebSocketImpl = globalThis.WebSocket }) {
+	constructor({ host, port, configDir, protocol = "ws", apiKey = "", WebSocketImpl = globalThis.WebSocket }) {
 		this.host = host;
 		this.port = port;
 		this.configDir = configDir || defaultConfigDir();
 		this.protocol = protocol;
+		this.apiKey = String(apiKey || "").trim();
 		this.WebSocketImpl = WebSocketImpl;
 		this.ws = null;
 		this.listeners = new Map();
@@ -94,7 +94,11 @@ class TuiWsBridge {
 			host,
 			port,
 			protocol: resolveWebSocketProtocol({ protocol, configDir: this.configDir }),
-			token: resolveTuiAuthToken({ configDir: this.configDir }),
+			token: this.apiKey ? "" : resolveTuiAuthToken({ configDir: this.configDir }),
+		});
+		this._insecureTls = shouldSkipTlsVerification({
+			host,
+			protocol: resolveWebSocketProtocol({ protocol, configDir: this.configDir }),
 		});
 	}
 
@@ -112,9 +116,27 @@ class TuiWsBridge {
 				host: this.host,
 				port: this.port,
 				protocol: resolveWebSocketProtocol({ protocol: this.protocol, configDir: this.configDir }),
-				token: resolveTuiAuthToken({ configDir: this.configDir }),
+				token: this.apiKey ? "" : resolveTuiAuthToken({ configDir: this.configDir }),
 			});
-			this.ws = new this.WebSocketImpl(this._url);
+			this._insecureTls = shouldSkipTlsVerification({
+				host: this.host,
+				protocol: resolveWebSocketProtocol({ protocol: this.protocol, configDir: this.configDir }),
+			});
+			const headers = {};
+			if (this.apiKey) {
+				headers["x-api-key"] = this.apiKey;
+			} else {
+				const token = resolveTuiAuthToken({ configDir: this.configDir });
+				if (token) headers.Authorization = `Bearer ${token}`;
+			}
+			const wsOptions = {};
+			if (Object.keys(headers).length > 0) {
+				wsOptions.headers = headers;
+			}
+			wsOptions.rejectUnauthorized = !this._insecureTls;
+			this.ws = Object.keys(wsOptions).length > 0
+				? new this.WebSocketImpl(this._url, wsOptions)
+				: new this.WebSocketImpl(this._url);
 
 			this.ws.onopen = () => {
 				this._connected = true;
@@ -147,7 +169,7 @@ class TuiWsBridge {
 			};
 
 			this.ws.onerror = (err) => {
-				const message = err?.message || err?.error?.message || "WebSocket error";
+				const message = err?.message || err?.error?.message || `WebSocket error (${this._url})`;
 				this._emit("error", { message });
 			};
 		} catch (err) {
@@ -305,27 +327,78 @@ class TuiWsBridge {
 			...(options.body ? { "Content-Type": "application/json" } : {}),
 			...(options.headers || {}),
 		};
-		const token = resolveTuiAuthToken({ configDir: this.configDir });
-		if (token && !headers.Authorization) {
-			headers.Authorization = `Bearer ${token}`;
+		if (this.apiKey) {
+			if (!headers["x-api-key"] && !headers["X-API-Key"]) {
+				headers["x-api-key"] = this.apiKey;
+			}
+		} else {
+			const token = resolveTuiAuthToken({ configDir: this.configDir });
+			if (token && !headers.Authorization) {
+				headers.Authorization = `Bearer ${token}`;
+			}
 		}
 
-		const response = await fetch(buildTuiHttpUrl({
+		const url = buildTuiHttpUrl({
 			host: this.host,
 			port: this.port,
 			path,
 			protocol: resolveWebSocketProtocol({ protocol: this.protocol, configDir: this.configDir }),
-		}), {
+		});
+		const skipTlsVerification = shouldSkipTlsVerification({
+			host: this.host,
+			protocol: resolveWebSocketProtocol({ protocol: this.protocol, configDir: this.configDir }),
+		});
+		if (typeof globalThis.fetch === "function" && !(url.startsWith("https:") && skipTlsVerification)) {
+			const response = await globalThis.fetch(url, {
+				method: options.method || (options.body ? "POST" : "GET"),
+				headers,
+				body: options.body ? JSON.stringify(options.body) : undefined,
+			});
+			const payload = await parseJsonResponse(response);
+			if (!response.ok || payload?.ok === false) {
+				const message = String(payload?.error || payload?.message || response.statusText || "Request failed").trim();
+				throw new Error(message || `HTTP ${response.status}`);
+			}
+			return payload;
+		}
+		const requestOptions = {
 			method: options.method || (options.body ? "POST" : "GET"),
 			headers,
-			body: options.body ? JSON.stringify(options.body) : undefined,
+			rejectUnauthorized: !skipTlsVerification,
+		};
+		const requester = url.startsWith("https:") ? httpsRequest : httpRequest;
+		const payload = await new Promise((resolvePayload, rejectPayload) => {
+			const req = requester(url, requestOptions, (res) => {
+				let text = "";
+				res.setEncoding("utf8");
+				res.on("data", (chunk) => {
+					text += chunk;
+				});
+				res.on("end", () => {
+					let parsed = null;
+					if (text) {
+						try {
+							parsed = JSON.parse(text);
+						} catch {
+							rejectPayload(new Error(`Expected JSON response but received: ${text.slice(0, 160)}`));
+							return;
+						}
+					}
+					if (res.statusCode >= 200 && res.statusCode < 300 && parsed?.ok !== false) {
+						resolvePayload(parsed);
+						return;
+					}
+					const message = String(parsed?.error || parsed?.message || res.statusMessage || "Request failed").trim();
+					rejectPayload(new Error(message || `HTTP ${res.statusCode}`));
+				});
+			});
+			req.on("error", rejectPayload);
+			req.on("timeout", () => req.destroy(new Error("Request timed out")));
+			if (options.body) {
+				req.write(JSON.stringify(options.body));
+			}
+			req.end();
 		});
-
-		const payload = await parseJsonResponse(response);
-		if (!response.ok) {
-			const message = String(payload?.error || payload?.message || response.statusText || "Request failed").trim();
-			throw new Error(message || `HTTP ${response.status}`);
-		}
 		return payload;
 	}
 
@@ -354,22 +427,25 @@ let _lastHost = null;
 let _lastPort = null;
 let _lastConfigDir = null;
 let _lastProtocol = null;
+let _lastApiKey = null;
 let _lastWebSocketImpl = null;
 
-function createWsBridge({ host, port, configDir, protocol, WebSocketImpl }) {
-	_instance = new TuiWsBridge({ host, port, configDir, protocol, WebSocketImpl });
+function createWsBridge({ host, port, configDir, protocol, apiKey, WebSocketImpl }) {
+	_instance = new TuiWsBridge({ host, port, configDir, protocol, apiKey, WebSocketImpl });
 	_lastHost = host;
 	_lastPort = port;
 	_lastConfigDir = configDir || defaultConfigDir();
 	_lastProtocol = protocol || "ws";
+	_lastApiKey = String(apiKey || "").trim();
 	_lastWebSocketImpl = WebSocketImpl || globalThis.WebSocket;
 	wsBridge._instance = _instance;
 	return _instance;
 }
 
-function wsBridge({ host, port, configDir, protocol, WebSocketImpl }) {
+function wsBridge({ host, port, configDir, protocol, apiKey, WebSocketImpl }) {
 	const resolvedConfigDir = configDir || defaultConfigDir();
 	const resolvedProtocol = protocol || "ws";
+	const resolvedApiKey = String(apiKey || "").trim();
 	const resolvedWebSocketImpl = WebSocketImpl || globalThis.WebSocket;
 	if (
 		_instance
@@ -378,6 +454,7 @@ function wsBridge({ host, port, configDir, protocol, WebSocketImpl }) {
 			|| port !== _lastPort
 			|| resolvedConfigDir !== _lastConfigDir
 			|| resolvedProtocol !== _lastProtocol
+			|| resolvedApiKey !== _lastApiKey
 			|| resolvedWebSocketImpl !== _lastWebSocketImpl
 		)
 	) {
@@ -387,6 +464,7 @@ function wsBridge({ host, port, configDir, protocol, WebSocketImpl }) {
 			port,
 			configDir: resolvedConfigDir,
 			protocol: resolvedProtocol,
+			apiKey: resolvedApiKey,
 			WebSocketImpl: resolvedWebSocketImpl,
 		});
 	}
@@ -396,6 +474,7 @@ function wsBridge({ host, port, configDir, protocol, WebSocketImpl }) {
 			port,
 			configDir: resolvedConfigDir,
 			protocol: resolvedProtocol,
+			apiKey: resolvedApiKey,
 			WebSocketImpl: resolvedWebSocketImpl,
 		});
 	}
@@ -411,7 +490,7 @@ export {
 	buildTuiWebSocketUrl,
 	createWsBridge,
 	defaultConfigDir,
+	readUiInstanceLock,
 	resolveWebSocketProtocol,
 	resolveTuiAuthToken,
 };
-

@@ -171,6 +171,15 @@ export const sessionDetailFixture = {
   ok: true,
   session: {
     ...sessionsFixture[0],
+    turnCount: 24,
+    turns: Array.from({ length: 24 }, (_, index) => ({
+      id: `turn-${index + 1}`,
+      number: index + 1,
+      timestamp: `2026-03-23T00:00:${String(index).padStart(2, "0")}.000Z`,
+      tokenDelta: 120 + index,
+      durationMs: 900 + index * 25,
+      eventType: index % 3 === 0 ? "tool_call" : index % 3 === 1 ? "assistant" : "tool_result",
+    })),
     messages: [
       { timestamp: "2026-03-23T00:00:00.000Z", role: "user", content: "Start debugging" },
       { timestamp: "2026-03-23T00:00:05.000Z", role: "assistant", content: "Loaded the relevant logs" },
@@ -264,7 +273,7 @@ export const tuiConfigFixture = {
           editorKind: "enum",
           readOnly: false,
           masked: false,
-          enumValues: ["internal", "github", "jira", "gnap"],
+          enumValues: ["internal", "github", "jira", "repo-mirror"],
         },
       ],
     },

@@ -3,10 +3,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 
-vi.mock("node:child_process", () => ({
-  spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
-  execSync: vi.fn(),
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    spawnSync: vi.fn(() => ({ status: 0, stdout: "", stderr: "" })),
+    execSync: vi.fn(),
+  };
+});
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal();
@@ -15,6 +19,8 @@ vi.mock("node:fs", async (importOriginal) => {
       existsSync: vi.fn(() => false),
       mkdirSync: vi.fn(),
       readdirSync: vi.fn(() => []),
+      realpathSync: vi.fn((path) => String(path)),
+      rmSync: vi.fn(),
       statSync: vi.fn(() => ({ mtimeMs: Date.now(), isDirectory: () => true })),
       symlinkSync: vi.fn(),
       writeFileSync: vi.fn(),
@@ -47,7 +53,7 @@ vi.mock("../workspace/worktree-setup.mjs", () => ({
 }));
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 
 import {
   WorktreeManager,
@@ -56,6 +62,7 @@ import {
   resetWorktreeManager,
   sanitizeBranchName,
   gitEnv,
+  fixGitConfigCorruption,
   TAG,
   DEFAULT_BASE_DIR,
   DEFAULT_MANAGED_TASK_BASE_DIR,
@@ -113,6 +120,8 @@ describe("worktree-manager", () => {
     resetWorktreeManager();
     existsSync.mockReturnValue(false);
     readdirSync.mockReturnValue([]);
+    realpathSync.mockImplementation((path) => String(path));
+    rmSync.mockReset();
     statSync.mockReturnValue({ mtimeMs: Date.now(), isDirectory: () => true });
     inspectWorktreeRuntimeSetupMock.mockReturnValue({
       ok: true,
@@ -221,6 +230,44 @@ describe("worktree-manager", () => {
           else process.env[key] = value;
         }
       }
+    });
+  });
+
+  describe("fixGitConfigCorruption", () => {
+    it("repairs core.bare=true and unsets shared core.worktree", () => {
+      existsSync.mockImplementation((path) => String(path).replace(/\\/g, "/").endsWith("/.git/worktrees"));
+      spawnSync.mockImplementation((_cmd, args) => {
+        if (args?.[0] === "config" && args?.[1] === "--bool" && args?.[2] === "--get" && args?.[3] === "core.bare") {
+          return { status: 0, stdout: "true\n", stderr: "" };
+        }
+        if (args?.[0] === "config" && args?.[1] === "--local" && args?.[2] === "--get" && args?.[3] === "core.worktree") {
+          return { status: 0, stdout: "/wrong/worktree\n", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      });
+
+      fixGitConfigCorruption(REPO_ROOT);
+
+      expect(spawnSync).toHaveBeenCalledWith("git", ["config", "--local", "core.bare", "false"], expect.any(Object));
+      expect(spawnSync).toHaveBeenCalledWith("git", ["config", "--local", "--unset-all", "core.worktree"], expect.any(Object));
+    });
+
+    it("repairs shared core.worktree even when core.bare is already false", () => {
+      existsSync.mockImplementation((path) => String(path).replace(/\\/g, "/").endsWith("/.git/worktrees"));
+      spawnSync.mockImplementation((_cmd, args) => {
+        if (args?.[0] === "config" && args?.[1] === "--bool" && args?.[2] === "--get" && args?.[3] === "core.bare") {
+          return { status: 0, stdout: "false\n", stderr: "" };
+        }
+        if (args?.[0] === "config" && args?.[1] === "--local" && args?.[2] === "--get" && args?.[3] === "core.worktree") {
+          return { status: 0, stdout: "/wrong/worktree\n", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      });
+
+      fixGitConfigCorruption(REPO_ROOT);
+
+      expect(spawnSync).not.toHaveBeenCalledWith("git", ["config", "--local", "core.bare", "false"], expect.any(Object));
+      expect(spawnSync).toHaveBeenCalledWith("git", ["config", "--local", "--unset-all", "core.worktree"], expect.any(Object));
     });
   });
 
@@ -461,8 +508,12 @@ describe("worktree-manager", () => {
 
       bootstrapWorktreeForPath(REPO_ROOT, worktreePath);
 
-      expect(ensureWorktreeRuntimeSetupMock).toHaveBeenCalledWith(resolve(REPO_ROOT), resolve(worktreePath));
-      expect(inspectWorktreeRuntimeSetupMock).toHaveBeenCalledWith(resolve(REPO_ROOT), resolve(worktreePath));
+      const [ensureRepoRoot, ensureWorktreePath] = ensureWorktreeRuntimeSetupMock.mock.calls[0] || [];
+      expect(String(ensureRepoRoot).replace(/\\/g, "/")).toMatch(/\/fake\/repo$/);
+      expect(String(ensureWorktreePath).replace(/\\/g, "/")).toMatch(/\/fake\/repo\/\.bosun\/worktrees\/task-abc123$/);
+      const [inspectRepoRoot, inspectWorktreePath] = inspectWorktreeRuntimeSetupMock.mock.calls[0] || [];
+      expect(String(inspectRepoRoot).replace(/\\/g, "/")).toMatch(/\/fake\/repo$/);
+      expect(String(inspectWorktreePath).replace(/\\/g, "/")).toMatch(/\/fake\/repo\/\.bosun\/worktrees\/task-abc123$/);
       expect(symlinkSync).toHaveBeenCalledTimes(1);
       const [targetPath, linkPath] = symlinkSync.mock.calls[0];
   expect(normalizePath(targetPath)).toBe(`${normalizedRepoRoot}/node_modules`);
@@ -544,6 +595,76 @@ describe("worktree-manager", () => {
         /\/fake\/repo\/\.cache\/worktrees\/ve-abc-feat\/node_modules$/,
       );
       expect(typeof linkType).toBe("string");
+    });
+
+    it("repairs reused worktree node_modules when an existing copy no longer points at repo root", async () => {
+      const wtPath = `${REPO_ROOT}/.cache/worktrees/ve-abc-feat`;
+      spawnSync.mockImplementation((_cmd, args) => {
+        if (args && args.includes("--porcelain")) {
+          return {
+            status: 0,
+            stdout: porcelainOutput([
+              { path: REPO_ROOT, branch: "refs/heads/main" },
+              { path: wtPath, branch: "refs/heads/ve/abc-feat" },
+            ]),
+            stderr: "",
+          };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      });
+      existsSync.mockImplementation((path) => {
+        const normalized = String(path).replace(/\\/g, "/");
+        return normalized.endsWith(`${REPO_ROOT}/node_modules`)
+          || normalized.endsWith(`${wtPath}/node_modules`);
+      });
+      realpathSync.mockImplementation((path) => String(path).replace(/\\/g, "/"));
+
+      await mgr.acquireWorktree("ve/abc-feat", "task-2", {
+        owner: "monitor",
+      });
+
+      expect(rmSync).toHaveBeenCalledWith(
+        expect.stringMatching(/node_modules$/),
+        expect.objectContaining({ recursive: true, force: true }),
+      );
+      expect(symlinkSync).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps shared node_modules when the existing worktree path already resolves to repo root", async () => {
+      const wtPath = `${REPO_ROOT}/.cache/worktrees/ve-abc-feat`;
+      spawnSync.mockImplementation((_cmd, args) => {
+        if (args && args.includes("--porcelain")) {
+          return {
+            status: 0,
+            stdout: porcelainOutput([
+              { path: REPO_ROOT, branch: "refs/heads/main" },
+              { path: wtPath, branch: "refs/heads/ve/abc-feat" },
+            ]),
+            stderr: "",
+          };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      });
+      existsSync.mockImplementation((path) => {
+        const normalized = String(path).replace(/\\/g, "/");
+        return normalized.endsWith(`${REPO_ROOT}/node_modules`)
+          || normalized.endsWith(`${wtPath}/node_modules`);
+      });
+      realpathSync.mockImplementation((path) => {
+        const normalized = String(path).replace(/\\/g, "/");
+        if (normalized.endsWith(`${REPO_ROOT}/node_modules`)
+          || normalized.endsWith(`${wtPath}/node_modules`)) {
+          return `${REPO_ROOT}/node_modules`;
+        }
+        return normalized;
+      });
+
+      await mgr.acquireWorktree("ve/abc-feat", "task-2", {
+        owner: "monitor",
+      });
+
+      expect(rmSync).not.toHaveBeenCalled();
+      expect(symlinkSync).not.toHaveBeenCalled();
     });
 
     it("registers worktree with taskKey", async () => {
@@ -1193,18 +1314,19 @@ describe("worktree-manager", () => {
           { path: mgr.repoRoot, branch: "refs/heads/main" },
         ]),
         stderr: "",
-      });
-      existsSync.mockImplementation((p) => {
-        return normalizePath(p) === managedTaskRoot;
-      });
-      readdirSync.mockImplementation((dirPath) => {
-        if (normalizePath(dirPath) === managedTaskRoot) {
+        });
+        existsSync.mockImplementation((p) => {
+          const normalized = String(p).replace(/\\/g, "/");
+          return normalized.endsWith(`/${DEFAULT_MANAGED_TASK_BASE_DIR}`);
+        });
+        readdirSync.mockImplementation((dirPath) => {
+        if (String(dirPath).replace(/\\/g, "/").endsWith(`/${DEFAULT_MANAGED_TASK_BASE_DIR}`)) {
           return [{ name: "task-abc123-deadbeef", isDirectory: () => true }];
         }
         return [];
       });
       statSync.mockImplementation((targetPath) => ({
-        mtimeMs: normalizePath(targetPath) === orphanPath
+        mtimeMs: String(targetPath).replace(/\\/g, "/").endsWith("/.bosun/worktrees/task-abc123-deadbeef")
           ? Date.now() - MAX_WORKTREE_AGE_MS - 10_000
           : Date.now(),
         isDirectory: () => true,

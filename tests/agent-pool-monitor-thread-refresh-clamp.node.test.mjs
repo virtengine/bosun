@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const source = readFileSync(resolve(process.cwd(), "agent/agent-pool.mjs"), "utf8");
+const source = readFileSync(resolve(process.cwd(), "agent/agent-launcher.mjs"), "utf8");
 
 describe("agent-pool monitor-monitor thread refresh clamp", () => {
   it("defines MONITOR_MONITOR_THREAD_REFRESH_TURNS_REMAINING constant", () => {

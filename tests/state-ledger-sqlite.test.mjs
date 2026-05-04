@@ -13,6 +13,7 @@ import {
   appendTaskTraceEventToStateLedger,
   appendArtifactRecordToStateLedger,
   appendOperatorActionToStateLedger,
+  deleteSessionRecordFromStateLedger,
   getAgentActivityFromStateLedger,
   getActiveTaskClaimFromStateLedger,
   getRunAuditBundleFromStateLedger,
@@ -23,7 +24,11 @@ import {
   getStateLedgerInfo,
   getTaskSnapshotFromStateLedger,
   getTaskTopologyFromStateLedger,
+  getHarnessRunFromStateLedger,
+  getWorkflowRunDetailFromStateLedger,
   getWorkflowRunFromStateLedger,
+  listHarnessRunEventsFromStateLedger,
+  listHarnessRunsFromStateLedger,
   listAuditEventsFromStateLedger,
   listArtifactsFromStateLedger,
   listKnowledgeEntriesFromStateLedger,
@@ -36,13 +41,21 @@ import {
   listTaskClaimEventsFromStateLedger,
   listTaskTopologiesFromStateLedger,
   listToolCallsFromStateLedger,
+  listWorkflowRunSummariesPageFromStateLedger,
   listWorkflowEventsFromStateLedger,
   listWorkflowTaskRunEntriesFromStateLedger,
   resetStateLedgerCache,
   resolveStateLedgerPath,
   upsertSessionRecordToStateLedger,
   upsertStateLedgerKeyValue,
+  writeHarnessRunToStateLedger,
+  writeWorkflowRunDetailToStateLedger,
 } from "../lib/state-ledger-sqlite.mjs";
+import {
+  listHarnessTelemetryEvents,
+  resetHarnessObservabilitySpinesForTests,
+} from "../infra/session-telemetry.mjs";
+import { createReplayReader } from "../infra/replay-reader.mjs";
 
 vi.mock("../infra/presence.mjs", () => ({
   getPresenceState: vi.fn(() => ({
@@ -86,6 +99,7 @@ async function loadTaskClaimsModule() {
 
 afterEach(async () => {
   resetStateLedgerCache();
+  resetHarnessObservabilitySpinesForTests();
   await vi.resetModules();
   while (tempDirs.length) {
     rmSync(tempDirs.pop(), { recursive: true, force: true });
@@ -93,6 +107,16 @@ afterEach(async () => {
 });
 
 describe("state ledger sqlite workflow integration", () => {
+  it("keeps standalone anchor paths isolated from the shared Bosun home ledger", () => {
+    const standaloneRoot = makeTempDir("state-ledger-standalone-");
+    const runsDir = join(standaloneRoot, "runs");
+    mkdirSync(runsDir, { recursive: true });
+
+    const resolvedPath = resolveStateLedgerPath({ anchorPath: runsDir });
+    expect(resolvedPath).toBe(resolve(standaloneRoot, "state-ledger.sqlite"));
+    expect(resolvedPath.includes(`${join("bosun", ".cache", "state-ledger.sqlite")}`)).toBe(false);
+  });
+
   it("mirrors workflow execution ledgers into sqlite and falls back to sqlite reads", async () => {
     const repoRoot = makeTempDir("state-ledger-workflow-");
     const runsDir = join(repoRoot, ".bosun", "workflow-runs");
@@ -156,6 +180,7 @@ describe("state ledger sqlite workflow integration", () => {
         "tool_calls",
         "workflow_events",
         "workflow_runs",
+        "workflow_snapshots",
       ]),
     );
 
@@ -182,6 +207,22 @@ describe("state ledger sqlite workflow integration", () => {
     const events = listWorkflowEventsFromStateLedger("run-1", { anchorPath: runsDir });
     expect(events.map((event) => event.eventType)).toEqual(["run.start", "run.end"]);
 
+    const pagedSummaries = listWorkflowRunSummariesPageFromStateLedger({
+      anchorPath: runsDir,
+      offset: 0,
+      limit: 10,
+    });
+    expect(pagedSummaries.total).toBe(1);
+    expect(pagedSummaries.runs).toEqual([
+      expect.objectContaining({
+        runId: "run-1",
+        workflowId: "wf-1",
+        status: "completed",
+        taskId: "task-1",
+        sessionId: "session-1",
+      }),
+    ]);
+
     rmSync(join(runsDir, "execution-ledger", "run-1.json"), { force: true });
 
     const fallbackRun = ledger.getRunLedger("run-1");
@@ -192,6 +233,178 @@ describe("state ledger sqlite workflow integration", () => {
       }),
     );
     expect(fallbackRun.events).toHaveLength(2);
+  });
+
+  it("writes objective-frame state through the ledger and restore summary", async () => {
+    const repoRoot = makeTempDir("state-ledger-objectives-");
+    const runsDir = join(repoRoot, ".bosun", "workflow-runs");
+    mkdirSync(runsDir, { recursive: true });
+
+    const { WorkflowExecutionLedger } = await import("../workflow/execution-ledger.mjs");
+    const ledger = new WorkflowExecutionLedger({ runsDir });
+
+    ledger.ensureRun({
+      runId: "run-objective-1",
+      workflowId: "wf-objective-1",
+      workflowName: "Objective Ledger Workflow",
+      startedAt: "2026-04-06T01:00:00.000Z",
+      status: "running",
+      objectiveFrame: {
+        successCriteria: [
+          { id: "criterion-1", title: "Draft report", status: "partial", blocking: true },
+        ],
+        goalProgress: {
+          status: "in_progress",
+          completedCriteriaCount: 1,
+          totalCriteriaCount: 2,
+          completionRatio: 0.5,
+        },
+        constraintState: {
+          status: "blocked",
+          blocked: true,
+          violations: [
+            {
+              constraintId: "approval",
+              message: "Operator approval pending",
+              blocking: true,
+            },
+          ],
+        },
+        tokenBudget: {
+          budgetTokens: 2000,
+          totalTokens: 1800,
+          remainingTokens: 200,
+          status: "near_limit",
+        },
+      },
+    });
+    ledger.appendEvent({
+      runId: "run-objective-1",
+      workflowId: "wf-objective-1",
+      workflowName: "Objective Ledger Workflow",
+      eventType: "run.start",
+      timestamp: "2026-04-06T01:00:00.000Z",
+      status: "running",
+      meta: {
+        taskId: "task-objective-1",
+        sessionId: "session-objective-1",
+        objectiveFrame: {
+          successCriteria: [
+            { id: "criterion-1", title: "Draft report", status: "partial", blocking: true },
+          ],
+          goalProgress: {
+            status: "in_progress",
+            completedCriteriaCount: 1,
+            totalCriteriaCount: 2,
+            completionRatio: 0.5,
+          },
+          constraintState: {
+            status: "blocked",
+            blocked: true,
+            violations: [
+              {
+                constraintId: "approval",
+                message: "Operator approval pending",
+                blocking: true,
+              },
+            ],
+          },
+          tokenBudget: {
+            budgetTokens: 2000,
+            totalTokens: 1800,
+            remainingTokens: 200,
+            status: "near_limit",
+          },
+        },
+      },
+    });
+
+    const persisted = ledger.getRunLedger("run-objective-1");
+    expect(persisted).toEqual(expect.objectContaining({
+      objectiveFrame: expect.objectContaining({
+        blocked: true,
+      }),
+      goalProgress: expect.objectContaining({
+        status: "in_progress",
+        completionRatio: 0.5,
+      }),
+      constraintState: expect.objectContaining({
+        status: "blocked",
+        blockingViolationCount: 1,
+      }),
+      tokenBudget: expect.objectContaining({
+        status: "near_limit",
+        totalTokens: 1800,
+      }),
+    }));
+
+    const restore = ledger.buildRestoreState({ runId: "run-objective-1" });
+    expect(restore).toEqual(expect.objectContaining({
+      objectiveFrame: expect.objectContaining({
+        blocked: true,
+      }),
+      goalProgress: expect.objectContaining({
+        status: "in_progress",
+      }),
+      constraintState: expect.objectContaining({
+        status: "blocked",
+      }),
+      tokenBudget: expect.objectContaining({
+        status: "near_limit",
+      }),
+    }));
+    expect(restore.runs).toEqual([
+      expect.objectContaining({
+        runId: "run-objective-1",
+        objectiveFrame: expect.objectContaining({
+          blocked: true,
+        }),
+        goalProgress: expect.objectContaining({
+          status: "in_progress",
+        }),
+        constraintState: expect.objectContaining({
+          status: "blocked",
+        }),
+        tokenBudget: expect.objectContaining({
+          status: "near_limit",
+        }),
+      }),
+    ]);
+  });
+
+  it("stores workflow run detail snapshots in sqlite for fileless reads", () => {
+    const repoRoot = makeTempDir("state-ledger-workflow-detail-");
+    const runsDir = join(repoRoot, ".bosun", "workflow-runs");
+    mkdirSync(runsDir, { recursive: true });
+
+    writeWorkflowRunDetailToStateLedger("run-detail-1", {
+      id: "run-detail-1",
+      startedAt: 1711846800000,
+      endedAt: 1711846860000,
+      data: {
+        _workflowId: "wf-detail-1",
+        _workflowName: "Workflow Detail Ledger",
+        taskId: "task-detail-1",
+      },
+      nodeStatuses: {
+        trigger: "completed",
+      },
+      logs: [],
+      errors: [],
+    }, { anchorPath: runsDir });
+
+    const detail = getWorkflowRunDetailFromStateLedger("run-detail-1", { anchorPath: runsDir });
+    expect(detail).toMatchObject({
+      id: "run-detail-1",
+      data: {
+        _workflowId: "wf-detail-1",
+        _workflowName: "Workflow Detail Ledger",
+        taskId: "task-detail-1",
+      },
+      nodeStatuses: {
+        trigger: "completed",
+      },
+    });
   });
 
   it("derives tool calls and artifacts from appended workflow events", async () => {
@@ -285,6 +498,504 @@ describe("state ledger sqlite workflow integration", () => {
         kind: "evidence_bundle",
         path: ".bosun/artifacts/evidence.json",
         sourceEventId: expect.any(String),
+      }),
+    ]);
+  });
+
+  it("stores harness runs and events in sqlite for SQL-first API reads", async () => {
+    const repoRoot = makeTempDir("state-ledger-harness-");
+    const harnessRunsDir = join(repoRoot, ".bosun", ".cache", "harness", "runs");
+    mkdirSync(harnessRunsDir, { recursive: true });
+
+    writeHarnessRunToStateLedger({
+      runId: "harness-run-1",
+      taskId: "task-h-1",
+      taskKey: "harness:task-h-1",
+      actor: "api",
+      recordedAt: "2026-03-31T05:10:00.000Z",
+      startedAt: "2026-03-31T05:00:00.000Z",
+      finishedAt: "2026-03-31T05:10:00.000Z",
+      mode: "run",
+      dryRun: false,
+      sourceOrigin: "file",
+      sourcePath: "internal-harness.md",
+      artifactId: "artifact-h-1",
+      artifactPath: "artifact-h-1.json",
+      compiledProfile: { agentId: "harness-agent", name: "Harness Agent" },
+      result: { success: true, status: "completed" },
+      events: [
+        {
+          id: "h1-e1",
+          seq: 1,
+          timestamp: "2026-03-31T05:00:00.000Z",
+          type: "harness:stage-start",
+          stageId: "plan",
+          stageType: "plan",
+          status: "running",
+          category: "stage",
+        },
+        {
+          id: "h1-e2",
+          seq: 2,
+          timestamp: "2026-03-31T05:09:00.000Z",
+          type: "harness:approval-requested",
+          stageId: "gate",
+          stageType: "approval",
+          status: "pending",
+          reason: "Needs operator confirmation",
+          category: "control",
+        },
+      ],
+    }, { anchorPath: harnessRunsDir });
+
+    const listed = listHarnessRunsFromStateLedger({ anchorPath: harnessRunsDir, limit: 10 });
+    expect(listed).toEqual([
+      expect.objectContaining({
+        runId: "harness-run-1",
+        taskId: "task-h-1",
+        taskKey: "harness:task-h-1",
+      }),
+    ]);
+
+    const stored = getHarnessRunFromStateLedger("harness-run-1", { anchorPath: harnessRunsDir });
+    expect(stored).toEqual(expect.objectContaining({
+      runId: "harness-run-1",
+      taskId: "task-h-1",
+      compiledProfile: expect.objectContaining({ agentId: "harness-agent" }),
+      result: expect.objectContaining({ success: true, status: "completed" }),
+    }));
+    expect(stored.events).toHaveLength(2);
+
+    const events = listHarnessRunEventsFromStateLedger("harness-run-1", { anchorPath: harnessRunsDir });
+    expect(events.map((event) => event.type)).toEqual([
+      "harness:stage-start",
+      "harness:approval-requested",
+    ]);
+  });
+
+  it("persists canonical harness observability events for replay-friendly projections", async () => {
+    const repoRoot = makeTempDir("state-ledger-harness-observability-");
+    const harnessRunsDir = join(repoRoot, ".bosun", ".cache", "harness", "runs");
+    mkdirSync(harnessRunsDir, { recursive: true });
+
+    writeHarnessRunToStateLedger({
+      runId: "harness-run-observe-1",
+      taskId: "task-observe-1",
+      taskKey: "harness:task-observe-1",
+      actor: "ui",
+      recordedAt: "2026-03-31T05:15:00.000Z",
+      startedAt: "2026-03-31T05:10:00.000Z",
+      finishedAt: "2026-03-31T05:15:00.000Z",
+      mode: "run",
+      dryRun: false,
+      sourceOrigin: "ui",
+      sourcePath: "internal-harness-observe.json",
+      artifactId: "artifact-observe-1",
+      artifactPath: "artifact-observe-1.json",
+      compiledProfile: { agentId: "observability-agent", name: "Observability Agent" },
+      result: { success: true, status: "completed" },
+      events: [
+        {
+          id: "observe-e1",
+          seq: 1,
+          timestamp: "2026-03-31T05:10:00.000Z",
+          type: "tool_execution_start",
+          category: "tool",
+          stageId: "implement",
+          stageType: "tool",
+          status: "running",
+          providerId: "openai-codex-subscription",
+          toolId: "shell.exec",
+          toolName: "shell.exec",
+          sessionId: "session-observe-1",
+          traceId: "11111111111111111111111111111111",
+          spanId: "2222222222222222",
+        },
+        {
+          id: "observe-e2",
+          seq: 2,
+          timestamp: "2026-03-31T05:11:00.000Z",
+          type: "approval_requested",
+          category: "control",
+          stageId: "review",
+          stageType: "approval",
+          reason: "push_branch requires approval",
+          status: "pending",
+          actor: "operator",
+          approvalId: "approval-observe-1",
+          toolId: "push_branch",
+        },
+        {
+          id: "observe-e3",
+          seq: 3,
+          timestamp: "2026-03-31T05:12:00.000Z",
+          type: "patch_applied",
+          category: "artifact",
+          stageId: "implement",
+          stageType: "mutation",
+          status: "completed",
+          filePath: "server/ui-server.mjs",
+          patchHash: "patch-observe-1",
+        },
+        {
+          id: "observe-e4",
+          seq: 4,
+          timestamp: "2026-03-31T05:13:00.000Z",
+          type: "subagent_completed",
+          category: "subagent",
+          stageId: "delegate",
+          stageType: "subagent",
+          status: "completed",
+          childSessionId: "session-observe-child-1",
+          childTaskId: "task-observe-child-1",
+        },
+      ],
+    }, { anchorPath: harnessRunsDir });
+
+    const stored = getHarnessRunFromStateLedger("harness-run-observe-1", { anchorPath: harnessRunsDir });
+    expect(stored).toEqual(expect.objectContaining({
+      runId: "harness-run-observe-1",
+      taskId: "task-observe-1",
+      actor: "ui",
+      compiledProfile: expect.objectContaining({ agentId: "observability-agent" }),
+      result: expect.objectContaining({ success: true, status: "completed" }),
+    }));
+    expect(stored.events).toEqual([
+      expect.objectContaining({
+        id: "observe-e1",
+        type: "tool_execution_start",
+        category: "tool",
+        providerId: "openai-codex-subscription",
+        toolId: "shell.exec",
+        traceId: "11111111111111111111111111111111",
+      }),
+      expect.objectContaining({
+        id: "observe-e2",
+        type: "approval_requested",
+        category: "control",
+        approvalId: "approval-observe-1",
+        status: "pending",
+      }),
+      expect.objectContaining({
+        id: "observe-e3",
+        type: "patch_applied",
+        category: "artifact",
+        filePath: "server/ui-server.mjs",
+        patchHash: "patch-observe-1",
+      }),
+      expect.objectContaining({
+        id: "observe-e4",
+        type: "subagent_completed",
+        category: "subagent",
+        childSessionId: "session-observe-child-1",
+        childTaskId: "task-observe-child-1",
+      }),
+    ]);
+
+    const replayEvents = listHarnessRunEventsFromStateLedger("harness-run-observe-1", { anchorPath: harnessRunsDir });
+    expect(replayEvents).toEqual([
+      expect.objectContaining({
+        id: "observe-e1",
+        seq: 1,
+        type: "tool_execution_start",
+        category: "tool",
+      }),
+      expect.objectContaining({
+        id: "observe-e2",
+        seq: 2,
+        type: "approval_requested",
+        category: "control",
+        actor: "operator",
+      }),
+      expect.objectContaining({
+        id: "observe-e3",
+        seq: 3,
+        type: "patch_applied",
+        category: "artifact",
+      }),
+      expect.objectContaining({
+        id: "observe-e4",
+        seq: 4,
+        type: "subagent_completed",
+        category: "subagent",
+      }),
+    ]);
+
+    const listed = listHarnessRunsFromStateLedger({ anchorPath: harnessRunsDir, limit: 10 });
+    expect(listed).toEqual([
+      expect.objectContaining({
+        runId: "harness-run-observe-1",
+        taskId: "task-observe-1",
+        result: expect.objectContaining({ success: true, status: "completed" }),
+        events: expect.arrayContaining([
+          expect.objectContaining({ type: "tool_execution_start" }),
+          expect.objectContaining({ type: "approval_requested" }),
+          expect.objectContaining({ type: "patch_applied" }),
+          expect.objectContaining({ type: "subagent_completed" }),
+        ]),
+      }),
+    ]);
+  });
+
+  it("replays recorded harness run events into the canonical telemetry spine", async () => {
+    const repoRoot = makeTempDir("state-ledger-harness-telemetry-replay-");
+    const controlPlane = await import("../agent/internal-harness-control-plane.mjs");
+
+    controlPlane.recordHarnessRun({
+      runId: "harness-run-telemetry-1",
+      taskId: "task-telemetry-1",
+      actor: "ui",
+      sourceOrigin: "ui",
+      artifactId: "artifact-telemetry-1",
+      artifactPath: "artifact-telemetry-1.json",
+      compiledProfile: { agentId: "telemetry-agent", name: "Telemetry Agent" },
+      result: { success: true, status: "completed" },
+      events: [
+        {
+          id: "telemetry-e1",
+          timestamp: "2026-04-03T10:00:00.000Z",
+          type: "patch_applied",
+          category: "artifact",
+          stageId: "implement",
+          stageType: "mutation",
+          filePath: "server/ui-server.mjs",
+          patchHash: "patch-telemetry-1",
+          status: "completed",
+        },
+        {
+          id: "telemetry-e2",
+          timestamp: "2026-04-03T10:00:01.000Z",
+          type: "subagent_completed",
+          category: "subagent",
+          stageId: "delegate",
+          stageType: "subagent",
+          childSessionId: "session-telemetry-child-1",
+          childTaskId: "task-telemetry-child-1",
+          subagentId: "subagent-telemetry-1",
+          status: "completed",
+        },
+      ],
+    }, { configDir: join(repoRoot, ".bosun") });
+
+    const fileEvents = listHarnessTelemetryEvents({
+      filePath: "server/ui-server.mjs",
+    }, { configDir: join(repoRoot, ".bosun") });
+    const childEvents = listHarnessTelemetryEvents({
+      childSessionId: "session-telemetry-child-1",
+    }, { configDir: join(repoRoot, ".bosun") });
+
+    expect(fileEvents).toEqual([
+      expect.objectContaining({
+        eventType: "patch_applied",
+        category: "artifact",
+        artifactPath: "server/ui-server.mjs",
+        patchHash: "patch-telemetry-1",
+        runId: "harness-run-telemetry-1",
+      }),
+    ]);
+    expect(childEvents).toEqual([
+      expect.objectContaining({
+        eventType: "subagent_completed",
+        category: "subagent",
+        childSessionId: "session-telemetry-child-1",
+        childTaskId: "task-telemetry-child-1",
+        subagentId: "subagent-telemetry-1",
+        runId: "harness-run-telemetry-1",
+      }),
+    ]);
+  });
+
+  it("rebuilds converged live projections from sqlite workflow and harness events", async () => {
+    const repoRoot = makeTempDir("state-ledger-replay-convergence-");
+    const runsDir = join(repoRoot, ".bosun", "workflow-runs");
+    const harnessRunsDir = join(repoRoot, ".bosun", ".cache", "harness", "runs");
+    mkdirSync(runsDir, { recursive: true });
+    mkdirSync(harnessRunsDir, { recursive: true });
+
+    const { WorkflowExecutionLedger } = await import("../workflow/execution-ledger.mjs");
+    const ledger = new WorkflowExecutionLedger({ runsDir });
+
+    ledger.ensureRun({
+      runId: "run-replay-converge-1",
+      workflowId: "wf-replay-converge",
+      workflowName: "Replay Converge Workflow",
+      startedAt: "2026-04-03T11:00:00.000Z",
+      status: "running",
+    });
+    ledger.appendEvent({
+      id: "wf-replay-e1",
+      runId: "run-replay-converge-1",
+      workflowId: "wf-replay-converge",
+      workflowName: "Replay Converge Workflow",
+      eventType: "tool.completed",
+      timestamp: "2026-04-03T11:00:01.000Z",
+      sessionId: "session-replay-converge-1",
+      rootSessionId: "session-root-converge-1",
+      taskId: "task-replay-converge-1",
+      rootTaskId: "task-root-converge-1",
+      providerId: "openai-api",
+      modelId: "gpt-5.4",
+      toolId: "apply_patch",
+      toolName: "apply_patch",
+      status: "completed",
+      tokenUsage: {
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+      },
+      meta: {
+        taskId: "task-replay-converge-1",
+        sessionId: "session-replay-converge-1",
+        rootSessionId: "session-root-converge-1",
+      },
+    });
+
+    writeHarnessRunToStateLedger({
+      runId: "harness-replay-converge-1",
+      taskId: "task-replay-converge-1",
+      actor: "ui",
+      recordedAt: "2026-04-03T11:01:00.000Z",
+      startedAt: "2026-04-03T11:01:00.000Z",
+      finishedAt: "2026-04-03T11:02:00.000Z",
+      mode: "run",
+      dryRun: false,
+      sourceOrigin: "ui",
+      compiledProfile: { agentId: "replay-agent", name: "Replay Agent" },
+      result: { success: true, status: "completed" },
+      events: [
+        {
+          id: "h-replay-e1",
+          seq: 1,
+          timestamp: "2026-04-03T11:01:10.000Z",
+          type: "approval.resolved",
+          category: "approval",
+          sessionId: "session-replay-converge-1",
+          rootSessionId: "session-root-converge-1",
+          runId: "harness-replay-converge-1",
+          rootRunId: "run-root-converge-1",
+          taskId: "task-replay-converge-1",
+          approvalId: "approval-converge-1",
+          toolId: "push_branch",
+          toolName: "push_branch",
+          actor: "operator",
+          status: "approved",
+        },
+        {
+          id: "h-replay-e2",
+          seq: 2,
+          timestamp: "2026-04-03T11:01:20.000Z",
+          type: "subagent.completed",
+          category: "subagent",
+          sessionId: "session-replay-converge-1",
+          rootSessionId: "session-root-converge-1",
+          runId: "harness-replay-converge-1",
+          rootRunId: "run-root-converge-1",
+          taskId: "task-replay-converge-1",
+          subagentId: "subagent-converge-1",
+          childSessionId: "session-child-converge-1",
+          childTaskId: "task-child-converge-1",
+          childRunId: "run-child-converge-1",
+          status: "completed",
+        },
+      ],
+    }, { anchorPath: harnessRunsDir });
+
+    const replay = createReplayReader({ anchorPath: runsDir }).readStateLedgerProjection({
+      anchorPath: runsDir,
+      workflowRunIds: ["run-replay-converge-1"],
+      harnessRunIds: ["harness-replay-converge-1"],
+      sessionId: "session-replay-converge-1",
+    });
+
+    expect(replay.events).toHaveLength(3);
+    expect(replay.live.sessions[0]).toEqual(expect.objectContaining({
+      sessionId: "session-replay-converge-1",
+      rootSessionId: "session-root-converge-1",
+      providerIds: ["openai-api"],
+      toolNames: expect.arrayContaining(["apply_patch", "push_branch"]),
+      approvalIds: ["approval-converge-1"],
+      subagentIds: ["subagent-converge-1"],
+      childSessionIds: ["session-child-converge-1"],
+      childTaskIds: ["task-child-converge-1"],
+      childRunIds: ["run-child-converge-1"],
+    }));
+    expect(replay.live.approvals).toEqual([
+      expect.objectContaining({
+        approvalId: "approval-converge-1",
+        sessionId: "session-replay-converge-1",
+        rootSessionId: "session-root-converge-1",
+        toolName: "push_branch",
+        status: "approved",
+      }),
+    ]);
+    expect(replay.live.subagents).toEqual([
+      expect.objectContaining({
+        subagentId: "subagent-converge-1",
+        childSessionId: "session-child-converge-1",
+        childTaskId: "task-child-converge-1",
+        childRunId: "run-child-converge-1",
+        rootSessionId: "session-root-converge-1",
+      }),
+    ]);
+    expect(replay.providers).toEqual([
+      expect.objectContaining({
+        providerId: "openai-api",
+        modelId: "gpt-5.4",
+        totalTokens: 30,
+      }),
+    ]);
+  });
+
+  it("records harness artifact compile and activation events into the canonical telemetry spine", async () => {
+    const repoRoot = makeTempDir("state-ledger-harness-artifact-observability-");
+    const controlPlane = await import("../agent/internal-harness-control-plane.mjs");
+    const configDir = join(repoRoot, ".bosun");
+    const source = [
+      "# Internal Harness",
+      "```json",
+      JSON.stringify({
+        name: "Observability Harness",
+        entryStageId: "plan",
+        stages: [
+          {
+            id: "plan",
+            type: "prompt",
+            prompt: "Plan the task.",
+          },
+        ],
+      }),
+      "```",
+    ].join("\n");
+
+    const compiled = controlPlane.compileHarnessSourceToArtifact(source, {
+      configDir,
+      sourceOrigin: "ui",
+      actor: "operator",
+    });
+    const activeState = controlPlane.activateHarnessArtifact(compiled.artifactPath, {
+      configDir,
+      actor: "operator",
+    });
+
+    const artifactEvents = listHarnessTelemetryEvents({
+      artifactId: compiled.artifactId,
+    }, { configDir });
+
+    expect(activeState.artifactId).toBe(compiled.artifactId);
+    expect(artifactEvents).toEqual([
+      expect.objectContaining({
+        eventType: "harness.artifact.compiled",
+        category: "artifact",
+        artifactId: compiled.artifactId,
+        artifactPath: compiled.artifactPath,
+        actor: "operator",
+      }),
+      expect.objectContaining({
+        eventType: "harness.artifact.activated",
+        category: "artifact",
+        artifactId: compiled.artifactId,
+        artifactPath: compiled.artifactPath,
+        actor: "operator",
       }),
     ]);
   });
@@ -441,7 +1152,7 @@ describe("state ledger sqlite audit helpers", () => {
     upsertStateLedgerKeyValue({
       scope: "settings",
       scopeId: repoRoot,
-      key: "GNAP_ENABLED",
+      key: "REPO_MIRROR_ENABLED",
       value: "true",
       source: "test",
       metadata: { updatedBy: "vitest" },
@@ -454,9 +1165,9 @@ describe("state ledger sqlite audit helpers", () => {
       actorType: "operator",
       scope: "settings",
       scopeId: repoRoot,
-      targetId: "GNAP_ENABLED",
-      request: { changes: { GNAP_ENABLED: "true" } },
-      result: { updated: ["GNAP_ENABLED"] },
+      targetId: "REPO_MIRROR_ENABLED",
+      request: { changes: { REPO_MIRROR_ENABLED: "true" } },
+      result: { updated: ["REPO_MIRROR_ENABLED"] },
     }, { repoRoot });
 
     appendArtifactRecordToStateLedger({
@@ -468,7 +1179,7 @@ describe("state ledger sqlite audit helpers", () => {
       metadata: { hash: "abc123" },
     }, { repoRoot });
 
-    expect(getStateLedgerKeyValue("settings", repoRoot, "GNAP_ENABLED", { repoRoot })).toEqual(
+    expect(getStateLedgerKeyValue("settings", repoRoot, "REPO_MIRROR_ENABLED", { repoRoot })).toEqual(
       expect.objectContaining({
         value: "true",
         source: "test",
@@ -479,7 +1190,7 @@ describe("state ledger sqlite audit helpers", () => {
         expect.objectContaining({
           actionId: "settings-update-1",
           actionType: "settings.update",
-          targetId: "GNAP_ENABLED",
+          targetId: "REPO_MIRROR_ENABLED",
         }),
       ]),
     );
@@ -651,6 +1362,43 @@ describe("state ledger sqlite audit helpers", () => {
         latestStatus: "completed",
       }),
     ]);
+  });
+
+  it("deletes durable session activity rows", () => {
+    const repoRoot = makeTempDir("state-ledger-session-delete-");
+
+    upsertSessionRecordToStateLedger({
+      sessionId: "session-delete-1",
+      type: "manual",
+      workspaceId: "workspace-delete",
+      taskId: "task-delete-1",
+      taskTitle: "Delete me",
+      status: "completed",
+      latestEventType: "assistant",
+      updatedAt: "2026-03-31T06:05:00.000Z",
+      startedAt: "2026-03-31T06:00:00.000Z",
+      eventCount: 1,
+      document: {
+        id: "session-delete-1",
+        taskId: "task-delete-1",
+        type: "manual",
+        status: "completed",
+      },
+    }, { repoRoot });
+
+    expect(getSessionActivityFromStateLedger("session-delete-1", { repoRoot })).toEqual(
+      expect.objectContaining({
+        sessionId: "session-delete-1",
+        latestTaskId: "task-delete-1",
+      }),
+    );
+
+    expect(deleteSessionRecordFromStateLedger("session-delete-1", { repoRoot })).toEqual({
+      sessionId: "session-delete-1",
+      deleted: true,
+    });
+    expect(getSessionActivityFromStateLedger("session-delete-1", { repoRoot })).toBeNull();
+    expect(listSessionActivitiesFromStateLedger({ repoRoot, workspaceId: "workspace-delete" })).toEqual([]);
   });
 
   it("stores promoted strategy snapshots and audit events", () => {

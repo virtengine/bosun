@@ -18,6 +18,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { homedir, tmpdir } from "node:os";
+import {
+  ensureLocalBosunBackendRunning,
+  normalizeRemoteConnectionConfig,
+  setActiveRemoteConnection,
+  setLocalConnectionConfig,
+  upsertRemoteConnection,
+} from "../tui/lib/connection-target.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -97,6 +104,7 @@ let trayMode = false;
 let startHidden = false;
 /** True when connected to a user-configured remote Bosun instance. */
 let remoteConnectionActive = false;
+let remoteConnectionPromptOpen = false;
 const DEFAULT_TELEGRAM_UI_PORT = 3080;
 const DESKTOP_RELEASES_URL = "https://github.com/virtengine/bosun/releases";
 const STARTUP_UPDATE_REMIND_LATER_MS = 12 * 60 * 60 * 1000;
@@ -397,15 +405,11 @@ function ensureDesktopApiKeyInEnv() {
 function readRemoteConnectionConfig() {
   try {
     const file = resolve(resolveDesktopConfigDir(), REMOTE_CONNECTION_FILE);
-    if (!existsSync(file)) return { enabled: false, endpoint: "", apiKey: "" };
+    if (!existsSync(file)) return normalizeRemoteConnectionConfig({});
     const raw = JSON.parse(readFileSync(file, "utf8"));
-    return {
-      enabled: !!raw?.enabled,
-      endpoint: String(raw?.endpoint || "").trim(),
-      apiKey: String(raw?.apiKey || "").trim(),
-    };
+    return normalizeRemoteConnectionConfig(raw);
   } catch {
-    return { enabled: false, endpoint: "", apiKey: "" };
+    return normalizeRemoteConnectionConfig({});
   }
 }
 
@@ -417,34 +421,81 @@ function saveRemoteConnectionConfig(config) {
   const dir = resolveDesktopConfigDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const file = resolve(dir, REMOTE_CONNECTION_FILE);
-  const payload = {
-    enabled: !!config?.enabled,
-    endpoint: String(config?.endpoint || "").trim(),
-    apiKey: String(config?.apiKey || "").trim(),
-  };
+  const payload = normalizeRemoteConnectionConfig(config);
   writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
   return payload;
+}
+
+function saveActiveRemoteConnectionEntry(entry = {}) {
+  const current = readRemoteConnectionConfig();
+  const next = upsertRemoteConnection(current, {
+    id: entry?.id,
+    name: entry?.name || entry?.endpoint,
+    endpoint: entry?.endpoint,
+    apiKey: entry?.apiKey,
+    enabled: true,
+  });
+  return saveRemoteConnectionConfig(next);
+}
+
+function saveDesktopLocalConnectionEntry(entry = {}) {
+  const current = readRemoteConnectionConfig();
+  const next = setLocalConnectionConfig(current, {
+    name: "Local Backend",
+    ...entry,
+  });
+  return saveRemoteConnectionConfig(next);
 }
 
 /**
  * Probe a remote Bosun endpoint. Returns true if reachable.
  */
 async function probeRemoteEndpoint(endpoint, apiKey) {
+  const result = await testRemoteEndpoint(endpoint, apiKey);
+  return result.ok;
+}
+
+async function testRemoteEndpoint(endpoint, apiKey) {
   try {
     const url = new URL("/api/status", endpoint);
     const headers = {};
     if (apiKey) headers["x-api-key"] = apiKey;
     const mod = url.protocol === "https:" ? await import("node:https") : await import("node:http");
-    return new Promise((ok) => {
+    return await new Promise((resolveProbe) => {
       const req = mod.get(url, { headers, timeout: 3000, rejectUnauthorized: false }, (res) => {
-        ok(res.statusCode >= 200 && res.statusCode < 400);
+        const statusCode = Number(res.statusCode || 0);
         res.resume();
+        if (statusCode >= 200 && statusCode < 400) {
+          resolveProbe({ ok: true, reachable: true, statusCode, error: "" });
+          return;
+        }
+        resolveProbe({
+          ok: false,
+          reachable: false,
+          statusCode,
+          error: statusCode === 401 || statusCode === 403
+            ? "Authentication failed"
+            : `Request failed (${statusCode || "unknown"})`,
+        });
       });
-      req.on("error", () => ok(false));
-      req.on("timeout", () => { req.destroy(); ok(false); });
+      req.on("error", (error) => resolveProbe({
+        ok: false,
+        reachable: false,
+        statusCode: 0,
+        error: String(error?.message || "Connection failed"),
+      }));
+      req.on("timeout", () => {
+        req.destroy();
+        resolveProbe({
+          ok: false,
+          reachable: false,
+          statusCode: 0,
+          error: "Connection timed out",
+        });
+      });
     });
   } catch {
-    return false;
+    return { ok: false, reachable: false, statusCode: 0, error: "Invalid endpoint URL" };
   }
 }
 
@@ -1084,6 +1135,160 @@ function buildWorkspaceSubmenu() {
   return items;
 }
 
+async function reconnectMainWindowToActiveConnection() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  await mainWindow.loadURL(buildLoadingPageUrl("Connecting to Bosun backend..."));
+  const uiUrl = await buildUiUrl();
+  await mainWindow.loadURL(uiUrl);
+}
+
+async function activateDesktopRemoteConnection(connectionId) {
+  const current = readRemoteConnectionConfig();
+  const connection = Array.isArray(current.connections)
+    ? current.connections.find((entry) => entry.id === connectionId)
+    : null;
+  if (!connection) {
+    await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Backend Connection",
+      message: "Saved backend connection not found.",
+      buttons: ["OK"],
+    });
+    return;
+  }
+  const reachable = await testRemoteEndpoint(connection.endpoint, connection.apiKey);
+  if (!reachable.ok) {
+    await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Backend Connection Failed",
+      message: `Could not connect to ${connection.name || connection.endpoint}`,
+      detail: reachable.error || "Connection failed",
+      buttons: ["OK"],
+    });
+    const updated = await showRemoteConnectionInputDialog({
+      endpoint: connection.endpoint,
+      apiKey: connection.apiKey,
+      introMessage: `Bosun could not reach ${connection.endpoint}. Update this backend connection, test it, then save to continue.`,
+    });
+    if (!updated?.endpoint) return;
+    saveActiveRemoteConnectionEntry({
+      id: connection.id,
+      name: connection.name,
+      endpoint: updated.endpoint,
+      apiKey: updated.apiKey,
+    });
+  } else {
+    const next = setActiveRemoteConnection(current, connection.id);
+    saveRemoteConnectionConfig(next);
+  }
+  remoteConnectionActive = true;
+  Menu.setApplicationMenu(buildAppMenu());
+  refreshTrayMenu();
+  await reconnectMainWindowToActiveConnection();
+}
+
+async function launchDesktopLocalBackend() {
+  const result = await ensureLocalBosunBackendRunning({
+    configDir: resolveDesktopConfigDir(),
+    env: process.env,
+    timeoutMs: 20000,
+  });
+  if (!result?.ok || !result?.target) {
+    await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Local Backend Launch Failed",
+      message: "Bosun could not launch the configured local backend.",
+      detail: result?.error || "Local backend did not become reachable.",
+      buttons: ["OK"],
+    });
+    return null;
+  }
+  saveDesktopLocalConnectionEntry(result.target);
+  return result.target;
+}
+
+async function activateDesktopLocalConnection(options = {}) {
+  if (options.launch === true) {
+    const launchedTarget = await launchDesktopLocalBackend();
+    if (!launchedTarget) return;
+  } else {
+    const daemonUrl = await resolveDaemonUiUrl();
+    if (daemonUrl) {
+      saveDesktopLocalConnectionEntry({ endpoint: daemonUrl });
+    }
+  }
+  const current = readRemoteConnectionConfig();
+  saveRemoteConnectionConfig({
+    ...current,
+    enabled: false,
+  });
+  remoteConnectionActive = false;
+  Menu.setApplicationMenu(buildAppMenu());
+  refreshTrayMenu();
+  await reconnectMainWindowToActiveConnection();
+}
+
+function buildConnectionSubmenu() {
+  const current = readRemoteConnectionConfig();
+  const connections = Array.isArray(current.connections) ? current.connections : [];
+  /** @type {Electron.MenuItemConstructorOptions[]} */
+  const items = [];
+
+  items.push({
+    label: "Launch Local Backend",
+    click: () => {
+      activateDesktopLocalConnection({ launch: true }).catch((err) =>
+        console.warn("[desktop] local backend launch failed:", err?.message || err),
+      );
+    },
+  });
+  items.push({
+    label: current.enabled ? "Use Local Backend" : "✓ Use Local Backend",
+    enabled: current.enabled,
+    click: () => {
+      activateDesktopLocalConnection().catch((err) =>
+        console.warn("[desktop] local backend activation failed:", err?.message || err),
+      );
+    },
+  });
+  items.push({ type: /** @type {const} */ ("separator") });
+
+  if (connections.length === 0) {
+    items.push({ label: "No saved remote backends", enabled: false });
+  } else {
+    for (const connection of connections) {
+      const isActive = current.enabled && connection.id === current.activeConnectionId;
+      items.push({
+        label: isActive ? `✓ ${connection.name}` : connection.name,
+        enabled: !isActive,
+        click: () => {
+          activateDesktopRemoteConnection(connection.id).catch((err) =>
+            console.warn("[desktop] remote backend activation failed:", err?.message || err),
+          );
+        },
+      });
+    }
+  }
+
+  items.push({ type: /** @type {const} */ ("separator") });
+  items.push({
+    label: "Manage Backend Connections…",
+    click: async () => {
+      const config = await showRemoteConnectionInputDialog({
+        introMessage: "Create or update a saved backend connection, test it, then save to connect.",
+      });
+      if (!config?.endpoint) return;
+      saveActiveRemoteConnectionEntry(config);
+      remoteConnectionActive = true;
+      Menu.setApplicationMenu(buildAppMenu());
+      refreshTrayMenu();
+      await reconnectMainWindowToActiveConnection();
+    },
+  });
+
+  return items;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -1268,6 +1473,10 @@ function buildAppMenu() {
       label: "Workspace",
       submenu: buildWorkspaceSubmenu(),
     },
+    {
+      label: "Backend Connections",
+      submenu: buildConnectionSubmenu(),
+    },
 
     // ── Bosun ───────────────────────────────────────────────────────────────
     {
@@ -1383,6 +1592,7 @@ async function loadUiServerModule() {
 }
 
 function buildDaemonUiBaseUrl() {
+  const savedLocal = readRemoteConnectionConfig().localConnection || null;
   let rawPort = Number(process.env.TELEGRAM_UI_PORT || "");
   // If TELEGRAM_UI_PORT isn't in the process env, try reading it from the
   // bosun module's .env so the desktop detects the daemon's actual port even
@@ -1407,12 +1617,17 @@ function buildDaemonUiBaseUrl() {
   }
   const port = Number.isFinite(rawPort) && rawPort > 0
     ? rawPort
-    : DEFAULT_TELEGRAM_UI_PORT;
+    : Number(savedLocal?.port || 0) > 0
+      ? Number(savedLocal.port)
+      : DEFAULT_TELEGRAM_UI_PORT;
   const tlsDisabled = parseBoolEnv(process.env.TELEGRAM_UI_TLS_DISABLE, false);
-  const protocol = tlsDisabled ? "http" : "https";
+  const protocol = tlsDisabled
+    ? "http"
+    : String(savedLocal?.httpProtocol || "").trim() || "https";
   const host =
     process.env.TELEGRAM_UI_DESKTOP_HOST ||
     process.env.TELEGRAM_UI_HOST ||
+    savedLocal?.host ||
     "127.0.0.1";
   return `${protocol}://${host}:${port}`;
 }
@@ -1603,6 +1818,29 @@ async function buildUiUrl() {
       // on every request to this origin automatically.
       return remoteTarget.toString();
     }
+    if (mainWindow && !remoteConnectionPromptOpen) {
+      remoteConnectionPromptOpen = true;
+      try {
+        const config = await showRemoteConnectionInputDialog({
+          endpoint: remote.endpoint,
+          apiKey: remote.apiKey,
+          introMessage: `Bosun could not reach ${remote.endpoint}. Update the remote connection, test it, then save to continue.`,
+        });
+        if (config?.endpoint) {
+          saveActiveRemoteConnectionEntry(config);
+          const retryRemote = await probeRemoteEndpoint(config.endpoint, config.apiKey);
+          if (retryRemote) {
+            console.log("[desktop] using updated remote Bosun endpoint:", config.endpoint);
+            remoteConnectionActive = true;
+            const remoteTarget = new URL(config.endpoint);
+            uiOrigin = remoteTarget.origin;
+            return remoteTarget.toString();
+          }
+        }
+      } finally {
+        remoteConnectionPromptOpen = false;
+      }
+    }
     console.warn("[desktop] remote endpoint unreachable, falling back to local");
     remoteConnectionActive = false;
   }
@@ -1648,11 +1886,11 @@ async function showConnectionChoiceDialog() {
     title: "Bosun — No Running Instance Detected",
     message: "Bosun couldn't find a running daemon.\nHow would you like to proceed?",
     detail: [
-      "• Start Local — launch Bosun in this process (default)",
+      "• Launch Local Backend — start or reconnect the configured Bosun daemon",
       "• Connect to Remote — connect to an external Bosun instance (Docker, VM, cloud)",
       "• Continue Offline — open the portal in offline mode",
     ].join("\n"),
-    buttons: ["Start Local", "Connect to Remote", "Continue Offline"],
+    buttons: ["Launch Local Backend", "Connect to Remote", "Continue Offline"],
     defaultId: 0,
     cancelId: 2,
     noLink: true,
@@ -1666,65 +1904,20 @@ async function showConnectionChoiceDialog() {
  * Prompt the user for a remote Bosun endpoint URL and API key.
  * Returns { endpoint, apiKey } or null if cancelled.
  */
-async function showRemoteConnectionInputDialog() {
-  /* ── Step 1: Endpoint URL ── */
+async function showRemoteConnectionInputDialog(options = {}) {
   const existing = readRemoteConnectionConfig();
-  const endpointPrompt = await dialog.showMessageBox(mainWindow, {
-    type: "question",
-    title: "Remote Bosun — Enter Endpoint",
-    message: "Enter the URL of the remote Bosun instance:",
-    detail: `Example: https://bosun.example.com:3080\n\nCurrent: ${existing.endpoint || "(none)"}`,
-    buttons: ["OK", "Cancel"],
-    defaultId: 0,
-    cancelId: 1,
-    noLink: true,
-    // Electron doesn't have an input dialog builtin, so we use a two-step
-    // approach with a prompt window for the actual text input.
-  });
-  if (endpointPrompt.response === 1) return null;
-
-  // Use a small BrowserWindow as a text-input dialog
-  const endpoint = await showTextInputWindow(
-    "Remote Bosun — Endpoint URL",
-    "Enter the Bosun endpoint URL:",
-    existing.endpoint || "https://",
-    "e.g. https://bosun.example.com:3080",
-  );
-  if (!endpoint) return null;
-
-  /* ── Step 2: API Key ── */
-  const apiKey = await showTextInputWindow(
-    "Remote Bosun — API Key",
-    "Enter the API key (BOSUN_API_KEY) for authentication:",
-    existing.apiKey || "",
-    "Leave empty if none is required",
-  );
-  // apiKey can be empty — that's valid (server may have auth disabled)
-
-  // Validate connectivity before saving
-  const reachable = await probeRemoteEndpoint(endpoint, apiKey || "");
-  if (!reachable) {
-    await dialog.showMessageBox(mainWindow, {
-      type: "warning",
-      title: "Connection Failed",
-      message: `Could not reach ${endpoint}`,
-      detail: "The remote instance may be offline or the URL/API key may be incorrect.\nThe config has been saved — you can update it in Settings.",
-      buttons: ["OK"],
-    });
-  }
-  return { endpoint, apiKey: apiKey || "" };
-}
-
-/**
- * Show a small modal window with a text input field.
- * Returns the entered string or null if cancelled.
- */
-function showTextInputWindow(title, label, defaultValue, placeholder) {
+  const savedConnections = Array.isArray(existing.connections) ? existing.connections : [];
+  const initialEndpoint = String(options.endpoint ?? existing.endpoint ?? "https://").trim() || "https://";
+  const initialApiKey = String(options.apiKey ?? existing.apiKey ?? "").trim();
+  const introMessage = String(
+    options.introMessage
+      || "Configure the Bosun endpoint, test it, then save to connect.",
+  ).trim();
   return new Promise((resolvePromise) => {
     const parent = mainWindow || undefined;
     const inputWin = new BrowserWindow({
-      width: 520,
-      height: 210,
+      width: 640,
+      height: 460,
       resizable: false,
       minimizable: false,
       maximizable: false,
@@ -1737,6 +1930,7 @@ function showTextInputWindow(title, label, defaultValue, placeholder) {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        preload: join(__dirname, "preload.cjs"),
       },
     });
     const escapeHtml = (value) =>
@@ -1746,39 +1940,159 @@ function showTextInputWindow(title, label, defaultValue, placeholder) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
-    const escapedLabel = escapeHtml(label);
-    const escapedDefault = escapeHtml(defaultValue);
-    const escapedPlaceholder = escapeHtml(placeholder);
+    const escapedEndpoint = escapeHtml(initialEndpoint);
+    const escapedApiKey = escapeHtml(initialApiKey);
+    const escapedIntro = escapeHtml(introMessage);
+    const escapedConnectionsJson = escapeHtml(JSON.stringify(savedConnections));
+    const escapedActiveConnectionId = escapeHtml(existing.activeConnectionId || "");
     const html = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html>
 <html><head><style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          background: #1a1a2e; color: #e0e0e0; padding: 20px; display: flex;
-         flex-direction: column; height: 100vh; }
+         flex-direction: column; gap: 14px; height: 100vh; }
+  h1 { font-size: 20px; font-weight: 700; }
+  p { color: #b9bfd6; }
   label { display: block; margin-bottom: 8px; font-weight: 600; }
   input { width: 100%; padding: 8px 12px; font-size: 14px; border: 1px solid #444;
           border-radius: 6px; background: #0f0f23; color: #e0e0e0; outline: none; }
   input:focus { border-color: #6366f1; }
+  .panel { border: 1px solid #2c3254; border-radius: 10px; padding: 14px; background: rgba(15,15,35,.7); }
+  .saved { display: flex; flex-direction: column; gap: 8px; max-height: 120px; overflow: auto; }
+  .saved button { text-align: left; width: 100%; }
+  .status { min-height: 48px; border-radius: 8px; padding: 10px 12px; background: #111827; color: #d1d5db; }
+  .status.success { background: rgba(6, 78, 59, .65); color: #bbf7d0; }
+  .status.error { background: rgba(127, 29, 29, .7); color: #fecaca; }
+  .status.pending { background: rgba(30, 64, 175, .55); color: #bfdbfe; }
   .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: auto; }
   button { padding: 8px 20px; border: none; border-radius: 6px; font-size: 14px;
            cursor: pointer; font-weight: 500; }
+  .ghost { background: #1f2937; color: #d1d5db; }
+  .ghost:hover { background: #374151; }
   .ok { background: #4f46e5; color: #fff; }
   .ok:hover { background: #6366f1; }
   .cancel { background: #333; color: #ccc; }
   .cancel:hover { background: #444; }
 </style></head><body>
-  <label>${escapedLabel}</label>
-  <input id="val" type="text" value="${escapedDefault}" placeholder="${escapedPlaceholder}" autofocus />
+  <h1>Remote Bosun Connection</h1>
+  <p>${escapedIntro}</p>
+  <div class="panel">
+    <label for="endpoint">Endpoint URL</label>
+    <input id="endpoint" type="text" value="${escapedEndpoint}" placeholder="https://bosun.example.com:4400" autofocus />
+  </div>
+  <div class="panel">
+    <label for="apiKey">API Key</label>
+    <input id="apiKey" type="password" value="${escapedApiKey}" placeholder="Leave empty if auth is disabled" />
+  </div>
+  <div class="panel">
+    <label>Saved Connections</label>
+    <div id="savedConnections" class="saved"></div>
+  </div>
+  <div id="status" class="status">Test the connection before saving.</div>
   <div class="btns">
-    <button class="cancel" onclick="close()">Cancel</button>
-    <button class="ok" onclick="submit()">OK</button>
+    <button class="ghost" id="testBtn" onclick="runTest()">Test Connection</button>
+    <button class="cancel" onclick="closeDialog()">Cancel</button>
+    <button class="ok" id="saveBtn" onclick="saveAndConnect()">Save & Connect</button>
   </div>
   <script>
-    const inp = document.getElementById('val');
-    inp.select();
-    function submit() { document.title = 'RESULT:' + inp.value; }
-    function close() { document.title = 'CANCEL'; }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') close(); });
+    const endpointInput = document.getElementById('endpoint');
+    const apiKeyInput = document.getElementById('apiKey');
+    const savedConnectionsEl = document.getElementById('savedConnections');
+    const statusEl = document.getElementById('status');
+    const testBtn = document.getElementById('testBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const savedConnections = JSON.parse('${escapedConnectionsJson}');
+    let selectedConnectionId = '${escapedActiveConnectionId}';
+
+    function setStatus(message, tone) {
+      statusEl.textContent = message;
+      statusEl.className = 'status' + (tone ? ' ' + tone : '');
+    }
+
+    function setBusy(busy) {
+      testBtn.disabled = busy;
+      saveBtn.disabled = busy;
+      endpointInput.disabled = busy;
+      apiKeyInput.disabled = busy;
+    }
+
+    function renderSavedConnections() {
+      if (!savedConnections.length) {
+        savedConnectionsEl.innerHTML = '<div style="color:#9ca3af">No saved connections yet.</div>';
+        return;
+      }
+      savedConnectionsEl.innerHTML = savedConnections.map((connection) => {
+        const active = connection.id === selectedConnectionId;
+        return '<button class="' + (active ? 'ok' : 'ghost') + '" data-connection-id="' + connection.id + '">' +
+          connection.name + (active ? ' [active]' : '') + ' → ' + connection.endpoint +
+          '</button>';
+      }).join('');
+      savedConnectionsEl.querySelectorAll('button[data-connection-id]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const connection = savedConnections.find((entry) => entry.id === button.dataset.connectionId);
+          if (!connection) return;
+          selectedConnectionId = connection.id;
+          endpointInput.value = connection.endpoint || '';
+          apiKeyInput.value = connection.apiKey || '';
+          renderSavedConnections();
+          setStatus('Loaded saved connection ' + connection.name + '.', '');
+        });
+      });
+    }
+
+    async function runTest() {
+      const endpoint = endpointInput.value.trim();
+      const apiKey = apiKeyInput.value;
+      if (!endpoint) {
+        setStatus('Endpoint URL is required.', 'error');
+        return false;
+      }
+      setBusy(true);
+      setStatus('Testing remote connection...', 'pending');
+      try {
+        const result = await window.veDesktop.connection.test(endpoint, apiKey);
+        if (result?.reachable) {
+          setStatus('Connection successful. You can now save and connect.', 'success');
+          return true;
+        }
+        setStatus(result?.error || 'Connection failed.', 'error');
+        return false;
+      } catch (error) {
+        setStatus(error?.message || 'Connection test failed.', 'error');
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function saveAndConnect() {
+      const endpoint = endpointInput.value.trim();
+      const apiKey = apiKeyInput.value;
+      const ok = await runTest();
+      if (!ok) return;
+      setBusy(true);
+      try {
+        const saved = await window.veDesktop.connection.set({ enabled: true, endpoint, apiKey });
+        if (!saved?.ok) {
+          setStatus(saved?.error || 'Failed to save the connection.', 'error');
+          return;
+        }
+        document.title = 'RESULT:' + encodeURIComponent(JSON.stringify({
+          id: selectedConnectionId || '',
+          endpoint,
+          apiKey,
+        }));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function closeDialog() { document.title = 'CANCEL'; }
+
+    endpointInput.select();
+    renderSavedConnections();
+    endpointInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDialog(); });
+    apiKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDialog(); });
   </script>
 </body></html>`)}`;
 
@@ -1787,9 +2101,18 @@ function showTextInputWindow(title, label, defaultValue, placeholder) {
 
     inputWin.webContents.on("page-title-updated", (_ev, newTitle) => {
       if (newTitle.startsWith("RESULT:")) {
-        const val = newTitle.slice(7).trim();
+        const raw = decodeURIComponent(newTitle.slice(7).trim());
         inputWin.destroy();
-        resolvePromise(val || null);
+        try {
+          const parsed = JSON.parse(raw);
+          resolvePromise({
+            id: String(parsed?.id || "").trim(),
+            endpoint: String(parsed?.endpoint || "").trim(),
+            apiKey: String(parsed?.apiKey || "").trim(),
+          });
+        } catch {
+          resolvePromise(null);
+        }
       } else if (newTitle === "CANCEL") {
         inputWin.destroy();
         resolvePromise(null);
@@ -1888,16 +2211,17 @@ async function createMainWindow() {
       ? await probeRemoteEndpoint(remote.endpoint, remote.apiKey)
       : false;
 
-    if (!remoteReachable) {
+    if (!remoteReachable && !(remote.enabled && remote.endpoint)) {
       await setLoadingMessage("No running Bosun instance detected...");
       const choice = await showConnectionChoiceDialog();
-      if (choice === "remote") {
+      if (choice === "local") {
+        await activateDesktopLocalConnection({ launch: true });
+      } else if (choice === "remote") {
         const config = await showRemoteConnectionInputDialog();
         if (config) {
-          saveRemoteConnectionConfig({ ...config, enabled: true });
+          saveActiveRemoteConnectionEntry(config);
         }
       }
-      // "local" choice: we already tried; buildUiUrl will fall back to in-process server
       // "offline" choice: continue with in-process server
     }
   }
@@ -2129,6 +2453,10 @@ function refreshTrayMenu() {
           },
         ]
       : []),
+    {
+      label: "Backend Connections",
+      submenu: buildConnectionSubmenu(),
+    },
 
     // ── Voice ────────────────────────────────────────────────────────────
     {
@@ -2486,13 +2814,17 @@ function registerDesktopIpc() {
    */
   ipcMain.handle("bosun:connection:set", async (_event, config) => {
     try {
-      const saved = saveRemoteConnectionConfig(config);
+      const saved = Array.isArray(config?.connections)
+        ? saveRemoteConnectionConfig(config)
+        : saveActiveRemoteConnectionEntry(config || {});
       // If switching to remote, update origin tracking flag
       if (saved.enabled && saved.endpoint) {
         remoteConnectionActive = true;
       } else {
         remoteConnectionActive = false;
       }
+      Menu.setApplicationMenu(buildAppMenu());
+      refreshTrayMenu();
       return { ok: true, ...saved };
     } catch (err) {
       return { ok: false, error: err?.message || "Failed to save connection config" };
@@ -2505,8 +2837,13 @@ function registerDesktopIpc() {
    */
   ipcMain.handle("bosun:connection:test", async (_event, { endpoint, apiKey } = {}) => {
     if (!endpoint) return { ok: false, error: "endpoint required" };
-    const reachable = await probeRemoteEndpoint(endpoint, apiKey || "");
-    return { ok: true, reachable };
+    const result = await testRemoteEndpoint(endpoint, apiKey || "");
+    return {
+      ok: true,
+      reachable: result.ok,
+      statusCode: result.statusCode || 0,
+      error: result.error || "",
+    };
   });
 
   /**
@@ -2516,8 +2853,10 @@ function registerDesktopIpc() {
   ipcMain.handle("bosun:connection:setup", async () => {
     const config = await showRemoteConnectionInputDialog();
     if (config) {
-      saveRemoteConnectionConfig({ ...config, enabled: true });
+      saveActiveRemoteConnectionEntry(config);
       remoteConnectionActive = true;
+      Menu.setApplicationMenu(buildAppMenu());
+      refreshTrayMenu();
       return { ok: true, ...config, enabled: true };
     }
     return { ok: false, cancelled: true };

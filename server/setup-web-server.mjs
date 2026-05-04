@@ -30,6 +30,20 @@ import {
   normalizeTemplateOverridesById,
 } from "../workflow/workflow-templates.mjs";
 import { discoverTelegramChats } from "../telegram/get-telegram-chat-id.mjs";
+import { buildAgentConfigurationGuide } from "../lib/agent-configuration-guide.mjs";
+import { normalizeProviderAuthState } from "../agent/provider-auth-manager.mjs";
+import {
+  buildSharedProviderAccountSummary,
+  resolveCodexSubscriptionAuth,
+  resolveCopilotOAuthAuth,
+  resolveSharedOAuthToken,
+} from "../agent/provider-auth-state.mjs";
+import {
+  buildLocalConnectionEntry,
+  readRemoteConnectionConfig,
+  saveRemoteConnectionConfig,
+  setLocalConnectionConfig,
+} from "../tui/lib/connection-target.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -784,9 +798,23 @@ function applyNonBlockingSetupEnvDefaults(envMap, env = {}, sourceEnv = process.
     ["internal-primary", "bidirectional"],
     "internal-primary",
   );
+  envMap.BOSUN_AGENT_RUNTIME = normalizeEnumValue(
+    pickNonEmptyValue(env.agentRuntime, envMap.BOSUN_AGENT_RUNTIME, sourceEnv.BOSUN_AGENT_RUNTIME),
+    ["harness", "sdk-cli"],
+    "harness",
+  );
+  envMap.BOSUN_PROVIDER_ROUTING_MODE = normalizeEnumValue(
+    pickNonEmptyValue(
+      env.providerRoutingMode,
+      envMap.BOSUN_PROVIDER_ROUTING_MODE,
+      sourceEnv.BOSUN_PROVIDER_ROUTING_MODE,
+    ),
+    ["default-only", "fallback", "spread"],
+    "default-only",
+  );
   envMap.EXECUTOR_MODE = normalizeEnumValue(
     pickNonEmptyValue(env.executorMode, envMap.EXECUTOR_MODE, sourceEnv.EXECUTOR_MODE),
-    ["internal", "hybrid"],
+    ["internal"],
     "internal",
   );
   envMap.EXECUTOR_DISTRIBUTION = normalizeEnumValue(
@@ -1590,6 +1618,135 @@ function applyNonBlockingSetupEnvDefaults(envMap, env = {}, sourceEnv = process.
   if (!envMap.ORCHESTRATOR_ARGS || String(envMap.ORCHESTRATOR_ARGS).trim() === "") {
     envMap.ORCHESTRATOR_ARGS = `-MaxParallel ${maxParallel}`;
   }
+
+  applyHarnessProviderSetupDefaults(envMap, env, sourceEnv);
+}
+
+function hasConfiguredSetupValue(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return false;
+  const lowered = normalized.toLowerCase();
+  return lowered !== "undefined" && lowered !== "null";
+}
+
+function maybeSetEnvDefault(envMap, key, value) {
+  if (!hasConfiguredSetupValue(value) || hasConfiguredSetupValue(envMap[key])) return false;
+  envMap[key] = String(value).trim();
+  return true;
+}
+
+function buildSetupHarnessProviderSummary(sourceEnv = process.env, settings = {}) {
+  const effectiveSettings = settings && typeof settings === "object" ? { ...settings } : {};
+  const providerIds = [
+    "openai-codex-subscription",
+    "openai-responses",
+    "azure-openai-responses",
+    "anthropic-messages",
+    "claude-subscription-shim",
+    "copilot-oauth",
+    "openrouter",
+    "perplexity",
+    "deepinfra",
+    "groq",
+    "together",
+    "xai",
+    "fireworks",
+    "cerebras",
+    "sambanova",
+    "nebius",
+    "gemini-generate-content",
+  ];
+  const providers = providerIds.map((providerId) => normalizeProviderAuthState(providerId, {}, {
+    env: sourceEnv,
+    settings: effectiveSettings,
+  }));
+  const preferredDefault =
+    providers.find((entry) => entry.providerId === "openai-codex-subscription" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "openai-responses" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "azure-openai-responses" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "claude-subscription-shim" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "copilot-oauth" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "anthropic-messages" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "openrouter" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "perplexity" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "deepinfra" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "groq" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "together" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "xai" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "fireworks" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "cerebras" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "sambanova" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "nebius" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "gemini-generate-content" && entry.authenticated)
+    || null;
+  return {
+    providers,
+    recommendedDefaultProviderId: preferredDefault?.providerId || "openai-responses",
+  };
+}
+
+function applyHarnessProviderSetupDefaults(envMap, env = {}, sourceEnv = process.env) {
+  const sharedAccounts = buildSharedProviderAccountSummary(true);
+  const codexAuth = resolveCodexSubscriptionAuth(sourceEnv);
+  const copilotAuth = resolveCopilotOAuthAuth(sourceEnv);
+
+  if (codexAuth?.authenticated) {
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_ENABLED", "true");
+    if ((codexAuth.authMode || "").toLowerCase() !== "apikey") {
+      maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_MODE", "oauth");
+    }
+  }
+
+  const openAiApiKey = pickNonEmptyValue(
+    env.openaiApiKey,
+    envMap.OPENAI_API_KEY,
+    sourceEnv.OPENAI_API_KEY,
+  );
+  if (hasConfiguredSetupValue(openAiApiKey)) {
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_OPENAI_RESPONSES_ENABLED", "true");
+  }
+
+  const azureEndpoint = pickNonEmptyValue(
+    env.azureOpenaiRealtimeEndpoint,
+    envMap.AZURE_OPENAI_ENDPOINT,
+    sourceEnv.AZURE_OPENAI_ENDPOINT,
+    sourceEnv.AZURE_OPENAI_REALTIME_ENDPOINT,
+  );
+  const azureApiKey = pickNonEmptyValue(
+    env.azureOpenaiRealtimeApiKey,
+    envMap.AZURE_OPENAI_API_KEY,
+    sourceEnv.AZURE_OPENAI_API_KEY,
+    sourceEnv.AZURE_OPENAI_REALTIME_API_KEY,
+  );
+  if ((hasConfiguredSetupValue(azureApiKey) || sharedAccounts.azure?.connected) && hasConfiguredSetupValue(azureEndpoint)) {
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_AZURE_OPENAI_ENABLED", "true");
+    if (sharedAccounts.azure?.connected && !hasConfiguredSetupValue(azureApiKey)) {
+      maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_AZURE_OPENAI_MODE", "oauth");
+    }
+  }
+
+  const anthropicApiKey = pickNonEmptyValue(
+    env.anthropicApiKey,
+    envMap.ANTHROPIC_API_KEY,
+    sourceEnv.ANTHROPIC_API_KEY,
+  );
+  if (hasConfiguredSetupValue(anthropicApiKey)) {
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_ANTHROPIC_ENABLED", "true");
+  }
+
+  if (sharedAccounts.claude?.connected) {
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_ENABLED", "true");
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_MODE", "oauth");
+  }
+
+  if (copilotAuth?.authenticated) {
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_COPILOT_OAUTH_ENABLED", "true");
+  }
+
+  if (!hasConfiguredSetupValue(envMap.BOSUN_PROVIDER_DEFAULT)) {
+    const summary = buildSetupHarnessProviderSummary(sourceEnv, envMap);
+    maybeSetEnvDefault(envMap, "BOSUN_PROVIDER_DEFAULT", summary.recommendedDefaultProviderId);
+  }
 }
 
 function getCommandVersion(cmd) {
@@ -1913,6 +2070,9 @@ async function handleStatus() {
     desktopShortcutStatus = { ...status_, methodName: getDesktopShortcutMethodName() };
   } catch { /* ignore */ }
 
+  const sharedConnectedAccounts = buildSharedProviderAccountSummary(true);
+  const harnessProviderSetup = buildSetupHarnessProviderSummary(process.env, existingEnv);
+
   return {
     ok: true,
     configured,
@@ -1926,6 +2086,8 @@ async function handleStatus() {
     existingConfig,
     existingEnv,
     githubOAuth,
+    sharedConnectedAccounts,
+    harnessProviderSetup,
     startupStatus,
     desktopShortcutStatus,
     version: getVersion(),
@@ -1949,6 +2111,16 @@ function handleDefaults() {
       repoRoot,
       bosunHome,
       workspacesDir,
+    }),
+    agentArchitecture: buildAgentConfigurationGuide({
+      BOSUN_AGENT_RUNTIME: "harness",
+      PRIMARY_AGENT: "codex-sdk",
+      INTERNAL_EXECUTOR_SDK: "auto",
+      EXECUTOR_MODE: "internal",
+      EXECUTOR_DISTRIBUTION: "primary-only",
+      EXECUTORS: "CODEX:DEFAULT:100",
+      BOSUN_PROVIDER_DEFAULT: "openai-responses",
+      BOSUN_PROVIDER_ROUTING_MODE: "default-only",
     }),
   };
 }
@@ -2088,11 +2260,8 @@ async function handleVoiceEndpointTest(body) {
       if (apiKey && !useOAuth) {
         headers.Authorization = `Bearer ${apiKey}`;
       } else {
-        try {
-          const { getOpenAILoginStatus } = await import("../voice/voice-auth-manager.mjs");
-          const st = getOpenAILoginStatus();
-          if (st.hasToken && st.accessToken) headers.Authorization = `Bearer ${st.accessToken}`;
-        } catch (_) { /* no oauth available */ }
+        const shared = resolveSharedOAuthToken("openai", true);
+        if (shared?.token) headers.Authorization = `Bearer ${shared.token}`;
       }
       if (!headers.Authorization) {
         return { ok: false, error: "No API key or OAuth token available" };
@@ -2119,11 +2288,8 @@ async function handleVoiceEndpointTest(body) {
       if (apiKey && !useOAuth) {
         headers["x-api-key"] = apiKey;
       } else {
-        try {
-          const { getClaudeLoginStatus } = await import("../voice/voice-auth-manager.mjs");
-          const st = getClaudeLoginStatus();
-          if (st.hasToken && st.accessToken) headers["x-api-key"] = st.accessToken;
-        } catch (_) { /* no oauth available */ }
+        const shared = resolveSharedOAuthToken("claude", true);
+        if (shared?.token) headers["x-api-key"] = shared.token;
       }
       if (!headers["x-api-key"]) {
         return { ok: false, error: "No API key or OAuth token available" };
@@ -2131,11 +2297,8 @@ async function handleVoiceEndpointTest(body) {
     } else if (normalizedProvider === "gemini") {
       let k = (apiKey && !useOAuth) ? apiKey : null;
       if (!k) {
-        try {
-          const { getGeminiLoginStatus } = await import("../voice/voice-auth-manager.mjs");
-          const st = getGeminiLoginStatus();
-          if (st.hasToken && st.accessToken) k = st.accessToken;
-        } catch (_) { /* no oauth available */ }
+        const shared = resolveSharedOAuthToken("gemini", true);
+        if (shared?.token) k = shared.token;
       }
       if (!k) {
         return { ok: false, error: "No API key or OAuth token available" };
@@ -2364,6 +2527,7 @@ function handleApply(body) {
 
     // ── Optional setup values ───────────────────────────────────────────────
     if (env.primaryAgent)               envMap.PRIMARY_AGENT                 = env.primaryAgent;
+    if (env.agentRuntime)               envMap.BOSUN_AGENT_RUNTIME           = env.agentRuntime;
     if (env.orchestratorScript)         envMap.ORCHESTRATOR_SCRIPT           = env.orchestratorScript;
 
     // ── Codex model profile settings ───────────────────────────────────────
@@ -2616,6 +2780,22 @@ function handleApply(body) {
           : {}),
       },
     };
+
+    const localProtocol = toBooleanEnvString(envMap.TELEGRAM_UI_TLS_DISABLE, false) === "true" ? "http" : "https";
+    const localHost = String(envMap.TELEGRAM_UI_DESKTOP_HOST || envMap.TELEGRAM_UI_HOST || "127.0.0.1").trim() || "127.0.0.1";
+    const localConnection = buildLocalConnectionEntry({
+      name: "Local Backend",
+      host: localHost,
+      port: Number(envMap.TELEGRAM_UI_PORT || DEFAULT_TELEGRAM_UI_PORT),
+      protocol: localProtocol,
+    });
+    if (localConnection) {
+      const remoteConfig = setLocalConnectionConfig(
+        readRemoteConnectionConfig(bosunHome),
+        localConnection,
+      );
+      saveRemoteConnectionConfig(remoteConfig, bosunHome);
+    }
     config.workflowEngine = workflowEngineConfig;
 
     if (configJson.executorMode)               config.executorMode               = configJson.executorMode;

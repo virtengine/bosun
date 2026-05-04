@@ -17,7 +17,9 @@ describe("GitHub PR trust regressions", () => {
     expect(attachWorkflow).toContain("const classLabels = {");
     expect(attachWorkflow).toContain("const attachMode = [\"all\", \"trusted-only\", \"disabled\"].includes(attachModeRaw)");
     expect(attachWorkflow).toContain("const labelNames = (pr.labels || [])");
-    expect(attachWorkflow).toContain("const isBosunCreated = labelNames.includes(classLabels.bosun);");
+    expect(attachWorkflow).toContain("const isBosunCreated =");
+    expect(attachWorkflow).toContain("labelNames.includes(classLabels.bosun)");
+    expect(attachWorkflow).toContain("Bosun-created PRs remain attached regardless of human PR attach mode");
     expect(attachWorkflow).toContain("const shouldAttach = isBosunCreated || attachMode === \"all\" || (attachMode === \"trusted-only\" && isTrustedAuthor);");
     expect(attachWorkflow).toContain("bosun-pr-bosun-created");
     expect(attachWorkflow).toContain("bosun-pr-trusted-author");

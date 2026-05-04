@@ -212,8 +212,10 @@ function finalizePipelineResult(type, startedAt, outputs, errors, extra = {}) {
     (sum, record) => sum + (Number(record?.tokensUsed) || 0),
     0,
   );
+  const ok = errors.length === 0 && outputs.some((record) => record?.success !== false);
   return {
-    ok: errors.length === 0 && outputs.some((record) => record?.success !== false),
+    ok,
+    success: ok,
     type,
     outputs,
     timing: {

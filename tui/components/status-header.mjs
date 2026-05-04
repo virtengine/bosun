@@ -1,6 +1,9 @@
 import React from "react";
 import htm from "htm";
-import { Box, Text } from "ink";
+import * as ink from "ink";
+
+const Box = ink.Box ?? ink.default?.Box;
+const Text = ink.Text ?? ink.default?.Text;
 
 const html = htm.bind(React.createElement);
 
@@ -132,6 +135,9 @@ export function buildStatusHeaderModel({
   connectionState = "offline",
   projectLabel = "No project",
   refreshCountdownSec = 0,
+  connectionSource = "",
+  connectionEndpoint = "",
+  authMode = "",
 } = {}) {
   const activeAgents = Math.max(0, toNumber(stats?.activeAgents, 0));
   const maxAgents = Math.max(0, toNumber(stats?.maxAgents, 0));
@@ -160,7 +166,20 @@ export function buildStatusHeaderModel({
       projectLabel: String(projectLabel || "").trim() || "No project",
       refreshLabel: `Next refresh: ${Math.max(0, Math.trunc(toNumber(refreshCountdownSec, 0)))}s`,
     },
+    row4: {
+      attachLabel: truncateAttachLabel(connectionSource, connectionEndpoint),
+      authLabel: authMode === "api-key" ? "Auth: API key" : "Auth: local token",
+    },
   };
+}
+
+function truncateAttachLabel(connectionSource, connectionEndpoint) {
+  const source = String(connectionSource || "").trim();
+  const endpoint = String(connectionEndpoint || "").trim();
+  if (!source && !endpoint) return "Attach: auto";
+  if (!endpoint) return `Attach: ${source || "auto"}`;
+  if (!source) return `Attach: ${endpoint}`;
+  return `Attach: ${source} -> ${endpoint}`;
 }
 
 export default function StatusHeader({
@@ -170,6 +189,9 @@ export default function StatusHeader({
   projectLabel,
   configuredProviders,
   refreshCountdownSec,
+  connectionSource,
+  connectionEndpoint,
+  authMode,
 }) {
   const resolvedConnectionState = connectionState || (connected ? "connected" : "offline");
   const model = buildStatusHeaderModel({
@@ -178,6 +200,9 @@ export default function StatusHeader({
     connectionState: resolvedConnectionState,
     projectLabel,
     refreshCountdownSec,
+    connectionSource,
+    connectionEndpoint,
+    authMode,
   });
   const connectionDot = resolvedConnectionState === "reconnecting" && refreshCountdownSec % 2 === 0
     ? "◌"
@@ -211,6 +236,11 @@ export default function StatusHeader({
         <${Text}>${model.row3.projectLabel}<//>
         <${Text} dimColor> | <//>
         <${Text}>${model.row3.refreshLabel}<//>
+      <//>
+      <${Box} marginTop=${1}>
+        <${Text} dimColor>${model.row4.attachLabel}<//>
+        <${Text} dimColor> | <//>
+        <${Text} dimColor>${model.row4.authLabel}<//>
       <//>
     <//>
   `;

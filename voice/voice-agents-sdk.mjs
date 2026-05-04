@@ -17,7 +17,7 @@
  */
 
 import { loadConfig } from "../config/config.mjs";
-import { resolveVoiceOAuthToken } from "./voice-auth-manager.mjs";
+import { resolveSharedOAuthToken as resolveVoiceOAuthToken } from "../agent/provider-auth-state.mjs";
 
 // ── Module-scope lazy imports ───────────────────────────────────────────────
 

@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createExecutorHealthRegionCache } from "../telegram/executor-health-region-cache.mjs";
 
 describe("telegram health region cache", () => {
-  beforeEach(async () => {
-    const mod = await import("../telegram/telegram-bot.mjs");
-    mod.__executorHealthTestApi.resetHealthRegionCacheForTest();
+  let healthCache;
+
+  beforeEach(() => {
+    healthCache = createExecutorHealthRegionCache();
   });
 
   it("deduplicates concurrent region refreshes and reuses the cached result", async () => {
-    const mod = await import("../telegram/telegram-bot.mjs");
     const loader = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 15));
       return {
@@ -18,14 +19,14 @@ describe("telegram health region cache", () => {
     });
 
     const [first, second] = await Promise.all([
-      mod.__executorHealthTestApi.getCachedExecutorRegionStatus({ loader }),
-      mod.__executorHealthTestApi.getCachedExecutorRegionStatus({ loader }),
+      healthCache.getCachedStatus({ loader }),
+      healthCache.getCachedStatus({ loader }),
     ]);
 
     expect(loader).toHaveBeenCalledTimes(1);
     expect(first).toEqual(second);
 
-    const cached = await mod.__executorHealthTestApi.getCachedExecutorRegionStatus({
+    const cached = await healthCache.getCachedStatus({
       loader: vi.fn(async () => ({
         active_region: "sweden",
         override: "manual",

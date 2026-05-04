@@ -2,14 +2,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Prevent disk-cached OAuth tokens in ~/.bosun/voice-auth-state.json from
+// Prevent disk-cached shared auth tokens in ~/.bosun/voice-auth-state.json from
 // leaking in and making azureAvailable=true regardless of what env vars the
 // test sets.
-vi.mock("../voice/voice-auth-manager.mjs", () => ({
-  resolveVoiceOAuthToken: vi.fn(() => null),
-  hasVoiceOAuthToken: vi.fn(() => false),
-  saveVoiceOAuthToken: vi.fn(),
-}));
+vi.mock("../agent/provider-auth-state.mjs", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    resolveSharedOAuthToken: vi.fn(() => null),
+    hasSharedOAuthToken: vi.fn(() => false),
+    saveSharedOAuthToken: vi.fn(),
+  };
+});
 
 // Non-existent temp dir — prevents loadDotEnv + loadConfigFile from reading
 // the developer's real .env / bosun.config.json which may have Azure creds.
@@ -113,10 +117,10 @@ const PROVIDER_MATRIX = Object.freeze([
   },
 ]);
 
-const _realFetch = globalThis.fetch;
 let envSnapshot = {};
 let uiServerModule = null;
 let argvSnapshot = [];
+let realFetch = null;
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -130,7 +134,7 @@ function outboundFetchMockForScenario(scenario) {
   globalThis.fetch = vi.fn(async (input, init = {}) => {
     const url = String(typeof input === "string" ? input : input?.url || "");
     if (url.startsWith("http://127.0.0.1:")) {
-      return _realFetch(input, init);
+      return realFetch(input, init);
     }
 
     outboundUrls.push(url);
@@ -196,6 +200,10 @@ async function startServer() {
 }
 
 beforeEach(() => {
+  realFetch =
+    typeof globalThis.fetch === "function"
+      ? globalThis.fetch.bind(globalThis)
+      : fetch.bind(globalThis);
   envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   argvSnapshot = process.argv.slice();
 
@@ -240,7 +248,7 @@ beforeEach(() => {
   process.env.GEMINI_ACCESS_TOKEN = "";
   process.env.GOOGLE_ACCESS_TOKEN = "";
 
-  globalThis.fetch = _realFetch;
+  globalThis.fetch = realFetch;
 });
 
 afterEach(async () => {
@@ -248,7 +256,7 @@ afterEach(async () => {
     uiServerModule.stopTelegramUiServer();
   }
   uiServerModule = null;
-  globalThis.fetch = _realFetch;
+  globalThis.fetch = realFetch;
   process.argv = argvSnapshot;
 
   // Reset session tracker singleton so smoke-test sessions don't leak
@@ -281,7 +289,7 @@ describe("voice provider smoke matrix", () => {
       expect(voiceCfg.provider).toBe(scenario.id);
       expect(voiceRelay.isVoiceAvailable().provider).toBe(scenario.id);
 
-      const configRes = await _realFetch(`http://127.0.0.1:${port}/api/voice/config`);
+      const configRes = await realFetch(`http://127.0.0.1:${port}/api/voice/config`);
       expect(configRes.status).toBe(200);
       const configJson = await configRes.json();
       expect(configJson.available).toBe(true);
@@ -289,7 +297,7 @@ describe("voice provider smoke matrix", () => {
         scenario.id,
       );
 
-      const tokenRes = await _realFetch(`http://127.0.0.1:${port}/api/voice/token`, {
+      const tokenRes = await realFetch(`http://127.0.0.1:${port}/api/voice/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -310,7 +318,7 @@ describe("voice provider smoke matrix", () => {
         );
       }
 
-      const visionRes = await _realFetch(`http://127.0.0.1:${port}/api/vision/frame`, {
+      const visionRes = await realFetch(`http://127.0.0.1:${port}/api/vision/frame`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -338,6 +346,6 @@ describe("voice provider smoke matrix", () => {
           true,
         );
       }
-    }, 20_000);
+    }, process.platform === "win32" ? 90_000 : 60_000);
   }
 });

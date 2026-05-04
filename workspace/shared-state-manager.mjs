@@ -51,6 +51,8 @@ import {
  */
 
 const REGISTRY_VERSION = "1.0.0";
+const EXECUTION_STATE_SCOPE_VERSION = "1.0.0";
+const EXECUTION_STATE_SCOPE_NAMES = Object.freeze(["execution", "stream", "global"]);
 const DEFAULT_TTL_SECONDS = 300; // 5 minutes
 const MAX_EVENT_LOG_ENTRIES = 100;
 const RENAME_RETRY_DELAY_MS = 60;
@@ -101,6 +103,125 @@ function getWriteFileOptions() {
     return { encoding: "utf-8" };
   }
   return { encoding: "utf-8", flush: true };
+}
+
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function cloneExecutionStateValue(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (typeof globalThis.structuredClone === "function") {
+    try {
+      return globalThis.structuredClone(value);
+    } catch {
+      // Fall through to manual clone for unsupported values.
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneExecutionStateValue(entry));
+  }
+  if (!isPlainObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, cloneExecutionStateValue(entry)]),
+  );
+}
+
+function normalizeExecutionStateScopeName(scopeName) {
+  const normalized = String(scopeName || "").trim().toLowerCase();
+  return EXECUTION_STATE_SCOPE_NAMES.includes(normalized) ? normalized : "execution";
+}
+
+function normalizeExecutionStateScopeEntry(scopeName, raw = {}) {
+  const normalizedScopeName = normalizeExecutionStateScopeName(scopeName);
+  const source = isPlainObject(raw) ? raw : {};
+  const current = source.current ?? source.state ?? {};
+  const inherited = source.inherited ?? {};
+  const metadata = source.metadata ?? {};
+  return {
+    scope: normalizedScopeName,
+    visibility: source.visibility || normalizedScopeName,
+    writable: source.writable !== false,
+    current: isPlainObject(current) ? cloneExecutionStateValue(current) : {},
+    inherited: isPlainObject(inherited) ? cloneExecutionStateValue(inherited) : {},
+    metadata: isPlainObject(metadata) ? cloneExecutionStateValue(metadata) : {},
+  };
+}
+
+export function createEmptyExecutionStateScopes() {
+  return {
+    version: EXECUTION_STATE_SCOPE_VERSION,
+    execution: normalizeExecutionStateScopeEntry("execution"),
+    stream: normalizeExecutionStateScopeEntry("stream"),
+    global: normalizeExecutionStateScopeEntry("global"),
+  };
+}
+
+export function normalizeExecutionStateScopes(raw = {}) {
+  const source = isPlainObject(raw) ? raw : {};
+  const scopesSource = isPlainObject(source.scopes) ? source.scopes : source;
+  const normalized = createEmptyExecutionStateScopes();
+  normalized.version = String(source.version || EXECUTION_STATE_SCOPE_VERSION);
+  for (const scopeName of EXECUTION_STATE_SCOPE_NAMES) {
+    normalized[scopeName] = normalizeExecutionStateScopeEntry(scopeName, scopesSource[scopeName]);
+  }
+  return normalized;
+}
+
+export function getExecutionStateScopeEntry(scopes, scopeName) {
+  const normalized = normalizeExecutionStateScopes(scopes);
+  return normalized[normalizeExecutionStateScopeName(scopeName)];
+}
+
+export function getExecutionStateScopeValue(scopes, scopeName) {
+  const entry = getExecutionStateScopeEntry(scopes, scopeName);
+  return cloneExecutionStateValue(entry.current);
+}
+
+export function mergeExecutionStateValues(baseValue = {}, nextValue = {}) {
+  const base = isPlainObject(baseValue) ? baseValue : {};
+  const next = isPlainObject(nextValue) ? nextValue : {};
+  const merged = cloneExecutionStateValue(base);
+  for (const [key, value] of Object.entries(next)) {
+    if (isPlainObject(value) && isPlainObject(merged[key])) {
+      merged[key] = mergeExecutionStateValues(merged[key], value);
+    } else {
+      merged[key] = cloneExecutionStateValue(value);
+    }
+  }
+  return merged;
+}
+
+export function updateExecutionStateScope(scopes, scopeName, updater, options = {}) {
+  const normalized = normalizeExecutionStateScopes(scopes);
+  const entry = normalized[normalizeExecutionStateScopeName(scopeName)];
+  if (!entry.writable && options.force !== true) {
+    return normalized;
+  }
+  const current = cloneExecutionStateValue(entry.current);
+  const nextValue = typeof updater === "function"
+    ? updater(current, cloneExecutionStateValue(entry))
+    : updater;
+  entry.current = options.merge === true
+    ? mergeExecutionStateValues(current, nextValue)
+    : (isPlainObject(nextValue) ? cloneExecutionStateValue(nextValue) : {});
+  return normalized;
+}
+
+export function createInheritedExecutionStateScopes(parentScopes, options = {}) {
+  const parent = normalizeExecutionStateScopes(parentScopes);
+  const inheritedScopes = createEmptyExecutionStateScopes();
+  for (const scopeName of EXECUTION_STATE_SCOPE_NAMES) {
+    const override = isPlainObject(options[scopeName]) ? options[scopeName] : {};
+    const parentEntry = parent[scopeName];
+    inheritedScopes[scopeName] = normalizeExecutionStateScopeEntry(scopeName, {
+      writable: override.writable ?? parentEntry.writable,
+      metadata: mergeExecutionStateValues(parentEntry.metadata, override.metadata || {}),
+      inherited: override.inherited ?? cloneExecutionStateValue(parentEntry.current),
+      current: override.current ?? {},
+    });
+  }
+  return inheritedScopes;
 }
 
 /**
@@ -1215,4 +1336,10 @@ export async function getStateStatistics(repoRoot = process.cwd()) {
 }
 
 // Export constants for external use
-export { REGISTRY_VERSION, DEFAULT_TTL_SECONDS, MAX_EVENT_LOG_ENTRIES };
+export {
+  REGISTRY_VERSION,
+  EXECUTION_STATE_SCOPE_VERSION,
+  EXECUTION_STATE_SCOPE_NAMES,
+  DEFAULT_TTL_SECONDS,
+  MAX_EVENT_LOG_ENTRIES,
+};

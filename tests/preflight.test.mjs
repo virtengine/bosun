@@ -9,13 +9,21 @@ const inspectWorktreeRuntimeSetupMock = vi.hoisted(() =>
   vi.fn(() => ({ ok: true, issues: [], missingFiles: [], hooksPath: ".githooks" })),
 );
 
-vi.mock("node:child_process", () => ({
-  spawnSync: spawnSyncMock,
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    spawnSync: spawnSyncMock,
+  };
+});
 
-vi.mock("node:fs", () => ({
-  existsSync: existsSyncMock,
-}));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    existsSync: existsSyncMock,
+  };
+});
 
 vi.mock("../shell/pwsh-runtime.mjs", () => ({
   resolvePwshRuntime: resolvePwshRuntimeMock,
@@ -42,6 +50,9 @@ function createSpawnMock({ coreEditor = ":" } = {}) {
   return (command, argsOrOptions) => {
     const normalized = normalizeCommand(command, argsOrOptions);
 
+    if (normalized.includes("-e process.exit(0)")) {
+      return { status: 0, stdout: "", stderr: "" };
+    }
     if (normalized.startsWith("git --version")) {
       return { status: 0, stdout: "git version 2.49.0\n", stderr: "" };
     }
@@ -213,5 +224,30 @@ describe("preflight interactive git editor warnings", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors.some((entry) => /worktree runtime setup is incomplete/i.test(entry.title))).toBe(true);
+  });
+
+  it("fails with a targeted error when Node child-process launch is blocked", () => {
+    spawnSyncMock.mockImplementation((command, argsOrOptions) => {
+      const normalized = normalizeCommand(command, argsOrOptions);
+      if (normalized.includes("-e process.exit(0)")) {
+        return {
+          status: -1,
+          stdout: "",
+          stderr: "spawnSync node EPERM",
+          error: { code: "EPERM", message: "spawnSync node EPERM" },
+        };
+      }
+      return createSpawnMock()(command, argsOrOptions);
+    });
+
+    const result = runPreflightChecks({ repoRoot: "C:\\repo" });
+    const report = formatPreflightReport(result);
+
+    expect(result.ok).toBe(false);
+    expect(result.details.childProcess.ok).toBe(false);
+    expect(result.errors.some((entry) => /Node child-process launch is blocked/i.test(entry.title))).toBe(true);
+    expect(report).toContain("Toolchain:");
+    expect(report).toContain("git: blocked");
+    expect(report).toContain("Child process launch: EPERM");
   });
 });

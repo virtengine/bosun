@@ -30,9 +30,12 @@ import {
   cfgOrCtx,
   deriveTaskBranch,
   ensureKanbanAdapterMod,
+  ensureTaskClaimsInitialized,
+  ensureTaskClaimsMod,
   ensureTaskStoreMod,
   looksLikeFilesystemPath,
   MAX_NO_COMMIT_ATTEMPTS,
+  normalizeMirroredRepoRoot,
   normalizeCanStartGuardResult,
   pickTaskString,
   resolveTaskRepositoryRoot,
@@ -98,11 +101,142 @@ import {
   trimLogText,
 } from "./definitions.mjs";
 
+function clearTaskIdentityContext(data) {
+  if (!data || typeof data !== "object") return;
+  for (const key of [
+    "taskId",
+    "activeTaskId",
+    "taskTitle",
+    "task",
+    "taskInfo",
+    "taskDetail",
+    "taskDescription",
+    "branch",
+    "branchName",
+    "baseBranch",
+    "_workflowRootTaskId",
+    "_workflowParentTaskId",
+    "_workflowRootSessionId",
+    "_workflowParentSessionId",
+  ]) {
+    delete data[key];
+  }
+}
+
+async function resolveExplicitTaskContext(ctx, engine, explicitTaskId, explicitTaskTitle) {
+  const normalizedTaskId = String(explicitTaskId || "").trim();
+  if (!normalizedTaskId) return null;
+  let attemptedLookup = false;
+  let matchingCandidate = null;
+
+  const providedCandidates = [
+    ctx?.data?.task,
+    ctx?.data?.taskDetail,
+    ctx?.data?.taskInfo,
+  ];
+  for (const candidate of providedCandidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const candidateId = String(candidate.id || candidate.task_id || "").trim();
+    if (candidateId !== normalizedTaskId) continue;
+    matchingCandidate = candidate;
+    break;
+  }
+
+  const mergeResolvedTask = (task) => (
+    matchingCandidate && typeof matchingCandidate === "object"
+      ? { ...matchingCandidate, ...task }
+      : task
+  );
+
+  const kanban = ctx?.data?._services?.kanban || engine?.services?.kanban || null;
+  if (typeof kanban?.getTask === "function") {
+    attemptedLookup = true;
+    try {
+      const task = await kanban.getTask(normalizedTaskId);
+      if (task && typeof task === "object") {
+        return {
+          taskId: normalizedTaskId,
+          taskTitle: pickTaskString(
+            explicitTaskTitle,
+            task.title,
+            task.task_title,
+            matchingCandidate?.title,
+            matchingCandidate?.task_title,
+          ),
+          task: mergeResolvedTask(task),
+        };
+      }
+    } catch {
+      // fall through to task-store lookup
+    }
+  }
+
+  const taskStore =
+    ctx?.data?._services?.taskStore ||
+    engine?.services?.taskStore ||
+    null;
+  if (typeof taskStore?.getTask === "function") {
+    attemptedLookup = true;
+    try {
+      const task = await taskStore.getTask(normalizedTaskId);
+      if (task && typeof task === "object") {
+        return {
+          taskId: normalizedTaskId,
+          taskTitle: pickTaskString(
+            explicitTaskTitle,
+            task.title,
+            task.task_title,
+            matchingCandidate?.title,
+            matchingCandidate?.task_title,
+          ),
+          task: mergeResolvedTask(task),
+        };
+      }
+    } catch {
+      // stale explicit task context should fall back to normal polling
+    }
+  }
+
+  if (matchingCandidate) {
+    return {
+      taskId: normalizedTaskId,
+      taskTitle: pickTaskString(
+        explicitTaskTitle,
+        matchingCandidate.title,
+        matchingCandidate.task_title,
+        normalizedTaskId,
+      ),
+      task: matchingCandidate,
+    };
+  }
+
+  if (!attemptedLookup) {
+    return {
+      taskId: normalizedTaskId,
+      taskTitle: pickTaskString(explicitTaskTitle, normalizedTaskId),
+      task: { id: normalizedTaskId, title: pickTaskString(explicitTaskTitle, normalizedTaskId) },
+    };
+  }
+
+  return null;
+}
+
 registerNodeType("trigger.manual", {
   describe: () => "Manual trigger — workflow starts on user request",
   schema: {
     type: "object",
     properties: {},
+  },
+  outputs: [
+    {
+      name: "default",
+      label: "Task",
+      type: "TaskDef",
+      description: "Default task payload emitted when a manual workflow run starts.",
+    },
+  ],
+  ui: {
+    primaryFields: [],
   },
   async execute(node, ctx) {
     ctx.log(node.id, "Manual trigger fired");
@@ -616,11 +750,65 @@ registerNodeType("trigger.task_available", {
       listRetryDelayMs: { type: "number", default: 2000, description: "Base delay between retries" },
       repoAreaParallelLimit: { type: "number", default: 0, description: "Per-repo-area active task cap (0 disables limit)" },
       enforceStartGuards: { type: "boolean", default: true, description: "Filter out tasks blocked by dependency/sprint DAG start guards" },
+      requireTaskPromptCompleteness: {
+        type: "boolean",
+        default: false,
+        description: "Skip tasks missing prompt-critical description or URL metadata before dispatch",
+      },
       sprintOrderMode: { type: "string", enum: ["parallel", "sequential"], description: "Optional global sprint-order override when evaluating guards" },
       strictStartGuardMissingTask: { type: "boolean", default: false, description: "When true, task_not_found from start guards blocks dispatch and emits audit events" },
     },
   },
   async execute(node, ctx, engine) {
+    const isWorkflowPlaceholder = (value) => {
+      if (typeof value !== "string") return false;
+      const trimmed = value.trim();
+      return trimmed.startsWith("{{") && trimmed.endsWith("}}");
+    };
+    const hasStaleWorktreePlaceholders = (task) => [
+      task?.blockedReason,
+      task?.cooldownUntil,
+      task?.meta?.autoRecovery?.retryAt,
+      task?.meta?.worktreeFailure?.retryAt,
+      task?.meta?.worktreeFailure?.blockedReason,
+    ].some((value) => isWorkflowPlaceholder(value));
+    const resolveBlockedTaskRetryAtMs = (task, autoRecovery) => {
+      const candidates = [
+        autoRecovery?.retryAt,
+        task?.cooldownUntil,
+        task?.meta?.worktreeFailure?.retryAt,
+      ];
+      for (const candidate of candidates) {
+        if (!candidate || isWorkflowPlaceholder(candidate)) continue;
+        const parsed = Date.parse(String(candidate));
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return null;
+    };
+    const shouldRecoverBlockedTask = (task, nowMs) => {
+      if (String(task?.status || "").trim().toLowerCase() !== "blocked") return false;
+      const autoRecovery = task?.meta?.autoRecovery;
+      const worktreeFailure = task?.meta?.worktreeFailure;
+      const failureKind = String(
+        worktreeFailure?.failureKind || autoRecovery?.failureKind || "",
+      ).trim();
+      const hasPlaceholder = hasStaleWorktreePlaceholders(task);
+      const isWorktreeRecovery = (
+        autoRecovery
+        && typeof autoRecovery === "object"
+        && autoRecovery.active !== false
+        && String(autoRecovery.reason || "").trim() === "worktree_failure"
+      ) || (
+        worktreeFailure
+        && typeof worktreeFailure === "object"
+      ) || hasPlaceholder;
+      if (!isWorktreeRecovery) return false;
+      if (failureKind === "branch_refresh_conflict" && !hasPlaceholder) return false;
+      const retryAtMs = resolveBlockedTaskRetryAtMs(task, autoRecovery);
+      if (Number.isFinite(retryAtMs) && retryAtMs > nowMs) return false;
+      if (!Number.isFinite(retryAtMs) && !hasPlaceholder) return false;
+      return true;
+    };
     const maxParallel = node.config?.maxParallel ?? 3;
     const singleStatus = node.config?.status ?? "todo";
     const statusesRaw = Array.isArray(node.config?.statuses) ? node.config.statuses : null;
@@ -633,17 +821,111 @@ registerNodeType("trigger.task_available", {
     const listRetryDelayMs = node.config?.listRetryDelayMs ?? 2000;
     const repoAreaParallelLimit = Number(node.config?.repoAreaParallelLimit ?? 0);
     const enforceStartGuards = node.config?.enforceStartGuards !== false;
+    const requireTaskPromptCompleteness =
+      node.config?.requireTaskPromptCompleteness === true;
     const sprintOrderMode = String(node.config?.sprintOrderMode || "").trim().toLowerCase();
     const strictStartGuardMissingTask =
       typeof node.config?.strictStartGuardMissingTask === "boolean"
         ? node.config.strictStartGuardMissingTask
         : STRICT_START_GUARD_MISSING_TASK;
 
+    const explicitTaskId = String(
+      ctx.data?.taskId
+      || ctx.data?.task?.id
+      || ctx.data?.taskDetail?.id
+      || "",
+    ).trim();
+    const explicitTaskTitle = pickTaskString(
+      ctx.data?.taskTitle,
+      ctx.data?.task?.title,
+      ctx.data?.taskDetail?.title,
+    );
+    if (explicitTaskId) {
+      const resolvedExplicitTask = await resolveExplicitTaskContext(
+        ctx,
+        engine,
+        explicitTaskId,
+        explicitTaskTitle,
+      );
+      if (!resolvedExplicitTask) {
+        ctx.log(node.id, `Ignoring stale explicit task context for ${explicitTaskId}`);
+        clearTaskIdentityContext(ctx.data);
+      } else {
+        bindTaskContext(ctx, resolvedExplicitTask);
+        const explicitBranch = deriveTaskBranch(resolvedExplicitTask.task);
+        if (explicitBranch) {
+          ctx.data.branch = explicitBranch;
+          ctx.data.branchName = explicitBranch;
+        }
+        ctx.log(node.id, `Using provided task context for ${explicitTaskId}`);
+        return {
+          triggered: true,
+          reason: "direct_task",
+          taskId: explicitTaskId,
+          taskTitle: resolvedExplicitTask.taskTitle || null,
+          task: resolvedExplicitTask.task || { id: explicitTaskId, title: resolvedExplicitTask.taskTitle || undefined },
+          tasks: [{ id: explicitTaskId }],
+        };
+      }
+    }
+
     // Check slot availability
-    const activeSlotCount = ctx.data?.activeSlotCount ?? 0;
+    const slotSnapshot =
+      typeof engine?.getTaskLifecycleSlotSnapshot === "function"
+        ? engine.getTaskLifecycleSlotSnapshot()
+        : null;
+    const workflowActiveRuns =
+      typeof engine?.getActiveRuns === "function"
+        ? engine.getActiveRuns()
+        : [];
+    const workflowActiveTaskIds = Array.from(new Set(
+      Array.isArray(slotSnapshot?.activeTaskIds) && slotSnapshot.activeTaskIds.length > 0
+        ? slotSnapshot.activeTaskIds
+        : workflowActiveRuns
+          .map((run) => String(run?.taskId || "").trim())
+          .filter(Boolean),
+    ));
+    const activeSlotCount = Number(
+      ctx.data?.activeSlotCount
+      ?? slotSnapshot?.activeSlotCount
+      ?? (workflowActiveTaskIds.length > 0 ? workflowActiveTaskIds.length : 0),
+    ) || 0;
+    if (
+      slotSnapshot?.baseBranchSlotCounts
+      && typeof slotSnapshot.baseBranchSlotCounts === "object"
+    ) {
+      ctx.data.baseBranchSlotCounts = slotSnapshot.baseBranchSlotCounts;
+    }
+    ctx.data.activeSlotCount = activeSlotCount;
+    ctx.data.activeTaskIds = workflowActiveTaskIds;
     if (activeSlotCount >= maxParallel) {
       ctx.log(node.id, `All ${maxParallel} slot(s) in use — skipping`);
       return { triggered: false, reason: "slots_full", activeSlotCount, maxParallel };
+    }
+
+    const kanban = ctx.data?._services?.kanban || engine?.services?.kanban;
+    const nowMs = Date.now();
+    if (kanban?.listTasks && typeof kanban.updateTask === "function") {
+      try {
+        const blockedTasks = await kanban.listTasks(projectId, { status: "blocked" });
+        if (Array.isArray(blockedTasks) && blockedTasks.length > 0) {
+          for (const blockedTask of blockedTasks) {
+            if (!shouldRecoverBlockedTask(blockedTask, nowMs)) continue;
+            const recoveredStatus = Boolean(
+              blockedTask?.prNumber || blockedTask?.pr_number || blockedTask?.prUrl || blockedTask?.pr_url,
+            )
+              ? "inreview"
+              : "todo";
+            await kanban.updateTask(String(blockedTask.id || blockedTask.task_id || "").trim(), {
+              status: recoveredStatus,
+              cooldownUntil: null,
+              blockedReason: null,
+            });
+          }
+        }
+      } catch (err) {
+        ctx.log(node.id, `Blocked-task recovery skipped: ${err?.message || err}`);
+      }
     }
 
     // Query kanban for each status with retry + backoff, merge results
@@ -657,7 +939,6 @@ registerNodeType("trigger.task_available", {
       let statusTasks = [];
       for (let attempt = 0; attempt <= listRetries; attempt++) {
         try {
-          const kanban = ctx.data?._services?.kanban || engine?.services?.kanban;
           if (kanban?.listTasks) {
             statusTasks = await kanban.listTasks(projectId, { status: queryStatus });
           } else {
@@ -702,12 +983,104 @@ registerNodeType("trigger.task_available", {
     if (filterDrafts && tasks?.length > 0) {
       tasks = tasks.filter((t) => !t.draft && !t.isDraft);
     }
+    if (requireTaskPromptCompleteness && tasks?.length > 0) {
+      const resolvePromptTaskUrl = (task = {}) => {
+        const taskMeta = task?.meta && typeof task.meta === "object" ? task.meta : {};
+        const taskId = pickTaskString(
+          task?.id,
+          task?.taskId,
+          task?.task_id,
+          taskMeta?.taskId,
+          taskMeta?.task_id,
+        );
+        return pickTaskString(
+          task?.taskUrl,
+          task?.task_url,
+          task?.url,
+          taskMeta?.taskUrl,
+          taskMeta?.task_url,
+          taskMeta?.url,
+          taskId ? `/api/tasks/detail?taskId=${encodeURIComponent(taskId)}` : "",
+        );
+      };
+      const eligibleTasks = [];
+      const filteredTasks = [];
+      for (const task of tasks) {
+        const taskId = String(task?.id || task?.task_id || "").trim();
+        let hydratedTask = task;
+        let taskDescription = pickTaskString(
+          task?.description,
+          task?.task_description,
+          task?.body,
+          task?.details,
+          task?.meta?.taskDescription,
+          task?.meta?.task_description,
+        );
+        let taskUrl = resolvePromptTaskUrl(task);
+        if ((!taskDescription || !taskUrl) && taskId && typeof kanban?.getTask === "function") {
+          try {
+            const fetchedTask = await kanban.getTask(taskId);
+            if (fetchedTask && typeof fetchedTask === "object") {
+              hydratedTask = {
+                ...fetchedTask,
+                ...task,
+                meta: {
+                  ...(fetchedTask.meta || {}),
+                  ...(task.meta || {}),
+                },
+              };
+              taskDescription = pickTaskString(
+                taskDescription,
+                fetchedTask.description,
+                fetchedTask.task_description,
+                fetchedTask.body,
+                fetchedTask.details,
+                fetchedTask.meta?.taskDescription,
+                fetchedTask.meta?.task_description,
+              );
+              taskUrl = pickTaskString(taskUrl, resolvePromptTaskUrl(fetchedTask));
+            }
+          } catch (err) {
+            ctx.log(node.id, `Prompt completeness lookup failed for ${taskId}: ${err?.message || err}`);
+          }
+        }
+        if (taskDescription && taskUrl) {
+          eligibleTasks.push(hydratedTask);
+          continue;
+        }
+        filteredTasks.push({
+          taskId: taskId || "(missing-id)",
+          missing: [
+            taskDescription ? null : "description",
+            taskUrl ? null : "url",
+          ].filter(Boolean),
+        });
+      }
+      if (filteredTasks.length > 0) {
+        const sample = filteredTasks
+          .slice(0, 3)
+          .map((entry) => `${entry.taskId}:${entry.missing.join("+")}`)
+          .join(", ");
+        ctx.log(node.id, `Prompt completeness filtered ${filteredTasks.length} task(s): ${sample}`);
+      }
+      tasks = eligibleTasks;
+      if (tasks.length === 0) {
+        return {
+          triggered: false,
+          reason: "prompt_quality_filtered",
+          taskCount: 0,
+          filteredTasks,
+        };
+      }
+    }
     if (!tasks || tasks.length === 0) {
       return { triggered: false, reason: "no_tasks", taskCount: 0 };
     }
 
     // Anti-thrash + cooldown filters
-    const activeTaskIds = ctx.data?.activeTaskIds || [];
+    const activeTaskIds = Array.isArray(ctx.data?.activeTaskIds) && ctx.data.activeTaskIds.length > 0
+      ? ctx.data.activeTaskIds
+      : workflowActiveTaskIds;
     const now = Date.now();
     tasks = tasks.filter((t) => {
       const id = String(t.id || t.task_id || "");
@@ -719,6 +1092,9 @@ registerNodeType("trigger.task_available", {
       // Skip-until cooldown (anti-thrash)
       const skipUntil = _skipUntil.get(id);
       if (skipUntil && now < skipUntil) return false;
+      // Persisted task cooldown survives workflow/session boundaries.
+      const persistedCooldownUntil = Date.parse(String(t.cooldownUntil || ""));
+      if (Number.isFinite(persistedCooldownUntil) && now < persistedCooldownUntil) return false;
       // Hard-blocked after MAX_NO_COMMIT_ATTEMPTS
       const noCommitCount = _noCommitCounts.get(id) || 0;
       if (noCommitCount >= MAX_NO_COMMIT_ATTEMPTS) return false;
@@ -734,6 +1110,41 @@ registerNodeType("trigger.task_available", {
 
     if (tasks.length === 0) {
       return { triggered: false, reason: "all_filtered", taskCount: 0 };
+    }
+
+    let persistedOwnershipFilteredCount = 0;
+    try {
+      const claimsMod = await ensureTaskClaimsMod();
+      await ensureTaskClaimsInitialized(ctx, claimsMod);
+      if (typeof claimsMod.listClaims === "function") {
+        const repoRoot = resolve(pickTaskString(
+          ctx?.data?.repoRoot,
+          ctx?.data?.workspace,
+          process.cwd(),
+        ));
+        const activeClaims = await claimsMod.listClaims({ repoRoot });
+        if (Array.isArray(activeClaims) && activeClaims.length > 0) {
+          const claimedTaskIds = new Set(
+            activeClaims
+              .map((claim) => String(claim?.task_id || claim?.taskId || "").trim())
+              .filter(Boolean),
+          );
+          const beforeFilterCount = tasks.length;
+          tasks = tasks.filter((task) => !claimedTaskIds.has(String(task?.id || task?.task_id || "").trim()));
+          persistedOwnershipFilteredCount = Math.max(0, beforeFilterCount - tasks.length);
+        }
+      }
+    } catch (err) {
+      ctx.log(node.id, `Persisted claim filtering skipped: ${err?.message || err}`);
+    }
+
+    if (tasks.length === 0) {
+      return {
+        triggered: false,
+        reason: persistedOwnershipFilteredCount > 0 ? "all_claimed" : "all_filtered",
+        taskCount: 0,
+        persistedOwnershipFilteredCount,
+      };
     }
 
     // DAG / sprint-order guard: only dispatch tasks that can legally start.
@@ -911,29 +1322,6 @@ registerNodeType("trigger.task_available", {
 
     const primaryTask = toDispatch[0] || null;
     if (primaryTask) {
-      const normalizeMirroredRepoRoot = (inputPath, fallbackRepoName = "") => {
-        const rawPath = String(inputPath || "").trim();
-        if (!rawPath) return "";
-        const normalized = rawPath.replace(/\\/g, "/");
-        const marker = "/.bosun/workspaces/";
-        const markerIndex = normalized.indexOf(marker);
-        if (markerIndex < 0) return rawPath;
-        const prefix = normalized.slice(0, markerIndex);
-        const tail = normalized.slice(markerIndex + marker.length).split("/").filter(Boolean);
-        const inferredRepoName = String(fallbackRepoName || tail[1] || tail[tail.length - 1] || "").trim();
-        if (!prefix || !inferredRepoName) return rawPath;
-        const prefixName = String(prefix.split("/").filter(Boolean).pop() || "").toLowerCase();
-        const candidate = prefixName === inferredRepoName.toLowerCase()
-          ? prefix
-          : resolve(prefix, inferredRepoName);
-        try {
-          if (existsSync(resolve(candidate, ".git"))) return candidate;
-        } catch {
-          // ignore and keep original
-        }
-        return candidate;
-      };
-
       const taskId = pickTaskString(primaryTask.id, primaryTask.task_id);
       const taskTitle = pickTaskString(primaryTask.title, primaryTask.task_title);
       bindTaskContext(ctx, { taskId, taskTitle, task: primaryTask });
@@ -984,25 +1372,34 @@ registerNodeType("trigger.task_available", {
       const baseBranch = pickTaskString(primaryTask.baseBranch, primaryTask.base_branch);
       if (baseBranch) ctx.data.baseBranch = baseBranch;
       const branch = deriveTaskBranch(primaryTask);
-      if (branch) ctx.data.branch = branch;
+      if (branch) {
+        ctx.data.branch = branch;
+        ctx.data.branchName = branch;
+      }
+      ctx.data._taskBranchBinding = {
+        taskId,
+        resolvedBranch: branch || null,
+        resolvedBaseBranch: baseBranch || null,
+        candidates: {
+          baseBranch: primaryTask?.baseBranch ?? primaryTask?.base_branch ?? null,
+          target: primaryTask?.target ?? null,
+          "meta.targetBranch": primaryTask?.meta?.targetBranch ?? primaryTask?.metadata?.targetBranch ?? null,
+        },
+      };
     }
 
     ctx.log(node.id, `Found ${toDispatch.length} task(s) ready (${remaining} slot(s) free)`);
     return {
       triggered: true,
       tasks: toDispatch,
+      task: primaryTask,
       taskCount: toDispatch.length,
+      taskTitle: primaryTask ? pickTaskString(primaryTask.title, primaryTask.task_title) : null,
       availableSlots: remaining,
       selectedTaskId: primaryTask ? pickTaskString(primaryTask.id, primaryTask.task_id) : "",
+      persistedOwnershipFilteredCount,
       auditEvents: startGuardAuditEvents,
     };
   },
 });
 // ── condition.slot_available ────────────────────────────────────────────────
-
-
-
-
-
-
-

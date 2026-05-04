@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
+import { isCiOnlyTestRun } from "./test-speed-gates.mjs";
 
 // ── Mock child_process so node types that shell-out complete instantly ──
 vi.mock("node:child_process", async (importOriginal) => {
@@ -68,6 +69,9 @@ import {
   registerNodeType,
   getNodeType,
 } from "../workflow/workflow-engine.mjs";
+
+const runFullTemplatePipelineE2E = isCiOnlyTestRun;
+const fullPipelineIt = runFullTemplatePipelineE2E ? it : it.skip;
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Mock Service Layer
@@ -335,6 +339,129 @@ function ensureExperimentalNodeTypes() {
     if (getNodeType(type)) return;
     registerNodeType(type, handler);
   };
+  const registerForE2E = (type, handler) => {
+    registerNodeType(type, handler, { source: "test-e2e" });
+  };
+  const resolveNodeString = (value, ctx) => {
+    if (typeof value === "string") return ctx.resolve(value);
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return "";
+  };
+  const buildCommandText = (node, ctx) => {
+    const command = String(ctx.resolve(node.config?.command || "") || "").trim();
+    const rawArgs = node.config?.args ?? [];
+    const args = Array.isArray(rawArgs)
+      ? rawArgs.map((value) => resolveNodeString(value, ctx)).filter(Boolean)
+      : [resolveNodeString(rawArgs, ctx)].filter(Boolean);
+    return { command, args, text: [command, ...args].filter(Boolean).join(" ").trim() };
+  };
+  const buildMockReviewSignals = (node, ctx) => {
+    const repo = String(ctx.resolve(node.config?.env?.DIRECT_REPO || "") || ctx.data?.repo || "virtengine/bosun");
+    const prNumber = Number(ctx.resolve(node.config?.env?.DIRECT_PR_NUMBER || "") || ctx.data?.prNumber || 42);
+    const prUrl = String(ctx.resolve(node.config?.env?.DIRECT_PR_URL || "") || ctx.data?.prUrl || `https://github.com/${repo}/pull/${prNumber}`);
+    const actionable = [
+      {
+        kind: "comment",
+        severity: "medium",
+        summary: "Tighten failing review feedback into a focused repair plan.",
+      },
+    ];
+    const qualityChecks = [
+      {
+        name: "unit-tests",
+        conclusion: "failure",
+        summary: "Mock quality check failure",
+      },
+    ];
+    const sonarChecks = [
+      {
+        name: "SonarQube",
+        conclusion: "failure",
+        summary: "Mock SonarQube issue set",
+      },
+    ];
+    return {
+      repo,
+      prNumber,
+      prUrl,
+      sourceKind: String(ctx.resolve(node.config?.env?.DIRECT_EVENT || "") || "schedule"),
+      prDigest: {
+        core: { number: prNumber, url: prUrl, title: "Mock PR" },
+        body: "Mock PR body",
+        files: [{ path: "src/mock.js", additions: 5, deletions: 1 }],
+        issueComments: [],
+        reviews: [],
+        reviewComments: [],
+        checks: qualityChecks,
+        digestSummary: "Mock PR digest summary",
+      },
+      signals: {
+        commentFindings: actionable,
+        qualityChecks,
+        sonarChecks,
+      },
+      commentFindings: actionable,
+      qualityChecks,
+      sonarChecks,
+      actionable,
+      hasSonarFailure: true,
+    };
+  };
+  const buildMockCommandOutput = (node, ctx) => {
+    const { text } = buildCommandText(node, ctx);
+    if (node.config?.parseJson === true) {
+      if (node.id === "fetch-review-signals" || node.id === "fetch-sonar-signals") {
+        return buildMockReviewSignals(node, ctx);
+      }
+      return { ok: true, command: text };
+    }
+    if (/git describe --tags --abbrev=0/i.test(text)) return "v0.0.0";
+    if (/gh pr list --state merged/i.test(text)) {
+      return JSON.stringify([
+        {
+          number: 1,
+          title: "feat: mock release item",
+          labels: [{ name: "feature" }],
+          author: { login: "bosun-bot" },
+          mergedAt: "2026-04-01T00:00:00Z",
+        },
+      ]);
+    }
+    if (/git log /i.test(text)) return "feat: mock release item (#1)\nfix: stabilize tests (#2)";
+    if (/gh pr view/i.test(text)) return '{"number":1,"title":"mock","mergeable":"MERGEABLE","labels":[]}';
+    if (/gh (issue|pr) /i.test(text)) return "[]";
+    if (/npm (run )?build/i.test(text)) return "build ok";
+    if (/npm test/i.test(text)) return "tests ok";
+    if (/npm run lint/i.test(text)) return "lint ok";
+    if (/npm audit/i.test(text)) return '{"vulnerabilities":{}}';
+    if (/git /i.test(text)) return "";
+    return "ok";
+  };
+  const buildMockAgentOutput = (node, ctx) => {
+    if (node.id === "draft-notes") {
+      return {
+        output: [
+          "# What's Changed",
+          "",
+          "## :rocket: Features",
+          "- Added mock release automation (#1)",
+          "",
+          "## :bug: Bug Fixes",
+          "- Stabilized workflow template E2E coverage (#2)",
+        ].join("\n"),
+        releaseNotes: [
+          "# What's Changed",
+          "",
+          "## :rocket: Features",
+          "- Added mock release automation (#1)",
+        ].join("\n"),
+      };
+    }
+    return {
+      output: `mock agent response for ${node.id}`,
+      summary: `mock summary for ${node.id}`,
+    };
+  };
 
   registerIfMissing("meeting.start", {
     describe: () => "Start a meeting session",
@@ -403,6 +530,120 @@ function ensureExperimentalNodeTypes() {
       const phrase = String(ctx.resolve(node.config?.wakePhrase || "")).toLowerCase();
       const text = String(ctx.resolve(node.config?.text || "")).toLowerCase();
       return { triggered: Boolean(phrase) && text.includes(phrase) };
+    },
+  });
+
+  // These nodes have real implementations that read/write workflow history and
+  // skillbook state. Override them for e2e template coverage so every template
+  // executes deterministically inside the tmp test sandbox.
+  registerForE2E("action.load_skillbook_strategies", {
+    describe: () => "Load canned skillbook strategies",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx) {
+      return {
+        success: true,
+        workflowId: ctx.resolve(node.config?.workflowId || ctx.data?._workflowId || ""),
+        strategies: [
+          {
+            id: "strategy-test-recovery",
+            title: "Retry with narrower verification scope",
+            score: 0.92,
+          },
+        ],
+        guidanceSummary: "Retry with narrower verification scope and preserve current worktree state.",
+      };
+    },
+  });
+
+  registerForE2E("action.run_command", {
+    describe: () => "Execute a deterministic command result for e2e tests",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx) {
+      return {
+        success: true,
+        output: buildMockCommandOutput(node, ctx),
+        exitCode: 0,
+      };
+    },
+  });
+
+  registerForE2E("action.run_agent", {
+    describe: () => "Return deterministic agent output for e2e tests",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx) {
+      const { output, summary, releaseNotes } = buildMockAgentOutput(node, ctx);
+      return {
+        success: true,
+        output,
+        summary,
+        releaseNotes,
+        sdk: String(node.config?.sdk || "mock"),
+        items: [],
+        threadId: `agent-${node.id}-${Date.now()}`,
+        sessionId: `agent-${node.id}-${Date.now()}`,
+        attempts: 1,
+        continues: 0,
+        resumed: false,
+      };
+    },
+  });
+
+  registerForE2E("agent.run_planner", {
+    describe: () => "Generate deterministic planner output for e2e tests",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx) {
+      const taskCount = Number(ctx.resolve(node.config?.taskCount || 2)) || 2;
+      const tasks = Array.from({ length: Math.max(1, Math.min(taskCount, 3)) }, (_, index) => ({
+        title: `Mock planned task ${index + 1}`,
+        description: "Auto-generated placeholder task",
+        acceptance_criteria: ["Planner output is parseable"],
+        verification: ["npm test -- tests"],
+        repo_areas: ["workflow"],
+        impact: 0.8,
+        confidence: 0.85,
+        risk: 0.2,
+      }));
+      return {
+        success: true,
+        output: JSON.stringify({ tasks }),
+        taskCount: tasks.length,
+        threadId: `planner-${Date.now()}`,
+        sdk: "mock",
+      };
+    },
+  });
+
+  registerForE2E("action.evaluate_run", {
+    describe: () => "Evaluate a run with deterministic test output",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx) {
+      const runId = String(ctx.resolve(node.config?.runId || "") || ctx.id || "test-run");
+      return {
+        success: true,
+        runId,
+        workflowId: String(ctx.data?._workflowId || ctx.workflowId || "test-workflow"),
+        evaluation: {
+          summary: "Stable test evaluation",
+          status: "healthy",
+        },
+        promotion: {
+          decision: "hold",
+          reason: "E2E harness uses deterministic mock evaluation output.",
+        },
+      };
+    },
+  });
+
+  registerForE2E("action.apply_self_improvement_ratchet", {
+    describe: () => "Apply a no-op ratchet decision for tests",
+    schema: { type: "object", properties: {} },
+    async execute() {
+      return {
+        success: true,
+        decision: "hold",
+        applied: false,
+        reason: "E2E harness keeps self-improvement state immutable.",
+      };
     },
   });
 }
@@ -1162,7 +1403,9 @@ describe("workflow-templates E2E execution", () => {
   });
 
   describe("full pipeline: install all + execute all", () => {
-    it("installs and executes every template in sequence without cross-contamination", async () => {
+    // This path is intentionally opt-in only because it takes several minutes
+    // on Windows and makes local pre-push feedback unusably slow.
+    fullPipelineIt("installs and executes every template in sequence without cross-contamination", async () => {
       // Use installTemplateSet to handle grouped flow dedup correctly
       const allIds = WORKFLOW_TEMPLATES.map((t) => t.id);
       // Build per-template overrides map so canary-deploy gets short delay
@@ -1173,9 +1416,13 @@ describe("workflow-templates E2E execution", () => {
 
       const results = [];
       for (const wf of engine.list()) {
+        const installedFrom = wf.metadata?.installedFrom || wf.id;
+        if (process.env.BOSUN_DEBUG_TEMPLATE_E2E === "1") {
+          console.log(`[template-e2e] executing ${installedFrom}`);
+        }
         const ctx = await engine.execute(wf.id, {}, { force: true });
         results.push({
-          id: wf.metadata?.installedFrom || wf.id,
+          id: installedFrom,
           status: ctx.errors.length > 0 ? "failed" : "completed",
           errorCount: ctx.errors.length,
           nodeCount: ctx.nodeStatuses.size,

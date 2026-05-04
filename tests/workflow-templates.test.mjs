@@ -20,8 +20,13 @@ import {
   installTemplateSet,
 } from "../workflow/workflow-templates.mjs";
 import {
+  isTaskBatchDispatchEligible,
   validateTaskBatchPayload,
 } from "../workflow-templates/task-batch.mjs";
+import {
+  RECOVER_BLOCKED_TASK_TEMPLATE,
+  RECOVER_BLOCKED_WORKTREES_TEMPLATE,
+} from "../workflow-templates/reliability.mjs";
 import {
   WorkflowEngine,
   getNodeType,
@@ -289,6 +294,70 @@ describe("workflow-templates", () => {
     expect(replenishNode?.config?.repoMapFileLimit).toBe(8);
   });
 
+  it("task lifecycle planning phase uses plan mode", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeTruthy();
+
+    const planNode = template.nodes.find((node) => node.id === "run-agent-plan");
+    const testsNode = template.nodes.find((node) => node.id === "run-agent-tests");
+    const implementNode = template.nodes.find((node) => node.id === "run-agent-implement");
+
+    expect(planNode?.config?.mode).toBe("plan");
+    expect(planNode?.config?.requireCompletionSignal).toBe(true);
+    expect(planNode?.config?.prompt).toContain("If inspection shows the requested behavior is already present");
+    expect(planNode?.config?.prompt).toContain("include the required completion signal instead of widening scope");
+    expect(testsNode?.config?.mode || "agent").toBe("agent");
+    expect(testsNode?.config?.prompt).toContain("Start with the narrowest reproducible test for the target seam");
+    expect(testsNode?.config?.prompt).toContain("keep the task scoped to the targeted seam instead of widening further");
+    expect(testsNode?.config?.prompt).toContain("If the focused target-seam tests already pass");
+    expect(testsNode?.config?.prompt).toContain("no tests-side code changes were needed");
+    expect(testsNode?.config?.prompt).toContain("Treat that as a successful phase completion rather than a blocker");
+    expect(implementNode?.config?.mode || "agent").toBe("agent");
+    expect(implementNode?.config?.prompt).toContain("Start with the narrowest verification that proves the changed surface");
+    expect(implementNode?.config?.prompt).toContain("keep the task scoped to the touched surface instead of thrashing on unrelated reds");
+    expect(implementNode?.config?.prompt).toContain("say `commit blocked`");
+  });
+
+  it("task lifecycle tests and implement phases start from a fresh session on reruns", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeTruthy();
+
+    const testsNode = template.nodes.find((node) => node.id === "run-agent-tests");
+    const implementNode = template.nodes.find((node) => node.id === "run-agent-implement");
+
+    expect(testsNode?.type).toBe("action.run_agent");
+    expect(testsNode?.config?.continueOnSession).toBe(false);
+    expect(implementNode?.type).toBe("action.run_agent");
+    expect(implementNode?.config?.continueOnSession).toBe(false);
+  });
+
+  it("task lifecycle phase agents require complete task prompt metadata", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeTruthy();
+
+    for (const phaseNodeId of ["run-agent-plan", "run-agent-tests", "run-agent-implement"]) {
+      const runAgent = template.nodes.find((n) => n.id === phaseNodeId);
+      expect(runAgent?.type).toBe("action.run_agent");
+      expect(runAgent?.config?.requireTaskPromptCompleteness).toBe(true);
+    }
+  });
+
+  it("recover blocked worktrees summary uses a precomputed count variable", async () => {
+    const { RECOVER_BLOCKED_WORKTREES_TEMPLATE: template } = await import("../workflow-templates/reliability.mjs");
+    expect(template).toBeTruthy();
+
+    const countNode = template.nodes.find((node) => node.id === "count-blocked");
+    expect(countNode?.type).toBe("action.set_variable");
+    expect(countNode?.config).toMatchObject({
+      key: "blockedTaskCount",
+      isExpression: true,
+    });
+
+    const summaryNode = template.nodes.find((node) => node.id === "log-summary");
+    expect(summaryNode?.config?.message).toContain("{{blockedTaskCount}} task(s)");
+    expect(summaryNode?.config?.message).not.toContain("{{$ctx");
+  });
+
   it("every template has required fields", () => {
     for (const t of WORKFLOW_TEMPLATES) {
       expect(t.id).toMatch(/^template-/);
@@ -541,6 +610,17 @@ describe("workflow-templates", () => {
     expect(triggerNode?.config?.filter).toBeUndefined();
   });
 
+  it("backend agent template uses action.run_agent for implementation planning", () => {
+    const template = getTemplate("template-backend-agent");
+    expect(template).toBeDefined();
+
+    const planNode = template.nodes.find((n) => n.id === "plan-work");
+    expect(planNode?.type).toBe("action.run_agent");
+    expect(planNode?.config?.mode).toBe("plan");
+    expect(planNode?.config?.executionRole).toBe("architect");
+    expect(planNode?.config?.outputVariable).toBe("plan");
+  });
+
   it("research evidence agent template is registered with sidecar and reviewed knowledge stages", async () => {
     const module = await import("../workflow-templates/research-evidence.mjs");
     const template = module.RESEARCH_EVIDENCE_AGENT_TEMPLATE;
@@ -549,6 +629,8 @@ describe("workflow-templates", () => {
     expect(template.category).toBe("research");
     expect(template.variables?.evidenceMode).toBe("answer");
     expect(template.variables?.promoteReviewedFindings).toBe(true);
+    expect(template.variables?.researchToolBundleId).toBe("scientific-evidence");
+    expect(template.variables?.includeRuntimeLogEvidence).toBe(true);
 
     const sidecarNode = template.nodes.find((node) => node.id === "run-evidence-sidecar");
     const generatorNode = template.nodes.find((node) => node.id === "generate-solution");
@@ -560,8 +642,12 @@ describe("workflow-templates", () => {
     expect(sidecarNode?.config?.command).toBe("node");
     expect(sidecarNode?.config?.args).toContain("workflow/research-evidence-sidecar.mjs");
     expect(sidecarNode?.config?.parseJson).toBe(true);
+    expect(String(sidecarNode?.config?.env?.BOSUN_RESEARCH_SIDECAR_INPUT || "")).toContain("researchToolBundleId");
+    expect(String(sidecarNode?.config?.env?.BOSUN_RESEARCH_SIDECAR_INPUT || "")).toContain("includeRuntimeLogEvidence");
     expect(String(generatorNode?.config?.prompt || "")).toContain("Evidence Summary");
+    expect(String(generatorNode?.config?.prompt || "")).toContain("Research Tool Bundle");
     expect(String(generatorNode?.config?.prompt || "")).toContain("Use citation keys");
+    expect(String(verifierNode?.config?.prompt || "")).toContain("Research Tool Bundle");
     expect(String(verifierNode?.config?.prompt || "")).toContain("VERDICT: CORRECT");
     expect(verdictNode?.type).toBe("transform.llm_parse");
     expect(verdictNode?.config?.outputPort).toBe("verdict");
@@ -590,6 +676,24 @@ describe("workflow-templates", () => {
     expect(String(autoFix?.config?.prompt || "")).not.toContain("Commit with message \"fix: address validation failures\"");
   });
 
+  it("task lifecycle phase agents run locally instead of auto-delegating", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+
+    for (const nodeId of [
+      "run-agent-plan",
+      "run-agent-tests",
+      "run-agent-implement",
+      "auto-fix-validation",
+      "auto-fix-validation-2",
+    ]) {
+      const phaseNode = template.nodes.find((node) => node.id === nodeId);
+      expect(phaseNode?.type).toBe("action.run_agent");
+      expect(phaseNode?.config?.delegateTaskWorkflow).toBe(false);
+      expect(phaseNode?.config?.agentProfile).toBeUndefined();
+    }
+  });
+
   it("agent templates only advance to inreview after a real PR is linked", () => {
     const backendTemplate = getTemplate("template-backend-agent");
     expect(backendTemplate).toBeDefined();
@@ -612,8 +716,54 @@ describe("workflow-templates", () => {
       expect(runAgent?.type).toBe("action.run_agent");
       expect(runAgent?.config?.sdk).toBe("{{resolvedSdk}}");
       expect(runAgent?.config?.model).toBe("{{resolvedModel}}");
-      expect(runAgent?.config?.agentProfile).toBe("{{agentProfile}}");
+      expect(runAgent?.config?.agentProfile).toBeUndefined();
+      expect(runAgent?.config?.delegateTaskWorkflow).toBe(false);
     }
+  });
+
+  it("task lifecycle treats commit-blocked implement sessions as recoverable", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+    const implementGate = template.nodes.find((n) => n.id === "implement-agent-ok");
+    expect(implementGate?.type).toBe("condition.expression");
+    expect(implementGate?.config?.expression).toContain("run-agent-implement");
+    expect(implementGate?.config?.expression).toContain("success === true");
+    expect(implementGate?.config?.expression).toContain("implementation_done_commit_blocked");
+  });
+
+  it("task lifecycle retries agent-phase worktree failures by reacquiring the worktree", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+    for (const nodeId of [
+      "plan-agent-worktree-reacquire-needed",
+      "tests-agent-worktree-reacquire-needed",
+      "implement-agent-worktree-reacquire-needed",
+    ]) {
+      const node = template.nodes.find((n) => n.id === nodeId);
+      expect(node?.type).toBe("condition.expression");
+      expect(node?.config?.expression).toContain("worktree_failure");
+      expect(node?.config?.expression).toContain("needsReacquire === true");
+    }
+    expect(template.edges.find((e) => e.source === "plan-agent-worktree-reacquire-needed" && e.target === "recover-worktree")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "tests-agent-worktree-reacquire-needed" && e.target === "recover-worktree")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "implement-agent-worktree-reacquire-needed" && e.target === "recover-worktree")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "retry-wt-ok" && e.target === "run-agent-plan" && e.backEdge === true)).toBeDefined();
+    expect(template.edges.find((e) => e.source === "retry-wt-ok" && e.target === "run-agent-tests" && e.backEdge === true)).toBeDefined();
+    expect(template.edges.find((e) => e.source === "retry-wt-ok" && e.target === "run-agent-implement" && e.backEdge === true)).toBeDefined();
+  });
+
+  it("task lifecycle reuses an existing PR when push is commit-blocked", () => {
+    const template = getTemplate("template-task-lifecycle");
+    expect(template).toBeDefined();
+    const existingPrLinked = template.nodes.find((n) => n.id === "push-pr-linked");
+    const logSuccess = template.nodes.find((n) => n.id === "log-success");
+    expect(existingPrLinked?.type).toBe("condition.expression");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.prNumber");
+    expect(existingPrLinked?.config?.expression).toContain("$data?.task?.prUrl");
+    expect(template.edges.find((e) => e.source === "push-failure-blocking" && e.target === "push-pr-linked")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-inreview")).toBeDefined();
+    expect(template.edges.find((e) => e.source === "push-pr-linked" && e.target === "set-blocked-push-failed")).toBeDefined();
+    expect(logSuccess?.config?.message).toContain("PR linked");
   });
 
   it("task lifecycle implement phase keeps verification scoped when unrelated baseline reds appear", () => {
@@ -1140,6 +1290,55 @@ describe("template drift + update behavior", () => {
     expect(refreshed.metadata.templateState.isCustomized).toBe(false);
   });
 
+  it("force-refreshes startup-critical task lifecycle workflows with banned trigger statuses or missing required edges", () => {
+    const installed = installTemplate("template-task-lifecycle", engine);
+    const wf = engine.get(installed.id);
+    const triggerNode = wf.nodes.find((node) => node.id === "trigger");
+
+    triggerNode.config.statuses = ["todo", "inreview"];
+    wf.edges = wf.edges.filter((edge) => !(
+      (edge.source === "recover-worktree" && edge.target === "retry-acquire-wt")
+      || (edge.source === "create-pr" && edge.target === "pr-created")
+    ));
+    engine.save(wf);
+
+    const result = reconcileInstalledTemplates(engine, { autoUpdateUnmodified: true });
+
+    expect(result.autoUpdated).toBe(1);
+    expect(result.forceUpdated).toEqual([wf.id]);
+    expect(result.criticalMismatches).toEqual([
+      expect.objectContaining({
+        workflowId: wf.id,
+        templateId: "template-task-lifecycle",
+        issues: expect.arrayContaining([
+          expect.objectContaining({ code: "fingerprint_mismatch" }),
+          expect.objectContaining({ code: "task_lifecycle_trigger_statuses" }),
+          expect.objectContaining({ code: "task_lifecycle_worktree_routing" }),
+          expect.objectContaining({ code: "task_lifecycle_pr_creation_routing" }),
+        ]),
+      }),
+    ]);
+    expect(result.criticalRemaining).toEqual([]);
+
+    const refreshed = engine.get(wf.id);
+    const refreshedTrigger = refreshed.nodes.find((node) => node.id === "trigger");
+    expect(refreshedTrigger?.config?.statuses).toEqual(["todo"]);
+    expect(
+      refreshed.edges.some((edge) => edge.source === "recover-worktree" && edge.target === "retry-acquire-wt"),
+    ).toBe(true);
+    expect(
+      refreshed.edges.some((edge) => edge.source === "create-pr" && edge.target === "pr-created"),
+    ).toBe(true);
+    const blockedRepairEdges = refreshed.edges.filter((edge) =>
+      edge.source === "annotate-blocked-wt-failed" && edge.target === "dispatch-wt-repair"
+    );
+    expect(blockedRepairEdges).toHaveLength(2);
+    expect(
+      blockedRepairEdges.map((edge) => edge.sourcePort).sort(),
+    ).toEqual(["default", "error"]);
+    expect(refreshed.metadata.templateState.isCustomized).toBe(false);
+  });
+
   it("supports copy update mode for customized workflows", () => {
     const installed = installTemplate("template-error-recovery", engine);
     const wf = engine.get(installed.id);
@@ -1216,9 +1415,142 @@ describe("workflow setup profiles", () => {
     for (const script of queryScripts) {
       expect(script).toContain("const mirrorMarker = (path.sep + \".bosun\" + path.sep + \"workspaces\" + path.sep).toLowerCase();");
       expect(script).toContain('path.join(repoRoot, "kanban", "kanban-adapter.mjs")');
-      expect(script).toContain('const filtered = (tasks || []).filter((task) => task && task.status === "todo" && !task.draft);');
+      expect(script).toContain("const looksDispatchable = function isTaskBatchDispatchEligible");
+      expect(script).toContain('const filtered = (tasks || []).filter((task) => looksDispatchable(task));');
       expect(script).not.toContain("repository.length > 0 && workspace.length > 0");
     }
+  });
+
+  it("treats structurally empty synthetic tasks as ineligible for autonomous batch dispatch", () => {
+    expect(isTaskBatchDispatchEligible({
+      id: "TASK-DIAG-1",
+      title: "Diagnostics export",
+      status: "todo",
+      draft: false,
+      projectId: null,
+      tags: [],
+      description: "",
+      branchName: null,
+      baseBranch: null,
+      meta: {},
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      id: "task-export-1",
+      title: "Export me",
+      status: "todo",
+      draft: false,
+      projectId: "internal",
+      tags: [],
+      description: "",
+      branchName: null,
+      baseBranch: null,
+      repository: null,
+      workspace: null,
+      meta: {
+        timeline: [{ type: "task.created", source: "test" }],
+        workflowRuns: [{ runId: "run-1" }],
+      },
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      id: "TASK-DIAG-LOCAL",
+      title: "Diagnostics export",
+      status: "todo",
+      draft: false,
+      projectId: "internal",
+      tags: [],
+      description: "",
+      branchName: null,
+      baseBranch: null,
+      repository: null,
+      workspace: null,
+      meta: {
+        timeline: [{ type: "task.created", source: "task-store" }],
+        workflowRuns: [{ runId: "run-local-1" }],
+      },
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      id: "task-import-1",
+      title: "Updated title",
+      status: "todo",
+      draft: false,
+      projectId: "internal",
+      tags: [],
+      description: "",
+      branchName: null,
+      baseBranch: null,
+      repository: null,
+      workspace: null,
+      meta: {
+        reviewFixLifecycle: {
+          mode: "review_redispatch",
+          state: "session_rebind_requested",
+        },
+      },
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      id: "d5325eca-de7e-433a-8b64-ddd01bc1e7f3",
+      title: "[s] feat(reliability): expose auto-update breaker state and reset controls",
+      status: "todo",
+      draft: false,
+      projectId: "internal",
+      tags: ["planning", "autonomous", "reliability"],
+      description: "Expose auto-update breaker state",
+      branchName: "task/d5325eca",
+      baseBranch: "origin/main",
+      meta: {
+        planner: { impact: 8 },
+        workflow: { workflowId: "template-task-replenish" },
+        repo_areas: ["infra/update-check.mjs"],
+      },
+    })).toBe(true);
+
+    expect(isTaskBatchDispatchEligible({
+      id: "a6a0198e-a547-4eb7-872c-af2c83604b5f",
+      title: "[m] agent logging: enrich session metadata from VK API when missing",
+      status: "todo",
+      draft: true,
+      projectId: "internal",
+      tags: [],
+      description: "Add VK metadata enrichment to session startup flows.",
+      branchName: null,
+      baseBranch: "main",
+      repository: "virtengine/bosun",
+      workspace: "virtengine-gh",
+      meta: {
+        planner: { impact: 7 },
+      },
+    })).toBe(true);
+  });
+
+  it("skips todo tasks whose persisted cooldownUntil is still active", () => {
+    const baseTask = {
+      id: "task-cooling-batch",
+      title: "Cooling batch candidate",
+      status: "todo",
+      draft: false,
+      description: "Dispatchable task metadata is present.",
+      branchName: "task/task-cooling-batch",
+      baseBranch: "origin/main",
+      repository: "virtengine/bosun",
+      workspace: "virtengine-gh",
+      meta: {
+        planner: { impact: 5 },
+      },
+    };
+
+    expect(isTaskBatchDispatchEligible({
+      ...baseTask,
+      cooldownUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+    })).toBe(false);
+
+    expect(isTaskBatchDispatchEligible({
+      ...baseTask,
+      cooldownUntil: new Date(Date.now() - 10 * 60_000).toISOString(),
+    })).toBe(true);
   });
 
   it("alerts Telegram only for failed batch items and logs the routine summary", () => {
@@ -1244,7 +1576,7 @@ describe("workflow setup profiles", () => {
     expect(dispatchLoop?.config?.items).toBe("$ctx.getNodeOutput('query-tasks')?.output || []");
     expect(dispatchLoop?.config?.workflowId).toBe("{{subWorkflow}}");
     expect(dispatchLoop?.config?.mode).toBe("dispatch");
-    expect(coordinatorEdge?.condition).toBe("$output === true || $output?.result === true || $output?.value === true");
+    expect(coordinatorEdge?.condition).toBe("$output === true || $output?.result === true || $output?.value === true || $output?.triggered === true");
   });
 
   it("uses JavaScript loop expressions for both task-batch templates", () => {
@@ -1514,11 +1846,12 @@ describe("github template CLI compatibility", () => {
     expect(watchdogTemplate).toBeDefined();
     const fetchNode = watchdogTemplate.nodes.find((n) => n.id === "fetch-and-classify");
     expect(fetchNode).toBeDefined();
-    const cmd = fetchNode.config?.command || "";
+    const cmd = Array.isArray(fetchNode.config?.args) ? String(fetchNode.config.args[1] || "") : "";
     // The script is joined into a single line for `node -e "..."`.
     // Any `//` line comment would comment out all subsequent code on that line,
     // causing SyntaxError: Unexpected end of input.
     expect(cmd).not.toMatch(/\/\/(?!\*)/); // no `//` comments
+    expect(() => new Function(cmd)).not.toThrow();
   });
   it("PR watchdog queues auto-merge after review instead of waiting for a later pass", () => {
     const watchdogTemplate = getTemplate("template-bosun-pr-watchdog");
@@ -1633,7 +1966,23 @@ describe("github template CLI compatibility", () => {
     const fixNode = progressorTemplate.nodes.find((n) => n.id === "programmatic-fix");
     const reviewNode = progressorTemplate.nodes.find((n) => n.id === "programmatic-review");
     const fixAgentNode = progressorTemplate.nodes.find((n) => n.id === "dispatch-fix-agent");
+    const markDoneMergedNode = progressorTemplate.nodes.find((n) => n.id === "mark-done-merged");
+    const triggerNode = progressorTemplate.nodes.find((n) => n.id === "trigger");
+    const normalizeNode = progressorTemplate.nodes.find((n) => n.id === "normalize-context");
+    const buildFixPromptNode = progressorTemplate.nodes.find((n) => n.id === "build-fix-prompt");
+    expect(triggerNode?.config?.inputs?.reviewIssues?.type).toBe("array");
+    expect(triggerNode?.config?.inputs?.reviewIssueCount?.type).toBe("number");
+    expect(triggerNode?.config?.inputs?.reviewFixDispatchMode?.type).toBe("string");
+    expect(triggerNode?.config?.inputs?.reviewFixRequestedAt?.type).toBe("string");
+    expect(normalizeNode?.config?.value).toContain("reviewIssues: Array.isArray($data?.reviewIssues) ? $data.reviewIssues : []");
+    expect(normalizeNode?.config?.value).toContain("reviewIssueCount: Number($data?.reviewIssueCount || 0) || 0");
+    expect(normalizeNode?.config?.value).toContain("reviewFixDispatchMode: String($data?.reviewFixDispatchMode || '').trim() || null");
+    expect(buildFixPromptNode?.config?.value).toContain("const persistedReviewIssues = Array.isArray($data?.prProgressContext?.reviewIssues) ? $data.prProgressContext.reviewIssues : [];");
+    expect(buildFixPromptNode?.config?.value).toContain("Persisted review issues");
+    expect(buildFixPromptNode?.config?.value).toContain("reviewFixDispatchMode");
+    expect(buildFixPromptNode?.config?.value).toContain("reviewFixRequestedAt");
     expect(getNodeCommandCode(inspectNode)).toContain("['pr','view',String(prNumber),'--repo',repo");
+    expect(getNodeCommandCode(inspectNode)).toContain("reviewDecision,state,mergedAt");
     expect(getNodeCommandCode(inspectNode)).toContain("collectPrDigest");
     expect(getNodeCommandCode(inspectNode)).toContain("/issues/'+prNumber+'/comments?per_page=100");
     expect(getNodeCommandCode(inspectNode)).toContain("/pulls/'+prNumber+'/reviews?per_page=100");
@@ -1643,6 +1992,8 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(inspectNode)).toContain("digestSummary");
     expect(getNodeCommandCode(inspectNode)).toContain("failedCheckNames");
     expect(getNodeCommandCode(inspectNode)).toContain("const conflictMergeables=new Set(['CONFLICTING','DIRTY','UNKNOWN']);");
+    expect(getNodeCommandCode(inspectNode)).toContain("if(mergedAt||prState==='MERGED'){classification='merged';reason='pr_merged';}");
+    expect(getNodeCommandCode(inspectNode)).toContain("else if(prState==='CLOSED'){classification='closed';reason='pr_closed';}");
     expect(getNodeCommandCode(inspectNode)).toContain("classification='conflict';reason='merge_conflict';");
     expect(getNodeCommandCode(fixNode)).toContain("MAX_AUTO_RERUN_ATTEMPT=1");
     expect(getNodeCommandCode(fixNode)).toContain("--log-failed");
@@ -1651,10 +2002,33 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(fixNode)).toContain("mergeable==='BEHIND'");
     expect(getNodeCommandCode(fixNode)).toContain("reason:'branch_updated_from_base'");
     expect(getNodeCommandCode(reviewNode)).toContain("mergeArgs=['pr','merge'");
+    expect(markDoneMergedNode?.type).toBe("action.update_task_status");
+    expect(markDoneMergedNode?.config?.taskId).toBe("{{taskId}}");
+    expect(markDoneMergedNode?.config?.status).toBe("done");
     expect(fixAgentNode?.config?.prompt).toContain("Use prDigest.body, prDigest.files, prDigest.issueComments, prDigest.reviews, prDigest.reviewComments, prDigest.checks");
+    expect(progressorTemplate.edges.find((e) => e.source === "review-needed" && e.target === "mark-done-merged")).toBeDefined();
+    expect(progressorTemplate.edges.find((e) => e.source === "mark-done-merged" && e.target === "notify-complete")).toBeDefined();
   });
 
-  it("task lifecycle and repair templates directly dispatch the PR progressor after inreview transitions", () => {
+  it("dependency audit no longer feeds placeholder branch names into create_pr and gates blocked PR creation", () => {
+    const dependencyAudit = getTemplate("template-dependency-audit");
+    const createPrNode = dependencyAudit.nodes.find((n) => n.id === "create-fix-pr");
+    const prCreatedNode = dependencyAudit.nodes.find((n) => n.id === "fix-pr-created");
+    const blockedNode = dependencyAudit.nodes.find((n) => n.id === "log-pr-blocked");
+
+    expect(createPrNode?.config?.branch).toBeUndefined();
+    expect(createPrNode?.config?.baseBranch).toBe("main");
+    expect(prCreatedNode?.config?.expression).toContain("success === true");
+    expect(prCreatedNode?.config?.expression).toContain("prNumber");
+    expect(prCreatedNode?.config?.expression).toContain("prUrl");
+    expect(prCreatedNode?.config?.expression).toContain("handedOff");
+    expect(blockedNode?.config?.message).toContain("Dependency audit PR creation blocked");
+    expect(dependencyAudit.edges.find((e) => e.source === "create-fix-pr" && e.target === "fix-pr-created")).toBeDefined();
+    expect(dependencyAudit.edges.find((e) => e.source === "fix-pr-created" && e.target === "alert-high")).toBeDefined();
+    expect(dependencyAudit.edges.find((e) => e.source === "fix-pr-created" && e.target === "log-pr-blocked")).toBeDefined();
+  });
+
+  it("task lifecycle waits for first-pass PR progressor completion while other templates still dispatch it", () => {
     const lifecycleTemplate = getTemplate("template-task-lifecycle");
     const finalizationTemplate = getTemplate("template-task-finalization-guard");
     const repairTemplate = getTemplate("template-task-repair-worktree");
@@ -1667,7 +2041,9 @@ describe("github template CLI compatibility", () => {
     const batchHandoff = batchPrTemplate.nodes.find((n) => n.id === "handoff-pr-progressor");
 
     expect(lifecycleHandoff?.type).toBe("action.execute_workflow");
+    expect(lifecycleHandoff?.config?.mode).toBe("sync");
     expect(lifecycleRecoveredHandoff?.config?.workflowId).toBe("template-bosun-pr-progressor");
+    expect(lifecycleRecoveredHandoff?.config?.mode).toBe("sync");
     expect(finalizationHandoff?.config?.mode).toBe("dispatch");
     expect(repairHandoff?.config?.workflowId).toBe("template-bosun-pr-progressor");
     expect(batchHandoff?.config?.workflowId).toBe("template-bosun-pr-progressor");
@@ -1700,15 +2076,138 @@ describe("github template CLI compatibility", () => {
     expect(progressorTemplate.edges.find((e) => e.source === "detect-pr-conflicts" && e.target === "build-fix-prompt")).toBeDefined();
   });
 
+  it("single PR fix templates prefer verified PR head branches over task branches", () => {
+    const fixTemplate = getTemplate("template-pr-fix-single");
+    const securityFixTemplate = getTemplate("template-pr-security-fix-single");
+    const fixParams = String(fixTemplate.nodes.find((n) => n.id === "resolve-pr-params")?.config?.value || "");
+    const securityParams = String(securityFixTemplate.nodes.find((n) => n.id === "resolve-pr-params")?.config?.value || "");
+
+    expect(fixParams).toContain("$data?.item?.prDigest?.core?.branch || $data?.item?.branch");
+    expect(fixParams).not.toContain("$data?.item?.branch || $data?.item?.prDigest?.core?.branch");
+    expect(securityParams).toContain("$data?.item?.prDigest?.core?.branch || $data?.item?.branch");
+    expect(securityParams).not.toContain("$data?.item?.branch || $data?.item?.prDigest?.core?.branch");
+  });
+
+  it("single PR fix templates resolve merged or closed PRs before deleted branches can block them", () => {
+    const fixTemplate = getTemplate("template-pr-fix-single");
+    const securityFixTemplate = getTemplate("template-pr-security-fix-single");
+    const fixValidateNode = fixTemplate.nodes.find((n) => n.id === "validate-pr-state");
+    const securityValidateNode = securityFixTemplate.nodes.find((n) => n.id === "validate-pr-state");
+    const fixResolveNode = fixTemplate.nodes.find((n) => n.id === "resolve-pr-task");
+    const securityResolveNode = securityFixTemplate.nodes.find((n) => n.id === "resolve-pr-task");
+    const fixValidateCode = getNodeCommandCode(fixValidateNode);
+    const securityValidateCode = getNodeCommandCode(securityValidateNode);
+    const fixSetupWorktree = fixTemplate.nodes.find((n) => n.id === "setup-worktree");
+    const securitySetupWorktree = securityFixTemplate.nodes.find((n) => n.id === "setup-worktree");
+    const fixSetupCode = getNodeCommandCode(fixSetupWorktree);
+    const securitySetupCode = getNodeCommandCode(securitySetupWorktree);
+    const fixResolveCode = getNodeCommandCode(fixResolveNode);
+    const securityResolveCode = getNodeCommandCode(securityResolveNode);
+
+    expect(fixValidateCode).toContain("gh',['pr','view',num,'--repo',repo,'--json','state,isDraft,headRefName,baseRefName,url,mergedAt,closedAt']");
+    expect(fixValidateCode).toContain("const merged=state==='MERGED'||Boolean(mergedAt);");
+    expect(fixValidateCode).toContain("const targetTaskStatus=merged?'done':(state==='CLOSED'?'cancelled':null);");
+    expect(fixValidateCode).toContain("reason=open?'open':(merged?'pr_merged':(state==='CLOSED'?'pr_closed':(isDraft?'draft_pr':'pr_not_open')))");
+    expect(securityValidateCode).toContain("gh',['pr','view',num,'--repo',repo,'--json','state,isDraft,headRefName,baseRefName,url,mergedAt,closedAt']");
+    expect(securityValidateCode).toContain("const merged=state==='MERGED'||Boolean(mergedAt);");
+    expect(fixSetupWorktree?.config?.env?.PR_BRANCH).toBe("{{validate-pr-state.output.branch || prParams.branch}}");
+    expect(securitySetupWorktree?.config?.env?.PR_BRANCH).toBe("{{validate-pr-state.output.branch || prParams.branch}}");
+    expect(fixSetupCode).toContain("head_branch_missing_after_pr_resolution");
+    expect(fixSetupCode).toContain("if(isMissingBranchError(err)){const prState=viewPrState();if(prState.shouldResolveTask)");
+    expect(securitySetupCode).toContain("head_branch_missing_after_pr_resolution");
+    expect(fixResolveCode).toContain("const resolutionKey='pr-resolution:'+repo+'#'+num+':'+targetTaskStatus;");
+    expect(fixResolveCode).toContain("targetTaskStatus==='cancelled'");
+    expect(fixResolveCode).toContain("runTask(['update',taskId,JSON.stringify(patch)])");
+    expect(securityResolveCode).toContain("const resolutionKey='pr-resolution:'+repo+'#'+num+':'+targetTaskStatus;");
+    expect(fixTemplate.edges.find((e) => e.source === "resolve-pr-params" && e.target === "validate-pr-state")).toBeDefined();
+    expect(fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "setup-worktree")).toBeDefined();
+    expect(fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "resolve-pr-task")).toBeDefined();
+    expect(fixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "resolve-pr-task")).toBeDefined();
+    expect(fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "release-claim")).toBeDefined();
+    expect(securityFixTemplate.edges.find((e) => e.source === "resolve-pr-params" && e.target === "validate-pr-state")).toBeDefined();
+    expect(securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "setup-worktree")).toBeDefined();
+    expect(securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "resolve-pr-task")).toBeDefined();
+    expect(securityFixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "resolve-pr-task")).toBeDefined();
+    expect(securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "release-claim")).toBeDefined();
+  });
+
+  it("task batch processor binds currentTask through loop.for_each variable", () => {
+    const template = getTemplate("template-task-batch-processor");
+    const dispatchNode = template.nodes.find((n) => n.id === "dispatch-tasks");
+    const queryNode = template.nodes.find((n) => n.id === "query-tasks");
+    const queryCode = String(queryNode?.config?.args?.[1] || "");
+
+    expect(dispatchNode?.type).toBe("loop.for_each");
+    expect(dispatchNode?.config?.variable).toBe("currentTask");
+    expect(dispatchNode?.config).not.toHaveProperty("itemVariable");
+    expect(queryNode?.config?.cwd).toBe("{{repoRoot}}");
+    expect(queryCode).toContain('process.env.REPO_ROOT = repoRoot');
+    expect(queryCode).toContain('process.env.BOSUN_STORE_PATH = path.join(repoRoot, ".bosun", ".cache", "kanban-state.json")');
+  });
+
+  it("task batch PR template pins repo-local store context before querying tasks", () => {
+    const template = getTemplate("template-task-batch-pr");
+    const queryNode = template.nodes.find((n) => n.id === "query-tasks");
+    const queryCode = String(queryNode?.config?.args?.[1] || "");
+
+    expect(queryNode?.config?.cwd).toBe("{{repoRoot}}");
+    expect(queryCode).toContain('process.env.REPO_ROOT = repoRoot');
+    expect(queryCode).toContain('process.env.BOSUN_STORE_PATH = path.join(repoRoot, ".bosun", ".cache", "kanban-state.json")');
+  });
+
   it("task lifecycle dispatches repair workflow for blocked non-retryable worktree failures", () => {
     const lifecycleTemplate = getTemplate("template-task-lifecycle");
     const repairDispatch = lifecycleTemplate.nodes.find((n) => n.id === "dispatch-wt-repair");
 
     expect(repairDispatch?.type).toBe("action.execute_workflow");
     expect(repairDispatch?.config?.workflowId).toBe("template-task-repair-worktree");
-    expect(repairDispatch?.config?.mode).toBe("dispatch");
+    expect(repairDispatch?.config?.mode).toContain("$data?._simulation === true");
+    expect(repairDispatch?.config?.mode).toContain("'sync'");
+    expect(repairDispatch?.config?.mode).toContain("'dispatch'");
+    expect(repairDispatch?.config?.input?.eventType).toBe("task.failed");
     expect(lifecycleTemplate.edges.find((e) => e.source === "annotate-blocked-wt-failed" && e.target === "dispatch-wt-repair")).toBeDefined();
     expect(lifecycleTemplate.edges.find((e) => e.source === "dispatch-wt-repair" && e.target === "release-slot-wt-failed")).toBeDefined();
+  });
+
+  it("error recovery passes task.failed event context into the repair workflow", () => {
+    const recoveryTemplate = getTemplate("template-error-recovery");
+    const repairDispatch = recoveryTemplate.nodes.find((n) => n.id === "chain-repair");
+
+    expect(repairDispatch?.type).toBe("action.execute_workflow");
+    expect(repairDispatch?.config?.workflowId).toBe("template-task-repair-worktree");
+    expect(String(repairDispatch?.config?.input || "")).toContain("eventType: 'task.failed'");
+  });
+
+  it("blocked worktree recovery trims task metadata payloads before dispatch", () => {
+    const orchestratorTemplate = RECOVER_BLOCKED_WORKTREES_TEMPLATE;
+    const blockedTaskTemplate = RECOVER_BLOCKED_TASK_TEMPLATE;
+    const repairTemplate = getTemplate("template-task-repair-worktree");
+    const queryNode = orchestratorTemplate.nodes.find((n) => n.id === "query-blocked");
+    const clearBlockedNode = blockedTaskTemplate.nodes.find((n) => n.id === "clear-blocked-meta");
+    const clearRepairSuccessNode = repairTemplate.nodes.find((n) => n.id === "clear-repair-blocked-success");
+    const clearRepairFailureNode = repairTemplate.nodes.find((n) => n.id === "clear-repair-blocked-failure");
+    const queryCode = getNodeCommandCode(queryNode);
+
+    expect(queryCode).toContain("const minimalMeta = {};");
+    expect(queryCode).toContain("minimalMeta.worktreeFailure = {");
+    expect(queryCode).toContain("minimalMeta.autoRecovery = {");
+    expect(queryCode).not.toContain("meta,");
+    expect(clearBlockedNode?.config?.args?.metaDeleteKeys).toEqual([
+      "autoRecovery",
+      "worktreeFailure",
+      "consecutiveRecoveryFailures",
+      "blockedReason",
+    ]);
+    expect(clearRepairSuccessNode?.config?.args?.metaDeleteKeys).toEqual([
+      "autoRecovery",
+      "worktreeFailure",
+      "blockedReason",
+    ]);
+    expect(clearRepairFailureNode?.config?.args?.metaDeleteKeys).toEqual([
+      "autoRecovery",
+      "worktreeFailure",
+      "blockedReason",
+    ]);
   });
 
   it("PR watchdog and GitHub sync pass node outputs via template interpolation env vars", () => {
@@ -1769,6 +2268,7 @@ const describeDryRunExecution = (
 )
   ? describe.skip
   : describe;
+const SLOW_TEMPLATE_DRY_RUN_TIMEOUT_MS = process.platform === "win32" ? 35_000 : 10_000;
 
 describeDryRunExecution("template dry-run execution", () => {
   beforeEach(() => { makeTmpEngine(); });
@@ -1791,7 +2291,7 @@ describeDryRunExecution("template dry-run execution", () => {
         ctx.errors || [],
         `Dry-run produced runtime errors for ${template.id}`
       ).toEqual([]);
-    });
+    }, SLOW_TEMPLATE_DRY_RUN_TIMEOUT_MS);
   }
 });
 

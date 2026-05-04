@@ -18,6 +18,12 @@
  *   createAgentEventBus(options) → AgentEventBus instance
  *   AgentEventBus class
  *   AGENT_EVENT  — Frozen enum of all event types
+ *
+ * Canonical architecture note:
+ * This bus is the canonical runtime ingress for live agent events into the
+ * observability spine. Surfaces may subscribe or rebroadcast, but canonical
+ * event normalization and harness telemetry recording must remain centralized
+ * here plus `infra/session-telemetry.mjs`.
  */
 
 import {
@@ -26,6 +32,12 @@ import {
   snapshotRetryQueue,
 } from "./retry-queue.mjs";
 import { addSpanEvent, recordAgentError, recordIntervention } from "../infra/tracing.mjs";
+import {
+  getHarnessTelemetrySummary,
+  listHarnessTelemetryEvents,
+  recordHarnessTelemetryEvent,
+} from "../infra/session-telemetry.mjs";
+import { normalizeCanonicalBusEvent } from "../infra/event-schema.mjs";
 
 const TAG = "[agent-event-bus]";
 
@@ -147,6 +159,7 @@ export class AgentEventBus {
         : (typeof globalThis.__bosun_setRetryQueueData === "function"
             ? globalThis.__bosun_setRetryQueueData
             : null);
+    this._configDir = options.configDir || process.cwd();
 
     /** @type {Array<{type: string, taskId: string, payload: object, ts: number}>} ring buffer */
     this._eventLog = [];
@@ -259,6 +272,7 @@ export class AgentEventBus {
     if (this._eventLog.length > this._maxEventLogSize) {
       this._eventLog.shift();
     }
+    this._recordCanonicalEvent(event);
 
     // ── WS broadcast
     if (!opts.skipBroadcast) {
@@ -589,6 +603,7 @@ export class AgentEventBus {
    */
   getStatus() {
     const retryQueue = snapshotRetryQueue(this._retryQueueState);
+    const observability = getHarnessTelemetrySummary({ configDir: this._configDir });
     return {
       started: this._started,
       eventLogSize: this._eventLog.length,
@@ -599,11 +614,22 @@ export class AgentEventBus {
       retryQueue,
       liveness: this.getAgentLiveness(),
       errorPatterns: this.getErrorPatternSummary(),
+      observability: {
+        eventCount: Number(observability?.eventCount || 0),
+        lastEventAt: observability?.lastEventAt || null,
+      },
     };
   }
 
   getRetryQueue() {
     return snapshotRetryQueue(this._retryQueueState);
+  }
+
+  getCanonicalEventLog(filter = {}) {
+    return listHarnessTelemetryEvents({
+      ...filter,
+      source: filter.source || "agent-event-bus",
+    }, { configDir: this._configDir });
   }
 
   clearRetryQueueTask(taskId, reason = "manual") {
@@ -635,6 +661,13 @@ export class AgentEventBus {
     } catch (err) {
       console.warn(`${TAG} WS broadcast error:`, err.message || err);
     }
+  }
+
+  _recordCanonicalEvent(event) {
+    recordHarnessTelemetryEvent(
+      normalizeCanonicalBusEvent(event),
+      { configDir: this._configDir },
+    );
   }
 
   _updateRetryQueue(action, meta = {}) {
@@ -1100,5 +1133,3 @@ export class AgentEventBus {
 export function createAgentEventBus(options) {
   return new AgentEventBus(options);
 }
-
-

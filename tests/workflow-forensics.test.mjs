@@ -309,6 +309,25 @@ describe("Snapshot create / restore lifecycle", () => {
     expect(result.ctx?.data?._replayTrajectory?.restoredFrom).toBe(ctx.id);
   });
 
+  it("lists and restores snapshots from sqlite when the snapshot file is missing", async () => {
+    const wf = makeWorkflow(
+      [{ id: "n1", type: PASS_TYPE, label: "A", config: {} }],
+      [],
+    );
+    engine.save(wf);
+    const ctx = await engine.execute(wf.id);
+    const snap = engine.createRunSnapshot(ctx.id);
+
+    rmSync(snap.path, { force: true });
+
+    const snapshots = engine.listSnapshots(wf.id);
+    expect(snapshots.some((entry) => entry.snapshotId === ctx.id)).toBe(true);
+
+    const restored = await engine.restoreFromSnapshot(ctx.id);
+    expect(restored.workflowId).toBe(wf.id);
+    expect(restored.snapshotId).toBe(ctx.id);
+  });
+
   it("persists trajectory replay data and short step summaries in run detail", async () => {
     const wf = makeWorkflow(
       [

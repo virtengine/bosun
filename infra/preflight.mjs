@@ -178,11 +178,17 @@ function checkDiskSpace(repoRoot) {
 function checkToolVersion(label, command, args, hint) {
   const res = runCommand(command, args);
   if (res.error || res.status !== 0) {
+    const errorCode = String(res.error?.code || "").trim();
+    const blocked = errorCode === "EPERM" || /\bEPERM\b/i.test(String(res.stderr || ""));
     return {
       label,
       ok: false,
-      version: "missing",
-      hint,
+      version: blocked ? "blocked" : "missing",
+      hint: blocked
+        ? `Bosun cannot launch ${label} from Node on this machine (${errorCode || "EPERM"}). Repair host child-process permissions/policy first.`
+        : hint,
+      blocked,
+      errorCode,
     };
   }
   const raw = readOutput(res);
@@ -297,21 +303,71 @@ function checkGhAuth() {
   return { ok: false, method: "none", error: readOutput(auth) };
 }
 
+export function checkChildProcessLaunch() {
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 2000,
+      },
+    );
+    if (result?.error) {
+      return {
+        ok: false,
+        code: String(result.error?.code || "").trim() || null,
+        message: String(result.error?.message || "").trim() || "child_process_launch_failed",
+      };
+    }
+    if (Number(result?.status) !== 0) {
+      return {
+        ok: false,
+        code: String(result?.status ?? "").trim() || null,
+        message: "child process launch exited non-zero",
+      };
+    }
+    return { ok: true, code: null, message: "" };
+  } catch (error) {
+    return {
+      ok: false,
+      code: String(error?.code || "").trim() || null,
+      message: String(error?.message || "").trim() || "child_process_launch_failed",
+    };
+  }
+}
+
 export function runPreflightChecks(options = {}) {
   const repoRoot = resolve(options.repoRoot || process.cwd());
   const errors = [];
   const warnings = [];
+  const childProcess = checkChildProcessLaunch();
 
   const toolchain = checkToolchain();
   let ghAuth = { ok: false, method: "unknown" };
   for (const tool of toolchain.tools) {
     if (tool.ok) continue;
-    const entry = { title: `Missing tool: ${tool.label}`, message: tool.hint };
+    const entry = {
+      title: tool.blocked
+        ? `Tool launch blocked: ${tool.label}`
+        : `Missing tool: ${tool.label}`,
+      message: tool.hint,
+    };
     if (toolchain.requiredTools.has(tool.label)) {
       errors.push(entry);
     } else {
       warnings.push(entry);
     }
+  }
+
+  if (!childProcess.ok) {
+    errors.push({
+      title: "Node child-process launch is blocked",
+      message:
+        `Bosun cannot spawn subprocesses from Node in this runtime (${childProcess.code || "unknown"}: ${childProcess.message}). ` +
+        "Workflow `action.run_command`, git worktree operations, GitHub CLI calls, and task execution handoffs will fail until host policy/environment is repaired.",
+    });
   }
 
   const gitConfig = checkGitConfig(repoRoot);
@@ -383,6 +439,7 @@ export function runPreflightChecks(options = {}) {
     errors,
     warnings,
     details: {
+      childProcess,
       toolchain,
       gitConfig,
       worktree,
@@ -396,6 +453,7 @@ export function runPreflightChecks(options = {}) {
 export function formatPreflightReport(result, options = {}) {
   const header = options.header || "bosun preflight";
   const lines = [];
+  const childProcessBlocked = result.details?.childProcess?.ok === false;
   lines.push(`=== ${header} ===`);
   lines.push(
     `Status: ${result.ok ? "OK" : "FAILED"} (${result.errors.length} error(s), ${result.warnings.length} warning(s))`,
@@ -405,9 +463,18 @@ export function formatPreflightReport(result, options = {}) {
   if (toolchain?.tools?.length) {
     lines.push("Toolchain:");
     for (const tool of toolchain.tools) {
-      const status = tool.ok ? tool.version : "missing";
+      const status = childProcessBlocked && tool.label !== "node"
+        ? "blocked"
+        : (tool.ok ? tool.version : (tool.version || "missing"));
       lines.push(`  - ${tool.label}: ${status}`);
     }
+  }
+
+  const childProcess = result.details?.childProcess;
+  if (childProcess) {
+    lines.push(
+      `Child process launch: ${childProcess.ok ? "ok" : `${childProcess.code || "blocked"}${childProcess.message ? ` (${childProcess.message})` : ""}`}`,
+    );
   }
 
   const gitConfig = result.details?.gitConfig;
@@ -478,4 +545,3 @@ export function formatPreflightReport(result, options = {}) {
 
   return lines.join(os.EOL);
 }
-

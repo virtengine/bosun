@@ -1,10 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getSessionTracker } from "../infra/session-tracker.mjs";
-import {
-  execPrimaryPrompt as execPrimaryPromptDefault,
-  getPrimaryAgentName as getPrimaryAgentNameDefault,
-  getAgentMode as getAgentModeDefault,
-} from "../agent/primary-agent.mjs";
+import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
 import {
   analyzeVisionFrame as analyzeVisionFrameDefault,
   isVoiceAvailable as isVoiceAvailableDefault,
@@ -231,15 +227,30 @@ export function createMeetingWorkflowService(dependencies = {}) {
   const deps = normalizeObject(dependencies);
   const sessionTracker = deps.sessionTracker || getSessionTracker();
   ensureSessionTrackerShape(sessionTracker);
+  const agentRuntime =
+    deps.agentRuntime && typeof deps.agentRuntime === "object"
+      ? deps.agentRuntime
+      : createHarnessAgentService();
 
-  const execPrimaryPrompt = deps.execPrimaryPrompt || execPrimaryPromptDefault;
+  const runInteractivePrompt =
+    typeof deps.runInteractivePrompt === "function"
+      ? deps.runInteractivePrompt
+      : typeof deps.execPrimaryPrompt === "function"
+        ? deps.execPrimaryPrompt
+      : agentRuntime.runInteractivePrompt?.bind(agentRuntime);
   const analyzeVisionFrame = deps.analyzeVisionFrame || analyzeVisionFrameDefault;
   const isVoiceAvailable = deps.isVoiceAvailable || isVoiceAvailableDefault;
   const getVoiceConfig = deps.getVoiceConfig || getVoiceConfigDefault;
   const getRealtimeConnectionInfo =
     deps.getRealtimeConnectionInfo || getRealtimeConnectionInfoDefault;
-  const getPrimaryAgentName = deps.getPrimaryAgentName || getPrimaryAgentNameDefault;
-  const getAgentMode = deps.getAgentMode || getAgentModeDefault;
+  const getPrimaryAgentName =
+    typeof deps.getPrimaryAgentName === "function"
+      ? deps.getPrimaryAgentName
+      : agentRuntime.getPrimaryAgentName?.bind(agentRuntime);
+  const getAgentMode =
+    typeof deps.getAgentMode === "function"
+      ? deps.getAgentMode
+      : agentRuntime.getAgentMode?.bind(agentRuntime);
   const now = typeof deps.now === "function" ? deps.now : Date.now;
   const createMessageId = typeof deps.createMessageId === "function"
     ? deps.createMessageId
@@ -248,10 +259,10 @@ export function createMeetingWorkflowService(dependencies = {}) {
     ? deps.visionStateCache
     : meetingVisionStateCache;
 
-  if (typeof execPrimaryPrompt !== "function") {
+  if (typeof runInteractivePrompt !== "function") {
     throw new MeetingWorkflowServiceError(
       "MEETING_DEPENDENCY_ERROR",
-      "execPrimaryPrompt dependency must be a function",
+      "runInteractivePrompt dependency must be a function",
     );
   }
   if (typeof analyzeVisionFrame !== "function") {
@@ -358,8 +369,9 @@ export function createMeetingWorkflowService(dependencies = {}) {
     };
 
     try {
-      const result = await execPrimaryPrompt(message, {
+      const result = await runInteractivePrompt(message, {
         sessionId: meetingId,
+        scope: `meeting:${meetingId}`,
         sessionType: String(session.type || "primary"),
         mode: normalizeNonEmptyString(options.mode) || undefined,
         model: normalizeNonEmptyString(options.model) || undefined,

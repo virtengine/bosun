@@ -4,6 +4,7 @@ import {
   createAgentEventBus,
   AGENT_EVENT,
 } from "../agent/agent-event-bus.mjs";
+import { resetHarnessObservabilitySpinesForTests } from "../infra/session-telemetry.mjs";
 
 describe("agent-event-bus", () => {
   /** @type {AgentEventBus} */
@@ -28,6 +29,7 @@ describe("agent-event-bus", () => {
 
   afterEach(() => {
     bus.stop();
+    resetHarnessObservabilitySpinesForTests();
     vi.useRealTimers();
   });
 
@@ -99,6 +101,64 @@ describe("agent-event-bus", () => {
     it("skips broadcast when opts.skipBroadcast is true", () => {
       bus.emit(AGENT_EVENT.TASK_STARTED, "task-1", {}, { skipBroadcast: true });
       expect(mockBroadcast).not.toHaveBeenCalled();
+    });
+
+    it("still records skipBroadcast events in the canonical telemetry log", () => {
+      bus.emit(AGENT_EVENT.TASK_STARTED, "task-1", {
+        sessionId: "session-1",
+        runId: "run-1",
+        providerId: "openai-api",
+      }, { skipBroadcast: true });
+
+      const events = bus.getCanonicalEventLog({ taskId: "task-1" });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual(expect.objectContaining({
+        source: "agent-event-bus",
+        taskId: "task-1",
+        sessionId: "session-1",
+        runId: "run-1",
+        providerId: "openai-api",
+      }));
+    });
+
+    it("forwards artifact and subagent payload fields into canonical telemetry filters", () => {
+      bus.emit(AGENT_EVENT.TASK_COMPLETED, "task-1", {
+        sessionId: "session-1",
+        rootSessionId: "session-root-1",
+        runId: "run-1",
+        rootRunId: "run-root-1",
+        providerId: "openai-api",
+        modelId: "gpt-5.4",
+        toolId: "apply_patch",
+        toolName: "apply_patch",
+        approvalId: "approval-bus-1",
+        filePath: "server/ui-server.mjs",
+        patchHash: "patch-bus-1",
+        childSessionId: "session-child-bus-1",
+        childTaskId: "task-child-bus-1",
+        subagentId: "subagent-bus-1",
+      }, { skipBroadcast: true });
+
+      const fileEvents = bus.getCanonicalEventLog({ filePath: "server/ui-server.mjs" });
+      const childEvents = bus.getCanonicalEventLog({ childSessionId: "session-child-bus-1" });
+
+      expect(fileEvents).toHaveLength(1);
+      expect(fileEvents[0]).toEqual(expect.objectContaining({
+        rootSessionId: "session-root-1",
+        rootRunId: "run-root-1",
+        providerId: "openai-api",
+        modelId: "gpt-5.4",
+        toolName: "apply_patch",
+        approvalId: "approval-bus-1",
+        filePath: "server/ui-server.mjs",
+        patchHash: "patch-bus-1",
+      }));
+      expect(childEvents).toHaveLength(1);
+      expect(childEvents[0]).toEqual(expect.objectContaining({
+        childSessionId: "session-child-bus-1",
+        childTaskId: "task-child-bus-1",
+        subagentId: "subagent-bus-1",
+      }));
     });
 
     it("deduplicates events within the dedup window", () => {

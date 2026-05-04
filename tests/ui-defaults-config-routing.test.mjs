@@ -46,6 +46,9 @@ describe("stored defaults config routing", () => {
       expect(source).toContain('Active Workspace Executors');
       expect(source).toContain('Save Workspace Executors');
       expect(source).toContain('Control mirrors the active workspace executor config used in the workspace switcher.');
+      expect(source).toContain('Session Phase');
+      expect(source).toContain('Prompt Discipline');
+      expect(source).toContain('Tool Discipline');
     }
 
     for (const source of [uiSwitcherSource, siteSwitcherSource]) {

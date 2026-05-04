@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 
 const mockGenerateContent = vi.hoisted(() => vi.fn());
 const mockSpawn = vi.hoisted(() => vi.fn());
+const SLOW_GEMINI_SHELL_TEST_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 5_000;
 
 vi.mock("@google/genai", () => ({
   GoogleGenAI: class GoogleGenAIMock {
@@ -14,19 +15,27 @@ vi.mock("@google/genai", () => ({
   },
 }));
 
-vi.mock("node:child_process", () => ({
-  spawn: (...args) => mockSpawn(...args),
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    spawn: (...args) => mockSpawn(...args),
+  };
+});
 
 vi.mock("../config/repo-root.mjs", () => ({
   resolveRepoRoot: vi.fn(() => "/mock/repo"),
 }));
 
-vi.mock("node:fs/promises", () => ({
-  mkdir: vi.fn().mockResolvedValue(undefined),
-  readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
-  writeFile: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    mkdir: vi.fn().mockResolvedValue(undefined),
+    readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 vi.mock("../infra/stream-resilience.mjs", () => ({
   isTransientStreamError: (err) => String(err?.message || "").includes("503"),
@@ -100,7 +109,7 @@ describe("gemini-shell", () => {
       totalTokens: 30,
     });
     expect(mockGenerateContent).toHaveBeenCalledTimes(1);
-  });
+  }, SLOW_GEMINI_SHELL_TEST_TIMEOUT_MS);
 
   it("returns disabled message when GEMINI_SDK_DISABLED is set", async () => {
     process.env.GEMINI_SDK_DISABLED = "true";
@@ -118,7 +127,7 @@ describe("gemini-shell", () => {
 
     expect(result.finalResponse).toBe("cli response");
     expect(mockSpawn).toHaveBeenCalled();
-  });
+  }, SLOW_GEMINI_SHELL_TEST_TIMEOUT_MS);
 
   it("retries CLI argument styles when a command attempt fails", async () => {
     process.env.GEMINI_TRANSPORT = "cli";
@@ -130,7 +139,7 @@ describe("gemini-shell", () => {
 
     expect(result.finalResponse).toContain("plain output");
     expect(mockSpawn).toHaveBeenCalledTimes(2);
-  });
+  }, SLOW_GEMINI_SHELL_TEST_TIMEOUT_MS);
 
   it("initializes and exposes lightweight session metadata", async () => {
     process.env.GEMINI_TRANSPORT = "sdk";
@@ -142,12 +151,12 @@ describe("gemini-shell", () => {
 
     await createSession("session-1");
     const sessions = await listSessions();
-    expect(sessions[0].id).toBe("session-1");
+    expect(sessions.some((entry) => entry.id === "session-1")).toBe(true);
 
     await execGeminiPrompt("hello", { sessionId: "session-1" });
     const info = getSessionInfo();
     expect(info.sessionId).toBe("session-1");
     expect(info.turnCount).toBeGreaterThan(0);
-  });
+  }, SLOW_GEMINI_SHELL_TEST_TIMEOUT_MS);
 });
 

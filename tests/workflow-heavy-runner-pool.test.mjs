@@ -75,6 +75,23 @@ describe("heavy runner pool leases", () => {
     expect(readFileSync(stderrArtifact.path, "utf8")).toContain("stderr-line");
   });
 
+  it("resolves Windows command shims for local-process leases", async () => {
+    if (process.platform !== "win32") return;
+    tempDir = mkdtempSync(join(tmpdir(), "bosun-heavy-runner-win-"));
+    const result = await runCommandInHeavyRunnerLease({
+      command: "npm --version",
+      cwd: tempDir,
+      intent: "build",
+      timeoutMs: 15000,
+      artifactRoot: join(tempDir, ".artifacts"),
+      runtime: "local-process",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(String(result.stdout || "")).toMatch(/\d+\.\d+\.\d+/);
+  }, 20000);
+
   it("retries lease acquisition failures and surfaces blocked evidence", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "bosun-heavy-runner-fail-"));
     const result = await runCommandInHeavyRunnerLease({

@@ -27,6 +27,7 @@ import {
 import {
   resolveAgentRepoRoot,
   resolveRepoLocalBosunDir,
+  resolveTrustedBosunConfigDir,
   detectBosunModuleRoot,
 } from "./repo-root.mjs";
 import { applyAllCompatibility } from "../compat.mjs";
@@ -147,9 +148,12 @@ export function resolveTrustedAuthorList(value, options = {}) {
 }
 
 function resolveConfigDir(repoRoot) {
+  if (process.env.BOSUN_CONFIG_PATH) {
+    return dirname(resolve(process.env.BOSUN_CONFIG_PATH));
+  }
   // 1. Explicit env override (BOSUN_HOME supersedes BOSUN_DIR; both are aliases)
-  if (process.env.BOSUN_HOME) return resolve(process.env.BOSUN_HOME);
-  if (process.env.BOSUN_DIR) return resolve(process.env.BOSUN_DIR);
+  if (process.env.BOSUN_HOME) return resolveTrustedBosunConfigDir(process.env.BOSUN_HOME, repoRoot);
+  if (process.env.BOSUN_DIR) return resolveTrustedBosunConfigDir(process.env.BOSUN_DIR, repoRoot);
 
   // 2. Prefer repo-local runtime state for source checkouts and repo-scoped runs.
   const repoLocalConfigDir = resolveRepoLocalBosunDir(repoRoot);
@@ -160,8 +164,13 @@ function resolveConfigDir(repoRoot) {
   //    explicitly passes `--config-dir .bosun`.  Without this, running from a
   //    directory outside the module (e.g. home dir) misses workspaces, .env
   //    vars (TELEGRAM_UI_PORT, TELEGRAM_MINIAPP_ENABLED, etc.), and task store.
+  //    NOTE: when repoRoot is empty, `resolve("")` collapses to process.cwd()
+  //    which often equals moduleRoot for source checkouts. Skipping the
+  //    equality guard in that case allows the module-local `.bosun` to be
+  //    picked up instead of falling through to the global AppData dir.
   const moduleRoot = detectBosunModuleRoot();
-  if (moduleRoot && resolve(moduleRoot) !== resolve(repoRoot || "")) {
+  const repoRootProvided = typeof repoRoot === "string" && repoRoot.trim() !== "";
+  if (moduleRoot && (!repoRootProvided || resolve(moduleRoot) !== resolve(repoRoot))) {
     const moduleLocalConfigDir = resolveRepoLocalBosunDir(moduleRoot);
     if (moduleLocalConfigDir) return moduleLocalConfigDir;
   }
@@ -369,7 +378,7 @@ function resolveKanbanBackendSource({ envPaths = [], configFilePath, configData 
   });
 }
 
-function validateKanbanBackendConfig({ kanbanBackend, kanban, jira, gnap }) {
+function validateKanbanBackendConfig({ kanbanBackend, kanban, jira, repoMirror }) {
   if (kanbanBackend === "jira") {
     const missing = [];
     if (!jira?.baseUrl) missing.push("JIRA_BASE_URL");
@@ -388,27 +397,39 @@ function validateKanbanBackendConfig({ kanbanBackend, kanban, jira, gnap }) {
     return;
   }
 
-  if (kanbanBackend !== "gnap") return;
+  if (kanbanBackend !== "repo-mirror") return;
 
   const invalid = [];
-  if (!gnap?.enabled) invalid.push("GNAP_ENABLED=true");
-  if (!gnap?.repoPath) invalid.push("GNAP_REPO_PATH");
-  if (gnap?.syncMode !== "projection") invalid.push("GNAP_SYNC_MODE=projection");
-  if (!["git", "local"].includes(gnap?.runStorage)) {
-    invalid.push("GNAP_RUN_STORAGE=git|local");
+  if (!repoMirror?.enabled) invalid.push("REPO_MIRROR_ENABLED=true");
+  if (!repoMirror?.repoPath) invalid.push("REPO_MIRROR_REPO_PATH");
+  if (repoMirror?.syncMode !== "projection") invalid.push("REPO_MIRROR_SYNC_MODE=projection");
+  if (!["git", "local"].includes(repoMirror?.runStorage)) {
+    invalid.push("REPO_MIRROR_RUN_STORAGE=git|local");
   }
-  if (!["off", "git", "local"].includes(gnap?.messageStorage)) {
-    invalid.push("GNAP_MESSAGE_STORAGE=off|git|local");
+  if (!["off", "git", "local"].includes(repoMirror?.messageStorage)) {
+    invalid.push("REPO_MIRROR_MESSAGE_STORAGE=off|git|local");
   }
   if (invalid.length > 0) {
     throw new Error(
-      `[config] KANBAN_BACKEND=gnap requires ${invalid.join(", ")}. ` +
-        `GNAP is projection-only in this build and must be explicitly enabled before selection.`,
+      `[config] KANBAN_BACKEND=repo-mirror requires ${invalid.join(", ")}. ` +
+        `RepoMirror is projection-only in this build and must be explicitly enabled before selection.`,
     );
   }
 }
 
 function loadConfigFile(configDir) {
+  const explicitConfigPath = process.env.BOSUN_CONFIG_PATH ? resolve(process.env.BOSUN_CONFIG_PATH) : "";
+  if (explicitConfigPath) {
+    if (!existsSync(explicitConfigPath)) {
+      return { path: explicitConfigPath, data: null };
+    }
+    try {
+      const raw = JSON.parse(readFileSync(explicitConfigPath, "utf8"));
+      return { path: explicitConfigPath, data: raw };
+    } catch {
+      return { path: explicitConfigPath, data: null, error: "invalid-json" };
+    }
+  }
   for (const name of CONFIG_FILES) {
     const p = resolve(configDir, name);
     if (!existsSync(p)) continue;
@@ -961,6 +982,18 @@ function normalizePrimaryAgent(value) {
   return raw;
 }
 
+function normalizeAgentRuntime(value) {
+  return String(value || "").trim().toLowerCase() === "sdk-cli"
+    ? "sdk-cli"
+    : "harness";
+}
+
+function normalizeInternalExecutorMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "hybrid") return "internal";
+  return normalized === "internal" ? "internal" : "internal";
+}
+
 function normalizeKanbanBackend(value) {
   const backend = String(value || "")
     .trim()
@@ -969,28 +1002,28 @@ function normalizeKanbanBackend(value) {
     backend === "internal" ||
     backend === "github" ||
     backend === "jira" ||
-    backend === "gnap"
+    backend === "repo-mirror"
   ) {
     return backend;
   }
   return "internal";
 }
 
-function normalizeGnapSyncMode(value) {
+function normalizeRepoMirrorSyncMode(value) {
   const mode = String(value || "")
     .trim()
     .toLowerCase();
   return mode || "projection";
 }
 
-function normalizeGnapRunStorage(value) {
+function normalizeRepoMirrorRunStorage(value) {
   const storage = String(value || "")
     .trim()
     .toLowerCase();
   return storage || "git";
 }
 
-function normalizeGnapMessageStorage(value) {
+function normalizeRepoMirrorMessageStorage(value) {
   const storage = String(value || "")
     .trim()
     .toLowerCase();
@@ -1198,10 +1231,6 @@ export function loadConfig(argv = process.argv, options = {}) {
   const explicitConfigDirRaw =
     cli["config-dir"] || process.env.BOSUN_HOME || process.env.BOSUN_DIR || "";
   const hasExplicitConfigDir = String(explicitConfigDirRaw || "").trim() !== "";
-  const allowRepoEnvWithExplicitConfig = isEnvEnabled(
-    process.env.BOSUN_LOAD_REPO_ENV_WITH_EXPLICIT_CONFIG,
-    false,
-  );
   const envOverride = reloadEnv || !isEnvEnabled(process.env.BOSUN_ENV_NO_OVERRIDE, false);
   let detectedRepoRoot = "";
   const getFallbackRepoRoot = () => {
@@ -1212,16 +1241,23 @@ export function loadConfig(argv = process.argv, options = {}) {
 
   // Determine config directory (where bosun stores its config)
   let configDir =
-    explicitConfigDirRaw ||
+    (explicitConfigDirRaw ? resolve(explicitConfigDirRaw) : "") ||
     resolveConfigDir(normalizedRepoRootOverride);
+  const canonicalEnvPath = resolve(configDir, ".env");
+  const repoEnvPath = resolve(normalizedRepoRootOverride || getFallbackRepoRoot(), ".env");
+  const canonicalEnvExists = existsSync(canonicalEnvPath);
 
-  // If BOSUN_HOME/BOSUN_DIR is declared in the repo-local .env, load that first
-  // and then pivot into the explicit config dir before reading config files.
+  // If BOSUN_HOME/BOSUN_DIR is declared in the canonical config-dir .env,
+  // load that first and then pivot into the explicit config dir before reading
+  // config files.
   if (!hasExplicitConfigDir) {
     loadDotEnv(configDir, { override: envOverride });
     const envConfigDirRaw = process.env.BOSUN_HOME || process.env.BOSUN_DIR || "";
     if (String(envConfigDirRaw).trim()) {
-      const resolvedEnvConfigDir = resolve(envConfigDirRaw);
+      const resolvedEnvConfigDir = resolveTrustedBosunConfigDir(
+        envConfigDirRaw,
+        normalizedRepoRootOverride || getFallbackRepoRoot(),
+      );
       if (resolvedEnvConfigDir !== resolve(configDir)) {
         configDir = resolvedEnvConfigDir;
       }
@@ -1283,19 +1319,23 @@ export function loadConfig(argv = process.argv, options = {}) {
   // but honor explicit repo-root/REPO_ROOT overrides.
   const agentRepoRoot = explicitRepoRoot || resolveAgentRepoRoot();
 
-  // Load .env from config dir — Bosun's .env is the primary source of truth
-  // for Bosun-specific configuration, so it should override any stale shell
-  // env vars.  Users who want shell vars to take precedence can use profiles
-  // or set BOSUN_ENV_NO_OVERRIDE=1.
+  // Load .env from the canonical config dir — Bosun's runtime .env is the
+  // primary source of truth for Bosun-specific configuration, so it should
+  // override any stale shell env vars. Users who want shell vars to take
+  // precedence can use profiles or set BOSUN_ENV_NO_OVERRIDE=1.
   loadDotEnv(configDir, { override: envOverride });
 
+  const allowRepoEnvWithExplicitConfig = isEnvEnabled(
+    process.env.BOSUN_LOAD_REPO_ENV_WITH_EXPLICIT_CONFIG,
+    false,
+  );
   const shouldLoadRepoEnv =
-    resolve(repoRoot) !== resolve(configDir) &&
-    (!hasExplicitConfigDir || allowRepoEnvWithExplicitConfig);
+    (!hasExplicitConfigDir || allowRepoEnvWithExplicitConfig) &&
+    !canonicalEnvExists &&
+    resolve(repoRoot) !== resolve(configDir);
 
-  // Also load .env from repo root if different.
-  // When config-dir/BOSUN_HOME is explicit, keep that environment isolated
-  // from the repo root unless explicitly re-enabled.
+  // Legacy compatibility: fall back to the repo-root .env only when the
+  // canonical config-dir .env does not exist yet.
   if (shouldLoadRepoEnv) {
     loadDotEnv(repoRoot, { override: envOverride });
   }
@@ -1517,6 +1557,12 @@ export function loadConfig(argv = process.argv, options = {}) {
     (configData.codexEnabled !== undefined ? configData.codexEnabled : true) &&
     !isEnvEnabled(process.env.CODEX_SDK_DISABLED, false) &&
     agentSdk.primary === "codex";
+  const agentRuntime = normalizeAgentRuntime(
+    cli["agent-runtime"] ||
+      process.env.BOSUN_AGENT_RUNTIME ||
+      configData.agentRuntime ||
+      "harness",
+  );
   const primaryAgent = normalizePrimaryAgent(
     cli["primary-agent"] ||
       cli.agent ||
@@ -1552,7 +1598,8 @@ export function loadConfig(argv = process.argv, options = {}) {
     !isEnvEnabled(process.env.OPENCODE_SDK_DISABLED, false);
 
   // ── Internal Executor ────────────────────────────────────
-  // Allows the monitor to run tasks via agent-pool directly. Modes: "internal" (default), "hybrid".
+  // Bosun now treats the internal queued-task engine as one mode: "internal".
+  // Legacy EXECUTOR_MODE=hybrid is accepted and normalized for compatibility.
   const kanbanBackend = normalizeKanbanBackend(
     process.env.KANBAN_BACKEND || configData.kanban?.backend || "internal",
   );
@@ -1686,32 +1733,32 @@ export function loadConfig(argv = process.argv, options = {}) {
         "",
     }),
   });
-  const gnap = Object.freeze({
+  const repoMirror = Object.freeze({
     enabled: isEnvEnabled(
-      process.env.GNAP_ENABLED ?? configData.kanban?.gnap?.enabled,
+      process.env.REPO_MIRROR_ENABLED ?? configData.kanban?.repoMirror?.enabled,
       false,
     ),
     repoPath:
       String(
-        process.env.GNAP_REPO_PATH || configData.kanban?.gnap?.repoPath || "",
+        process.env.REPO_MIRROR_REPO_PATH || configData.kanban?.repoMirror?.repoPath || "",
       ).trim(),
-    syncMode: normalizeGnapSyncMode(
-      process.env.GNAP_SYNC_MODE || configData.kanban?.gnap?.syncMode,
+    syncMode: normalizeRepoMirrorSyncMode(
+      process.env.REPO_MIRROR_SYNC_MODE || configData.kanban?.repoMirror?.syncMode,
     ),
-    runStorage: normalizeGnapRunStorage(
-      process.env.GNAP_RUN_STORAGE || configData.kanban?.gnap?.runStorage,
+    runStorage: normalizeRepoMirrorRunStorage(
+      process.env.REPO_MIRROR_RUN_STORAGE || configData.kanban?.repoMirror?.runStorage,
     ),
-    messageStorage: normalizeGnapMessageStorage(
-      process.env.GNAP_MESSAGE_STORAGE ||
-        configData.kanban?.gnap?.messageStorage,
+    messageStorage: normalizeRepoMirrorMessageStorage(
+      process.env.REPO_MIRROR_MESSAGE_STORAGE ||
+        configData.kanban?.repoMirror?.messageStorage,
     ),
     publicRoadmapEnabled: isEnvEnabled(
-      process.env.GNAP_PUBLIC_ROADMAP_ENABLED ??
-        configData.kanban?.gnap?.publicRoadmapEnabled,
+      process.env.REPO_MIRROR_PUBLIC_ROADMAP_ENABLED ??
+        configData.kanban?.repoMirror?.publicRoadmapEnabled,
       false,
     ),
   });
-  validateKanbanBackendConfig({ kanbanBackend, kanban, jira, gnap });
+  validateKanbanBackendConfig({ kanbanBackend, kanban, jira, repoMirror });
 
   const internalExecutorConfig = configData.internalExecutor || {};
   const workflowRecoveryConfig =
@@ -1757,11 +1804,11 @@ export function loadConfig(argv = process.argv, options = {}) {
       ),
     ),
   );
-  const executorMode = (
+  const executorMode = normalizeInternalExecutorMode(
     process.env.EXECUTOR_MODE ||
     internalExecutorConfig.mode ||
-    "internal"
-  ).toLowerCase();
+    "internal",
+  );
   const reviewAgentToggleRaw =
     process.env.INTERNAL_EXECUTOR_REVIEW_AGENT_ENABLED;
   const reviewAgentEnabled =
@@ -1805,9 +1852,7 @@ export function loadConfig(argv = process.argv, options = {}) {
     ),
   });
   const internalExecutor = {
-    mode: ["internal", "hybrid"].includes(executorMode)
-      ? executorMode
-      : "internal",
+    mode: executorMode,
     maxParallel: Number(
       envInternalExecutorParallel ||
         internalExecutorConfig.maxParallel ||
@@ -2331,6 +2376,10 @@ export function loadConfig(argv = process.argv, options = {}) {
     configData.harness && typeof configData.harness === "object"
       ? configData.harness
       : {};
+  const providersData =
+    configData.providers && typeof configData.providers === "object"
+      ? configData.providers
+      : {};
   const harnessValidationData =
     harnessData.validation && typeof harnessData.validation === "object"
       ? harnessData.validation
@@ -2345,7 +2394,7 @@ export function loadConfig(argv = process.argv, options = {}) {
   const harness = Object.freeze({
     enabled: isEnvEnabled(
       process.env.BOSUN_HARNESS_ENABLED ?? harnessData.enabled,
-      false,
+      agentRuntime === "harness",
     ),
     source: String(
       process.env.BOSUN_HARNESS_SOURCE ??
@@ -2357,6 +2406,14 @@ export function loadConfig(argv = process.argv, options = {}) {
         ? harnessValidationModeRaw
         : "report",
     }),
+    primaryExecutor: String(harnessData.primaryExecutor ?? "").trim() || "",
+    routingMode: String(harnessData.routingMode ?? providersData.routingMode ?? "default-only").trim().toLowerCase() || "default-only",
+    executors: Array.isArray(harnessData.executors)
+      ? harnessData.executors.map((entry) => ({ ...(entry && typeof entry === "object" ? entry : {}) }))
+      : [],
+  });
+  const providers = Object.freeze({
+    ...(providersData || {}),
   });
 
   // ── Status file ──────────────────────────────────────────
@@ -2426,6 +2483,7 @@ export function loadConfig(argv = process.argv, options = {}) {
     preflightEnabled,
     preflightRetryMs,
     codexEnabled,
+    agentRuntime,
     agentPoolEnabled,
     primaryAgent,
     primaryAgentEnabled,
@@ -2438,7 +2496,7 @@ export function loadConfig(argv = process.argv, options = {}) {
     kanbanSource,
     githubProjectSync,
     jira,
-    gnap,
+    repoMirror,
     projectRequirements,
 
     // Voice assistant
@@ -2511,6 +2569,7 @@ export function loadConfig(argv = process.argv, options = {}) {
     // Workflow template defaults + opt-in typed workflow entries
     workflowDefaults: Object.freeze(workflowDefaults),
     harness,
+    providers,
 
     // Paths
     statusPath,

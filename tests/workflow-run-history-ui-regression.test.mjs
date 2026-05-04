@@ -18,6 +18,8 @@ function extractFunctionSource(source, functionName, nextFunctionName) {
 describe("workflow run history UI pagination", () => {
   const uiSource = readFileSync(resolve(process.cwd(), "ui/tabs/workflows.js"), "utf8");
   const siteSource = readFileSync(resolve(process.cwd(), "site/ui/tabs/workflows.js"), "utf8");
+  const uiWorkflowListSource = extractFunctionSource(uiSource, "WorkflowListView", "RunHistoryView");
+  const siteWorkflowListSource = extractFunctionSource(siteSource, "WorkflowListView", "RunHistoryView");
   const uiRunHistorySource = extractFunctionSource(uiSource, "RunHistoryView", "WorkflowCodeView");
   const siteRunHistorySource = extractFunctionSource(siteSource, "RunHistoryView", "WorkflowCodeView");
 
@@ -37,6 +39,24 @@ describe("workflow run history UI pagination", () => {
       expect(source).toContain("buildWorkflowRunApiPath");
       expect(source).toContain("activeWorkspaceId.value");
       expect(source).toContain("searchParams.set(\"workspace\", workspaceId)");
+      expect(source).toContain("apiFetch(buildWorkflowRunApiPath(`/api/workflows/runs/${encodeURIComponent(safeRunId)}`))");
+    });
+
+    it(`${label} shows explicit loading and retry states for run history and run details`, () => {
+      expect(source).toContain("workflowRunsLoading");
+      expect(source).toContain("workflowRunsError");
+      expect(source).toContain("workflowRunDetailLoading");
+      expect(source).toContain("workflowRunDetailError");
+      expect(source).toContain("Loading workflow runs…");
+      expect(source).toContain("Fetching run details…");
+      expect(source).toContain("Retry");
+      expect(source).toContain("Refreshing…");
+    });
+
+    it(`${label} refreshes live run history incrementally instead of refetching the full loaded list`, () => {
+      expect(source).toContain("mergeWorkflowRunRefresh");
+      expect(source).toContain("preserveExisting: true");
+      expect(source).not.toContain("limit: Math.max(runs.length, WORKFLOW_RUN_PAGE_SIZE)");
     });
 
     it(`${label} keeps older workflow pagination manual-only`, () => {
@@ -142,6 +162,18 @@ describe("workflow run history UI pagination", () => {
   }
 
   for (const [label, source] of [
+    ["ui", uiWorkflowListSource],
+    ["site", siteWorkflowListSource],
+  ]) {
+    it(`${label} keeps workflow cards wrapped into stable header and action regions`, () => {
+      expect(source).toContain("display: flex; flex-direction: column; gap: 8px;");
+      expect(source).toContain("display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap;");
+      expect(source).toContain("justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 2px;");
+      expect(source).toContain("whiteSpace: 'nowrap'");
+    });
+  }
+
+  for (const [label, source] of [
     ["ui", uiRunHistorySource],
     ["site", siteRunHistorySource],
   ]) {
@@ -161,5 +193,14 @@ describe("workflow run history UI pagination", () => {
     expect(uiSource).toContain("Source:");
     expect(uiSource).toContain("state ledger / SQLite");
     expect(uiSource).toContain("All Sessions:");
+  });
+
+  it("server caps and caches durable session list reads for session polling", () => {
+    const serverSource = readFileSync(resolve(process.cwd(), "server/ui-server.mjs"), "utf8");
+
+    expect(serverSource).toContain("const DURABLE_SESSION_LIST_LIMIT = 750;");
+    expect(serverSource).toContain("const DURABLE_SESSION_LIST_CACHE_TTL_MS = 5000;");
+    expect(serverSource).toContain("const durableSessionListCache = new Map();");
+    expect(serverSource).toContain("cloneSessionSummaryRecords");
   });
 });

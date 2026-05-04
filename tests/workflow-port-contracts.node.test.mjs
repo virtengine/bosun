@@ -12,6 +12,7 @@ import {
   installTemplate,
   applyWorkflowTemplateState,
 } from "../workflow/workflow-templates.mjs";
+import "../workflow/workflow-nodes.mjs";
 
 let tmpDir;
 let engine;
@@ -44,6 +45,22 @@ describe("workflow port compatibility contract", () => {
       isPortConnectionCompatible(
         { name: "out", label: "Out", type: "json" },
         { name: "in", label: "In", type: "text", accepts: ["json", "yaml"] },
+      ),
+      { compatible: true, reason: null },
+    );
+
+    assert.deepEqual(
+      isPortConnectionCompatible(
+        { name: "out", label: "Out", type: "JSON" },
+        { name: "in", label: "In", type: "TaskDef", accepts: ["json"] },
+      ),
+      { compatible: true, reason: null },
+    );
+
+    assert.deepEqual(
+      isPortConnectionCompatible(
+        { name: "out", label: "Out", type: "json" },
+        { name: "in", label: "In", type: "TaskDef" },
       ),
       { compatible: true, reason: null },
     );
@@ -201,6 +218,14 @@ describe("workflow engine port hydration", () => {
 
     assert.equal(saved.edges[0].sourcePortType, "TaskDef");
     assert.equal(saved.edges[0].targetPortType, "TaskDef");
+  });
+
+  it("installs the task lifecycle template without rejecting chained agent phases", () => {
+    assert.doesNotThrow(() => {
+      installTemplate("template-task-lifecycle", engine);
+    });
+    const installed = engine.list().find((workflow) => workflow.metadata?.installedFrom === "template-task-lifecycle");
+    assert.ok(installed, "task lifecycle template should install successfully");
   });
 });
 

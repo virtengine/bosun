@@ -40,6 +40,9 @@ describe("RunEvaluator", () => {
       const result = evaluator.evaluate(run);
       expect(result.score).toBeGreaterThanOrEqual(90);
       expect(result.grade).toBe("A");
+      expect(result.judgment).toMatchObject({
+        decision: "ACCEPT",
+      });
       expect(result.issues).toHaveLength(0);
     });
 
@@ -165,6 +168,10 @@ describe("RunEvaluator", () => {
       });
       const result = evaluator.evaluate(run);
       expect(result.remediation.suggestedRetryMode).toBe("from_failed");
+      expect(result.judgment).toMatchObject({
+        decision: "RETRY",
+        retryMode: "from_failed",
+      });
     });
 
     it("suggests from_scratch when multiple nodes failed", () => {
@@ -379,6 +386,92 @@ describe("RunEvaluator", () => {
         primaryGoalId: "goal-child",
         policyOutcome: expect.objectContaining({ status: "blocked" }),
       }));
+      expect(result.judgment).toMatchObject({
+        decision: "ESCALATE",
+        reason: "governance.approval_pending",
+      });
+    });
+
+    it("tracks objective progress, constraint violations, and token budgets in evaluation metrics", () => {
+      const run = makeRunDetail({
+        data: {
+          _workflowId: "wf-objectives",
+          objectiveFrame: {
+            successCriteria: [
+              { id: "criterion-1", title: "Collect baseline", status: "satisfied", blocking: true },
+              { id: "criterion-2", title: "Ship final recommendation", status: "partial", blocking: true },
+            ],
+            goalProgress: {
+              status: "in_progress",
+              completedCriteriaCount: 1,
+              totalCriteriaCount: 2,
+              completionRatio: 0.5,
+            },
+            constraintState: {
+              status: "warning",
+              blocked: false,
+              violations: [
+                {
+                  constraintId: "citation-coverage",
+                  message: "Missing one supporting citation.",
+                  blocking: false,
+                },
+              ],
+            },
+            tokenBudget: {
+              budgetTokens: 2000,
+              totalTokens: 1900,
+              remainingTokens: 100,
+              status: "near_limit",
+              approvalRequired: true,
+            },
+          },
+        },
+      });
+
+      const result = evaluator.evaluate(run, { workflowId: "wf-objectives" });
+
+      expect(result.governance).toEqual(expect.objectContaining({
+        objectiveFrame: expect.objectContaining({
+          blocked: false,
+        }),
+        successCriteria: expect.arrayContaining([
+          expect.objectContaining({ title: "Collect baseline", status: "satisfied" }),
+          expect.objectContaining({ title: "Ship final recommendation", status: "partial" }),
+        ]),
+        goalProgress: expect.objectContaining({
+          status: "in_progress",
+          completionRatio: 0.5,
+        }),
+        constraintState: expect.objectContaining({
+          status: "warning",
+          violationCount: 1,
+          blockingViolationCount: 0,
+        }),
+        tokenBudget: expect.objectContaining({
+          status: "near_limit",
+          totalTokens: 1900,
+          approvalRequired: true,
+        }),
+      }));
+      expect(result.metrics.successCriteriaCount).toBe(2);
+      expect(result.metrics.completedCriteriaCount).toBe(1);
+      expect(result.metrics.goalProgressStatus).toBe("in_progress");
+      expect(result.metrics.goalCompletionRatio).toBe(0.5);
+      expect(result.metrics.constraintStatus).toBe("warning");
+      expect(result.metrics.constraintViolationCount).toBe(1);
+      expect(result.metrics.blockingConstraintViolationCount).toBe(0);
+      expect(result.metrics.tokenBudgetStatus).toBe("near_limit");
+      expect(result.metrics.totalTokens).toBe(1900);
+      expect(result.issues.some((issue) => issue.message.includes("Blocking success criterion incomplete: Ship final recommendation"))).toBe(true);
+      expect(result.issues.some((issue) => issue.message.includes("Constraint violation (citation-coverage)"))).toBe(true);
+      expect(result.issues.some((issue) => issue.message.includes("Token budget is near limit"))).toBe(true);
+      expect(result.remediation.fixActions.map((action) => action.type)).toEqual(expect.arrayContaining([
+        "complete_success_criterion",
+        "review_goal_progress",
+        "review_token_budget",
+      ]));
+      expect(result.judgment.decision).toBe("ESCALATE");
     });
   });
 });

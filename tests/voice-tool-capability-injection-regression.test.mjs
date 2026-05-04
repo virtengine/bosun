@@ -34,10 +34,16 @@ describe("voice tool capability injection regressions", () => {
 
   it("injects tool capability contracts for primary and workflow agents", () => {
     const primary = readFileSync(resolve(process.cwd(), "agent/primary-agent.mjs"), "utf8");
+    const orchestrator = readFileSync(resolve(process.cwd(), "agent/tool-orchestrator.mjs"), "utf8");
     const workflow = readFileSync(resolve(process.cwd(), "workflow/workflow-nodes/definitions.mjs"), "utf8");
-    expect(primary).toContain("## Tool Capability Contract");
-    expect(primary).toContain("Enabled tools JSON:");
+    expect(primary).toContain("buildToolCapabilityContract");
+    expect(primary).toContain("buildPrimaryToolCapabilityContract");
+    expect(orchestrator).toContain("## Tool Capability Contract");
+    expect(orchestrator).toContain("Enabled tools JSON:");
     expect(workflow).toContain("buildWorkflowAgentToolContract");
     expect(workflow).toContain("## Tool Capability Contract");
+    expect(workflow).toContain("prefer targeted read/view calls with explicit line ranges");
+    expect(workflow).toContain("retry as separate single-purpose commands");
+    expect(workflow).toContain("node tools/vitest-runner.mjs run <target-paths>");
   });
 });

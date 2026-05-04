@@ -5,13 +5,13 @@
  *   - Internal Store          — default, source-of-truth local kanban
  *   - GitHub Issues           — native GitHub integration with shared state persistence
  *   - Jira                    — enterprise project management via Jira REST v3
- *   - GNAP (projection-only)  — optional GNAP-compatible projection registration
+ *   - RepoMirror (projection-only)  — optional repo-backed projection registration
  *
  * This module handles TASK LIFECYCLE (tracking, status, metadata) only.
  * Code execution is handled separately by agent-pool.mjs.
  *
  * Configuration:
- *   - `KANBAN_BACKEND` env var: "internal" | "github" | "jira" | "gnap" (default: "internal")
+ *   - `KANBAN_BACKEND` env var: "internal" | "github" | "jira" | "repo-mirror" (default: "internal")
  *   - `bosun.config.json` → `kanban.backend` field
  *
  * EXPORTS:
@@ -79,9 +79,9 @@ import {
   materializeProjectedTask,
   readProjectedTaskRecord,
   rebuildAgentsRegistry,
-  resolveGnapProjectionConfig,
+  resolveRepoMirrorProjectionConfig,
   upsertProjectedTask,
-} from "./gnap-projection-store.mjs";
+} from "./repo-mirror-projection-store.mjs";
 
 const TAG = "[kanban]";
 
@@ -717,21 +717,22 @@ function normalizePrLinkageEntry(entry = {}, fallback = {}) {
   };
 }
 
+function buildPrLinkageKey(entry = {}) {
+  const branchName = String(entry?.branchName || "").trim().toLowerCase();
+  const prUrl = String(entry?.prUrl || "").trim().toLowerCase();
+  const prNumber = Number.isFinite(entry?.prNumber) ? entry.prNumber : "";
+  return [branchName, prNumber, prUrl].join("|");
+}
+
 function mergePrLinkageRecords(...sources) {
   const merged = [];
   const indexByKey = new Map();
-  const buildKey = (entry) => {
-    const branchName = String(entry?.branchName || "").trim().toLowerCase();
-    const prUrl = String(entry?.prUrl || "").trim().toLowerCase();
-    const prNumber = Number.isFinite(entry?.prNumber) ? entry.prNumber : "";
-    return [branchName, prNumber, prUrl].join("|");
-  };
   for (const source of sources) {
     const entries = Array.isArray(source) ? source : [];
     for (const rawEntry of entries) {
       const entry = normalizePrLinkageEntry(rawEntry);
       if (!entry) continue;
-      const key = buildKey(entry);
+      const key = buildPrLinkageKey(entry);
       if (!key) continue;
       if (indexByKey.has(key)) {
         const idx = indexByKey.get(key);
@@ -745,12 +746,55 @@ function mergePrLinkageRecords(...sources) {
   return merged;
 }
 
+function promotePrimaryPrLinkage(records = [], preferred = {}) {
+  const entries = Array.isArray(records)
+    ? records.map((entry) => normalizePrLinkageEntry(entry)).filter(Boolean)
+    : [];
+  if (entries.length === 0) return [];
+  const branchName = typeof preferred?.branchName === "string"
+    ? preferred.branchName.trim()
+    : "";
+  const prUrl = typeof preferred?.prUrl === "string"
+    ? preferred.prUrl.trim()
+    : "";
+  const parsedPrNumber =
+    preferred?.prNumber == null || preferred?.prNumber === ""
+      ? null
+      : Number.parseInt(String(preferred.prNumber), 10);
+  const prNumber =
+    Number.isFinite(parsedPrNumber) && parsedPrNumber > 0 ? parsedPrNumber : null;
+  if (!branchName && !prUrl && !prNumber) return entries;
+  const matchesPreferred = (entry) =>
+    (branchName && entry?.branchName === branchName)
+    || (prUrl && entry?.prUrl === prUrl)
+    || (prNumber && entry?.prNumber === prNumber);
+  const promoted = normalizePrLinkageEntry({
+    ...(branchName ? { branchName } : {}),
+    ...(prUrl ? { prUrl } : {}),
+    ...(prNumber ? { prNumber } : {}),
+    updatedAt: new Date().toISOString(),
+  }, entries.find(matchesPreferred) || entries[0] || {});
+  if (!promoted) return entries;
+  const promotedKey = buildPrLinkageKey(promoted);
+  let skippedPromoted = false;
+  const remaining = entries.filter((entry) => {
+    if (skippedPromoted) return true;
+    if (buildPrLinkageKey(entry) !== promotedKey) return true;
+    skippedPromoted = true;
+    return false;
+  });
+  return [promoted, ...remaining];
+}
+
 function buildPrLinkagePatch(options = {}, currentTask = null) {
   const branchName = typeof options?.branchName === "string" ? options.branchName.trim() : "";
   const prUrl = typeof options?.prUrl === "string" ? options.prUrl.trim() : "";
   const prNumber = options?.prNumber == null || options?.prNumber === ""
     ? null
     : Number.parseInt(String(options.prNumber), 10);
+  if (!branchName && !prUrl && !(Number.isFinite(prNumber) && prNumber > 0)) {
+    return {};
+  }
   const source = typeof options?.source === "string" && options.source.trim() ? options.source.trim() : null;
   const freshness = typeof options?.freshness === "string" && options.freshness.trim() ? options.freshness.trim() : null;
   const currentMeta = currentTask?.meta && typeof currentTask.meta === "object" ? currentTask.meta : {};
@@ -763,9 +807,12 @@ function buildPrLinkagePatch(options = {}, currentTask = null) {
     freshness,
     updatedAt: new Date().toISOString(),
     linkedAt: currentLinkage[0]?.linkedAt || new Date().toISOString(),
-  }, currentTask || {});
+  }, currentLinkage[0] || {});
   if (!nextEntry) return {};
-  const prLinkage = mergePrLinkageRecords(currentLinkage, [nextEntry]);
+  const prLinkage = promotePrimaryPrLinkage(
+    mergePrLinkageRecords(currentLinkage, [nextEntry]),
+    nextEntry,
+  );
   return {
     ...(nextEntry.branchName ? { branchName: nextEntry.branchName } : {}),
     ...(nextEntry.prUrl ? { prUrl: nextEntry.prUrl } : {}),
@@ -859,12 +906,14 @@ class InternalAdapter {
         : "internal";
     const recoveredStatus = String(embeddedPayload?.status || "").trim();
     const tags = normalizeTags(task.tags || task.meta?.tags || []);
-    const draft = Boolean(
-      task.draft ||
-        task.meta?.draft ||
-        task.status === "draft" ||
-        recoveredStatus === "draft",
-    );
+    const hasExplicitDraftFlag = typeof task.draft === "boolean";
+    const draft = hasExplicitDraftFlag
+      ? task.draft === true
+      : Boolean(
+          task.meta?.draft ||
+            task.status === "draft" ||
+            recoveredStatus === "draft",
+        );
     const labelBag = []
       .concat(Array.isArray(task.labels) ? task.labels : [])
       .concat(Array.isArray(task.tags) ? task.tags : [])
@@ -892,6 +941,12 @@ class InternalAdapter {
       resolveTaskField(task, "parentTaskId"),
     );
     const dueDate = normalizeTaskStringField(resolveTaskField(task, "dueDate"));
+    const consecutiveNoCommits = Number(
+      normalizeTaskNumericField(resolveTaskField(task, "consecutiveNoCommits")) || 0,
+    );
+    const cooldownUntil = normalizeTaskStringField(
+      resolveTaskField(task, "cooldownUntil"),
+    );
     const existingAttachments = []
       .concat(Array.isArray(task.attachments) ? task.attachments : [])
       .concat(Array.isArray(task.meta?.attachments) ? task.meta.attachments : []);
@@ -934,6 +989,8 @@ class InternalAdapter {
       createdAt: task.createdAt || null,
       updatedAt: task.updatedAt || null,
       lastActivityAt: task.lastActivityAt || task.updatedAt || null,
+      consecutiveNoCommits,
+      cooldownUntil,
       timeline: Array.isArray(task.timeline) ? task.timeline : [],
       workflowRuns: Array.isArray(task.workflowRuns) ? task.workflowRuns : [],
       statusHistory: Array.isArray(task.statusHistory) ? task.statusHistory : [],
@@ -947,6 +1004,8 @@ class InternalAdapter {
         statusHistory: Array.isArray(task.statusHistory) ? task.statusHistory : (Array.isArray(task.meta?.statusHistory) ? task.meta.statusHistory : []),
         comments: normalizedComments,
         attachments: mergedAttachments,
+        consecutiveNoCommits,
+        cooldownUntil,
         prLinkage,
         prLinkageSource: primaryPrLinkage?.source || task.meta?.prLinkageSource || null,
         prLinkageFreshness: primaryPrLinkage?.freshness || task.meta?.prLinkageFreshness || null,
@@ -1038,6 +1097,16 @@ class InternalAdapter {
     }
     const updates = {};
     const baseBranch = resolveBaseBranchInput(patch);
+    const baseBranchProvided =
+      hasOwnField(patch, "baseBranch") ||
+      hasOwnField(patch, "base_branch") ||
+      hasOwnField(patch, "upstream_branch") ||
+      hasOwnField(patch, "upstreamBranch") ||
+      hasOwnField(patch, "upstream") ||
+      hasOwnField(patch, "target_branch") ||
+      hasOwnField(patch, "targetBranch") ||
+      hasOwnField(patch, "base") ||
+      hasOwnField(patch, "target");
     if (typeof patch.title === "string") updates.title = patch.title;
     if (typeof patch.description === "string") updates.description = patch.description;
     if (typeof patch.status === "string" && patch.status.trim()) {
@@ -1050,6 +1119,11 @@ class InternalAdapter {
     if (hasOwnField(patch, "workflowRuns")) updates.workflowRuns = patch.workflowRuns;
     if (hasOwnField(patch, "workflowHistory")) updates.workflowHistory = patch.workflowHistory;
     if (hasOwnField(patch, "workflows")) updates.workflows = patch.workflows;
+      if (hasOwnField(patch, "consecutiveNoCommits")) {
+        updates.consecutiveNoCommits = Number(
+          normalizeTaskNumericField(patch.consecutiveNoCommits) || 0,
+        );
+      }
     if (hasOwnField(patch, "cooldownUntil")) {
       updates.cooldownUntil = normalizeTaskStringField(patch.cooldownUntil);
     }
@@ -1095,8 +1169,8 @@ class InternalAdapter {
     }
     const current = getInternalTask(normalizedId);
     const replaceMeta = patch.replaceMeta === true;
-    if (baseBranch) {
-      updates.baseBranch = baseBranch;
+    if (baseBranchProvided) {
+      updates.baseBranch = baseBranch || null;
     }
     if (assigneeProvided || assignee || assignees.length > 0) {
       updates.assignee = assignee || assignees[0] || null;
@@ -1141,19 +1215,39 @@ class InternalAdapter {
         ...(Array.isArray(patch.repositories) ? { repositories: patch.repositories } : {}),
         ...(baseBranch ? { base_branch: baseBranch, baseBranch } : {}),
       };
+      if (baseBranchProvided && !baseBranch) {
+        delete updates.meta.baseBranch;
+        delete updates.meta.base_branch;
+      }
       for (const [key, value] of Object.entries(patch.meta)) {
         if (value == null && Object.prototype.hasOwnProperty.call(updates.meta, key)) {
           delete updates.meta[key];
         }
       }
-    } else if (baseBranch) {
+    } else if (baseBranchProvided) {
       updates.meta = {
         ...(current?.meta || {}),
-        base_branch: baseBranch,
-        baseBranch,
+        ...(baseBranch ? { base_branch: baseBranch, baseBranch } : {}),
       };
+      if (!baseBranch) {
+        delete updates.meta.baseBranch;
+        delete updates.meta.base_branch;
+      }
     }
-    const directLinkage = mergePrLinkageRecords(current?.prLinkage, current?.meta?.prLinkage, patch.prLinkage, patch.meta?.prLinkage, [normalizePrLinkageEntry(patch, patch)]);
+    const directLinkage = promotePrimaryPrLinkage(
+      mergePrLinkageRecords(
+        current?.prLinkage,
+        current?.meta?.prLinkage,
+        patch.prLinkage,
+        patch.meta?.prLinkage,
+        [normalizePrLinkageEntry(patch, patch)],
+      ),
+      {
+        branchName: updates.branchName,
+        prUrl: updates.prUrl,
+        prNumber: updates.prNumber,
+      },
+    );
     if (directLinkage.length > 0) {
       const primaryPrLinkage = directLinkage[0] || null;
       updates.prLinkage = directLinkage;
@@ -1512,7 +1606,7 @@ function buildProjectedStatusHistory(projectedTask = {}) {
     if (!rawStatus) continue;
     history.push({
       status: normaliseStatus(rawStatus),
-      source: normalizeTaskStringField(entry?.source) || "gnap-projection",
+      source: normalizeTaskStringField(entry?.source) || "repo-mirror-projection",
       actor: normalizeTaskStringField(entry?.actor),
       timestamp: normalizeTaskStringField(entry?.timestamp),
     });
@@ -1543,7 +1637,7 @@ function mergeProjectedTaskIntoLocal(localTask = {}, projectedTask = null) {
     ...localTask,
     assignee: localTask.assignee || projectedTask.assignee || assignees[0] || null,
     assignees,
-    projectId: localTask.projectId || projectedTask.projectId || "gnap",
+    projectId: localTask.projectId || projectedTask.projectId || "repo-mirror",
     workspace: localTask.workspace || projectedTask.workspace || null,
     repository: localTask.repository || projectedTask.repository || null,
     repositories: mergeTaskStringLists(localTask.repositories, projectedTask.repositories),
@@ -1696,7 +1790,7 @@ function extractBaseBranchFromLabels(labels) {
 function extractBaseBranchFromText(text) {
   if (!text) return null;
   const match = String(text || "").match(
-    /\b(?:upstream|base|target)(?:_branch| branch)?\s*[:=]\s*([A-Za-z0-9._/-]+)/i,
+    /\b(?:(?:upstream|base)(?:_branch| branch)?|target(?:_branch| branch))\s*[:=]\s*([A-Za-z0-9._/-]+)/i,
   );
   if (!match?.[1]) return null;
   return normalizeBranchName(match[1]);
@@ -1712,8 +1806,7 @@ function resolveBaseBranchInput(payload) {
     payload.upstream ||
     payload.target_branch ||
     payload.targetBranch ||
-    payload.base ||
-    payload.target;
+    payload.base;
   return normalizeBranchName(candidate);
 }
 
@@ -1722,7 +1815,7 @@ function upsertBaseBranchMarker(text, baseBranch) {
   if (!branch) return String(text || "");
   const source = String(text || "");
   const pattern =
-    /\b(?:upstream|base|target)(?:_branch| branch)?\s*[:=]\s*([A-Za-z0-9._/-]+)/i;
+    /\b(?:(?:upstream|base)(?:_branch| branch)?|target(?:_branch| branch))\s*[:=]\s*([A-Za-z0-9._/-]+)/i;
   if (pattern.test(source)) {
     return source.replace(pattern, `base_branch: ${branch}`);
   }
@@ -6066,11 +6159,11 @@ class JiraAdapter {
 // Adapter Registry & Resolution
 // ---------------------------------------------------------------------------
 
-class GnapProjectionAdapter {
+class RepoMirrorProjectionAdapter {
   constructor(config = {}) {
-    this.name = "gnap";
-    this.backend = "gnap";
-    this._config = resolveGnapProjectionConfig(config);
+    this.name = "repo-mirror";
+    this.backend = "repo-mirror";
+    this._config = resolveRepoMirrorProjectionConfig(config);
     this._internal = new InternalAdapter();
   }
 
@@ -6132,7 +6225,7 @@ class GnapProjectionAdapter {
     if (!projectedTask?.id) return null;
     const existingTask = options.existingTask || null;
     const preferProjectedCanonical = options.preferProjectedCanonical !== false;
-    const existingImported = existingTask?.meta?.gnap?.imported === true;
+    const existingImported = existingTask?.meta?.repoMirror?.imported === true;
     const imported =
       existingImported ||
       !existingTask ||
@@ -6200,13 +6293,13 @@ class GnapProjectionAdapter {
         attachments,
         workflowRuns,
         evidence: projectedTask.meta?.evidence || existingTask?.meta?.evidence || {},
-        gnap: {
-          ...(existingTask?.meta?.gnap || {}),
-          ...(projectedTask.meta?.gnap || {}),
+        repoMirror: {
+          ...(existingTask?.meta?.repoMirror || {}),
+          ...(projectedTask.meta?.repoMirror || {}),
           imported,
           observed: true,
           projectionOnly: true,
-          taskPath: filePath || projectedTask.meta?.gnap?.taskPath || null,
+          taskPath: filePath || projectedTask.meta?.repoMirror?.taskPath || null,
           syncMode: this._config.syncMode,
           upstreamUpdatedAt: String(projectedDoc?.updated_at || projectedTask.updatedAt || "").trim() || null,
         },
@@ -6224,8 +6317,8 @@ class GnapProjectionAdapter {
     const projectedUpdatedMs = Date.parse(String(doc?.updated_at || projectedTask.updatedAt || "")) || 0;
     const existingUpdatedMs = Date.parse(String(existing?.updatedAt || existing?.lastActivityAt || "")) || 0;
     const existingImported =
-      existing?.meta?.gnap?.imported === true
-      || String(existing?.meta?.gnap?.taskPath || "").trim() === String(filePath || "").trim();
+      existing?.meta?.repoMirror?.imported === true
+      || String(existing?.meta?.repoMirror?.taskPath || "").trim() === String(filePath || "").trim();
     const shouldApply = !existing || existingImported || projectedUpdatedMs >= existingUpdatedMs;
     const patch = this._buildInternalTaskPatch(projectedTask, doc, filePath, {
       existingTask: existing,
@@ -6277,9 +6370,9 @@ class GnapProjectionAdapter {
     await this._ensureProjectionScaffold();
     return [
       {
-        id: "gnap",
-        name: "GNAP Projection",
-        backend: "gnap",
+        id: "repo-mirror",
+        name: "RepoMirror Projection",
+        backend: "repo-mirror",
         meta: {
           projectionOnly: true,
           ...this._config,
@@ -6301,7 +6394,7 @@ class GnapProjectionAdapter {
       const messageDocs = await listProjectedMessagesForTask(this._config, taskId);
       tasks.push(materializeProjectedTask(doc, filePath, runDocs, messageDocs));
     }
-    if (normalizedProjectId && normalizedProjectId !== "gnap") {
+    if (normalizedProjectId && normalizedProjectId !== "repo-mirror") {
       tasks = tasks.filter(
         (task) =>
           String(task.projectId || "").trim().toLowerCase() === normalizedProjectId,
@@ -6386,7 +6479,7 @@ const ADAPTERS = {
   internal: () => new InternalAdapter(),
   github: () => new GitHubIssuesAdapter(),
   jira: () => new JiraAdapter(),
-  gnap: () => new GnapProjectionAdapter(loadConfig()?.gnap || {}),
+  "repo-mirror": () => new RepoMirrorProjectionAdapter(loadConfig()?.repoMirror || {}),
 };
 
 /** @type {Object|null} Cached adapter instance */
@@ -6427,7 +6520,7 @@ function resolveBackendName() {
 
 /**
  * Get the active kanban adapter.
- * @returns {InternalAdapter|GitHubIssuesAdapter|JiraAdapter|GnapProjectionAdapter} Adapter instance.
+ * @returns {InternalAdapter|GitHubIssuesAdapter|JiraAdapter|RepoMirrorProjectionAdapter} Adapter instance.
  */
 export function getKanbanAdapter() {
   const name = resolveBackendName();
@@ -6435,7 +6528,7 @@ export function getKanbanAdapter() {
   if (name === "internal") activeAdapter = ADAPTERS.internal();
   else if (name === "github") activeAdapter = ADAPTERS.github();
   else if (name === "jira") activeAdapter = ADAPTERS.jira();
-  else if (name === "gnap") activeAdapter = ADAPTERS.gnap();
+  else if (name === "repo-mirror") activeAdapter = ADAPTERS["repo-mirror"]();
   else throw new Error(`${TAG} unknown kanban backend: ${name}`);
   activeBackendName = name;
   console.log(`${TAG} using ${name} backend`);
@@ -6444,7 +6537,7 @@ export function getKanbanAdapter() {
 
 /**
  * Switch the kanban backend at runtime.
- * @param {string} name Backend name ("internal", "github", "jira", "gnap").
+ * @param {string} name Backend name ("internal", "github", "jira", "repo-mirror").
  */
 export function setKanbanBackend(name) {
   const normalised = (name || "").trim().toLowerCase();
@@ -6482,20 +6575,15 @@ export function getKanbanBackendName() {
 // Convenience exports: direct task operations via active adapter
 // ---------------------------------------------------------------------------
 
-// ── Workflow Event Bridge (lazy-loaded from monitor.mjs) ──────────────────
+// ── Workflow Event Bridge ──────────────────────────────────────────────────
+// The daemon injects its workflow-event queue. Standalone callers (like the
+// task simulator) must not import monitor.mjs just to emit best-effort events.
 let _kanbanQueueWorkflowEvent = null;
+export function setKanbanWorkflowEventQueue(queueFn) {
+  _kanbanQueueWorkflowEvent = typeof queueFn === "function" ? queueFn : null;
+}
 function emitKanbanEvent(eventType, eventData = {}) {
-  if (!_kanbanQueueWorkflowEvent) {
-    import("../infra/monitor.mjs")
-      .then((mod) => {
-        if (typeof mod.queueWorkflowEvent === "function") {
-          _kanbanQueueWorkflowEvent = mod.queueWorkflowEvent;
-          _kanbanQueueWorkflowEvent(eventType, eventData);
-        }
-      })
-      .catch(() => {});
-    return;
-  }
+  if (!_kanbanQueueWorkflowEvent) return;
   _kanbanQueueWorkflowEvent(eventType, eventData);
 }
 

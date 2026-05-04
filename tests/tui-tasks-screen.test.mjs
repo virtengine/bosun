@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 
 import {
   formatColumnSummary,
@@ -9,12 +10,9 @@ import {
   TASK_VIEW_WIDTH_THRESHOLD,
   buildBoardColumns,
   buildListRows,
-  createTaskFromForm,
-  deleteTaskById,
   normalizeTaskStatus,
   parseTaskDescription,
   resolveTaskView,
-  updateTaskFromForm,
   validateTaskForm,
 } from "../ui/tui/tasks-screen-helpers.js";
 import {
@@ -25,7 +23,28 @@ import {
   formatTask,
   normalizeTaskCreatePayload,
 } from "../tui/screens/tasks-screen-helpers.mjs";
-import { taskList } from "../task/task-cli.mjs";
+
+let createTaskApiFromRequestJson;
+let createTaskFromForm;
+let deleteTaskById;
+let listTasksFromApi;
+let taskList;
+let updateTaskFromForm;
+
+async function loadTaskCrudModules() {
+  vi.resetModules();
+  const taskScreenHelpers = await import("../ui/tui/tasks-screen-helpers.js");
+  const taskCli = await import("../task/task-cli.mjs");
+
+  ({
+    createTaskApiFromRequestJson,
+    createTaskFromForm,
+    deleteTaskById,
+    listTasksFromApi,
+    updateTaskFromForm,
+  } = taskScreenHelpers);
+  ({ taskList } = taskCli);
+}
 
 const tempDirs = [];
 
@@ -41,9 +60,14 @@ function readStore(storePath) {
 
 afterEach(() => {
   delete process.env.BOSUN_STORE_PATH;
+  resetStateLedgerCache();
   while (tempDirs.length) {
     rmSync(tempDirs.pop(), { recursive: true, force: true });
   }
+});
+
+beforeEach(async () => {
+  await loadTaskCrudModules();
 });
 
 describe("tui tasks screen helpers", () => {
@@ -251,5 +275,37 @@ describe("tui tasks screen helpers", () => {
     const removed = await deleteTaskById(created.id);
     expect(removed).toBe(true);
     expect(Object.keys(readStore(storePath).tasks || {})).toHaveLength(0);
+  });
+
+  it("maps remote task CRUD onto the ui-server API contract", async () => {
+    const requestJson = async (path, options = {}) => {
+      if (path === "/api/tasks") {
+        return { ok: true, data: [{ id: "task-1", title: "Remote", status: "todo" }] };
+      }
+      if (path === "/api/tasks/create") {
+        return { ok: true, data: { id: "task-2", ...options.body } };
+      }
+      if (path === "/api/tasks/update") {
+        return { ok: true, data: { id: options.body.taskId, ...options.body } };
+      }
+      if (path === "/api/tasks/task-3") {
+        return { ok: true, deleted: true };
+      }
+      throw new Error(`Unexpected path ${path}`);
+    };
+    const taskApi = createTaskApiFromRequestJson(requestJson);
+
+    await expect(listTasksFromApi({}, taskApi)).resolves.toEqual([
+      { id: "task-1", title: "Remote", status: "todo" },
+    ]);
+    await expect(createTaskFromForm({ title: "Create remote task" }, taskApi)).resolves.toMatchObject({
+      id: "task-2",
+      title: "Create remote task",
+    });
+    await expect(updateTaskFromForm("task-2", { title: "Updated remote task" }, taskApi)).resolves.toMatchObject({
+      id: "task-2",
+      title: "Updated remote task",
+    });
+    await expect(deleteTaskById("task-3", taskApi)).resolves.toBe(true);
   });
 });

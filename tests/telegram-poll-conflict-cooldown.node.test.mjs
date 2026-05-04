@@ -293,3 +293,48 @@ describe("conflict state JSON shape", () => {
     assert.equal(result, null, "missing file should yield null");
   });
 });
+
+describe("editDirect — stale message fallback", () => {
+  it("falls back to sendDirect when Telegram reports message to edit not found", async () => {
+    const editIdx = src.indexOf("async function editDirect");
+    assert.ok(editIdx !== -1, "editDirect should be defined");
+    const nextIdx = src.indexOf("// ── Action Summarizer", editIdx);
+    assert.ok(nextIdx !== -1, "editDirect snippet terminator should exist");
+    const editSource = src.slice(editIdx, nextIdx).trim();
+
+    const buildEditDirect = new Function(
+      "telegramToken",
+      "MAX_MESSAGE_LEN",
+      "formatTelegramIconTokens",
+      "sanitizeWebAppButtons",
+      "telegramApiFetch",
+      "sendDirect",
+      "console",
+      `${editSource}; return editDirect;`,
+    );
+
+    const sendCalls = [];
+    const editDirect = buildEditDirect(
+      "token",
+      4000,
+      (value) => value,
+      (value) => value,
+      async () => ({
+        ok: false,
+        status: 400,
+        text: async () => '{"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}',
+      }),
+      async (chatId, text, options) => {
+        sendCalls.push({ chatId, text, options });
+        return 4321;
+      },
+      { warn() {} },
+    );
+
+    const result = await editDirect("12345", 99, "updated text", {});
+    assert.equal(result, 4321);
+    assert.equal(sendCalls.length, 1);
+    assert.equal(sendCalls[0].chatId, "12345");
+    assert.equal(sendCalls[0].text, "updated text");
+  });
+});

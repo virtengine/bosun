@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * bosun — Startup Service Manager
  *

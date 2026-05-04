@@ -46,9 +46,13 @@ vi.mock("node:http", () => ({
 }));
 
 // ── child_process mock ─────────────────────────────────────────────────────────
-vi.mock("node:child_process", () => ({
-  exec: vi.fn((_cmd, cb) => { if (cb) cb(null); }),
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    exec: vi.fn((_cmd, cb) => { if (cb) cb(null); }),
+  };
+});
 
 // ── fetch mock ────────────────────────────────────────────────────────────────
 const _fetchMock = vi.fn();
@@ -340,6 +344,25 @@ describe("voice-auth-manager OAuth", () => {
     await mod.refreshOpenAICodexToken();
     const resolved = mod.resolveVoiceOAuthToken("openai", true);
     expect(resolved?.token).toBe("refreshed_access");
+  });
+
+  it("describes voice provider lifecycle with refreshability and missing actions", async () => {
+    mod.saveVoiceOAuthToken("openai", {
+      accessToken: "voice_openai_token",
+      refreshToken: "voice_refresh_token",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+
+    const lifecycle = mod.describeVoiceProviderLifecycle("openai");
+
+    expect(lifecycle).toEqual(expect.objectContaining({
+      provider: "openai",
+      status: "connected",
+      hasToken: true,
+      refreshable: true,
+      connectedSource: expect.any(String),
+    }));
+    expect(lifecycle.missingActions).toEqual([]);
   });
 
   it("refreshOpenAICodexToken throws on non-OK response", async () => {

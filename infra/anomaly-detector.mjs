@@ -133,7 +133,11 @@ function isOperationalThought(normalized) {
  * @property {number} lastLineAt
  * @property {string|null} lastToolTitle - Last ToolCall title seen
  * @property {number} lastToolCallFingerprint - DJB2 hash of last tool call (minus toolCallId)
+ * @property {number} lastToolApproxFingerprint - DJB2 hash of normalized tool call content
  * @property {number} consecutiveSameToolCount - How many times in a row
+ * @property {string|null} lastReasoningNormalized - Last exact normalized thought/reasoning text
+ * @property {string|null} lastReasoningSkeleton - Last normalized thought/reasoning skeleton
+ * @property {number} consecutiveNearReasoningCount - Consecutive near-identical reasoning streak
  * @property {number} rebaseCount - git rebase --continue count
  * @property {number} rebaseAbortCount
  * @property {number} gitPushCount
@@ -167,7 +171,11 @@ function createProcessState(processId) {
     lastLineAt: now,
     lastToolTitle: null,
     lastToolCallFingerprint: 0,
+    lastToolApproxFingerprint: 0,
     consecutiveSameToolCount: 0,
+    lastReasoningNormalized: null,
+    lastReasoningSkeleton: null,
+    consecutiveNearReasoningCount: 0,
     rebaseCount: 0,
     rebaseAbortCount: 0,
     gitPushCount: 0,
@@ -247,6 +255,41 @@ function djb2Hash(str) {
  */
 function isIterativeTool(title) {
   return ITERATIVE_TOOL_PREFIXES.some((p) => title.startsWith(p));
+}
+
+/**
+ * Normalize volatile values out of a tool call or response so we can detect
+ * "same call, tiny arg drift" loops without requiring byte-for-byte identity.
+ * We keep enough literal structure to avoid collapsing truly different edits.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function normalizeLoopSkeleton(text) {
+  return String(text || "")
+    .replace(RE_TOOL_CALL_ID, "")
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi, "<id>")
+    .replace(/\b(?:0x)?[0-9a-f]{10,}\b/gi, "<hex>")
+    .replace(/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z\b/gi, "<ts>")
+    .replace(/\b\d{2,}\b/g, "<n>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Extract assistant reasoning text from either Copilot thought lines or Codex
+ * reasoning summaries.
+ *
+ * @param {string} line
+ * @returns {string|null}
+ */
+function extractReasoningText(line) {
+  const thoughtMatch = RE_THOUGHT_TEXT.exec(line);
+  if (thoughtMatch?.[1]) return thoughtMatch[1];
+  const summaryMatch = RE_REASONING_SUMMARY.exec(line);
+  if (summaryMatch?.[1]) return summaryMatch[1];
+  return null;
 }
 
 // P2: Tool failure (Copilot format)
@@ -719,25 +762,46 @@ export class AnomalyDetector {
     }
 
     const title = match[1];
+    const iterative = isIterativeTool(title);
 
     // Fingerprint the full tool call content, stripping the toolCallId which
     // changes every invocation. Two calls are "identical" only when both the
     // tool name AND the arguments/content are the same.
     const stripped = line.replace(RE_TOOL_CALL_ID, "");
     const fingerprint = djb2Hash(stripped);
+    const approxNormalized = normalizeLoopSkeleton(stripped);
+    const approxFingerprint = djb2Hash(approxNormalized);
+    const sameExact =
+      fingerprint === state.lastToolCallFingerprint && title === state.lastToolTitle;
+    const sameNear =
+      !sameExact &&
+      !iterative &&
+      approxNormalized.length >= 24 &&
+      approxFingerprint === state.lastToolApproxFingerprint &&
+      title === state.lastToolTitle;
 
-    if (fingerprint === state.lastToolCallFingerprint && title === state.lastToolTitle) {
+    // Tool activity is real progress, so any reasoning/output streak should reset.
+    state.lastReasoningNormalized = null;
+    state.lastReasoningSkeleton = null;
+    state.consecutiveNearReasoningCount = 0;
+
+    if (sameExact || sameNear) {
       state.consecutiveSameToolCount++;
     } else {
       state.lastToolTitle = title;
       state.lastToolCallFingerprint = fingerprint;
+      state.lastToolApproxFingerprint = approxFingerprint;
       state.consecutiveSameToolCount = 1;
     }
 
+    state.lastToolTitle = title;
+    state.lastToolCallFingerprint = fingerprint;
+    state.lastToolApproxFingerprint = approxFingerprint;
+
     const count = state.consecutiveSameToolCount;
+    const loopKind = sameNear ? "near_identical" : "identical";
 
     // Use elevated thresholds for inherently iterative tools (editing, reading)
-    const iterative = isIterativeTool(title);
     const warnThreshold = iterative
       ? this.#thresholds.toolCallLoopWarn * 3
       : this.#thresholds.toolCallLoopWarn;
@@ -752,8 +816,8 @@ export class AnomalyDetector {
         processId: state.processId,
         shortId: state.shortId,
         taskTitle: state.taskTitle,
-        message: `Tool call death loop: "${title}" called ${count}x consecutively (identical content)`,
-        data: { tool: title, count, iterative },
+        message: `Tool call death loop: "${title}" called ${count}x consecutively (${sameNear ? "near-identical" : "identical"} content)`,
+        data: { tool: title, count, iterative, loopKind },
         action: "kill",
       });
     } else if (count >= warnThreshold) {
@@ -763,8 +827,8 @@ export class AnomalyDetector {
         processId: state.processId,
         shortId: state.shortId,
         taskTitle: state.taskTitle,
-        message: `Tool call loop: "${title}" called ${count}x consecutively (identical content)`,
-        data: { tool: title, count, iterative },
+        message: `Tool call loop: "${title}" called ${count}x consecutively (${sameNear ? "near-identical" : "identical"} content)`,
+        data: { tool: title, count, iterative, loopKind },
         action: "warn",
       });
     }
@@ -952,14 +1016,7 @@ export class AnomalyDetector {
    * P3: Thought repetition (model spinning/looping).
    */
   #detectThoughtSpinning(line, state) {
-    let thoughtText = null;
-
-    // Copilot format
-    const thoughtMatch = RE_THOUGHT_TEXT.exec(line);
-    if (thoughtMatch) {
-      thoughtText = thoughtMatch[1];
-    }
-
+    const thoughtText = extractReasoningText(line);
     if (!thoughtText) return;
 
     // Normalize: lowercase, trim, collapse whitespace
@@ -975,8 +1032,21 @@ export class AnomalyDetector {
     // tests" many times. These are progress indicators, not loops.
     if (isOperationalThought(normalized)) return;
 
+    const skeleton = normalizeLoopSkeleton(normalized);
+    const sameNear =
+      skeleton.length >= 18 &&
+      state.lastReasoningSkeleton === skeleton;
+    if (sameNear) {
+      state.consecutiveNearReasoningCount++;
+    } else {
+      state.lastReasoningSkeleton = skeleton;
+      state.consecutiveNearReasoningCount = 1;
+    }
+    state.lastReasoningNormalized = normalized;
+
     const count = (state.thoughtCounts.get(normalized) || 0) + 1;
     state.thoughtCounts.set(normalized, count);
+    const nearCount = state.consecutiveNearReasoningCount;
 
     if (count >= this.#thresholds.thoughtSpinKill) {
       this.#emit({
@@ -989,6 +1059,21 @@ export class AnomalyDetector {
         data: { thought: thoughtText, count },
         action: "kill",
       });
+    } else if (nearCount >= this.#thresholds.thoughtSpinKill) {
+      this.#emit({
+        type: AnomalyType.THOUGHT_SPINNING,
+        severity: Severity.HIGH,
+        processId: state.processId,
+        shortId: state.shortId,
+        taskTitle: state.taskTitle,
+        message: `Near-identical reasoning loop: "${thoughtText}" repeated ${nearCount}x with only minor variation`,
+        data: {
+          thought: thoughtText,
+          count: nearCount,
+          loopKind: "near_identical_reasoning",
+        },
+        action: "kill",
+      });
     } else if (count >= this.#thresholds.thoughtSpinWarn) {
       this.#emit({
         type: AnomalyType.THOUGHT_SPINNING,
@@ -998,6 +1083,21 @@ export class AnomalyDetector {
         taskTitle: state.taskTitle,
         message: `Thought repetition: "${thoughtText}" repeated ${count}x`,
         data: { thought: thoughtText, count },
+        action: "info",
+      });
+    } else if (nearCount >= this.#thresholds.thoughtSpinWarn) {
+      this.#emit({
+        type: AnomalyType.THOUGHT_SPINNING,
+        severity: Severity.LOW,
+        processId: state.processId,
+        shortId: state.shortId,
+        taskTitle: state.taskTitle,
+        message: `Near-identical reasoning streak: "${thoughtText}" repeated ${nearCount}x with only minor variation`,
+        data: {
+          thought: thoughtText,
+          count: nearCount,
+          loopKind: "near_identical_reasoning",
+        },
         action: "info",
       });
     }

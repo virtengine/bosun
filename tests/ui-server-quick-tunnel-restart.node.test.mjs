@@ -156,7 +156,7 @@ describe("ui-server quick tunnel auto-restart with exponential backoff", () => {
 
   it("caps restart delay at a maximum (default 120 seconds)", () => {
     const has120sMax = source.includes("TELEGRAM_UI_QUICK_TUNNEL_RESTART") &&
-      (source.includes("120000") || source.includes("120 * 1000") ||
+      (source.includes("120000") || source.includes("120_000") || source.includes("120 * 1000") ||
        /120\s*\*\s*1000/.test(source));
     assert.ok(
       has120sMax,

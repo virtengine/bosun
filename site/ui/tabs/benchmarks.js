@@ -7,20 +7,20 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic } from "../../../ui/modules/telegram.js";
-import { apiFetch } from "../../../ui/modules/api.js";
+import { haptic } from "../modules/telegram.js";
+import { apiFetch } from "../modules/api.js";
 import {
   benchmarksData,
   benchmarksLoaded,
   loadBenchmarks,
   showToast,
-} from "../../../ui/modules/state.js";
-import { formatRelative } from "../../../ui/modules/utils.js";
+} from "../modules/state.js";
+import { formatRelative } from "../modules/utils.js";
 import {
   activeWorkspaceId,
   loadWorkspaces,
   workspaces,
-} from "../../../ui/components/workspace-switcher.js";
+} from "../components/workspace-switcher.js";
 import {
   Alert,
   Box,

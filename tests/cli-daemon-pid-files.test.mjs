@@ -7,6 +7,12 @@ describe("cli daemon pid tracking", () => {
 
   it("uses a dedicated daemon pid file separate from monitor lock pid file", () => {
     expect(cliSource).toContain(
+      "function resolveRepoRootForCliRuntime(options = {}) {",
+    );
+    expect(cliSource).toContain(
+      'const runtimeRepoRoot = resolveRepoRootForCliRuntime();',
+    );
+    expect(cliSource).toContain(
       "const runtimeCacheDir = resolve(runtimeRepoRoot, \".cache\");",
     );
     expect(cliSource).toContain(
@@ -24,6 +30,9 @@ describe("cli daemon pid tracking", () => {
     expect(cliSource).toContain(
       "readAlivePid(DAEMON_PID_FILE) || readAlivePid(LEGACY_DAEMON_PID_FILE)",
     );
+    expect(cliSource).toContain("const DAEMON_START_STABILITY_MS = Math.max(");
+    expect(cliSource).toContain("function installDaemonPidCleanup() {");
+    expect(cliSource).toContain("if (!isDaemonSupervisorRuntime()) return;");
     expect(cliSource).toContain(
       "writeFileSync(DAEMON_PID_FILE, String(pid), \"utf8\");",
     );
@@ -76,23 +85,68 @@ describe("cli daemon pid tracking", () => {
   it("guards daemon-child startup with singleton ownership of daemon pid file", () => {
     expect(cliSource).toContain("const existingDaemonPid = getDaemonPid();");
     expect(cliSource).toContain("duplicate daemon-child ignored");
+    expect(cliSource).toContain("function isDaemonSupervisorRuntime() {");
   });
 
   it("launches the foreground monitor as a child process instead of a worker thread", () => {
-    expect(cliSource).toContain("monitorChild = spawn(");
+    expect(cliSource).toContain("const spawnMonitorChild = (forceWindowsShell = false) => {");
+    expect(cliSource).toContain("function checkPipedChildProcessLaunch() {");
+    expect(cliSource).toContain("stdio: [\"ignore\", \"pipe\", \"pipe\"]");
+    expect(cliSource).toContain("monitor child spawn preflight blocked");
+    expect(cliSource).toContain("return spawn(");
+    expect(cliSource).toContain("monitorChild = spawnMonitorChild(false);");
     expect(cliSource).toContain("[...runAsNode, monitorPath, ...process.argv.slice(2)]");
     expect(cliSource).not.toContain("monitorChild = new Worker(");
+  });
+
+  it("forwards Ctrl+C shutdown signals to the monitor child instead of waiting indefinitely", () => {
+    expect(cliSource).toContain("function requestMonitorChildShutdown(signal = \"SIGINT\")");
+    expect(cliSource).toContain("function installMonitorChildSignalHandlers() {");
+    expect(cliSource).toContain("if (monitorChildSignalHandlersInstalled) return;");
+    expect(cliSource).toContain("shutdownSignalCount > 1 ? \"SIGTERM\" : signal");
+    expect(cliSource).toContain("monitorChild.kill(requestedSignal)");
+    expect(cliSource).toContain("monitorShutdownForceTimer = setTimeout(() => {");
+    expect(cliSource).toContain("child.kill(\"SIGTERM\")");
+    expect(cliSource).toContain("installMonitorChildSignalHandlers();\n  await runMonitor();");
+    expect(cliSource).toContain("async function startDaemon() {\n  installMonitorChildSignalHandlers();");
   });
 
 
   it("propagates --config-dir/BOSUN_HOME into daemon-child env config dir", () => {
     expect(cliSource).toContain("const configDirArg = getArgValue(\"--config-dir\");");
+    expect(cliSource).toContain("const explicitRepoRoot = getArgValue(\"--repo-root\");");
     expect(cliSource).toContain("if (configDirArg) return resolve(configDirArg);");
-    expect(cliSource).toContain("if (process.env.BOSUN_HOME) return resolve(process.env.BOSUN_HOME);");
+    expect(cliSource).toContain("if (process.env.BOSUN_HOME) return resolveTrustedBosunConfigDir(process.env.BOSUN_HOME, repoRoot);");
+    expect(cliSource).toContain("if (repoRootArg) return resolve(repoRootArg);");
     expect(cliSource).toContain("BOSUN_DIR: process.env.BOSUN_DIR || resolveConfigDirForCli(),");
+    expect(cliSource).toContain("? { REPO_ROOT: resolve(process.env.REPO_ROOT) }");
+    expect(cliSource).toContain("? { REPO_ROOT: resolve(explicitRepoRoot) }");
     expect(cliSource).toContain("function normalizeDetachedDaemonArgs(rawArgs = []) {");
     expect(cliSource).toContain("...normalizeDetachedDaemonArgs(");
   });
+
+  it("uses PowerShell Start-Process for stable Windows daemon detachment", () => {
+    expect(cliSource).toContain("function startDaemonViaWindowsStartProcess(launchSpec) {");
+    expect(cliSource).toContain("Start-Process -FilePath");
+    expect(cliSource).toContain("launching daemon via PowerShell Start-Process for stable Windows detachment");
+  });
+
+  it("falls back to an inline daemon supervisor when Windows child-process launch is blocked", () => {
+    expect(cliSource).toContain("async function startDaemon() {");
+    expect(cliSource).toContain("const launchPreflight =");
+    expect(cliSource).toContain("checkPipedChildProcessLaunch()");
+    expect(cliSource).toContain("daemon detached startup is unavailable on this Windows host");
+    expect(cliSource).toContain("bosun daemon fallback active");
+    expect(cliSource).toContain('await runMonitor({ restartReason: "daemon-inline-fallback" });');
+  });
+
+  it("fails daemon startup when the detached child cannot stay alive through the stability window", () => {
+    expect(cliSource).toContain("const stabilityDeadline = Date.now() + DAEMON_START_STABILITY_MS;");
+    expect(cliSource).toContain(
+      "Detached daemon exited during startup stability window; Windows child-process policy is preventing a durable daemon start in this runtime.",
+    );
+  });
+
   it("supports windows ghost daemon discovery for --daemon-status/--stop-daemon", () => {
     expect(cliSource).toContain("if (process.platform === \"win32\")");
     expect(cliSource).toContain("Get-CimInstance Win32_Process");
@@ -128,7 +182,7 @@ describe("cli daemon pid tracking", () => {
   });
 
   it("treats explicit --sentinel as a standalone command unless daemon mode is requested", () => {
-    expect(cliSource).toContain("sentinelExplicit && !IS_DAEMON_CHILD");
+    expect(cliSource).toContain("sentinelExplicit && !isDaemonSupervisorRuntime()");
     expect(cliSource).toContain(
       "Sentinel started without launching monitor (use --daemon --sentinel to run both).",
     );

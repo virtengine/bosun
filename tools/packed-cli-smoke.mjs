@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getRequiredHarnessRuntimeAssets } from "./prepublish-check.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -154,6 +155,103 @@ function assertPackedCliStarts(installDir) {
   }
 }
 
+function assertPackedRuntimeModulesLoad(installDir) {
+  const requiredStep9Assets = JSON.stringify(getRequiredHarnessRuntimeAssets());
+  const probeOutput = runNode(
+    [
+      "--input-type=module",
+      "--eval",
+      `
+        import { existsSync, mkdtempSync, rmSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { resolve } from "node:path";
+        import { pathToFileURL } from "node:url";
+
+        const installDir = process.cwd();
+        const packageDir = resolve(installDir, "node_modules", "bosun");
+        const requiredStep9Assets = ${requiredStep9Assets};
+
+        for (const asset of requiredStep9Assets) {
+          if (!existsSync(resolve(packageDir, asset))) {
+            throw new Error(\`packed package is missing required Step 9 asset: \${asset}\`);
+          }
+        }
+
+        const skillsModule = await import(pathToFileURL(resolve(packageDir, "agent", "bosun-skills.mjs")).href);
+        const skillsHome = mkdtempSync(resolve(tmpdir(), "bosun-packed-skills-"));
+        try {
+          const result = skillsModule.scaffoldSkills(skillsHome);
+          if (result.written.length !== skillsModule.BUILTIN_SKILLS.length) {
+            throw new Error(\`expected \${skillsModule.BUILTIN_SKILLS.length} scaffolded skills, got \${result.written.length}\`);
+          }
+        } finally {
+          rmSync(skillsHome, { recursive: true, force: true });
+        }
+
+        const codexShellModule = await import(pathToFileURL(resolve(packageDir, "shell", "codex-shell.mjs")).href);
+        if (typeof codexShellModule.initCodexShell !== "function") {
+          throw new Error("packed shell/codex-shell.mjs did not load expected exports");
+        }
+
+        process.env.BOSUN_ENV_NO_OVERRIDE = "1";
+        process.env.TELEGRAM_UI_TLS_DISABLE = "true";
+        process.env.TELEGRAM_UI_ALLOW_UNSAFE = "true";
+        process.env.TELEGRAM_UI_TUNNEL = "disabled";
+        process.env.BOSUN_UI_ALLOW_EPHEMERAL_PORT = "1";
+        process.env.BOSUN_UI_AUTO_OPEN_BROWSER = "false";
+        process.env.BOSUN_UI_BROWSER_OPEN_MODE = "manual";
+        process.env.TELEGRAM_BOT_TOKEN = "";
+        process.env.TELEGRAM_CHAT_ID = "";
+        process.env.KANBAN_BACKEND = "internal";
+
+        const uiServerModule = await import(pathToFileURL(resolve(packageDir, "server", "ui-server.mjs")).href);
+        const server = await uiServerModule.startTelegramUiServer({
+          port: 0,
+          host: "127.0.0.1",
+          skipInstanceLock: true,
+          skipAutoOpen: true,
+        });
+
+        try {
+          const port = server.address().port;
+          const health = await fetch(\`http://127.0.0.1:\${port}/api/health\`);
+          if (!health.ok) {
+            throw new Error(\`packed UI server health probe failed with status \${health.status}\`);
+          }
+
+          const appJs = await fetch(\`http://127.0.0.1:\${port}/app.js?native=1\`);
+          const appJsText = await appJs.text();
+          const appJsContentType = String(appJs.headers.get("content-type") || "").toLowerCase();
+          if (!appJs.ok || appJsText.trim().length < 100 || !appJsContentType.includes("javascript")) {
+            throw new Error("packed UI server failed to serve app.js");
+          }
+
+          const settings = await fetch(\`http://127.0.0.1:\${port}/api/settings\`);
+          const settingsJson = await settings.json();
+          if (!settings.ok || settingsJson?.ok !== true) {
+            throw new Error("packed UI server failed to serve settings payload");
+          }
+
+          if (!existsSync(resolve(packageDir, ".env.example"))) {
+            throw new Error("packed package is missing .env.example");
+          }
+        } finally {
+          uiServerModule.stopTelegramUiServer();
+        }
+
+        console.log("runtime-probes-ok");
+      `,
+    ],
+    {
+      cwd: installDir,
+    },
+  );
+
+  if (!probeOutput.trim().includes("runtime-probes-ok")) {
+    throw new Error("packed runtime probes did not report success");
+  }
+}
+
 function safeRemove(targetPath, label) {
   if (!targetPath) return;
   try {
@@ -178,6 +276,7 @@ function main() {
     tarballPath = packTarball();
     installPackedArtifact(tarballPath, installDir);
     assertPackedCliStarts(installDir);
+    assertPackedRuntimeModulesLoad(installDir);
 
     const manifest = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
     console.log(

@@ -23,17 +23,28 @@ import StatusScreen from "./screens/status.mjs";
 import WorkflowsScreen from "./screens/workflows.mjs";
 import TelemetryScreen from "./screens/telemetry.mjs";
 import SettingsScreen from "./screens/settings.mjs";
+import ConnectionSetupScreen from "./screens/connection-setup.mjs";
 import { readTuiHeaderConfig } from "./lib/header-config.mjs";
-import { listTasksFromApi } from "../ui/tui/tasks-screen-helpers.js";
+import { createTaskApiFromRequestJson, listTasksFromApi } from "../ui/tui/tasks-screen-helpers.js";
 import { useWorkflows } from "../ui/tui/useWorkflows.js";
 import CommandPalette from "./CommandPalette.js";
 import { buildCommandPaletteActions, createCommandPaletteHistoryAdapter } from "./lib/command-palette.mjs";
 import HelpScreen, { getFooterHints, SHORTCUT_GROUPS } from "../ui/tui/HelpScreen.js";
 import {
+  buildCanonicalSessionApiPath,
+  normalizeSessionsUpdatePayload,
+} from "../ui/modules/session-api.js";
+import {
   appendLogEntry,
   createDefaultLogsFilterState,
   ensureLogSource,
 } from "../ui/tui/logs-screen-helpers.js";
+import { buildTuiHttpUrl } from "./lib/ws-bridge.mjs";
+import {
+  ensureLocalBosunBackendRunning,
+  readRemoteConnectionConfig,
+  resolveLocalTuiConnectionTarget,
+} from "./lib/connection-target.mjs";
 
 const CLI_SHORTCUT_TITLES = new Set(["Global", "Tasks screen", "Agents screen", "Modals"]);
 const CLI_SHORTCUT_GROUPS = SHORTCUT_GROUPS.filter((group) => CLI_SHORTCUT_TITLES.has(group.title));
@@ -97,13 +108,22 @@ function isPaletteShortcut(input, key) {
   return input === ":" || isCtrlPaletteShortcut(input, key);
 }
 
-async function fallbackRequestJson(host, port, path, options = {}) {
+function isRemoteAttachTarget(target = {}) {
+  const source = String(target?.source || "").trim().toLowerCase();
+  if (["saved-remote", "cli-endpoint", "cli-host-port"].includes(source)) return true;
+  return Boolean(String(target?.apiKey || "").trim());
+}
+
+async function fallbackRequestJson(host, port, protocol, apiKey, path, options = {}) {
   const headers = {
     Accept: "application/json",
     ...(options.body ? { "Content-Type": "application/json" } : {}),
     ...(options.headers || {}),
   };
-  const response = await fetch(new URL(path, `http://${host}:${port}`).toString(), {
+  if (apiKey && !headers["x-api-key"] && !headers["X-API-Key"]) {
+    headers["x-api-key"] = apiKey;
+  }
+  const response = await fetch(buildTuiHttpUrl({ host, port, path, protocol }), {
     method: options.method || (options.body ? "POST" : "GET"),
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
@@ -115,9 +135,31 @@ async function fallbackRequestJson(host, port, path, options = {}) {
   return payload;
 }
 
-export default function App({ host, port, connectOnly, initialScreen, refreshMs, wsClient, historyAdapter }) {
+export default function App({
+  config,
+  configDir,
+  host,
+  port,
+  protocol = "ws",
+  apiKey = "",
+  connectOnly,
+  initialScreen,
+  refreshMs,
+  wsClient,
+  historyAdapter,
+  connectionSource = "",
+  connectionEndpoint = "",
+}) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const [connectionTarget, setConnectionTarget] = useState(() => ({
+    host,
+    port,
+    protocol,
+    apiKey,
+    source: connectionSource,
+    endpoint: connectionEndpoint,
+  }));
   const [screen, setScreen] = useState(initialScreen || "status");
   const [connected, setConnected] = useState(false);
   const [connectionState, setConnectionState] = useState("offline");
@@ -137,27 +179,61 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
   const [refreshCountdownSec, setRefreshCountdownSec] = useState(toRefreshSeconds(refreshMs));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [recentActionIds, setRecentActionIds] = useState([]);
+  const [connectionSetupOpen, setConnectionSetupOpen] = useState(false);
+  const [connectionSetupReason, setConnectionSetupReason] = useState("");
+  const [everConnected, setEverConnected] = useState(false);
+
+  const resolvedConfigDir = configDir || process.env.BOSUN_DIR || undefined;
+  const resolvedHost = connectionTarget.host || host;
+  const resolvedPort = connectionTarget.port || port;
+  const resolvedProtocol = connectionTarget.protocol || protocol;
+  const resolvedApiKey = connectionTarget.apiKey || "";
 
   const bridge = useMemo(
-    () => wsClient || wsBridgeFactory({ host, port }),
-    [host, port, wsClient],
+    () => wsClient || wsBridgeFactory({
+      host: resolvedHost,
+      port: resolvedPort,
+      protocol: resolvedProtocol,
+      apiKey: resolvedApiKey,
+      configDir: resolvedConfigDir,
+    }),
+    [resolvedApiKey, resolvedConfigDir, resolvedHost, resolvedPort, resolvedProtocol, wsClient],
   );
   const workflowsConfig = useMemo(() => ({}), []);
   const headerConfig = useMemo(
     () => readTuiHeaderConfig(bridge?.configDir),
     [bridge?.configDir],
   );
-  const workflowsState = useWorkflows(workflowsConfig);
+  const localWorkflowsState = useWorkflows(workflowsConfig);
+  const workflowsState = useMemo(() => ({
+    ...localWorkflowsState,
+    workflows,
+    loading: localWorkflowsState.loading && workflows.length === 0,
+    error: localWorkflowsState.error,
+  }), [localWorkflowsState, workflows]);
   const resolvedHistory = useMemo(
     () => historyAdapter || createCommandPaletteHistoryAdapter(),
     [historyAdapter],
   );
+
+  useEffect(() => {
+    setConnectionTarget({
+      host,
+      port,
+      protocol,
+      apiKey,
+      source: connectionSource,
+      endpoint: connectionEndpoint,
+    });
+  }, [apiKey, connectionEndpoint, connectionSource, host, port, protocol]);
+
   const requestJson = useCallback((path, options = {}) => {
     if (typeof bridge?.requestJson === "function") {
       return bridge.requestJson(path, options);
     }
-    return fallbackRequestJson(host, port, path, options);
-  }, [bridge, host, port]);
+    return fallbackRequestJson(resolvedHost, resolvedPort, resolvedProtocol, resolvedApiKey, path, options);
+  }, [bridge, resolvedApiKey, resolvedHost, resolvedPort, resolvedProtocol]);
+  const taskApi = useMemo(() => createTaskApiFromRequestJson(requestJson), [requestJson]);
 
   useEffect(() => {
     const nextRefreshMs = Number(refreshMs || 2000);
@@ -182,7 +258,7 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
     };
     const refreshTasks = async () => {
       try {
-        const nextTasks = await listTasksFromApi();
+        const nextTasks = await listTasksFromApi({}, taskApi);
         if (active) setTasks(nextTasks);
       } catch (err) {
         if (active) setError(String(err?.message || err || "Failed to load tasks"));
@@ -200,7 +276,10 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
 
     on("connect", () => {
       setConnected(true);
+      setEverConnected(true);
       setConnectionState("connected");
+      setConnectionSetupOpen(false);
+      setConnectionSetupReason("");
       setError(null);
       resetRefreshCountdown();
       void refreshTasks().catch(() => {});
@@ -222,6 +301,10 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
     on("error", (err) => {
       const message = err?.message || String(err || "Unknown websocket error");
       setError(message);
+      if (!everConnected && isRemoteAttachTarget(connectionTarget)) {
+        setConnectionSetupReason(message);
+        setConnectionSetupOpen(true);
+      }
       if (message.includes("Max reconnection attempts")) {
         setConnectionState("offline");
       }
@@ -235,11 +318,7 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
       resetRefreshCountdown();
     });
     on("sessions:update", (payload) => {
-      const nextSessions = Array.isArray(payload?.sessions)
-        ? payload.sessions
-        : Array.isArray(payload)
-          ? payload
-          : [];
+      const nextSessions = normalizeSessionsUpdatePayload(payload);
       setSessions(nextSessions);
     });
     on("session:start", (session) => {
@@ -305,7 +384,7 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
         bridge.disconnect();
       }
     };
-  }, [bridge, effectiveRefreshMs, requestJson]);
+  }, [bridge, connectionTarget, effectiveRefreshMs, everConnected, requestJson, taskApi]);
 
   useEffect(() => {
     if (helpOpen) {
@@ -338,7 +417,7 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
       if (action.type === "navigation") {
         setScreen(action.payload.screen);
       } else if (action.type === "session") {
-        await requestJson(`/api/sessions/${encodeURIComponent(action.payload.sessionId)}/${action.command}?workspace=all`, {
+        await requestJson(buildCanonicalSessionApiPath(action.payload.sessionId, action.command, { workspace: "all" }), {
           method: "POST",
         });
       } else if (action.type === "task") {
@@ -428,6 +507,7 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
   }, [exit, helpOpen, maxHelpScrollOffset, screen]);
 
   useInput((input, key) => {
+    if (connectionSetupOpen) return;
     if (paletteOpen) return;
     if (screenInputLocked && !helpOpen) {
       if (isCtrlPaletteShortcut(input, key)) {
@@ -441,15 +521,59 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
 
   const ScreenComponent = SCREENS[screen] || StatusScreen;
   const screenStats = stats;
+  const handleConnectionTargetConnect = useCallback((target) => {
+    setEverConnected(false);
+    setConnected(false);
+    setConnectionState("reconnecting");
+    setConnectionSetupOpen(false);
+    setConnectionSetupReason("");
+    setError(null);
+    setConnectionTarget((current) => ({
+      ...current,
+      ...target,
+    }));
+  }, []);
+  const handleUseLocalConnection = useCallback(async () => {
+    const localTarget = resolveLocalTuiConnectionTarget({
+      configDir: resolvedConfigDir || bridge?.configDir,
+      config,
+      env: process.env,
+    });
+    handleConnectionTargetConnect(localTarget);
+  }, [bridge?.configDir, config, handleConnectionTargetConnect, resolvedConfigDir]);
+  const handleLaunchLocalConnection = useCallback(async () => {
+    const result = await ensureLocalBosunBackendRunning({
+      configDir: resolvedConfigDir || bridge?.configDir,
+      config,
+      env: process.env,
+      timeoutMs: 20000,
+    });
+    if (!result?.ok || !result?.target) {
+      throw new Error(result?.error || "Local backend did not start");
+    }
+    handleConnectionTargetConnect(result.target);
+    return result.target;
+  }, [bridge?.configDir, config, handleConnectionTargetConnect, resolvedConfigDir]);
+  const connectionConfigSnapshot = useMemo(
+    () => readRemoteConnectionConfig(resolvedConfigDir || bridge?.configDir),
+    [bridge?.configDir, connectionTarget.endpoint, connectionTarget.source, resolvedApiKey, resolvedConfigDir],
+  );
   const settingsState = {
-    configDir: bridge?.configDir,
-    host,
-    port,
-    protocol: bridge?.protocol,
+    configDir: resolvedConfigDir || bridge?.configDir,
+    host: resolvedHost,
+    port: resolvedPort,
+    protocol: bridge?.protocol || resolvedProtocol,
+    apiKey: resolvedApiKey,
     refreshMs,
     projectLabel: headerConfig.projectLabel,
     configuredProviders: headerConfig.configuredProviders,
     connectionState,
+    connectionSource: connectionTarget.source,
+    connectionEndpoint: connectionTarget.endpoint,
+    authMode: resolvedApiKey ? "api-key" : "local-token",
+    activeConnectionId: connectionConfigSnapshot.activeConnectionId,
+    remoteConnections: connectionConfigSnapshot.connections,
+    localConnection: connectionConfigSnapshot.localConnection,
   };
   const footerText = (footerHints || []).map(([keysLabel, description]) => `${keysLabel} ${description}`).join("  |  ");
 
@@ -470,6 +594,9 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
         projectLabel=${headerConfig.projectLabel}
         configuredProviders=${headerConfig.configuredProviders}
         refreshCountdownSec=${refreshCountdownSec}
+        connectionSource=${connectionTarget.source}
+        connectionEndpoint=${connectionTarget.endpoint}
+        authMode=${settingsState.authMode}
       />
       <${ScreenTabs} screen=${screen} />
       <${Box} flexDirection="column" flexGrow=${1}>
@@ -480,26 +607,46 @@ export default function App({ host, port, connectOnly, initialScreen, refreshMs,
               <//>
             `
           : null}
-        <${ScreenComponent}
-          stats=${screenStats}
-          sessions=${sessions}
-          tasks=${tasks}
-          logs=${logs}
-          workflowEvents=${workflowEvents}
-          workflowsState=${workflowsState}
-          settingsState=${settingsState}
-          logsFilterState=${logsFilterState}
-          wsBridge=${bridge}
-          host=${host}
-          port=${port}
-          connectOnly=${connectOnly}
+        ${connectionSetupOpen
+          ? html`
+              <${ConnectionSetupScreen}
+                configDir=${resolvedConfigDir || bridge?.configDir}
+                initialEndpoint=${connectionTarget.endpoint || ""}
+                initialApiKey=${resolvedApiKey}
+                initialError=${connectionSetupReason}
+                onConnect=${handleConnectionTargetConnect}
+                onLaunchLocal=${handleLaunchLocalConnection}
+                onUseLocal=${handleUseLocalConnection}
+                onInputCaptureChange=${setScreenInputLocked}
+              />
+            `
+          : html`
+              <${ScreenComponent}
+                stats=${screenStats}
+                sessions=${sessions}
+                tasks=${tasks}
+                logs=${logs}
+                workflowEvents=${workflowEvents}
+                workflowsState=${workflowsState}
+                settingsState=${settingsState}
+                logsFilterState=${logsFilterState}
+                wsBridge=${bridge}
+                host=${resolvedHost}
+                port=${resolvedPort}
+                requestJson=${requestJson}
+                connectOnly=${connectOnly}
           refreshMs=${effectiveRefreshMs}
           onTasksChange=${setTasks}
           onLogsFilterStateChange=${setLogsFilterState}
           onInputCaptureChange=${setScreenInputLocked}
           onFooterHintsChange=${setFooterHints}
+          onOpenConnectionManager=${() => {
+            setConnectionSetupReason("");
+            setConnectionSetupOpen(true);
+          }}
         />
-        ${helpOpen
+            `}
+        ${helpOpen && !connectionSetupOpen
           ? html`
               <${Box} flexDirection="column" marginTop=${1}>
                 <${HelpScreen}

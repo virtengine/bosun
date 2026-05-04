@@ -29,10 +29,10 @@ import {
 
 const html = htm.bind(h);
 
-import { ICONS } from "../../../ui/modules/icons.js";
-import { navigateTo, TAB_CONFIG, activeTab } from "../../../ui/modules/router.js";
-import { sendCommandToChat } from "../../../ui/modules/api.js";
-import { executorData, refreshTab } from "../../../ui/modules/state.js";
+import { ICONS } from "../modules/icons.js";
+import { navigateTo, TAB_CONFIG, activeTab } from "../modules/router.js";
+import { sendCommandToChat } from "../modules/api.js";
+import { executorData, refreshTab } from "../modules/state.js";
 
 /* ═══════════════════════════════════════════════
  *  Palette Items

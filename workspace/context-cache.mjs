@@ -40,9 +40,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const TAG = "[context-cache]";
+const TOOL_LOG_SCHEMA_VERSION = 2;
 
 /** Cache directory lives alongside bosun's logs/ directory */
-const TOOL_LOG_DIR = resolve(__dirname, "..", ".cache", "tool-logs");
+const TOOL_LOG_DIR = resolve(
+  process.env.BOSUN_TOOL_LOG_DIR || resolve(__dirname, "..", ".cache", "tool-logs"),
+);
 
 /** Default max age for cached entries: 24 hours */
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -50,7 +53,7 @@ const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** Monotonic counter — reset per process, files use timestamp + counter */
 let _logCounter = 0;
 
-/** In-memory index: logId → { file, ts, toolName, argsPreview } */
+/** In-memory index: logId → { file, ts, toolName, argsPreview, pointer } */
 const _logIndex = new Map();
 
 // ---------------------------------------------------------------------------
@@ -200,6 +203,234 @@ async function ensureCacheDir() {
   await fs.mkdir(TOOL_LOG_DIR, { recursive: true });
 }
 
+function buildToolLogRetrieveCommand(logId) {
+  const numericId = Number(logId);
+  return Number.isFinite(numericId) && numericId > 0
+    ? `bosun --tool-log ${numericId}`
+    : null;
+}
+
+function safePositiveInteger(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0
+    ? Math.max(0, Math.trunc(numeric))
+    : fallback;
+}
+
+function normalizeSpillStage(value, fallback = "tool_log") {
+  const text = String(value || "").trim();
+  return text || fallback;
+}
+
+function normalizeSpillTier(value, fallback = "spill") {
+  const text = String(value || "").trim();
+  return text || fallback;
+}
+
+function inferSpillTier({ compressionKind = null, budgetPolicy = null, inlineMode = null, fallback = "spill" } = {}) {
+  const kind = String(compressionKind || "").trim().toLowerCase();
+  const policy = String(budgetPolicy || "").trim().toLowerCase();
+  const mode = String(inlineMode || "").trim().toLowerCase();
+  if (kind.includes("tier1")) return "tier1";
+  if (kind.includes("tier2")) return "tier2";
+  if (kind.includes("tier3")) return "tier3";
+  if (kind.includes("breadcrumb") || kind.includes("summary")) return "summary";
+  if (kind.includes("signal") || kind.includes("delta")) return "structured";
+  if (kind.includes("preview")) return "preview";
+  if (policy === "structured-delta") return "structured";
+  if (policy === "artifact-summary") return "summary";
+  if (policy === "artifact-excerpt" || policy === "inline-excerpt") return "preview";
+  if (mode === "delta-summary") return "structured";
+  if (mode === "minimal-summary") return "summary";
+  if (mode === "bounded-excerpt" || mode === "selected-lines") return "preview";
+  return fallback;
+}
+
+function cloneSpillPointer(pointer) {
+  if (!pointer || typeof pointer !== "object") return null;
+  return JSON.parse(JSON.stringify(pointer));
+}
+
+function deriveTextFormat(item) {
+  const itemText = getItemText(item);
+  if (typeof itemText === "string" && itemText.trim()) return "text";
+  return "json";
+}
+
+function buildToolLogSpillPointer({
+  logId,
+  filePath = null,
+  ts = Date.now(),
+  toolName = "unknown",
+  argsPreview = "",
+  source = "context-cache",
+  stage = "tool_log",
+  tier = null,
+  compressionKind = null,
+  compactionMode = null,
+  family = null,
+  commandFamily = null,
+  budgetPolicy = null,
+  originalChars = 0,
+  retainedChars = 0,
+  originalBytes = 0,
+  retainedBytes = 0,
+  format = "text",
+} = {}) {
+  const numericId = Number(logId);
+  if (!Number.isFinite(numericId) || numericId < 1) return null;
+  const retrieveCommand = buildToolLogRetrieveCommand(numericId);
+  return {
+    schemaVersion: TOOL_LOG_SCHEMA_VERSION,
+    kind: "tool-log",
+    storage: "disk",
+    logId: numericId,
+    filePath: filePath ? String(filePath) : null,
+    retrieveCommand,
+    retrievable: Boolean(retrieveCommand),
+    source: String(source || "context-cache"),
+    stage: normalizeSpillStage(stage, "tool_log"),
+    tier: normalizeSpillTier(
+      tier,
+      inferSpillTier({ compressionKind, budgetPolicy, fallback: "spill" }),
+    ),
+    compressionKind: String(compressionKind || "").trim() || null,
+    compactionMode: String(compactionMode || "").trim() || null,
+    family: String(family || "").trim() || null,
+    commandFamily: String(commandFamily || "").trim() || null,
+    budgetPolicy: String(budgetPolicy || "").trim() || null,
+    format: String(format || "text"),
+    toolName: String(toolName || "unknown"),
+    argsPreview: String(argsPreview || ""),
+    originalChars: safePositiveInteger(originalChars, 0),
+    retainedChars: safePositiveInteger(retainedChars, 0),
+    originalBytes: safePositiveInteger(originalBytes, 0),
+    retainedBytes: safePositiveInteger(retainedBytes, 0),
+    createdAt: Number.isFinite(Number(ts)) ? Number(ts) : Date.now(),
+  };
+}
+
+function resolveDecisionSpillMetadata(decision = null) {
+  if (!decision || typeof decision !== "object") return {};
+  return {
+    source: decision.source || null,
+    stage: decision.stage || null,
+    tier: decision.tier || null,
+    compressionKind: decision.compressionKind || null,
+    compactionMode: decision.compactionMode || null,
+    family: decision.family || null,
+    commandFamily: decision.commandFamily || null,
+    budgetPolicy: decision.budgetPolicy || null,
+    originalChars: decision.originalChars,
+    retainedChars: decision.retainedChars,
+    originalBytes: decision.originalBytes,
+    retainedBytes: decision.retainedBytes,
+    format: decision.format || null,
+  };
+}
+
+function createToolLogSpillPointerFromEntry(entry, overrides = {}) {
+  if (!entry || typeof entry !== "object") return null;
+  const decisionMeta = resolveDecisionSpillMetadata(entry.decision);
+  return buildToolLogSpillPointer({
+    logId: overrides.logId ?? entry.id,
+    filePath: overrides.filePath ?? entry.filePath ?? null,
+    ts: overrides.ts ?? entry.ts,
+    toolName: overrides.toolName ?? entry.toolName,
+    argsPreview: overrides.argsPreview ?? entry.argsPreview,
+    source: overrides.source ?? decisionMeta.source ?? "context-cache",
+    stage: overrides.stage ?? decisionMeta.stage ?? "tool_log",
+    tier: overrides.tier ?? decisionMeta.tier,
+    compressionKind: overrides.compressionKind ?? decisionMeta.compressionKind,
+    compactionMode: overrides.compactionMode ?? decisionMeta.compactionMode,
+    family: overrides.family ?? decisionMeta.family,
+    commandFamily: overrides.commandFamily ?? decisionMeta.commandFamily,
+    budgetPolicy: overrides.budgetPolicy ?? decisionMeta.budgetPolicy,
+    originalChars: overrides.originalChars ?? decisionMeta.originalChars ?? getItemText(entry.item).length,
+    retainedChars: overrides.retainedChars ?? decisionMeta.retainedChars ?? 0,
+    originalBytes: overrides.originalBytes ?? decisionMeta.originalBytes ?? Buffer.byteLength(safeJsonStringify(entry.item ?? ""), "utf8"),
+    retainedBytes: overrides.retainedBytes ?? decisionMeta.retainedBytes ?? 0,
+    format: overrides.format ?? decisionMeta.format ?? deriveTextFormat(entry.item),
+  });
+}
+
+function attachSpillPointer(item, pointer) {
+  if (!item || typeof item !== "object" || !pointer) return item;
+  const nextItem = { ...item, _spillPointer: cloneSpillPointer(pointer) };
+  if (nextItem._cachedLogId == null && pointer.logId != null) {
+    nextItem._cachedLogId = pointer.logId;
+  }
+  return nextItem;
+}
+
+function buildItemSpillPointer(logId, originalItem, retainedItem, overrides = {}) {
+  const originalText = getItemText(originalItem);
+  const retainedText = getItemText(retainedItem);
+  return resolveToolLogSpillPointer(logId, {
+    toolName: extractToolName(originalItem),
+    argsPreview: extractArgsPreview(originalItem),
+    originalChars: originalText.length,
+    retainedChars: retainedText.length,
+    originalBytes: Buffer.byteLength(safeJsonStringify(originalItem), "utf8"),
+    retainedBytes: Buffer.byteLength(safeJsonStringify(retainedItem), "utf8"),
+    format: deriveTextFormat(originalItem),
+    ...overrides,
+  });
+}
+
+export function resolveToolLogSpillPointer(logId, overrides = {}) {
+  const numericId = Number(logId);
+  if (!Number.isFinite(numericId) || numericId < 1) return null;
+  const indexEntry = _logIndex.get(numericId);
+  if (indexEntry?.pointer && !overrides?.refresh) {
+    return cloneSpillPointer({
+      ...indexEntry.pointer,
+      ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)),
+    });
+  }
+  return buildToolLogSpillPointer({
+    logId: numericId,
+    filePath: overrides.filePath ?? indexEntry?.file ?? resolve(TOOL_LOG_DIR, `${numericId}.json`),
+    ts: overrides.ts ?? indexEntry?.ts ?? Date.now(),
+    toolName: overrides.toolName ?? indexEntry?.toolName ?? "unknown",
+    argsPreview: overrides.argsPreview ?? indexEntry?.argsPreview ?? "",
+    source: overrides.source ?? "context-cache",
+    stage: overrides.stage ?? "tool_log",
+    tier: overrides.tier,
+    compressionKind: overrides.compressionKind,
+    compactionMode: overrides.compactionMode,
+    family: overrides.family,
+    commandFamily: overrides.commandFamily,
+    budgetPolicy: overrides.budgetPolicy,
+    originalChars: overrides.originalChars ?? 0,
+    retainedChars: overrides.retainedChars ?? 0,
+    originalBytes: overrides.originalBytes ?? 0,
+    retainedBytes: overrides.retainedBytes ?? 0,
+    format: overrides.format ?? "text",
+  });
+}
+
+export function getItemSpillPointer(item) {
+  if (!item || typeof item !== "object") return null;
+  if (item._spillPointer && typeof item._spillPointer === "object") {
+    return cloneSpillPointer(item._spillPointer);
+  }
+  if (item._cachedLogId != null) {
+    return resolveToolLogSpillPointer(item._cachedLogId, {
+      stage: item._liveCompacted ? "live_tool_compaction" : "historical_tool_compaction",
+      tier: item._compressed ? inferSpillTier({ compressionKind: item._compressed }) : undefined,
+      compressionKind: item._compressed || undefined,
+      family: item._liveCompactionFamily || item._contextEnvelope?.meta?.family || undefined,
+      commandFamily: item._liveCompactionCommandFamily || item._contextEnvelope?.meta?.commandFamily || undefined,
+      budgetPolicy: item._semanticBudgetPolicy || item._contextEnvelope?.meta?.budgetPolicy || undefined,
+      retainedChars: getItemText(item).length,
+      retainedBytes: Buffer.byteLength(getItemText(item), "utf8"),
+      format: deriveTextFormat(item),
+    });
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Cache Write
 // ---------------------------------------------------------------------------
@@ -221,6 +452,8 @@ async function writeToCache(item, toolName, argsPreview, decision = null) {
   const logId = Date.now() * 1000 + _logCounter; // unique, sortable
   const filename = `${logId}.json`;
   const filepath = resolve(TOOL_LOG_DIR, filename);
+  const originalText = getItemText(item);
+  const serializedItem = safeJsonStringify(item);
 
   const entry = {
     id: logId,
@@ -230,6 +463,12 @@ async function writeToCache(item, toolName, argsPreview, decision = null) {
     ...(decision && typeof decision === "object" ? { decision } : {}),
     item,
   };
+  entry.filePath = filepath;
+  entry.pointer = createToolLogSpillPointerFromEntry(entry, {
+    filePath: filepath,
+    originalChars: resolveDecisionSpillMetadata(decision).originalChars ?? originalText.length,
+    originalBytes: resolveDecisionSpillMetadata(decision).originalBytes ?? Buffer.byteLength(serializedItem, "utf8"),
+  });
 
   try {
     await fs.writeFile(filepath, JSON.stringify(entry), "utf8");
@@ -238,6 +477,7 @@ async function writeToCache(item, toolName, argsPreview, decision = null) {
       ts: entry.ts,
       toolName: entry.toolName,
       argsPreview: entry.argsPreview,
+      pointer: cloneSpillPointer(entry.pointer),
     });
 
     // Optionally keep full content in memory for fast retrieval
@@ -268,10 +508,19 @@ async function updateCachedDecision(logId, decision) {
     const raw = await fs.readFile(filepath, "utf8");
     const entry = JSON.parse(raw);
     entry.decision = decision;
+    entry.pointer = createToolLogSpillPointerFromEntry(entry, entry.pointer || {});
     await fs.writeFile(filepath, JSON.stringify(entry), "utf8");
+    const indexEntry = _logIndex.get(numericId);
+    if (indexEntry) {
+      _logIndex.set(numericId, {
+        ...indexEntry,
+        pointer: cloneSpillPointer(entry.pointer),
+      });
+    }
     const memEntry = _contentCache.get(numericId);
     if (memEntry?.entry) {
       memEntry.entry.decision = decision;
+      memEntry.entry.pointer = cloneSpillPointer(entry.pointer);
     }
   } catch {
     // best effort only
@@ -296,7 +545,8 @@ export async function retrieveToolLog(id) {
   // Fast path: in-memory content cache (only populated when toolLogCache.enabled = true)
   const memEntry = _contentCache.get(numId);
   if (memEntry) {
-    return { found: true, entry: memEntry.entry, fromMemCache: true };
+    const pointer = createToolLogSpillPointerFromEntry(memEntry.entry, memEntry.entry.pointer || {});
+    return { found: true, entry: { ...memEntry.entry, pointer }, spillPointer: pointer, fromMemCache: true };
   }
 
   // Try in-memory index first
@@ -307,7 +557,14 @@ export async function retrieveToolLog(id) {
     const fs = await getFs();
     const raw = await fs.readFile(filepath, "utf8");
     const entry = JSON.parse(raw);
-    return { found: true, entry };
+    const pointer = createToolLogSpillPointerFromEntry(entry, {
+      filePath: entry.filePath || filepath,
+      ...(entry.pointer && typeof entry.pointer === "object" ? entry.pointer : {}),
+    });
+    if (pointer && !entry.pointer) {
+      entry.pointer = pointer;
+    }
+    return { found: true, entry, spillPointer: pointer };
   } catch (err) {
     if (err.code === "ENOENT") {
       return { found: false, error: `Tool log ${numId} not found (may have been pruned)` };
@@ -338,12 +595,17 @@ export async function listToolLogs(limit = 20) {
       try {
         const raw = await fs.readFile(resolve(TOOL_LOG_DIR, f), "utf8");
         const entry = JSON.parse(raw);
+        const pointer = createToolLogSpillPointerFromEntry(entry, {
+          filePath: entry.filePath || resolve(TOOL_LOG_DIR, f),
+          ...(entry.pointer && typeof entry.pointer === "object" ? entry.pointer : {}),
+        });
         results.push({
           id: entry.id,
           ts: entry.ts,
           toolName: entry.toolName,
           argsPreview: entry.argsPreview,
           decision: entry.decision || null,
+          pointer,
         });
       } catch {
         // skip corrupt entries
@@ -420,6 +682,69 @@ function getItemText(item) {
     (item.error && typeof item.error === "object" ? item.error.message : "") ||
     ""
   );
+}
+
+function getCompressionMessageId(item) {
+  const value =
+    item?.id
+    ?? item?.messageId
+    ?? item?.toolCallId
+    ?? item?.callId
+    ?? null;
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function getCompressionTurnIndex(item) {
+  const value = Number(item?.turnIndex ?? item?._turnIndex ?? item?.turn ?? NaN);
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : null;
+}
+
+function buildCompressionEventPayload({
+  item = null,
+  beforeText = "",
+  afterText = "",
+  sessionId = null,
+  stage = null,
+  decision = "compressed",
+  reason = null,
+  agentType = null,
+  sessionType = null,
+  normalizedSessionType = null,
+  compactionFamily = null,
+  commandFamily = null,
+  compressionKind = null,
+  cachedLogId = null,
+}) {
+  const originalChars = String(beforeText || "").length;
+  const compressedChars = String(afterText || "").length;
+  const savedChars = Math.max(0, originalChars - compressedChars);
+  const savedPct = originalChars > 0
+    ? Math.max(0, Math.round((savedChars / originalChars) * 100))
+    : 0;
+  return {
+    originalChars,
+    compressedChars,
+    savedChars,
+    savedPct,
+    ...(agentType ? { agentType } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(stage ? { stage } : {}),
+    ...(decision ? { decision } : {}),
+    ...(reason ? { reason } : {}),
+    ...(sessionType ? { sessionType } : {}),
+    ...(normalizedSessionType ? { normalizedSessionType } : {}),
+    ...(compactionFamily ? { compactionFamily } : {}),
+    ...(commandFamily ? { commandFamily } : {}),
+    ...(compressionKind ? { compressionKind } : {}),
+    ...(cachedLogId ? { cachedLogId } : {}),
+    ...(item?.type ? { itemType: String(item.type) } : {}),
+    ...(item?.role ? { itemRole: String(item.role) } : {}),
+    ...(getCompressionMessageId(item) ? { messageId: getCompressionMessageId(item) } : {}),
+    ...(getCompressionTurnIndex(item) != null ? { turnIndex: getCompressionTurnIndex(item) } : {}),
+    beforePreview: truncateCompactedPreviewText(beforeText, { maxChars: 3200, tailChars: 600 }).text,
+    afterPreview: truncateCompactedPreviewText(afterText, { maxChars: 3200, tailChars: 600 }).text,
+  };
 }
 
 /**
@@ -1160,7 +1485,8 @@ export function buildContextEnvelope({
       if (!item || typeof item !== "object") continue;
       const compressedTag = String(item._compressed || "").trim().toLowerCase();
       const text = String(item.text || item.output || item.aggregated_output || "").toLowerCase();
-      const hasToolPlaceholder = Boolean(item._cachedLogId) || text.includes("full output: bosun --tool-log") || text.includes(" chars compressed");
+      const spillPointer = getItemSpillPointer(item);
+      const hasToolPlaceholder = Boolean(item._cachedLogId) || Boolean(spillPointer?.retrievable) || text.includes("full output: bosun --tool-log") || text.includes(" chars compressed");
       if (compressedTag.startsWith("agent_")) { counts.agent += 1; continue; }
       if (compressedTag === "user_breadcrumb") { counts.user += 1; continue; }
       if (hasToolPlaceholder) {
@@ -1393,7 +1719,13 @@ function shouldApplyLiveCompaction(item, opts, contextUsagePct, force = false) {
 async function compactStandaloneToolItem(
   item,
   opts = {},
-  { agentType = null, force = false } = {},
+  {
+    agentType = null,
+    force = false,
+    sessionId = null,
+    sessionType = null,
+    normalizedSessionType = null,
+  } = {},
 ) {
   if (!item || typeof item !== "object") return item;
   const existingText = getItemText(item);
@@ -1408,9 +1740,15 @@ async function compactStandaloneToolItem(
   if (directGitClass) {
     const diagnostic = await analyzeCommandDiagnosticForItem(item);
     const logId = await writeToCache(item, extractToolName(item), extractArgsPreview(item), {
+      source: "context-cache",
+      stage: "live_tool_compaction",
+      tier: "tier2",
+      compressionKind: "git_tier2",
+      compactionMode: "bounded-excerpt",
       family: "git",
       commandFamily: extractCommandFamily(item),
       budgetPolicy: diagnostic?.deltaSummary ? "structured-delta" : "artifact-excerpt",
+      originalChars: existingText.length,
     });
     const compactedItem = applyImmediateGitCompression(item, logId, opts);
     if (diagnostic) {
@@ -1429,17 +1767,34 @@ async function compactStandaloneToolItem(
       directArtifact: true,
     });
     await updateCachedDecision(logId, envelope?.meta || null);
-    recordShreddingEvent({
-      originalChars: existingText.length,
-      compressedChars: compactedText.length,
-      savedChars: Math.max(0, existingText.length - compactedText.length),
-      savedPct: Math.max(0, Math.round(((existingText.length - compactedText.length) / Math.max(1, existingText.length)) * 100)),
-      agentType: agentType || null,
+    const spillPointer = buildItemSpillPointer(logId, item, compactedItem, {
       stage: "live_tool_compaction",
+      tier: "tier2",
+      source: "context-cache",
+      compressionKind: "git_tier2",
+      compactionMode: "bounded-excerpt",
+      family: "git",
+      commandFamily: extractCommandFamily(item),
+      budgetPolicy: envelope?.meta?.budgetPolicy || "artifact-excerpt",
+    });
+    const pointerBoundItem = attachSpillPointer(compactedItem, spillPointer);
+    recordShreddingEvent(buildCompressionEventPayload({
+      item: pointerBoundItem,
+      beforeText: existingText,
+      afterText: getItemText(pointerBoundItem),
+      sessionId,
+      stage: "live_tool_compaction",
+      decision: "compressed",
+      reason: "Live compaction converted a large git payload into a bounded excerpt with retrieval hints.",
+      agentType,
+      sessionType,
+      normalizedSessionType,
       compactionFamily: "git",
       commandFamily: extractCommandFamily(item),
-    });
-    return compactedItem;
+      compressionKind: "git_tier2",
+      cachedLogId: logId,
+    }));
+    return pointerBoundItem;
   }
 
   const analysis = analyzeLiveToolOutput(item, opts, { force });
@@ -1447,11 +1802,22 @@ async function compactStandaloneToolItem(
   if (analysis) {
     const diagnostic = await analyzeCommandDiagnosticForItem(item);
     const logId = await writeToCache(item, extractToolName(item), extractArgsPreview(item), {
+      source: "context-cache",
+      stage: "live_tool_compaction",
+      tier: inferSpillTier({
+        compressionKind: "live_signal_excerpt",
+        budgetPolicy: liveBudgetPolicy?.name || liveBudgetPolicy?.budget?.decision,
+        inlineMode: liveBudgetPolicy?.inlineMode,
+        fallback: "structured",
+      }),
+      compressionKind: "live_signal_excerpt",
+      compactionMode: liveBudgetPolicy?.inlineMode || "selected-lines",
       family: analysis.family,
       commandFamily: analysis.commandFamily,
       budgetPolicy: diagnostic?.deltaSummary ? "structured-delta" : "inline-excerpt",
+      originalChars: analysis.originalText.length,
     });
-    const compactedItem = {
+    const compactedItemBase = {
       ...item,
       _cachedLogId: logId,
       _liveCompacted: true,
@@ -1459,17 +1825,17 @@ async function compactStandaloneToolItem(
       _liveCompactionCommandFamily: analysis.commandFamily,
       _liveCompactionPolicy: liveBudgetPolicy,
     };
-    if (diagnostic) compactedItem._commandDiagnostics = diagnostic;
+    if (diagnostic) compactedItemBase._commandDiagnostics = diagnostic;
     setItemText(
-      compactedItem,
+      compactedItemBase,
       appendCommandDiagnosticFooter(
         renderLiveCompactionText(analysis, logId, opts),
         diagnostic,
         opts,
       ),
     );
-    const compactedText = getItemText(compactedItem);
-    const envelope = attachCommandEnvelope(compactedItem, {
+    const compactedText = getItemText(compactedItemBase);
+    const envelope = attachCommandEnvelope(compactedItemBase, {
       family: analysis.family,
       commandFamily: analysis.commandFamily,
       diagnostic,
@@ -1479,27 +1845,54 @@ async function compactStandaloneToolItem(
       excerptStrategy: "selected-lines",
     });
     await updateCachedDecision(logId, envelope?.meta || null);
-    recordShreddingEvent({
-      originalChars: analysis.originalText.length,
-      compressedChars: compactedText.length,
-      savedChars: Math.max(0, analysis.originalText.length - compactedText.length),
-      savedPct: analysis.savedPct,
-      agentType: agentType || null,
+    const compactedItem = attachSpillPointer(compactedItemBase, buildItemSpillPointer(logId, item, compactedItemBase, {
       stage: "live_tool_compaction",
+      tier: inferSpillTier({
+        budgetPolicy: envelope?.meta?.budgetPolicy,
+        inlineMode: liveBudgetPolicy?.inlineMode,
+        compressionKind: "live_signal_excerpt",
+        fallback: "structured",
+      }),
+      source: "context-cache",
+      compressionKind: "live_signal_excerpt",
+      compactionMode: liveBudgetPolicy?.inlineMode || "selected-lines",
+      family: analysis.family,
+      commandFamily: analysis.commandFamily,
+      budgetPolicy: envelope?.meta?.budgetPolicy || compactedItemBase._semanticBudgetPolicy || "inline-excerpt",
+    }));
+    recordShreddingEvent(buildCompressionEventPayload({
+      item: compactedItem,
+      beforeText: analysis.originalText,
+      afterText: compactedText,
+      sessionId,
+      stage: "live_tool_compaction",
+      decision: "compressed",
+      reason: "Live compaction extracted high-signal lines from a large command result before it entered retained context.",
+      agentType,
+      sessionType,
+      normalizedSessionType,
       compactionFamily: analysis.family,
       commandFamily: analysis.commandFamily,
-    });
+      compressionKind: "live_signal_excerpt",
+      cachedLogId: logId,
+    }));
     return compactedItem;
   }
 
   const diagnostic = await analyzeCommandDiagnosticForItem(item);
   const fallbackFamily = classifyLiveFamily(extractCommandFamily(item), item);
   const logId = await writeToCache(item, extractToolName(item), extractArgsPreview(item), {
+    source: "context-cache",
+    stage: "live_tool_compaction",
+    tier: diagnostic?.insufficientSignal ? "summary" : "structured",
+    compressionKind: "live_generic_excerpt",
+    compactionMode: diagnostic?.insufficientSignal ? "minimal-summary" : "signal-first",
     family: fallbackFamily,
     commandFamily: extractCommandFamily(item),
     budgetPolicy: diagnostic?.insufficientSignal ? "artifact-summary" : "inline-excerpt",
+    originalChars: existingText.length,
   });
-  const compactedItem = {
+  const compactedItemBase = {
     ...item,
     _cachedLogId: logId,
     _liveCompacted: true,
@@ -1516,20 +1909,20 @@ async function compactStandaloneToolItem(
       why: ["family:generic", "fallback-signal-excerpt"],
     },
   };
-  if (diagnostic) compactedItem._commandDiagnostics = diagnostic;
+  if (diagnostic) compactedItemBase._commandDiagnostics = diagnostic;
   setItemText(
-    compactedItem,
+    compactedItemBase,
     appendCommandDiagnosticFooter(
       renderGenericSignalExcerptText(item, logId, opts),
       diagnostic,
       opts,
     ),
   );
-  const compactedText = getItemText(compactedItem);
+  const compactedText = getItemText(compactedItemBase);
   if (!compactedText || compactedText.length >= existingText.length) {
     return item;
   }
-  const envelope = attachCommandEnvelope(compactedItem, {
+  const envelope = attachCommandEnvelope(compactedItemBase, {
     family: fallbackFamily,
     commandFamily: extractCommandFamily(item),
     diagnostic,
@@ -1540,20 +1933,48 @@ async function compactStandaloneToolItem(
     directArtifact: diagnostic?.insufficientSignal === true,
   });
   await updateCachedDecision(logId, envelope?.meta || null);
-  recordShreddingEvent({
-    originalChars: existingText.length,
-    compressedChars: compactedText.length,
-    savedChars: Math.max(0, existingText.length - compactedText.length),
-    savedPct: Math.max(0, Math.round(((existingText.length - compactedText.length) / Math.max(1, existingText.length)) * 100)),
-    agentType: agentType || null,
+  const compactedItem = attachSpillPointer(compactedItemBase, buildItemSpillPointer(logId, item, compactedItemBase, {
     stage: "live_tool_compaction",
+    tier: inferSpillTier({
+      budgetPolicy: envelope?.meta?.budgetPolicy,
+      inlineMode: compactedItemBase?._liveCompactionPolicy?.budget?.decision,
+      compressionKind: "live_generic_excerpt",
+      fallback: diagnostic?.insufficientSignal ? "summary" : "structured",
+    }),
+    source: "context-cache",
+    compressionKind: "live_generic_excerpt",
+    compactionMode: diagnostic?.insufficientSignal ? "minimal-summary" : "signal-first",
+    family: fallbackFamily,
+    commandFamily: extractCommandFamily(item),
+    budgetPolicy: envelope?.meta?.budgetPolicy || compactedItemBase._semanticBudgetPolicy || "artifact-summary",
+  }));
+  recordShreddingEvent(buildCompressionEventPayload({
+    item: compactedItem,
+    beforeText: existingText,
+    afterText: compactedText,
+    sessionId,
+    stage: "live_tool_compaction",
+    decision: "compressed",
+    reason: "Live compaction fell back to a generic signal-first excerpt to keep the command output retrievable but smaller.",
+    agentType,
+    sessionType,
+    normalizedSessionType,
     compactionFamily: fallbackFamily,
     commandFamily: extractCommandFamily(item),
-  });
+    compressionKind: "live_generic_excerpt",
+    cachedLogId: logId,
+  }));
   return compactedItem;
 }
 
-async function maybeCompactLiveToolOutputs(items, opts = {}, { contextUsagePct = null, force = false, agentType = null } = {}) {
+async function maybeCompactLiveToolOutputs(items, opts = {}, {
+  contextUsagePct = null,
+  force = false,
+  agentType = null,
+  sessionId = null,
+  sessionType = null,
+  normalizedSessionType = null,
+} = {}) {
   if (!Array.isArray(items) || items.length === 0) return items;
   let changed = false;
   const nextItems = [];
@@ -1566,7 +1987,13 @@ async function maybeCompactLiveToolOutputs(items, opts = {}, { contextUsagePct =
       nextItems.push(item);
       continue;
     }
-    const compactedItem = await compactStandaloneToolItem(item, opts, { agentType, force });
+    const compactedItem = await compactStandaloneToolItem(item, opts, {
+      agentType,
+      force,
+      sessionId,
+      sessionType,
+      normalizedSessionType,
+    });
     nextItems.push(compactedItem);
     changed = changed || compactedItem !== item;
   }
@@ -1633,6 +2060,7 @@ export async function compactCommandOutputPayload(
   const compactedItem = compactedItems[0] || syntheticItem;
   const compactedText = String(getItemText(compactedItem) || combinedText).trim();
   const toolLogId = compactedItem?._cachedLogId || null;
+  const spillPointer = getItemSpillPointer(compactedItem);
   const commandDiagnostics = compactedItem?._commandDiagnostics || null;
   const contextEnvelope = compactedItem?._contextEnvelope || buildContextEnvelope({
     scope: "command",
@@ -1661,6 +2089,7 @@ export async function compactCommandOutputPayload(
     compactedChars: compactedText.length,
     item: compactedItem,
     toolLogId,
+    spillPointer,
     retrieveCommand: toolLogId ? `bosun --tool-log ${toolLogId}` : null,
     compactionFamily: compactedItem?._liveCompactionFamily || null,
     commandFamily: compactedItem?._liveCompactionCommandFamily || extractCommandFamily(syntheticItem),
@@ -1800,7 +2229,7 @@ function compressImmediateGitText(text, logId, opts) {
 }
 
 function applyImmediateGitCompression(item, logId, opts) {
-  const compressed = {
+  const compressedBase = {
     ...item,
     _cachedLogId: logId,
     _compressed: "git_tier2",
@@ -1818,8 +2247,17 @@ function applyImmediateGitCompression(item, logId, opts) {
       why: ["family:generic", "fallback-signal-excerpt"],
     },
   };
-  setItemText(compressed, compressImmediateGitText(getItemText(item), logId, opts));
-  return compressed;
+  setItemText(compressedBase, compressImmediateGitText(getItemText(item), logId, opts));
+  return attachSpillPointer(compressedBase, buildItemSpillPointer(logId, item, compressedBase, {
+    stage: "historical_tool_compaction",
+    tier: "tier2",
+    source: "context-cache",
+    compressionKind: "git_tier2",
+    compactionMode: "bounded-excerpt",
+    family: "git",
+    commandFamily: extractCommandFamily(item),
+    budgetPolicy: "artifact-excerpt",
+  }));
 }
 // ---------------------------------------------------------------------------
 // Tiered Compression
@@ -1890,11 +2328,22 @@ function applyCompression(item, logId, tier, opts) {
 
   if (tier === 3) {
     // Skeleton — replace the entire item with a minimal summary
-    return {
+    const compressed = {
       type: item.type || "context_compressed",
       _cachedLogId: logId,
+      _compressed: "tool_tier3",
       text: compressTier3(item, logId),
     };
+    return attachSpillPointer(compressed, buildItemSpillPointer(logId, item, compressed, {
+      stage: "historical_tool_compaction",
+      tier: "tier3",
+      source: "context-cache",
+      compressionKind: "tool_tier3",
+      compactionMode: "skeleton-summary",
+      family: "tool-output",
+      commandFamily: extractCommandFamily(item),
+      budgetPolicy: "artifact-summary",
+    }));
   }
 
   const compressor = tier === 1
@@ -1902,6 +2351,7 @@ function applyCompression(item, logId, tier, opts) {
     : (text, id) => compressTier2(text, id, opts);
   const next = { ...item };
   next._cachedLogId = logId;
+  next._compressed = tier === 1 ? "tool_tier1" : "tool_tier2";
 
   // Compress all text-bearing fields
   const textKeys = ["text", "output", "aggregated_output", "result", "message"];
@@ -1920,7 +2370,16 @@ function applyCompression(item, logId, tier, opts) {
     });
   }
 
-  return next;
+  return attachSpillPointer(next, buildItemSpillPointer(logId, item, next, {
+    stage: "historical_tool_compaction",
+    tier: tier === 1 ? "tier1" : "tier2",
+    source: "context-cache",
+    compressionKind: next._compressed,
+    compactionMode: tier === 1 ? "head-tail-wide" : "head-tail-tight",
+    family: "tool-output",
+    commandFamily: extractCommandFamily(item),
+    budgetPolicy: tier === 1 ? "artifact-excerpt" : "inline-excerpt",
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -2522,11 +2981,14 @@ export async function cacheAndCompressItems(items, options = {}) {
 
   const result = [];
   const cachePromises = [];
+  const trace = options?._compressionTrace && typeof options._compressionTrace === "object"
+    ? { ...options._compressionTrace }
+    : null;
 
   for (const { item, turn } of turnItems) {
     const age = maxTurn - turn;
     processCompressItem(
-      item, age, scores, actionPaths, result, cachePromises, opts,
+      item, age, scores, actionPaths, result, cachePromises, opts, trace,
     );
   }
 
@@ -2548,7 +3010,7 @@ export async function cacheAndCompressItems(items, options = {}) {
  * @param {Array} result     Mutated — items are pushed here
  * @param {Array} cachePromises  Mutated — cache promises pushed here
  */
-function processCompressItem(item, age, scores, actionPaths, result, cachePromises, opts) {
+function processCompressItem(item, age, scores, actionPaths, result, cachePromises, opts, trace = null) {
   const immediateGitOutput = classifyImmediateGitOutput(item, opts);
   if (immediateGitOutput && !item._cachedLogId) {
     const toolName = extractToolName(item);
@@ -2556,8 +3018,37 @@ function processCompressItem(item, age, scores, actionPaths, result, cachePromis
     const cacheIdx = result.length;
     result.push(item);
     cachePromises.push(
-      writeToCache(item, toolName, argsPreview).then((logId) => {
-        result[cacheIdx] = applyImmediateGitCompression(item, logId, opts);
+      writeToCache(item, toolName, argsPreview, {
+        source: "context-cache",
+        stage: "historical_tool_compaction",
+        tier: "tier2",
+        compressionKind: "git_tier2",
+        compactionMode: "bounded-excerpt",
+        family: "git",
+        commandFamily: extractCommandFamily(item),
+        budgetPolicy: "artifact-excerpt",
+        originalChars: getItemText(item).length,
+      }).then((logId) => {
+        const nextItem = applyImmediateGitCompression(item, logId, opts);
+        result[cacheIdx] = nextItem;
+        if (trace) {
+          recordShreddingEvent(buildCompressionEventPayload({
+            item: nextItem,
+            beforeText: getItemText(item),
+            afterText: getItemText(nextItem),
+            sessionId: trace.sessionId,
+            stage: "historical_tool_compaction",
+            decision: "compressed",
+            reason: "Immediate git output cap compacted an oversized diff or status payload.",
+            agentType: trace.agentType,
+            sessionType: trace.sessionType,
+            normalizedSessionType: trace.normalizedSessionType,
+            compactionFamily: "git",
+            commandFamily: extractCommandFamily(item),
+            compressionKind: "git_tier2",
+            cachedLogId: logId,
+          }));
+        }
       }),
     );
     return;
@@ -2580,7 +3071,26 @@ function processCompressItem(item, age, scores, actionPaths, result, cachePromis
 
   // Already compressed? Re-apply at potentially more aggressive tier
   if (item._cachedLogId) {
-    result.push(applyCompression(item, item._cachedLogId, tier, opts));
+    const nextItem = applyCompression(item, item._cachedLogId, tier, opts);
+    result.push(nextItem);
+    if (trace) {
+      recordShreddingEvent(buildCompressionEventPayload({
+        item: nextItem,
+        beforeText: getItemText(item),
+        afterText: getItemText(nextItem),
+        sessionId: trace.sessionId,
+        stage: "historical_tool_compaction",
+        decision: "compressed",
+        reason: "An older tool output was re-compacted at a more aggressive context tier.",
+        agentType: trace.agentType,
+        sessionType: trace.sessionType,
+        normalizedSessionType: trace.normalizedSessionType,
+        compactionFamily: "tool-output",
+        commandFamily: extractCommandFamily(item),
+        compressionKind: `tool_tier${tier}`,
+        cachedLogId: item._cachedLogId,
+      }));
+    }
     return;
   }
 
@@ -2591,9 +3101,40 @@ function processCompressItem(item, age, scores, actionPaths, result, cachePromis
   result.push(item); // placeholder — will be replaced
 
   cachePromises.push(
-    writeToCache(item, toolName, argsPreview).then((logId) => {
+    writeToCache(item, toolName, argsPreview, {
+      source: "context-cache",
+      stage: "historical_tool_compaction",
+      tier: tier === 1 ? "tier1" : tier === 2 ? "tier2" : "tier3",
+      compressionKind: `tool_tier${tier}`,
+      compactionMode: tier === 1 ? "head-tail-wide" : tier === 2 ? "head-tail-tight" : "skeleton-summary",
+      family: "tool-output",
+      commandFamily: extractCommandFamily(item),
+      budgetPolicy: tier === 3 ? "artifact-summary" : tier === 1 ? "artifact-excerpt" : "inline-excerpt",
+      originalChars: getItemText(item).length,
+    }).then((logId) => {
       const smartResult = trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId, opts);
-      result[cacheIdx] = smartResult || applyCompression(item, logId, tier, opts);
+      const nextItem = smartResult || applyCompression(item, logId, tier, opts);
+      result[cacheIdx] = nextItem;
+      if (trace) {
+        recordShreddingEvent(buildCompressionEventPayload({
+          item: nextItem,
+          beforeText: getItemText(item),
+          afterText: getItemText(nextItem),
+          sessionId: trace.sessionId,
+          stage: "historical_tool_compaction",
+          decision: "compressed",
+          reason: smartResult
+            ? "A low-signal historical search result was compacted to keep only action-relevant lines."
+            : "An older tool output was compacted to reduce retained session context.",
+          agentType: trace.agentType,
+          sessionType: trace.sessionType,
+          normalizedSessionType: trace.normalizedSessionType,
+          compactionFamily: smartResult ? "search" : "tool-output",
+          commandFamily: extractCommandFamily(item),
+          compressionKind: smartResult ? "search_signal_excerpt" : `tool_tier${tier}`,
+          cachedLogId: logId,
+        }));
+      }
     }),
   );
 }
@@ -2614,9 +3155,18 @@ function trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId, o
   const smartText = smartCompressSearchResult(text, actionPaths, logId);
   if (!smartText) return null;
 
-  const compressed = { ...item, _cachedLogId: logId };
+  const compressed = { ...item, _cachedLogId: logId, _compressed: "search_signal_excerpt" };
   setItemText(compressed, smartText);
-  return compressed;
+  return attachSpillPointer(compressed, buildItemSpillPointer(logId, item, compressed, {
+    stage: "historical_tool_compaction",
+    tier: "structured",
+    source: "context-cache",
+    compressionKind: "search_signal_excerpt",
+    compactionMode: "action-aware-signal-lines",
+    family: "search",
+    commandFamily: extractCommandFamily(item),
+    budgetPolicy: "inline-excerpt",
+  }));
 }
 
 // ===========================================================================
@@ -2927,7 +3477,7 @@ export async function compressAllItems(items, options = {}) {
   }
 
   // Step 1: Apply tool output compression (existing system)
-  let result = await cacheAndCompressItems(items, opts);
+  let result = await cacheAndCompressItems(items, options);
 
   // Step 2: Apply message compression to agent + user messages
   // Skip entirely if message compression is turned off
@@ -2939,35 +3489,56 @@ export async function compressAllItems(items, options = {}) {
   // Not enough turns to need message compression yet
   if (maxTurn < 2) return result;
 
-  result = turnItems.map(({ item, turn }) => {
+  const trace = options?._compressionTrace && typeof options._compressionTrace === "object"
+    ? { ...options._compressionTrace }
+    : null;
+  const nextItems = [];
+  for (const { item, turn } of turnItems) {
     const age = maxTurn - turn;
     const kind = classifyItem(item);
 
     // Pinned: never compress
-    if (kind === "pinned") return item;
+    if (kind === "pinned") {
+      nextItems.push(item);
+      continue;
+    }
 
     // Tool outputs: already compressed by cacheAndCompressItems
-    if (kind === "tool_output") return item;
+    if (kind === "tool_output") {
+      nextItems.push(item);
+      continue;
+    }
 
     // Other/unknown: pass through
-    if (kind === "other") return item;
+    if (kind === "other") {
+      nextItems.push(item);
+      continue;
+    }
 
     // Agent messages: tiered compression based on age
     if (kind === "agent_msg") {
-      if (!opts.compressAgentMessages) return item;
-      return compressAgentMessage(item, age, opts);
+      if (!opts.compressAgentMessages) {
+        nextItems.push(item);
+        continue;
+      }
+      nextItems.push(await compressAgentMessage(item, age, opts, trace));
+      continue;
     }
 
     // User messages: compress after the current turn
     if (kind === "user_msg") {
-      if (!opts.compressUserMessages) return item;
-      return compressUserMessage(item, age, opts);
+      if (!opts.compressUserMessages) {
+        nextItems.push(item);
+        continue;
+      }
+      nextItems.push(await compressUserMessage(item, age, opts, trace));
+      continue;
     }
 
-    return item;
-  });
+    nextItems.push(item);
+  }
 
-  return result;
+  return nextItems;
 }
 
 /**
@@ -2977,7 +3548,71 @@ export async function compressAllItems(items, options = {}) {
  * @param {number} age   Turns since this message
  * @returns {object}     Possibly compressed item
  */
-function compressAgentMessage(item, age, opts) {
+async function cacheCompressedMessageSnapshot(item, compressedItem, trace = null, compressionKind = null, reason = null) {
+  const beforeText = getItemText(item);
+  const afterText = getItemText(compressedItem);
+  let cachedLogId = compressedItem?._cachedLogId || item?._cachedLogId || null;
+  if (!cachedLogId && beforeText) {
+    const synthetic = {
+      id: getCompressionMessageId(item) || undefined,
+      type: item?.type || "agent_message",
+      role: item?.role,
+      text: beforeText,
+    };
+    cachedLogId = await writeToCache(
+      synthetic,
+      item?.type || item?.role || "context-message",
+      `${item?.role || item?.type || "message"}:${getCompressionMessageId(item) || "snapshot"}`,
+      {
+        source: "context-cache",
+        stage: "message_compaction",
+        tier: inferSpillTier({ compressionKind, fallback: compressionKind === "user_breadcrumb" ? "summary" : "preview" }),
+        compressionKind,
+        compactionMode: compressionKind === "user_breadcrumb" ? "breadcrumb" : "message-summary",
+        family: "message",
+        commandFamily: item?.role || item?.type || "message",
+        budgetPolicy: compressionKind === "user_breadcrumb" ? "artifact-summary" : "inline-excerpt",
+        originalChars: beforeText.length,
+      },
+    );
+  }
+  const nextItem = cachedLogId
+    ? attachSpillPointer(
+      { ...compressedItem, _cachedLogId: compressedItem?._cachedLogId || cachedLogId },
+      buildItemSpillPointer(cachedLogId, item, compressedItem, {
+        stage: "message_compaction",
+        tier: inferSpillTier({ compressionKind, fallback: compressionKind === "user_breadcrumb" ? "summary" : "preview" }),
+        source: "context-cache",
+        compressionKind,
+        compactionMode: compressionKind === "user_breadcrumb" ? "breadcrumb" : "message-summary",
+        family: "message",
+        commandFamily: item?.role || item?.type || "message",
+        budgetPolicy: compressionKind === "user_breadcrumb" ? "artifact-summary" : "inline-excerpt",
+      }),
+    )
+    : compressedItem;
+  if (trace) {
+    recordShreddingEvent(buildCompressionEventPayload({
+      item: nextItem,
+      beforeText,
+      afterText,
+      sessionId: trace.sessionId,
+      stage: "message_compaction",
+      decision: "compressed",
+      reason,
+      agentType: trace.agentType,
+      sessionType: trace.sessionType,
+      normalizedSessionType: trace.normalizedSessionType,
+      compactionFamily: "message",
+      commandFamily: item?.role || item?.type || "message",
+      compressionKind,
+      cachedLogId,
+    }));
+  }
+  return nextItem;
+}
+
+async function compressAgentMessage(item, age, opts, trace = null) {
   const minChars = opts?.msgMinCompressChars ?? MSG_MIN_COMPRESS_CHARS;
   const tier0Age  = opts?.msgTier0MaxAge     ?? MSG_TIER_0_MAX_AGE;
   const tier1Age  = opts?.msgTier1MaxAge     ?? MSG_TIER_1_MAX_AGE;
@@ -2993,22 +3628,24 @@ function compressAgentMessage(item, age, opts) {
     const summary = summarizeAgentMessage(text);
     const preview = text.length > 200 ? text.slice(0, 200) + "…" : text;
     if (preview.length >= text.length - 20) return item; // not worth compressing
-    return {
+    return await cacheCompressedMessageSnapshot(item, {
       ...item,
       text: `${summary}\n\n[…${text.length - 200} chars of agent reasoning compressed]`,
       _originalLength: text.length,
       _compressed: "agent_tier1",
-    };
+    }, trace, "agent_tier1", "An older assistant message was reduced to a summary plus a short retained excerpt.");
   }
 
   // Tier 2: breadcrumb only (5+ turns old)
   const summary = summarizeAgentMessage(text);
-  return {
+  return await cacheCompressedMessageSnapshot(item, {
     type: item.type || "agent_message",
+    id: item.id,
+    role: item.role,
     text: `[Agent: ${summary}]`,
     _originalLength: text.length,
     _compressed: "agent_tier2",
-  };
+  }, trace, "agent_tier2", "An older assistant message was collapsed to a breadcrumb to preserve only the core intent.");
 }
 
 /**
@@ -3018,7 +3655,7 @@ function compressAgentMessage(item, age, opts) {
  * @param {number} age   Turns since this message
  * @returns {object}     Possibly compressed item
  */
-function compressUserMessage(item, age, opts) {
+async function compressUserMessage(item, age, opts, trace = null) {
   const minChars  = opts?.msgMinCompressChars ?? MSG_MIN_COMPRESS_CHARS;
   const fullTurns = opts?.userMsgFullTurns    ?? USER_MSG_FULL_TURNS;
 
@@ -3031,13 +3668,14 @@ function compressUserMessage(item, age, opts) {
   // Strip the TOOL_OUTPUT_GUARDRAIL and system prompt before summarizing
   // so the breadcrumb only captures the user's actual request
   const summary = summarizeUserMessage(text);
-  return {
+  return await cacheCompressedMessageSnapshot(item, {
     type: item.type || "user_message",
+    id: item.id,
     role: item.role,
     text: summary,
     _originalLength: text.length,
     _compressed: "user_breadcrumb",
-  };
+  }, trace, "user_breadcrumb", "An older user prompt was reduced to a breadcrumb so it no longer occupies full context.");
 }
 
 // ---------------------------------------------------------------------------
@@ -3080,6 +3718,145 @@ export function estimateContextUsagePct(items, contextWindowTokens = 128_000) {
   );
   const estimatedTokens = totalChars / CHARS_PER_TOKEN;
   return Math.min(estimatedTokens / contextWindowTokens, 1.0);
+}
+
+function cloneJson(value) {
+  if (value == null) return value ?? null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return JSON.stringify({ type: typeof value, preview: String(value) }, null, 2);
+  }
+}
+
+export async function spillToolOutputToCache(output, options = {}) {
+  const format = typeof output === "string" ? "text" : "json";
+  const serialized = format === "text" ? String(output ?? "") : safeJsonStringify(output);
+  const syntheticItem = {
+    type: "tool_output_spill",
+    tool_name: String(options.toolName || "tool-output"),
+    arguments: options.argsPreview ? { preview: String(options.argsPreview) } : undefined,
+    output: serialized,
+  };
+  const decision = {
+    source: options.source || "tool-output-truncation",
+    stage: options.stage || "tool_output_truncation",
+    tier: options.tier || "preview",
+    compressionKind: options.compressionKind || "tool_output_preview",
+    compactionMode: options.compactionMode || "bounded-preview",
+    family: options.family || "tool-output",
+    commandFamily: options.commandFamily || "tool-output",
+    budgetPolicy: options.budgetPolicy || "preview-pointer",
+    originalChars: safePositiveInteger(options.originalChars, serialized.length),
+    retainedChars: safePositiveInteger(options.retainedChars, 0),
+    originalBytes: safePositiveInteger(options.originalBytes, Buffer.byteLength(serialized, "utf8")),
+    retainedBytes: safePositiveInteger(options.retainedBytes, 0),
+    format,
+  };
+  const logId = await writeToCache(
+    syntheticItem,
+    syntheticItem.tool_name,
+    String(options.argsPreview || ""),
+    decision,
+  );
+  return resolveToolLogSpillPointer(logId, decision);
+}
+
+export function truncateCompactedPreviewText(text, options = {}) {
+  const value = String(text ?? "");
+  const maxChars = Number.isFinite(Number(options.maxChars))
+    ? Math.max(1, Math.trunc(Number(options.maxChars)))
+    : 4000;
+  const marker = String(options.marker ?? "…truncated");
+  if (value.length <= maxChars) {
+    return {
+      text: value,
+      truncated: false,
+      originalChars: value.length,
+      retainedChars: value.length,
+    };
+  }
+  const tailChars = Number.isFinite(Number(options.tailChars))
+    ? Math.max(0, Math.trunc(Number(options.tailChars)))
+    : Math.min(400, Math.floor(maxChars * 0.2));
+  const headChars = Math.max(0, maxChars - tailChars - marker.length - 2);
+  const nextValue = `${value.slice(0, headChars)}\n${marker}\n${tailChars > 0 ? value.slice(-tailChars) : ""}`;
+  return {
+    text: nextValue,
+    truncated: true,
+    originalChars: value.length,
+    retainedChars: nextValue.length,
+  };
+}
+
+export function truncateCompactedToolOutput(output, options = {}) {
+  const format = typeof output === "string" ? "text" : "json";
+  const serialized = format === "text" ? String(output ?? "") : safeJsonStringify(output);
+  const truncatedText = truncateCompactedPreviewText(serialized, options);
+  const originalBytes = Buffer.byteLength(serialized, "utf8");
+  const retainedBytes = Buffer.byteLength(truncatedText.text, "utf8");
+  if (!truncatedText.truncated) {
+    return {
+      format,
+      data: format === "text" ? serialized : cloneJson(output),
+      preview: serialized,
+      truncated: false,
+      originalChars: truncatedText.originalChars,
+      retainedChars: truncatedText.retainedChars,
+      originalBytes,
+      retainedBytes,
+    };
+  }
+  return {
+    format,
+    data: format === "text"
+      ? truncatedText.text
+      : {
+          truncated: true,
+          preview: truncatedText.text,
+        },
+    preview: truncatedText.text,
+    truncated: true,
+    originalChars: truncatedText.originalChars,
+    retainedChars: truncatedText.retainedChars,
+    originalBytes,
+    retainedBytes,
+  };
+}
+
+export function normalizeContextShreddingSessionType(value, fallback = "primary") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === "workflow" || raw === "pipeline-stage" || raw.startsWith("flow")) {
+    return "flow";
+  }
+  if (raw === "subagent" || raw === "delegate") {
+    return "delegate";
+  }
+  if (raw === "voice-dispatch" || raw === "voice" || raw.startsWith("voice-")) {
+    return "voice";
+  }
+  return raw;
+}
+
+function countSessionChars(items) {
+  return Array.isArray(items)
+    ? items.reduce((sum, item) => sum + (getItemText(item)?.length || 0), 0)
+    : 0;
+}
+
+function buildCoverageEventStats(items) {
+  const originalChars = countSessionChars(items);
+  return {
+    originalChars,
+    compressedChars: originalChars,
+    savedChars: 0,
+    savedPct: 0,
+  };
 }
 
 /**
@@ -3198,7 +3975,11 @@ export function recordShreddingEvent(stats) {
   if (!stats || typeof stats !== "object") return;
   const { originalChars = 0, compressedChars = 0, savedChars = 0, savedPct = 0,
           agentType = null, attemptId = null, taskId = null, stage = null,
-          compactionFamily = null, commandFamily = null } = stats;
+          compactionFamily = null, commandFamily = null, sessionType = null,
+          normalizedSessionType = null, decision = null, reason = null,
+          sessionId = null, messageId = null, turnIndex = null, cachedLogId = null,
+          itemType = null, itemRole = null, compressionKind = null,
+          beforePreview = null, afterPreview = null } = stats;
 
   // Skip no-op events (nothing to report)
   if (originalChars === 0 && compressedChars === 0) return;
@@ -3215,6 +3996,19 @@ export function recordShreddingEvent(stats) {
     ...(stage      ? { stage }      : {}),
     ...(compactionFamily ? { compactionFamily } : {}),
     ...(commandFamily ? { commandFamily } : {}),
+    ...(sessionType ? { sessionType } : {}),
+    ...(normalizedSessionType ? { normalizedSessionType } : {}),
+    ...(decision ? { decision } : {}),
+    ...(reason ? { reason } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(messageId ? { messageId } : {}),
+    ...(Number.isFinite(Number(turnIndex)) ? { turnIndex: Math.max(0, Math.trunc(Number(turnIndex))) } : {}),
+    ...(cachedLogId ? { cachedLogId } : {}),
+    ...(itemType ? { itemType } : {}),
+    ...(itemRole ? { itemRole } : {}),
+    ...(compressionKind ? { compressionKind } : {}),
+    ...(beforePreview ? { beforePreview } : {}),
+    ...(afterPreview ? { afterPreview } : {}),
   };
 
   // Ring buffer — evict oldest when full
@@ -3282,10 +4076,24 @@ export function getShreddingLogFile() {
  */
 export async function maybeCompressSessionItems(
   items,
-  { sessionType = "primary", agentType = "", force = false, skip = false } = {},
+  { sessionType = "primary", agentType = "", force = false, skip = false, sessionId = null } = {},
 ) {
   if (!Array.isArray(items) || items.length === 0) return items;
-  if (skip) return items;
+  const rawSessionType = String(sessionType || "").trim().toLowerCase() || "primary";
+  const normalizedSessionType = normalizeContextShreddingSessionType(rawSessionType, "primary");
+  if (skip) {
+    recordShreddingEvent({
+      ...buildCoverageEventStats(items),
+      agentType: agentType || "unknown",
+      stage: "session_skipped",
+      sessionType: rawSessionType,
+      normalizedSessionType,
+      decision: "skip_flag",
+      reason: "Caller explicitly skipped context shredding for this turn.",
+      ...(sessionId ? { sessionId } : {}),
+    });
+    return items;
+  }
 
   // Lazy-import config to avoid circular dependency
   const { resolveContextShreddingOptions } = await import(
@@ -3293,7 +4101,7 @@ export async function maybeCompressSessionItems(
   );
 
   const shreddingOpts = {
-    ...resolveContextShreddingOptions(sessionType, agentType),
+    ...resolveContextShreddingOptions(normalizedSessionType, agentType),
     ...Object.fromEntries(Object.entries({
       liveToolCompactionEnabled: arguments[1]?.liveToolCompactionEnabled,
       liveToolCompactionMode: arguments[1]?.liveToolCompactionMode,
@@ -3305,7 +4113,19 @@ export async function maybeCompressSessionItems(
       liveToolCompactionAllowCommands: arguments[1]?.liveToolCompactionAllowCommands,
     }).filter(([, value]) => value !== undefined)),
   };
-  if (shreddingOpts?._skip === true && !force) return items;
+  if (shreddingOpts?._skip === true && !force) {
+    recordShreddingEvent({
+      ...buildCoverageEventStats(items),
+      agentType: agentType || "unknown",
+      stage: "session_skipped",
+      sessionType: rawSessionType,
+      normalizedSessionType,
+      decision: "config_disabled",
+      reason: "Context shredding is disabled for this session type or agent profile.",
+      ...(sessionId ? { sessionId } : {}),
+    });
+    return items;
+  }
 
   const usagePct = estimateContextUsagePct(items);
   const threshold = Number.isFinite(shreddingOpts?.contextUsageThreshold)
@@ -3316,29 +4136,54 @@ export async function maybeCompressSessionItems(
     contextUsagePct: usagePct,
     force,
     agentType,
+    sessionId,
+    sessionType: rawSessionType,
+    normalizedSessionType,
   });
   const workingUsagePct = workingItems === items
     ? usagePct
     : estimateContextUsagePct(workingItems);
 
-  if (!force && workingUsagePct < threshold) return workingItems;
+  if (!force && workingUsagePct < threshold) {
+    recordShreddingEvent({
+      ...estimateSavings(items, workingItems),
+      agentType: agentType || "unknown",
+      stage: "session_skipped",
+      sessionType: rawSessionType,
+      normalizedSessionType,
+      decision: "below_threshold",
+      reason: `Estimated context usage ${Math.round(workingUsagePct * 100)}% stayed below the ${Math.round(threshold * 100)}% shredding threshold.`,
+      ...(sessionId ? { sessionId } : {}),
+    });
+    return workingItems;
+  }
 
   shreddingOpts.contextUsagePct = workingUsagePct;
+  shreddingOpts._compressionTrace = {
+    sessionId,
+    agentType,
+    sessionType: rawSessionType,
+    normalizedSessionType,
+  };
   const compressedItems = await compressAllItems(workingItems, shreddingOpts);
 
   try {
     const savings = estimateSavings(items, compressedItems);
-    if (savings.savedChars > 0) {
-      recordShreddingEvent({ ...savings, agentType: agentType || "unknown", stage: "session_total" });
-    }
+    recordShreddingEvent({
+      ...savings,
+      agentType: agentType || "unknown",
+      stage: "session_total",
+      sessionType: rawSessionType,
+      normalizedSessionType,
+      decision: savings.savedChars > 0 ? "compressed" : "pass_through",
+      reason: savings.savedChars > 0
+        ? "Context shredding reduced the retained session payload."
+        : "This session reached the compaction pipeline but the retained payload stayed effectively unchanged.",
+      ...(sessionId ? { sessionId } : {}),
+    });
   } catch {
     /* non-fatal */
   }
 
   return compressedItems;
 }
-
-
-
-
-

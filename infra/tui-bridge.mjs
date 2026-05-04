@@ -540,6 +540,15 @@ function normalizeRuntimeHealth(runtimeHealth = {}, fallback = {}) {
 
 function normalizeSessionSummary(session = {}) {
   const normalized = session && typeof session === "object" ? { ...session } : {};
+  const createdAt = normalized.createdAt == null
+    ? new Date().toISOString()
+    : String(normalized.createdAt);
+  const lastActiveAt = normalized.lastActiveAt == null
+    ? createdAt
+    : String(normalized.lastActiveAt);
+  const createdAtMs = Date.parse(createdAt);
+  const lastActiveAtMs = Date.parse(lastActiveAt);
+  const now = Date.now();
   const tokenUsage = normalized?.tokenUsage || normalized?.insights?.tokenUsage || null;
   const inputTokens = Number(normalized.inputTokens ?? tokenUsage?.inputTokens ?? 0);
   const outputTokens = Number(normalized.outputTokens ?? tokenUsage?.outputTokens ?? 0);
@@ -573,6 +582,31 @@ function normalizeSessionSummary(session = {}) {
   normalized.totalTokens = Number.isFinite(totalTokens)
     ? Math.max(0, Math.round(totalTokens))
     : (normalized.inputTokens + normalized.outputTokens);
+  normalized.createdAt = createdAt;
+  normalized.lastActiveAt = lastActiveAt;
+  normalized.branch = normalized.branch == null
+    ? (normalized.branchName == null ? null : String(normalized.branchName))
+    : String(normalized.branch);
+  normalized.idleMs = nonNegativeNumber(
+    normalized.idleMs,
+    Number.isFinite(lastActiveAtMs) ? Math.max(0, now - lastActiveAtMs) : 0,
+  );
+  normalized.elapsedMs = nonNegativeNumber(
+    normalized.elapsedMs,
+    Number.isFinite(createdAtMs) ? Math.max(0, now - createdAtMs) : normalized.idleMs,
+  );
+  normalized.recommendation = normalized.recommendation == null
+    ? ""
+    : String(normalized.recommendation);
+  normalized.preview = normalized.preview == null
+    ? (normalized.summary == null ? null : String(normalized.summary))
+    : String(normalized.preview);
+  normalized.lastMessage = normalized.lastMessage == null
+    ? (normalized.agentLastMessage == null ? null : String(normalized.agentLastMessage))
+    : String(normalized.lastMessage);
+  normalized.insights = normalized.insights && typeof normalized.insights === "object"
+    ? { ...normalized.insights }
+    : {};
   normalized.tokenCount = normalized.totalTokens;
   normalized.totalEvents = nonNegativeNumber(normalized.totalEvents, 0);
   normalized.hasEdits = Boolean(normalized.hasEdits);

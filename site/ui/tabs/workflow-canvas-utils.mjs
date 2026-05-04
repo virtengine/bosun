@@ -1,3 +1,8 @@
+import {
+  buildWorkflowDraftFlowchart,
+  normalizeWorkflowFlowchartMetadata,
+} from "../../../lib/workflow-flowchart-utils.mjs";
+
 function deepClone(value) {
   try {
     if (typeof structuredClone === "function") return structuredClone(value);
@@ -22,6 +27,17 @@ function normalizeGroupList(groups = []) {
       collapsed: group?.collapsed === true,
     }))
     .filter((group) => group.id && group.nodeIds.length > 0);
+}
+
+function normalizeText(value, fallback = "") {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
+function uniqueStrings(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => normalizeText(value))
+    .filter(Boolean))];
 }
 
 function escapeRegex(value) {
@@ -186,6 +202,17 @@ function toNodeTypeMap(nodeTypes = []) {
 
 function normalizePortDescriptor(port, direction, index) {
   const fallbackName = index === 0 ? "default" : `${direction}-${index + 1}`;
+  if (typeof port === "string") {
+    const namedPort = port.trim() || fallbackName;
+    return {
+      name: namedPort,
+      label: namedPort,
+      type: "Any",
+      description: "",
+      accepts: [],
+      color: null,
+    };
+  }
   if (!port || typeof port !== "object") {
     return {
       name: fallbackName,
@@ -219,19 +246,39 @@ function isWildcardPortType(type) {
   return normalized === "*" || normalized === "Any";
 }
 
+function normalizePortTypeForCompatibility(type) {
+  const normalized = String(type || "").trim();
+  if (!normalized) return "Any";
+  const lowered = normalized.toLowerCase();
+  if (["*", "any"].includes(lowered)) return "Any";
+  if (["taskdef"].includes(lowered)) return "json";
+  if (["json", "object"].includes(lowered)) return "json";
+  if (["string", "text"].includes(lowered)) return "string";
+  if (["boolean", "bool"].includes(lowered)) return "boolean";
+  if (["number", "numeric", "float", "int", "integer"].includes(lowered)) return "number";
+  return lowered;
+}
+
 function isPortConnectionCompatible(sourcePort, targetPort) {
   if (!sourcePort || !targetPort) return { compatible: true, reason: null };
   const sourceType = String(sourcePort.type || "Any").trim() || "Any";
   const targetType = String(targetPort.type || "Any").trim() || "Any";
+  const normalizedSourceType = normalizePortTypeForCompatibility(sourceType);
+  const normalizedTargetType = normalizePortTypeForCompatibility(targetType);
   const accepted = new Set(
     [targetType, ...(Array.isArray(targetPort.accepts) ? targetPort.accepts : [])]
-      .map((value) => String(value || "").trim())
+      .map((value) => normalizePortTypeForCompatibility(value))
       .filter(Boolean),
   );
-  if (isWildcardPortType(sourceType)) {
+  if (
+    isWildcardPortType(sourceType)
+    || isWildcardPortType(targetType)
+    || accepted.has(normalizePortTypeForCompatibility("*"))
+    || accepted.has(normalizePortTypeForCompatibility("Any"))
+  ) {
     return { compatible: true, reason: null };
   }
-  if (sourceType === targetType || accepted.has(sourceType)) {
+  if (normalizedSourceType === normalizedTargetType || accepted.has(normalizedSourceType)) {
     return { compatible: true, reason: null };
   }
   return {
@@ -318,20 +365,57 @@ export function resolveCanvasNodePorts(node, nodeTypes = []) {
   const typeOutputs = Array.isArray(typeInfo?.outputs) ? typeInfo.outputs : typePorts.outputs;
   const nodeInputs = Array.isArray(node?.inputs) ? node.inputs : null;
   const nodeOutputs = Array.isArray(node?.outputs) ? node.outputs : null;
-  const inputSource = Array.isArray(node?.inputPorts) && node.inputPorts.length
-    ? node.inputPorts
-    : (nodeInputs && nodeInputs.length ? nodeInputs : typeInputs);
-  const outputSource = Array.isArray(node?.outputPorts) && node.outputPorts.length
-    ? node.outputPorts
-    : (nodeOutputs && nodeOutputs.length ? nodeOutputs : typeOutputs);
-  const inputs = (Array.isArray(inputSource) ? inputSource : [])
-    .map((port, index) => normalizePortDescriptor(port, "input", index));
-  const outputs = (Array.isArray(outputSource) ? outputSource : [])
-    .map((port, index) => normalizePortDescriptor(port, "output", index));
+  const inputPorts = normalizePortList(node?.inputPorts, "input");
+  const outputPorts = normalizePortList(node?.outputPorts, "output");
+  const configuredInputs = normalizePortList(nodeInputs, "input");
+  const configuredOutputs = normalizePortList(nodeOutputs, "output");
+  const handlerInputs = normalizePortList(typeInputs, "input");
+  const handlerOutputs = normalizePortList(typeOutputs, "output");
+  const inputs = handlerInputs.length > 0
+    ? handlerInputs
+    : (inputPorts.length > 0
+      ? inputPorts
+      : (configuredInputs.length > 0
+        ? configuredInputs
+        : [normalizePortDescriptor(null, "input", 0)]));
+  let outputs;
+  if (handlerOutputs.length > 0) {
+    const handlerByName = new Map(handlerOutputs.map((port) => [port.name, port]));
+    const storedBase = outputPorts.length > 0 ? outputPorts : configuredOutputs;
+    if (storedBase.length > 0) {
+      const refreshed = storedBase.map((port) => {
+        const handlerPort = handlerByName.get(port.name);
+        return handlerPort ? { ...port, type: handlerPort.type, accepts: handlerPort.accepts } : port;
+      });
+      const storedNames = new Set(storedBase.map((port) => port.name));
+      const additionalConfigured = configuredOutputs.filter(
+        (port) => !storedNames.has(port.name) && !handlerByName.has(port.name),
+      );
+      const missingHandlerPorts = handlerOutputs.filter((port) => !storedNames.has(port.name));
+      outputs = [...refreshed, ...additionalConfigured, ...missingHandlerPorts];
+    } else {
+      outputs = handlerOutputs;
+    }
+  } else if (outputPorts.length > 0 && configuredOutputs.length > 0) {
+    const existingNames = new Set(outputPorts.map((port) => port.name));
+    const additionalConfigured = configuredOutputs.filter((port) => !existingNames.has(port.name));
+    outputs = [...outputPorts, ...additionalConfigured];
+  } else if (outputPorts.length > 0) {
+    outputs = outputPorts;
+  } else if (configuredOutputs.length > 0) {
+    outputs = configuredOutputs;
+  } else {
+    outputs = [normalizePortDescriptor(null, "output", 0)];
+  }
   return {
-    inputs: inputs.length ? inputs : [normalizePortDescriptor(null, "input", 0)],
-    outputs: outputs.length ? outputs : [normalizePortDescriptor(null, "output", 0)],
+    inputs,
+    outputs,
   };
+}
+
+function normalizePortList(ports, direction) {
+  return (Array.isArray(ports) ? ports : [])
+    .map((port, index) => normalizePortDescriptor(port, direction, index));
 }
 
 export function hydrateCanvasEdges(nodes = [], edges = [], nodeTypes = []) {
@@ -666,6 +750,79 @@ export function buildCollapsedGraph(graph = {}) {
     visibleEdges,
     visibleGroups: snapshot.groups,
     collapsedGroups,
+  };
+}
+
+export function buildDraftFlowchartMetadata(graph = {}, flowchart = null) {
+  return buildWorkflowDraftFlowchart({
+    ...(graph || {}),
+    metadata: {
+      ...((graph?.metadata && typeof graph.metadata === "object" && !Array.isArray(graph.metadata)) ? graph.metadata : {}),
+      ...(flowchart ? { flowchart } : {}),
+    },
+  });
+}
+
+export function buildDraftFlowchartMap(graph = {}, flowchart = null) {
+  const snapshot = createGraphSnapshot(graph.nodes, graph.edges, graph.groups);
+  const nodeMap = new Map((snapshot.nodes || []).map((node) => [normalizeText(node?.id), node]).filter(([id]) => id));
+  const groupMap = new Map((snapshot.groups || []).map((group) => [normalizeText(group?.id), group]).filter(([id]) => id));
+  const normalizedFlowchart = flowchart
+    ? normalizeWorkflowFlowchartMetadata(flowchart, snapshot)
+    : null;
+  const metadata = buildDraftFlowchartMetadata(
+    { ...graph, nodes: snapshot.nodes, edges: snapshot.edges, groups: snapshot.groups },
+    normalizedFlowchart,
+  );
+
+  const steps = (metadata?.steps || []).map((step) => {
+    const runtimeNodeIds = uniqueStrings(step.runtimeNodeIds).filter((nodeId) => nodeMap.has(nodeId));
+    const runtimeNodes = runtimeNodeIds.map((nodeId) => nodeMap.get(nodeId)).filter(Boolean);
+    const runtimeNodeLabels = runtimeNodes.map((node) => normalizeText(node?.label, node?.id || "node"));
+    const groupId = normalizeText(step.groupId);
+    const group = groupMap.get(groupId) || null;
+    return {
+      ...step,
+      runtimeNodeIds,
+      runtimeNodes,
+      runtimeNodeLabels,
+      runtimeNodeCount: runtimeNodeIds.length,
+      missingRuntimeNodeIds: uniqueStrings(step.runtimeNodeIds).filter((nodeId) => !nodeMap.has(nodeId)),
+      group,
+      groupId,
+      primaryNodeId: normalizeText(step.primaryNodeId || runtimeNodeIds[0]),
+      isBound: runtimeNodeIds.length > 0,
+    };
+  });
+
+  const stepMap = new Map(steps.map((step) => [step.id, step]));
+  const runtimeNodeToStepId = {};
+  for (const step of steps) {
+    for (const nodeId of step.runtimeNodeIds) {
+      if (!runtimeNodeToStepId[nodeId]) runtimeNodeToStepId[nodeId] = step.id;
+    }
+  }
+
+  const links = (metadata?.links || [])
+    .map((link) => ({
+      ...link,
+      sourceStep: stepMap.get(link.sourceStepId) || null,
+      targetStep: stepMap.get(link.targetStepId) || null,
+      edgeIds: uniqueStrings(link.edgeIds),
+    }))
+    .filter((link) => link.sourceStep && link.targetStep);
+
+  const mappedRuntimeNodeIds = new Set(Object.keys(runtimeNodeToStepId));
+  const unboundRuntimeNodes = (snapshot.nodes || []).filter((node) => !mappedRuntimeNodeIds.has(normalizeText(node?.id)));
+
+  return {
+    ...metadata,
+    steps,
+    links,
+    stepMap,
+    groupMap,
+    runtimeNodeToStepId,
+    unboundRuntimeNodes,
   };
 }
 

@@ -490,8 +490,41 @@ function buildRuntimeState(key, overrides = {}) {
   };
 }
 
+function resolveSessionRuntimeLiveFlag(session) {
+  if (!session || typeof session !== "object") return null;
+  if (typeof session.runtimeIsLive === "boolean") return session.runtimeIsLive;
+  if (typeof session.runtime?.isLive === "boolean") return session.runtime.isLive;
+  if (typeof session.runtimeSnapshot?.isLive === "boolean") return session.runtimeSnapshot.isLive;
+  return null;
+}
+
+function resolveSessionRuntimeAgeMs(session, now = Date.now()) {
+  const recencyAt = getSessionRecencyTimestamp(session);
+  const recencyMs = Date.parse(String(recencyAt || ""));
+  if (!Number.isFinite(recencyMs)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, now - recencyMs);
+}
+
+function buildSessionRecencyRuntimeState(session, lifecycle, options = {}, source = "recency") {
+  if (!lifecycle.isActive) {
+    return buildRuntimeState("stopped", { source: "lifecycle" });
+  }
+  const now = Number(options?.now || Date.now()) || Date.now();
+  const ageMs = resolveSessionRuntimeAgeMs(session, now);
+  if (ageMs <= SESSION_RUNTIME_RECENT_WINDOW_MS) {
+    return buildRuntimeState("recent", { source, ageMs });
+  }
+  if (ageMs >= SESSION_RUNTIME_STALE_WINDOW_MS || !Number.isFinite(ageMs)) {
+    return buildRuntimeState("stale", { source, ageMs });
+  }
+  return buildRuntimeState("idle", { source, ageMs, isLive: false });
+}
+
 export function getSessionRuntimeState(session, options = {}) {
   const lifecycle = getSessionLifecycleState(session);
+  if (!lifecycle.isActive) {
+    return buildRuntimeState("stopped", { source: "lifecycle" });
+  }
   const runtimeKey = normalizeSessionRuntimeKey(
     session?.runtimeState
       || session?.runtimeStatus
@@ -499,23 +532,72 @@ export function getSessionRuntimeState(session, options = {}) {
       || session?.runtimeSnapshot?.state
       || (session?.lifecycleStatus ? "" : session?.status),
   );
+  const runtimeIsLive = resolveSessionRuntimeLiveFlag(session);
   if (runtimeKey) {
-    return buildRuntimeState(runtimeKey, { source: "runtime" });
+    if (runtimeKey === "running" && runtimeIsLive === false) {
+      return buildSessionRecencyRuntimeState(session, lifecycle, options, "runtime");
+    }
+    const now = Number(options?.now || Date.now()) || Date.now();
+    const ageMs = resolveSessionRuntimeAgeMs(session, now);
+    return buildRuntimeState(runtimeKey, {
+      source: "runtime",
+      ageMs: Number.isFinite(ageMs) ? ageMs : null,
+      isLive:
+        runtimeKey === "running"
+          ? (runtimeIsLive === false ? false : true)
+          : (runtimeIsLive === true ? true : false),
+    });
   }
-  if (!lifecycle.isActive) {
-    return buildRuntimeState("stopped", { source: "lifecycle" });
+  return buildSessionRecencyRuntimeState(session, lifecycle, options, "recency");
+}
+
+export function getSessionHistoryState(session, options = {}) {
+  const lifecycle = getSessionLifecycleState(session);
+  const runtime = getSessionRuntimeState(session, options);
+  const inProgress =
+    lifecycle.isActive
+    && (runtime.isLive || runtime.key === "running" || runtime.key === "queued");
+  const isArchived = lifecycle.key === "archived";
+  const isHistoric = !inProgress;
+  const folderPath = String(
+    session?.surface?.repository?.selected?.path
+    || session?.workspaceDir
+    || session?.workspacePath
+    || session?.metadata?.selectedRepoPath
+    || session?.metadata?.workspaceDir
+    || session?.metadata?.workspacePath
+    || "",
+  ).trim() || null;
+
+  let label = "Live session";
+  let tone = "default";
+  if (isArchived) {
+    label = "Archived history";
+    tone = "default";
+  } else if (isHistoric) {
+    label = "Cold reopen ready";
+    tone = runtime.isStale ? "warning" : "info";
+  } else if (runtime.key === "running" || runtime.key === "queued") {
+    label = "Live session";
+    tone = "success";
   }
-  const now = Number(options?.now || Date.now()) || Date.now();
-  const recencyAt = getSessionRecencyTimestamp(session);
-  const recencyMs = Date.parse(String(recencyAt || ""));
-  const ageMs = Number.isFinite(recencyMs) ? Math.max(0, now - recencyMs) : Number.POSITIVE_INFINITY;
-  if (ageMs <= SESSION_RUNTIME_RECENT_WINDOW_MS) {
-    return buildRuntimeState("recent", { source: "recency", ageMs });
-  }
-  if (ageMs >= SESSION_RUNTIME_STALE_WINDOW_MS || !Number.isFinite(ageMs)) {
-    return buildRuntimeState("stale", { source: "recency", ageMs });
-  }
-  return buildRuntimeState("idle", { source: "recency", ageMs, isLive: false });
+
+  return {
+    key: isArchived ? "archived" : (isHistoric ? "historic" : "live"),
+    label,
+    tone,
+    isHistoric,
+    isArchived,
+    isLive: inProgress,
+    canReopenTranscript: Boolean(session && (session.id || session.taskId)),
+    canResumeWork: isArchived || lifecycle.key === "paused",
+    canDeleteHistory: isHistoric,
+    canRevealFolder: Boolean(folderPath),
+    folderPath,
+    reopenLabel: isHistoric ? "Reopen transcript" : "Open session",
+    resumeLabel: isArchived || lifecycle.key === "paused" ? "Resume work" : "",
+    deleteLabel: isHistoric ? "Delete history" : "Delete session",
+  };
 }
 
 export function resolveSessionWorkspaceHint(session, fallback = "active") {
@@ -551,6 +633,68 @@ export function buildSessionApiPath(sessionId, action = "", opts = {}) {
 
   const qs = params.toString();
   return qs ? `${path}?${qs}` : path;
+}
+
+export const buildCanonicalSessionApiPath = buildSessionApiPath;
+
+export function buildSessionsApiPath(opts = {}) {
+  const params = new URLSearchParams();
+
+  const workspace = normalizeWorkspaceHint(opts?.workspace);
+  if (workspace) params.set("workspace", workspace);
+
+  if (opts?.includeHidden === true) params.set("includeHidden", "true");
+
+  for (const key of ["type", "status"]) {
+    const value = String(opts?.[key] || "").trim();
+    if (value) params.set(key, value);
+  }
+
+  if (opts?.query && typeof opts.query === "object") {
+    for (const [key, value] of Object.entries(opts.query)) {
+      if (value == null) continue;
+      const stringValue = String(value).trim();
+      if (!stringValue) continue;
+      params.set(key, stringValue);
+    }
+  }
+
+  const qs = params.toString();
+  return qs ? `/api/sessions?${qs}` : "/api/sessions";
+}
+
+export const buildCanonicalSessionsApiPath = buildSessionsApiPath;
+
+export function normalizeSessionsUpdatePayload(payload) {
+  const sessions = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.sessions)
+      ? payload.sessions
+      : [];
+  return sessions.filter((session) => session && typeof session === "object");
+}
+
+export function normalizeSessionEventPayload(payload = {}) {
+  const session =
+    payload?.session && typeof payload.session === "object"
+      ? { ...payload.session }
+      : {};
+  const event =
+    payload?.event && typeof payload.event === "object"
+      ? { ...payload.event }
+      : { kind: "message", ...(payload?.message ? { message: payload.message } : {}) };
+  const sessionId = String(
+    payload?.sessionId || session?.id || payload?.session?.id || payload?.taskId || "",
+  ).trim();
+  const taskId = String(
+    payload?.taskId || session?.taskId || payload?.session?.taskId || sessionId,
+  ).trim();
+  return {
+    sessionId,
+    taskId,
+    session,
+    event,
+  };
 }
 
 

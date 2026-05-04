@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
 import { MsgHub } from "./msg-hub.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -95,6 +96,14 @@ function resolveTemplate(template, scope) {
 function normalizeFilePaths(paths) {
   if (!Array.isArray(paths)) return [];
   return [...new Set(paths.map((entry) => String(entry || "").trim()).filter(Boolean))];
+}
+
+function normalizePipelineSessionSegment(value, fallback = "session") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-");
+  return normalized || fallback;
 }
 
 function summarizeOutput(result) {
@@ -599,6 +608,46 @@ function buildAgentTaskKey(workflowName, spec, pipelineContext) {
   return parts.map((entry) => String(entry || "").trim()).filter(Boolean).join(":");
 }
 
+function buildManagedPipelineSessionContext(spec, taskInput, context, taskKey) {
+  const task = taskInput?.task || {};
+  const taskId = String(task.taskId || task.id || "").trim() || null;
+  const pipelineRunId = String(context?.pipeline?.runId || "").trim() || null;
+  const workflowName = String(context?.pipeline?.name || "").trim() || "pipeline";
+  const stageName = String(spec.name || spec.id || spec.stage || spec.sdk || "agent").trim() || "agent";
+  const fallbackParentSessionId =
+    String(
+      task.sessionId ||
+      task.parentSessionId ||
+      task.rootSessionId ||
+      taskId ||
+      "",
+    ).trim() || null;
+  const sessionId = [
+    taskId || workflowName,
+    "pipeline",
+    normalizePipelineSessionSegment(stageName, "agent"),
+    normalizePipelineSessionSegment(pipelineRunId || taskKey, "run"),
+  ].join(":");
+  return {
+    taskId,
+    sessionId,
+    sessionScope: taskId ? "pipeline-task" : "pipeline-flow",
+    parentSessionId: fallbackParentSessionId,
+    rootSessionId:
+      String(task.rootSessionId || fallbackParentSessionId || taskId || "").trim() || null,
+    metadata: {
+      source: "workflow-pipeline-agent",
+      pipelineId: String(context?.pipeline?.id || "").trim() || null,
+      pipelineName: workflowName,
+      pipelineKind: String(context?.pipeline?.kind || "").trim() || null,
+      pipelineRunId,
+      stageName,
+      taskId,
+      taskTitle: String(task.title || task.name || "").trim() || null,
+    },
+  };
+}
+
 export function createBosunAgent(spec = {}, services = {}) {
   const normalizedSpec = { timeoutMs: DEFAULT_TIMEOUT_MS, sdk: "auto", ...spec };
   return {
@@ -625,36 +674,31 @@ export function createBosunAgent(spec = {}, services = {}) {
       const abortController = new AbortController();
       const disconnectAbort = relayAbort(context.signal, abortController);
       const taskKey = buildAgentTaskKey(context.pipeline?.name, normalizedSpec, context.pipeline);
+      const managedSession = buildManagedPipelineSessionContext(
+        normalizedSpec,
+        taskInput,
+        context,
+        taskKey,
+      );
+      const harnessAgentService = createHarnessAgentService({ agentPool });
 
       try {
-        let rawResult = null;
-        if (normalizedSpec.autoRecover !== false && typeof agentPool.execWithRetry === "function") {
-          rawResult = await agentPool.execWithRetry(prompt, {
-            taskKey,
-            cwd,
-            timeoutMs,
-            sdk,
-            model,
-            abortController,
-            maxRetries: Number(normalizedSpec.maxRetries ?? 1),
-            maxContinues: Number(normalizedSpec.maxContinues ?? 1),
-          });
-        } else if (typeof agentPool.launchOrResumeThread === "function") {
-          rawResult = await agentPool.launchOrResumeThread(prompt, cwd, timeoutMs, {
-            taskKey,
-            sdk,
-            model,
-            abortController,
-          });
-        } else if (typeof agentPool.launchEphemeralThread === "function") {
-          rawResult = await agentPool.launchEphemeralThread(prompt, cwd, timeoutMs, {
-            sdk,
-            model,
-            abortController,
-          });
-        } else {
-          throw new Error("agentPool does not expose a supported execution method.");
-        }
+        const rawResult = await harnessAgentService.runTask(prompt, {
+          autoRecover: normalizedSpec.autoRecover !== false,
+          taskKey,
+          cwd,
+          timeoutMs,
+          sdk,
+          model,
+          sessionId: managedSession.sessionId,
+          sessionScope: managedSession.sessionScope,
+          parentSessionId: managedSession.parentSessionId,
+          rootSessionId: managedSession.rootSessionId,
+          metadata: managedSession.metadata,
+          abortController,
+          maxRetries: Number(normalizedSpec.maxRetries ?? 1),
+          maxContinues: Number(normalizedSpec.maxContinues ?? 1),
+        });
 
         return {
           success: rawResult?.success !== false,

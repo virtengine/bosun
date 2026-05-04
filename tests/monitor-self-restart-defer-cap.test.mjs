@@ -31,8 +31,23 @@ describe("monitor self-restart defer hard caps", () => {
       "selfRestartForSourceChange(filename, { forceActiveAgentExit: true });",
     );
     expect(monitorSource).toContain("if (activeSlots > 0 && !forceActiveAgentExit)");
+    expect(monitorSource).toContain("if (activeWorkflowRuns > 0)");
     expect(monitorSource).toContain(
       "FORCED self-restart: proceeding with ${activeSlots} active agent(s) after defer hard cap",
+    );
+  });
+
+  it("defers restart while workflow runs are still active", () => {
+    expect(monitorSource).toContain("function getActiveWorkflowRunSummaries()");
+    expect(monitorSource).toContain("reason: `${activeWorkflowRuns} workflow run(s) active`");
+    expect(monitorSource).toContain(
+      "self-restart deferred — ${activeWorkflowRuns.length} workflow run(s) still active",
+    );
+    expect(monitorSource).toContain(
+      "continuing to defer until workflow work clears",
+    );
+    expect(monitorSource).not.toContain(
+      "FORCED self-restart: proceeding with ${activeWorkflowRuns} active workflow run(s) after defer hard cap",
     );
   });
 });

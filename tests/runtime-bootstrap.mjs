@@ -1,8 +1,10 @@
+import "./warning-filter.mjs";
 import { spawnSync } from "node:child_process";
 import { _resetSingleton } from "../infra/session-tracker.mjs";
 import { ensureTestRuntimeSandbox } from "../infra/test-runtime.mjs";
 import { installTestRuntimeGuards } from "../infra/test-runtime-guards.mjs";
 import { _resetRuntimeAccumulatorForTests } from "../infra/runtime-accumulator.mjs";
+import { installTestLogFilter } from "./test-log-filter.mjs";
 
 function detectChildSpawnBlocked() {
   if (
@@ -26,6 +28,7 @@ function detectChildSpawnBlocked() {
 export function bootstrapTestRuntime() {
   const sandbox = ensureTestRuntimeSandbox({ force: true });
   process.env.BOSUN_TEST_CHILD_SPAWN_BLOCKED = detectChildSpawnBlocked() ? "1" : "0";
+  installTestLogFilter();
   installTestRuntimeGuards();
   _resetSingleton({ persistDir: null });
   // Redirect the session accumulator to the test sandbox so tests never

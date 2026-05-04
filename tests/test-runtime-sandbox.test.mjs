@@ -97,6 +97,8 @@ describe("test runtime sandbox", () => {
     const runtimeBootstrap = readFileSync(resolve(process.cwd(), "tests/runtime-bootstrap.mjs"), "utf8");
     const uiServer = readFileSync(resolve(process.cwd(), "server/ui-server.mjs"), "utf8");
     const agentPool = readFileSync(resolve(process.cwd(), "agent/agent-pool.mjs"), "utf8");
+    const agentLauncher = readFileSync(resolve(process.cwd(), "agent/agent-launcher.mjs"), "utf8");
+    const threadRegistry = readFileSync(resolve(process.cwd(), "agent/thread-registry.mjs"), "utf8");
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
     const sessionTrackerModule = await import("../infra/session-tracker.mjs");
 
@@ -109,7 +111,12 @@ describe("test runtime sandbox", () => {
     );
     expect(uiServer).toContain("shouldHideGeneratedWorkflowFromList");
     expect(uiServer).toContain("const cacheDir = sandbox?.cacheDir || resolve(repoRoot, \".bosun\", \".cache\");");
-    expect(agentPool).toContain('resolve(testSandbox.cacheDir, "thread-registry.json")');
+    expect(agentPool).toContain('export * from "./agent-launcher.mjs";');
+    expect(agentLauncher).toContain('from "./thread-registry.mjs"');
+    expect(agentLauncher).toContain("ensureManagedThreadRegistryLoaded");
+    expect(agentLauncher).toContain("setManagedThreadRecord");
+    expect(threadRegistry).toContain('process.env.BOSUN_TEST_CACHE_DIR');
+    expect(threadRegistry).toContain('resolve(testCacheDir, "thread-registry.json")');
     expect(packageJson.scripts["test:node"]).toContain("--import ./tests/node-test-bootstrap.mjs");
   });
 

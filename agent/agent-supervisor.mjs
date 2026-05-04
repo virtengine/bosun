@@ -56,6 +56,7 @@ export const SITUATION = Object.freeze({
 
   // ── Agent Stuck in Loop ──
   PLAN_STUCK: "plan_stuck",             // Created plan, asked permission
+  DOOM_LOOP: "doom_loop",               // Near-identical responses/retries repeating
   TOOL_LOOP: "tool_loop",              // Same tool calls repeating
   ERROR_LOOP: "error_loop",            // Same error repeating 3+ times
   ANALYSIS_PARALYSIS: "analysis_paralysis", // Only reading, never editing
@@ -133,6 +134,7 @@ const INTERVENTION_LADDER = {
   [SITUATION.NO_RESPONSE_AT_ALL]: [INTERVENTION.FORCE_NEW_THREAD, INTERVENTION.REDISPATCH_TASK, INTERVENTION.BLOCK_AND_NOTIFY],
 
   [SITUATION.PLAN_STUCK]:         [INTERVENTION.INJECT_PROMPT, INTERVENTION.FORCE_NEW_THREAD, INTERVENTION.REDISPATCH_TASK, INTERVENTION.BLOCK_AND_NOTIFY],
+  [SITUATION.DOOM_LOOP]:          [INTERVENTION.INJECT_PROMPT, INTERVENTION.FORCE_NEW_THREAD, INTERVENTION.BLOCK_AND_NOTIFY],
   [SITUATION.TOOL_LOOP]:          [INTERVENTION.INJECT_PROMPT, INTERVENTION.FORCE_NEW_THREAD, INTERVENTION.BLOCK_AND_NOTIFY],
   [SITUATION.ERROR_LOOP]:         [INTERVENTION.INJECT_PROMPT, INTERVENTION.FORCE_NEW_THREAD, INTERVENTION.BLOCK_AND_NOTIFY],
   [SITUATION.ANALYSIS_PARALYSIS]: [INTERVENTION.INJECT_PROMPT, INTERVENTION.FORCE_NEW_THREAD, INTERVENTION.BLOCK_AND_NOTIFY],
@@ -210,6 +212,12 @@ const RECOVERY_PROMPTS = {
     `1. Summarize what you know\n2. Identify the actual blocker\n3. Try a different approach\n` +
     `4. Make incremental progress — edit one file, test it, commit it.`,
 
+  [SITUATION.DOOM_LOOP]: (ctx) =>
+    `You've been replaying near-identical outputs on "${ctx.taskTitle}" without changing runtime state. ` +
+    `Break the doom loop immediately:\n` +
+    `1. Stop summarizing the same blocker\n2. Pick one concrete action that changes state\n` +
+    `3. Execute it now\n4. Verify the state changed before sending another status update.`,
+
   [SITUATION.ERROR_LOOP]: (ctx) =>
     `You've hit the same error ${ctx.errorCount || 3}+ times: "${ctx.errorPattern || "unknown"}"\n` +
     `The current approach is NOT working. Do NOT retry the same thing.\n` +
@@ -259,7 +267,7 @@ const RECOVERY_PROMPTS = {
   [SITUATION.PUSH_FAILURE]: (ctx) =>
     `git push failed. Common causes:\n` +
     `1. Pre-push hooks failed → fix lint/test/build errors and push again\n` +
-    `2. Remote rejected → git pull --rebase origin main && resolve conflicts && push\n` +
+    `2. Remote rejected → git pull --no-rebase origin main && resolve conflicts && push\n` +
     `3. Authentication → check git credentials\n` +
     `Error: ${(ctx.errorOutput || "").slice(0, 1000)}`,
 
@@ -269,8 +277,8 @@ const RECOVERY_PROMPTS = {
     `Fix ALL errors (lint, vet, build, test), then push again. Do NOT use --no-verify.`,
 
   [SITUATION.REBASE_SPIRAL]: () =>
-    `You're stuck in a rebase loop. STOP rebasing and try:\n` +
-    `1. git rebase --abort\n` +
+    `You're stuck in a sync loop. STOP rebasing and try:\n` +
+    `1. git merge --abort\n` +
     `2. git stash (save any local changes)\n` +
     `3. git fetch origin && git merge origin/main --no-edit\n` +
     `4. If merge conflicts, resolve them manually\n` +
@@ -1178,7 +1186,15 @@ export class AgentSupervisor {
     // ── Anomaly detector signals ──
     for (const anomaly of anomalies) {
       if (anomaly.type === "REBASE_SPIRAL") return SITUATION.REBASE_SPIRAL;
-      if (anomaly.type === "THOUGHT_SPINNING") return SITUATION.THOUGHT_SPINNING;
+      if (anomaly.type === "IDLE_STALL") {
+        return anomaly.severity === "HIGH" ? SITUATION.IDLE_HARD : SITUATION.IDLE_SOFT;
+      }
+      if (anomaly.type === "THOUGHT_SPINNING") {
+        if (anomaly.data?.loopKind === "near_identical_reasoning") {
+          return SITUATION.DOOM_LOOP;
+        }
+        return SITUATION.THOUGHT_SPINNING;
+      }
       if (anomaly.type === "SELF_DEBUG_LOOP") return SITUATION.SELF_DEBUG_LOOP;
       if (anomaly.type === "TOOL_CALL_LOOP") return SITUATION.TOOL_LOOP;
       if (anomaly.type === "REPEATED_ERROR") return SITUATION.ERROR_LOOP;
@@ -1187,12 +1203,14 @@ export class AgentSupervisor {
     // ── Session behavioral analysis ──
     if (analysis?.primary) {
       const analysisMap = {
+        doom_loop: SITUATION.DOOM_LOOP,
         plan_stuck: SITUATION.PLAN_STUCK,
         tool_loop: SITUATION.TOOL_LOOP,
         analysis_paralysis: SITUATION.ANALYSIS_PARALYSIS,
         needs_clarification: SITUATION.NEEDS_CLARIFICATION,
         false_completion: SITUATION.FALSE_COMPLETION,
         rate_limited: SITUATION.RATE_LIMITED,
+        no_progress: SITUATION.IDLE_SOFT,
       };
       if (analysisMap[analysis.primary]) return analysisMap[analysis.primary];
     }
@@ -1297,7 +1315,14 @@ export class AgentSupervisor {
 
     // Not in bad behavioral pattern
     const analysis = signals.sessionAnalysis;
-    const badPatterns = ["plan_stuck", "tool_loop", "analysis_paralysis", "false_completion"];
+    const badPatterns = [
+      "doom_loop",
+      "plan_stuck",
+      "tool_loop",
+      "analysis_paralysis",
+      "false_completion",
+      "no_progress",
+    ];
     if (!analysis?.primary || !badPatterns.includes(analysis.primary)) {
       score += HEALTH_WEIGHTS.notInBadPattern;
     }
@@ -1441,4 +1466,3 @@ export class AgentSupervisor {
 export function createAgentSupervisor(opts) {
   return new AgentSupervisor(opts);
 }
-

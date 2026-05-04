@@ -372,11 +372,11 @@ function mergeArrayUnique(existing, additions) {
   return result;
 }
 
-function normalizeClaudePermissionsAllow(values) {
+function normalizeClaudePermissionsAllow(values = []) {
   const normalized = [];
   const seen = new Set();
 
-  for (const rawValue of values || []) {
+  for (const rawValue of values) {
     let value = String(rawValue || "").trim();
     if (!value) continue;
 

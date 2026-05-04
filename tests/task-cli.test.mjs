@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 
 const mockExistsSync = vi.hoisted(() => vi.fn());
 const mockReadFileSync = vi.hoisted(() => vi.fn());
@@ -36,6 +37,7 @@ afterEach(() => {
   delete process.env.BOSUN_HOME;
   delete process.env.REPO_ROOT;
   delete process.env.BOSUN_TASK_EXECUTOR_RUNTIME_FILE;
+  resetStateLedgerCache();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -116,6 +118,53 @@ describe("task CLI store persistence", () => {
 
     expect(result.status).toBe(0);
     expect((readStore(storePath).tasks || {})[task.id]).toBeUndefined();
+  });
+
+  it("lists multiple statuses when --status receives a comma-separated filter", async () => {
+    const storePath = makeTempStorePath();
+    configureTaskStore({ storePath });
+    loadStore();
+    addTask({
+      id: randomUUID(),
+      title: "Todo task",
+      status: "todo",
+      draft: false,
+      workspace: "virtengine-gh",
+      repository: "bosun",
+    });
+    addTask({
+      id: randomUUID(),
+      title: "Blocked task",
+      status: "blocked",
+      draft: false,
+      workspace: "virtengine-gh",
+      repository: "bosun",
+    });
+    addTask({
+      id: randomUUID(),
+      title: "Done task",
+      status: "done",
+      draft: false,
+      workspace: "virtengine-gh",
+      repository: "bosun",
+    });
+    await waitForStoreWrites();
+
+    const result = spawnSync(
+      process.execPath,
+      ["cli.mjs", "task", "list", "--status", "todo,blocked", "--json"],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, BOSUN_STORE_PATH: storePath },
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(0);
+    const stdout = String(result.stdout || "");
+    const jsonStart = stdout.lastIndexOf("\n[");
+    const listed = JSON.parse(jsonStart >= 0 ? stdout.slice(jsonStart + 1) : stdout);
+    expect(listed.map((task) => task.status).sort()).toEqual(["blocked", "todo"]);
   });
 
   it("canonicalizes workspace and repository keys on create", () => {

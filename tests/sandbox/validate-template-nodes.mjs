@@ -49,11 +49,11 @@ const WELL_KNOWN_INPUTS = new Set([
 // ──────────────────────────────────────────────────────────────────────────
 
 const violations = [];
-const warnings   = [];
+const warnings = [];
 
 let templateCount = 0;
-let nodeCount     = 0;
-let edgeCount     = 0;
+let nodeCount = 0;
+let edgeCount = 0;
 
 for (const template of WORKFLOW_TEMPLATES) {
   templateCount++;
@@ -131,14 +131,17 @@ console.log(`   Templates : ${templateCount}`);
 console.log(`   Nodes     : ${nodeCount}`);
 console.log(`   Edges     : ${edgeCount}`);
 
-if (warnings.length) {
-  console.log(`\n⚠️  Warnings (${warnings.length}):`);
-  for (const w of warnings) console.log(`   ${w}`);
+const sortedWarnings = [...warnings].sort((left, right) => left.localeCompare(right));
+const sortedViolations = [...violations].sort((left, right) => left.localeCompare(right));
+
+if (sortedWarnings.length) {
+  console.log(`\n⚠️  Warnings (${sortedWarnings.length}):`);
+  for (const warning of sortedWarnings) console.log(`   ${warning}`);
 }
 
-if (violations.length) {
-  console.error(`\n❌ Violations (${violations.length}) — FAILING:`);
-  for (const v of violations) console.error(`   ${v}`);
+if (sortedViolations.length) {
+  console.error(`\n❌ Violations (${sortedViolations.length}) — FAILING:`);
+  for (const violation of sortedViolations) console.error(`   ${violation}`);
   process.exit(1);
 } else {
   console.log(`\n✅ All integrity checks passed — ${templateCount} templates are well-formed.`);

@@ -9,7 +9,7 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge, Avatar, LinearProgress, Grid } from "@mui/material";
+import { Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge, Avatar, LinearProgress, Grid, Collapse } from "@mui/material";
 
 /* ─── Inner error boundary for complex sub-components ─── */
 class ChatSafeBoundary extends Component {
@@ -36,14 +36,241 @@ class ChatSafeBoundary extends Component {
   }
 }
 
+const CONTEXT_BREAKDOWN_ORDER = [
+  "system instructions",
+  "tool definitions",
+  "messages",
+  "tool results",
+  "other",
+];
+
+function formatContextCount(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0";
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(numeric >= 10_000_000 ? 0 : 1).replace(/\.0$/, "")}M`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(numeric >= 100_000 ? 0 : 1).replace(/\.0$/, "")}k`;
+  return String(Math.round(numeric));
+}
+
+function normalizeContextPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+function formatContextTrackerSummary(contextWindow = null) {
+  const usedTokens = Number(contextWindow?.usedTokens || 0) || 0;
+  const totalTokens = Number.isFinite(Number(contextWindow?.totalTokens))
+    ? Math.max(0, Number(contextWindow.totalTokens))
+    : null;
+  const percent = normalizeContextPercent(contextWindow?.percent);
+  return {
+    usedTokens,
+    totalTokens,
+    percent,
+    percentLabel: percent != null ? `${percent}% used` : "Tracked",
+    usageLabel: totalTokens != null
+      ? `${formatContextCount(usedTokens)} / ${formatContextCount(totalTokens)}`
+      : `${formatContextCount(usedTokens)} tokens`,
+  };
+}
+
+function contextTrackerTone(percent) {
+  if (!Number.isFinite(Number(percent))) return "default";
+  const value = Number(percent);
+  if (value >= 95) return "error";
+  if (value >= 85) return "warning";
+  if (value >= 70) return "info";
+  return "success";
+}
+
+function normalizeContextBreakdownRows(rows = [], totalTokens = 0) {
+  const source = Array.isArray(rows) ? rows : [];
+  const normalized = source
+    .filter((row) => row && typeof row === "object")
+    .map((row) => {
+      const percent = normalizeContextPercent(row.percent) ?? 0;
+      const label = String(row.label || "Other").trim() || "Other";
+      return {
+        label,
+        sortKey: CONTEXT_BREAKDOWN_ORDER.indexOf(label.toLowerCase()),
+        percent,
+        approxTokens: totalTokens > 0 ? Math.round((percent / 100) * totalTokens) : null,
+      };
+    })
+    .sort((left, right) => {
+      const leftKey = left.sortKey === -1 ? Number.MAX_SAFE_INTEGER : left.sortKey;
+      const rightKey = right.sortKey === -1 ? Number.MAX_SAFE_INTEGER : right.sortKey;
+      if (leftKey !== rightKey) return leftKey - rightKey;
+      return right.percent - left.percent;
+    });
+  return normalized;
+}
+
+function ContextTrackerPanel({
+  contextWindow = null,
+  tokenUsage = null,
+  compaction = null,
+  contextBreakdown = [],
+  expanded = false,
+  onToggle = null,
+  onCompactConversation = null,
+  canCompactConversation = false,
+}) {
+  const summary = formatContextTrackerSummary(contextWindow);
+  const tone = contextTrackerTone(summary.percent);
+  const breakdownRows = normalizeContextBreakdownRows(contextBreakdown, summary.totalTokens || 0);
+  const remainingTokens = Number.isFinite(Number(contextWindow?.remainingTokens))
+    ? Math.max(0, Number(contextWindow.remainingTokens))
+    : (summary.totalTokens != null ? Math.max(0, summary.totalTokens - summary.usedTokens) : null);
+  const reservedForResponseTokens = Number.isFinite(Number(contextWindow?.reservedForResponseTokens))
+    ? Math.max(0, Number(contextWindow.reservedForResponseTokens))
+    : null;
+  const compactEvents = Math.max(0, Number(compaction?.compactEvents || 0) || 0);
+  const compactionState = String(compaction?.state || "").trim() || (compaction?.canCompact ? "available" : "disabled");
+  return html`
+    <${Paper}
+      variant="outlined"
+      sx=${{
+        borderRadius: 2,
+        borderColor: tone === "error"
+          ? "error.light"
+          : tone === "warning"
+            ? "warning.light"
+            : "divider",
+        bgcolor: "background.paper",
+        overflow: "hidden",
+      }}
+    >
+      <${Box}
+        sx=${{
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          px: 1.25,
+          py: 1,
+          flexWrap: "wrap",
+        }}
+      >
+        <${Chip}
+          size="small"
+          color=${tone === "default" ? "default" : tone}
+          variant="filled"
+          label=${`Context ${summary.percentLabel}`}
+          onClick=${onToggle}
+          sx=${{ fontWeight: 700 }}
+        />
+        <${Typography} variant="caption" sx=${{ fontWeight: 600 }}>
+          ${summary.usageLabel}
+          ${summary.totalTokens != null ? " tokens" : ""}
+        <//>
+        ${compactEvents > 0
+          ? html`<${Chip} size="small" variant="outlined" color="warning" label=${`${compactEvents} compact event${compactEvents === 1 ? "" : "s"}`} />`
+          : null}
+        <${Chip}
+          size="small"
+          variant="outlined"
+          color=${compactionState === "disabled" ? "default" : compactEvents > 0 ? "warning" : "success"}
+          label=${compactionState === "disabled" ? "Compaction off" : compactionState === "compacted" ? "Compacted" : "Compactable"}
+        />
+        <${Button}
+          size="small"
+          variant="text"
+          onClick=${onToggle}
+          sx=${{ ml: "auto", textTransform: "none" }}
+        >
+          ${expanded ? "Hide details" : "View details"}
+        </${Button}>
+        ${canCompactConversation
+          ? html`
+              <${Button}
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick=${onCompactConversation}
+                sx=${{ textTransform: "none" }}
+              >
+                Compact Conversation
+              </${Button}>
+            `
+          : null}
+      </${Box}>
+      <${Collapse} in=${expanded} unmountOnExit>
+        <${Divider} />
+        <${Box} sx=${{ px: 1.25, py: 1.1 }}>
+          <${Stack} spacing=${1}>
+            <${Stack} direction="row" spacing=${0.75} sx=${{ flexWrap: "wrap" }}>
+              ${summary.percent != null
+                ? html`<${Chip} size="small" variant="outlined" label=${`${summary.percent}% used`} />`
+                : null}
+              ${remainingTokens != null
+                ? html`<${Chip} size="small" variant="outlined" label=${`${formatContextCount(remainingTokens)} headroom`} />`
+                : null}
+              ${reservedForResponseTokens != null
+                ? html`<${Chip} size="small" variant="outlined" label=${`${formatContextCount(reservedForResponseTokens)} reserved for response`} />`
+                : null}
+              ${Number(tokenUsage?.cacheInputTokens || 0) > 0
+                ? html`<${Chip} size="small" variant="outlined" label=${`${formatContextCount(tokenUsage.cacheInputTokens)} cache in`} />`
+                : null}
+            </${Stack}>
+            ${breakdownRows.length > 0
+              ? html`
+                  <${Stack} spacing=${0.75}>
+                    ${breakdownRows.map((row) => html`
+                      <${Box}
+                        key=${row.label}
+                        sx=${{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 1,
+                        }}
+                      >
+                        <${Typography} variant="caption" color="text.secondary">${row.label}<//>
+                        <${Stack} direction="row" spacing=${0.75} alignItems="center">
+                          ${row.approxTokens != null
+                            ? html`<${Typography} variant="caption" color="text.secondary">${formatContextCount(row.approxTokens)} tok<//>`
+                            : null}
+                          <${Chip} size="small" variant="outlined" label=${`${row.percent}%`} sx=${{ height: 20 }} />
+                        </${Stack}>
+                      </${Box}>
+                    `)}
+                  </${Stack}>
+                `
+              : html`<${Typography} variant="caption" color="text.secondary">Context breakdown is not available for this session yet.<//>`}
+            <${Divider} />
+            <${Stack} direction="row" spacing=${1.5} sx=${{ flexWrap: "wrap" }}>
+              <${Typography} variant="caption" color="text.secondary">
+                Input ${formatContextCount(tokenUsage?.inputTokens || 0)}
+              <//>
+              <${Typography} variant="caption" color="text.secondary">
+                Output ${formatContextCount(tokenUsage?.outputTokens || 0)}
+              <//>
+              <${Typography} variant="caption" color="text.secondary">
+                Total ${formatContextCount(tokenUsage?.totalTokens || summary.usedTokens || 0)}
+              <//>
+              <${Typography} variant="caption" color="text.secondary">
+                Mode ${String(compaction?.mode || "normal").replace(/_/g, " ")}
+              <//>
+            </${Stack}>
+          </${Stack}>
+        </${Box}>
+      </${Collapse}>
+    </${Paper}>
+  `;
+}
+
 import {
   SessionList,
   SESSION_VIEW_FILTER,
   loadSessions,
+  sessionsLoading,
   selectedSessionId,
   sessionsData,
   createSession,
+  deleteSessionHistory,
   loadSessionMessages,
+  revealSessionFolder,
   archiveSession,
   resumeSession,
 } from "../components/session-list.js";
@@ -52,11 +279,13 @@ import { ChatView } from "../components/chat-view.js";
 import { apiFetch } from "../modules/api.js";
 import {
   buildSessionApiPath,
+  getSessionHistoryState,
   getSessionLifecycleState,
   getSessionRecencyTimestamp,
   getSessionRuntimeState,
   resolveSessionWorkspaceHint,
 } from "../modules/session-api.js";
+import { replaceSessionInList } from "../modules/session-surface.js";
 import { showToast } from "../modules/state.js";
 import { VoiceMicButton, requestVoiceModeOpen } from "../modules/voice.js";
 import { iconText, resolveIcon } from "../modules/icon-utils.js";
@@ -68,11 +297,12 @@ import {
   activeManualAgentId,
   activeAgentInfo,
   availableAgents,
-  yoloMode,
   selectedModel,
 } from "../components/agent-selector.js";
 import {
   addPendingMessage,
+  agentStatus as streamingAgentStatus,
+  clearAgentStatus,
   confirmMessage,
   rejectMessage,
   markUserMessageSent,
@@ -386,12 +616,12 @@ export function ChatTab() {
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const sendMenuRef = useRef(null);
-  const messageQueueRef = useRef([]);
   const chatDropDepthRef = useRef(0);
+  const lastAppliedRouteSessionIdRef = useRef(null);
   const [showSendMenu, setShowSendMenu] = useState(false);
-  const [queueCount, setQueueCount] = useState(0);
   const [stoppingAgent, setStoppingAgent] = useState(false);
   const routeSessionId = String(routeParams.value?.sessionId || "").trim();
+  const isLoadingSessionList = sessionsLoading.value === true;
 
   const getWorkspaceScopeForView = useCallback((view) => {
     const normalized = String(view || "").toLowerCase();
@@ -550,14 +780,30 @@ export function ChatTab() {
 
   useEffect(() => {
     if (!routeSessionId) return;
+    const listedRouteSession = (sessionsData.value || []).some(
+      (entry) => String(entry?.id || "").trim() === routeSessionId,
+    );
+    if (!isLoadingSessionList && !listedRouteSession) {
+      if (String(selectedSessionId.value || "").trim() === routeSessionId) {
+        selectedSessionId.value = null;
+      }
+      setRouteParams({}, { replace: true, skipGuard: true });
+      return;
+    }
+    if (lastAppliedRouteSessionIdRef.current === routeSessionId && sessionId && sessionId !== routeSessionId) {
+      return;
+    }
     if (sessionId === routeSessionId) return;
+    lastAppliedRouteSessionIdRef.current = routeSessionId;
     selectedSessionId.value = routeSessionId;
-  }, [routeSessionId]);
+  }, [isLoadingSessionList, routeSessionId, sessionId]);
 
   useEffect(() => {
     if (sessionId) {
+      lastAppliedRouteSessionIdRef.current = sessionId;
       setRouteParams({ sessionId }, { replace: true, skipGuard: true });
     } else {
+      lastAppliedRouteSessionIdRef.current = null;
       setRouteParams({}, { replace: true, skipGuard: true });
     }
   }, [sessionId]);
@@ -593,10 +839,13 @@ export function ChatTab() {
     const val = e.target.value;
     setInputValue(val);
 
-    // Auto-grow textarea
-    const el = e.target;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    // NOTE: do NOT manually set textarea height here. The MUI <TextField
+    // multiline maxRows={4}> wraps a TextareaAutosize that handles auto-grow
+    // internally via a hidden shadow textarea. Setting el.style.height
+    // ourselves forces a synchronous layout/reflow on every keystroke, which
+    // makes the chat composer feel "heavy" — especially while the
+    // InspectorPanel is also re-rendering. Letting MUI own the sizing keeps
+    // input latency at a single React commit.
 
     if (val.startsWith("/")) {
       setShowSlashMenu(true);
@@ -617,7 +866,7 @@ export function ChatTab() {
   }
 
   /* ── Send message or command ── */
-  async function handleSend(explicitContent) {
+  async function handleSend(explicitContent, sendOptions = {}) {
     const content = (typeof explicitContent === "string" ? explicitContent : inputValue).trim();
     const attachments = Array.isArray(pendingAttachments)
       ? pendingAttachments.filter(Boolean)
@@ -633,6 +882,7 @@ export function ChatTab() {
     const asModeMessage = Boolean(modeOverride && cmdArgs);
     const outboundContent = asModeMessage ? cmdArgs : content;
     const outboundMode = modeOverride || agentMode.value;
+    const deliveryMode = sendOptions?.deliveryMode;
     let createdSessionId = "";
 
     try {
@@ -694,9 +944,11 @@ export function ChatTab() {
             body: JSON.stringify({
               content: msg,
               mode: outboundMode,
+              agent: activeAgent.value || undefined,
+              providerSelection: activeAgent.value || undefined,
               agentProfileId: activeManualAgentId.value || undefined,
-              yolo: yoloMode.peek(),
               model: selectedModel.value || undefined,
+              ...(deliveryMode ? { deliveryMode } : {}),
               attachments,
             }),
           });
@@ -707,6 +959,7 @@ export function ChatTab() {
           confirmMessage(tempId);
         } catch (err) {
           rejectMessage(tempId, err.message || "Send failed");
+          clearAgentStatus(sessionId);
           throw err;
         }
 
@@ -719,7 +972,6 @@ export function ChatTab() {
           agent: activeAgent.value,
           mode: outboundMode,
           agentProfileId: activeManualAgentId.value || undefined,
-          yolo: yoloMode.peek(),
           model: selectedModel.value || undefined,
         });
         const newId = res?.session?.id;
@@ -738,14 +990,17 @@ export function ChatTab() {
               body: JSON.stringify({
                 content: outboundContent,
                 mode: outboundMode,
-                yolo: yoloMode.peek(),
+                agent: activeAgent.value || undefined,
+                providerSelection: activeAgent.value || undefined,
                 model: selectedModel.value || undefined,
+                ...(deliveryMode ? { deliveryMode } : {}),
                 attachments,
               }),
             });
             confirmMessage(tempId);
           } catch (err) {
             rejectMessage(tempId, err.message || "Send failed");
+            clearAgentStatus(newId);
           }
 
           loadSessionMessages(newId, { limit: 50 });
@@ -802,8 +1057,9 @@ export function ChatTab() {
           method: "POST",
           body: JSON.stringify({}),
         });
+        clearAgentStatus(sessionId);
+        optimisticMarkIdle();
         if (stopResult?.stopped) {
-          optimisticMarkIdle();
           showToast("Stopped current agent turn", "info");
         } else {
           showToast("No active agent turn to stop", "info");
@@ -815,6 +1071,7 @@ export function ChatTab() {
           method: "POST",
           body: JSON.stringify({ command: "/stop" }),
         });
+        clearAgentStatus();
         optimisticMarkIdle();
         showToast("Agent stopped", "info");
       }
@@ -834,30 +1091,62 @@ export function ChatTab() {
   }
 
   /* ── Add message to queue for delivery after current task ── */
-  function handleAddToQueue() {
+  async function handleAddToQueue() {
     const content = inputValue.trim();
-    if (!content) return;
+    const attachments = Array.isArray(pendingAttachments)
+      ? pendingAttachments.filter(Boolean)
+      : [];
+    if ((!content && attachments.length === 0) || uploadingAttachments) return;
     setShowSendMenu(false);
-    messageQueueRef.current.push(content);
-    setQueueCount(messageQueueRef.current.length);
-    setInputValue("");
-    showToast(`Message queued (${messageQueueRef.current.length} pending)`, "success");
+    if (!sessionId || !composerBusy) {
+      await handleSend();
+      return;
+    }
+    const messagePath = sessionApiPath(sessionId, "message");
+    if (!messagePath) {
+      showToast("Session path unavailable", "error");
+      return;
+    }
+    setSending(true);
+    try {
+      const res = await apiFetch(messagePath, {
+        method: "POST",
+        body: JSON.stringify({
+          content,
+          mode: agentMode.value,
+          agent: activeAgent.value || undefined,
+          providerSelection: activeAgent.value || undefined,
+          agentProfileId: activeManualAgentId.value || undefined,
+          model: selectedModel.value || undefined,
+          attachments,
+          deliveryMode: "queue",
+        }),
+      });
+      const depth = Number(res?.queueDepth || 0) || 0;
+      setInputValue("");
+      setPendingAttachments([]);
+      pendingDraftTextBySessionId.delete(String(sessionId || DRAFT_SESSION_KEY));
+      pendingAttachmentsBySessionId.delete(String(sessionId || DRAFT_SESSION_KEY));
+      persistDraftTextCache();
+      persistDraftAttachmentCache();
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
+      await refreshPrimarySessions();
+      loadSessionMessages(sessionId, { limit: 50 });
+      showToast(depth > 0 ? `Message queued (${depth} pending)` : "Message queued", "success");
+    } catch (err) {
+      showToast("Failed to queue message: " + (err.message || "Unknown error"), "error");
+    } finally {
+      setSending(false);
+    }
   }
 
   /* ── Steer with message (send to running session) ── */
   async function handleSteerWithMessage() {
     setShowSendMenu(false);
-    await handleSend();
+    await handleSend(undefined, { deliveryMode: "steer" });
   }
-
-  /* ── Auto-send queued messages when agent becomes free ── */
-  useEffect(() => {
-    if (!sending && messageQueueRef.current.length > 0) {
-      const next = messageQueueRef.current.shift();
-      setQueueCount(messageQueueRef.current.length);
-      handleSend(next);
-    }
-  }, [sending]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Close send menu when clicking outside ── */
   useEffect(() => {
@@ -870,14 +1159,6 @@ export function ChatTab() {
     document.addEventListener("mousedown", handleOutside);
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [showSendMenu]);
-
-  // Clear one-shot stop UI lock as soon as the selected agent reports idle.
-  useEffect(() => {
-    if (!stoppingAgent) return;
-    if (!activeAgentInfo.value?.busy) {
-      setStoppingAgent(false);
-    }
-  }, [stoppingAgent, activeAgentInfo.value?.busy]);
 
   /* ── Keyboard handling ── */
   function handleKeyDown(e) {
@@ -908,17 +1189,21 @@ export function ChatTab() {
       }
     }
 
-    // Alt+Enter = Add to Queue
+    // Alt+Enter = Steer immediately
     if (e.key === "Enter" && e.altKey) {
       e.preventDefault();
-      handleAddToQueue();
+      handleSteerWithMessage();
       return;
     }
 
-    // Send on Enter (shift+enter = newline)
+    // Enter queues by default while the agent is busy; otherwise it sends.
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      if (composerBusy) {
+        handleAddToQueue();
+      } else {
+        handleSend();
+      }
     }
   }
 
@@ -1003,23 +1288,24 @@ export function ChatTab() {
     if (isMobile) setDrawerOpen(false);
   }, [isMobile]);
 
+  const trackedSessions = sessionsData.value || [];
   const activeSession = useMemo(() => {
     try {
-      return (sessionsData.peek() || []).find((s) => s.id === sessionId) || null;
+      return trackedSessions.find((s) => s.id === sessionId) || null;
     } catch {
       return null;
     }
-  }, [sessionId]);
+  }, [trackedSessions, sessionId]);
   const resolveWorkspaceForSessionId = useCallback((targetSessionId, fallback = "active") => {
     const safeTarget = String(targetSessionId || "").trim();
     if (!safeTarget) return resolveSessionWorkspaceHint(activeSession, fallback);
-    const match = (sessionsData.peek() || []).find((s) => String(s?.id || "") === safeTarget) || null;
+    const match = trackedSessions.find((s) => String(s?.id || "") === safeTarget) || null;
     if (match) return resolveSessionWorkspaceHint(match, fallback);
     if (safeTarget === String(sessionId || "").trim()) {
       return resolveSessionWorkspaceHint(activeSession, fallback);
     }
     return resolveSessionWorkspaceHint(null, fallback);
-  }, [activeSession, sessionId]);
+  }, [activeSession, sessionId, trackedSessions]);
   const sessionApiPath = useCallback((targetSessionId, action = "", fallbackWorkspace = "active") => {
     const safeTarget = String(targetSessionId || "").trim();
     if (!safeTarget) return "";
@@ -1027,19 +1313,107 @@ export function ChatTab() {
       workspace: resolveWorkspaceForSessionId(safeTarget, fallbackWorkspace),
     });
   }, [resolveWorkspaceForSessionId]);
+  const handleSessionSurfaceUpdated = useCallback((nextSession) => {
+    if (!nextSession?.id) {
+      refreshPrimarySessions().catch(() => {});
+      return;
+    }
+    sessionsData.value = replaceSessionInList(sessionsData.peek(), nextSession);
+  }, [refreshPrimarySessions]);
+  const sessionWorkspaceScope = resolveWorkspaceForSessionId(sessionId, "active");
+  const sessionSurface = activeSession?.surface || null;
+  const sessionRepoLabel = String(
+    sessionSurface?.repository?.selected?.displayName
+    || sessionSurface?.repository?.selected?.name
+    || sessionSurface?.repository?.selected?.path
+    || "",
+  ).trim();
+  const sessionBranchLabel = String(
+    sessionSurface?.branch?.selected
+    || sessionSurface?.branch?.current
+    || "",
+  ).trim();
   const sessionTitle = activeSession?.title || activeSession?.taskId || "Session";
   const sessionLifecycle = getSessionLifecycleState(activeSession);
   const sessionRuntime = getSessionRuntimeState(activeSession);
+  const sessionHistory = getSessionHistoryState(activeSession);
+  const trackedAgentStatus = streamingAgentStatus.value || {};
+  const trackedSessionId = String(trackedAgentStatus.sessionId || "").trim();
+  const currentSessionId = String(sessionId || "").trim();
+  const sessionAgentBusy =
+    Boolean(currentSessionId)
+    && trackedSessionId === currentSessionId
+    && String(trackedAgentStatus.state || "").trim().toLowerCase() !== "idle";
+  const providerBusy = Boolean(activeAgentInfo.value?.busy);
+  const composerBusy = sessionAgentBusy || (!currentSessionId && providerBusy);
   const sessionFreshnessAt = getSessionRecencyTimestamp(activeSession);
   const sessionFreshnessLabel = sessionFreshnessAt ? new Date(sessionFreshnessAt).toLocaleString() : "unknown";
+  const queuedFollowups = Array.isArray(activeSession?.metadata?.queuedFollowups)
+    ? activeSession.metadata.queuedFollowups
+    : [];
+  const queuedFollowupCount = queuedFollowups.length;
+  const [contextTrackerOpen, setContextTrackerOpen] = useState(false);
+  const sessionContextWindow = sessionSurface?.contextWindow || activeSession?.insights?.contextWindow || null;
+  const sessionTokenUsage = sessionSurface?.tokenUsage || activeSession?.insights?.tokenUsage || null;
+  const sessionCompaction = sessionSurface?.compaction || null;
+  const sessionContextBreakdown = Array.isArray(sessionSurface?.contextBreakdown)
+    ? sessionSurface.contextBreakdown
+    : Array.isArray(activeSession?.insights?.contextBreakdown)
+      ? activeSession.insights.contextBreakdown
+      : [];
+  const sessionContextSummary = formatContextTrackerSummary(sessionContextWindow);
+  const showContextTracker = Boolean(
+    sessionId
+    && (sessionContextWindow || sessionTokenUsage || sessionCompaction || sessionContextBreakdown.length > 0),
+  );
   const sessionMeta = [
     activeSession?.type,
     `Lifecycle: ${sessionLifecycle.label}`,
     `Runtime: ${sessionRuntime.label}`,
     `Freshness: ${sessionFreshnessLabel}`,
+    sessionHistory.isHistoric ? `History: ${sessionHistory.label}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
+
+  useEffect(() => {
+    setContextTrackerOpen(false);
+  }, [sessionId]);
+
+  const handleCompactConversation = useCallback(async () => {
+    if (!sessionId) return;
+    await handleSend("/compact", composerBusy ? { deliveryMode: "queue" } : {});
+    setContextTrackerOpen(true);
+  }, [composerBusy, handleSend, sessionId]);
+
+  const handleRevealSessionFolder = useCallback(async () => {
+    if (!sessionId) return;
+    const revealedPath = await revealSessionFolder(sessionId);
+    if (!revealedPath) {
+      showToast("Session folder is not available", "error");
+      return;
+    }
+    showToast("Opened session folder", "success");
+  }, [sessionId]);
+
+  const handleDeleteSessionHistory = useCallback(async () => {
+    if (!sessionId) return;
+    const deleted = await deleteSessionHistory(sessionId);
+    if (!deleted) {
+      showToast("Could not delete session history", "error");
+      return;
+    }
+    showToast("Session history deleted", "success");
+    setRouteParams({}, { replace: true, skipGuard: true });
+  }, [sessionId]);
+
+  // Clear one-shot stop UI lock as soon as the selected agent reports idle.
+  useEffect(() => {
+    if (!stoppingAgent) return;
+    if (!composerBusy) {
+      setStoppingAgent(false);
+    }
+  }, [composerBusy, stoppingAgent]);
 
   useEffect(() => {
     const key = String(sessionId || DRAFT_SESSION_KEY);
@@ -1258,6 +1632,43 @@ export function ChatTab() {
                 <${Box} className="chat-shell-title" sx=${{ flex: 1, minWidth: 0 }}>
                   <${Typography} variant="subtitle1" noWrap fontWeight=${600}>${sessionId ? sessionTitle : "New chat"}<//>
                   <${Typography} variant="caption" color="text.secondary" noWrap>${sessionId ? (sessionMeta || "Session") : "Open sessions or start a new chat"}<//>
+                  ${sessionId && (sessionRepoLabel || sessionBranchLabel)
+                    ? html`
+                        <${Stack} direction="row" spacing=${0.75} sx=${{ mt: 0.75, flexWrap: "wrap" }}>
+                          ${sessionRepoLabel
+                            ? html`
+                                <${Chip}
+                                  size="small"
+                                  variant="outlined"
+                                  icon=${html`<span style="font-size:12px;line-height:1">${resolveIcon("box")}</span>`}
+                                  label=${sessionRepoLabel}
+                                />
+                              `
+                            : null}
+                          ${sessionBranchLabel
+                            ? html`
+                                <${Chip}
+                                  size="small"
+                                  variant="outlined"
+                                  icon=${html`<span style="font-size:12px;line-height:1">${resolveIcon("git-branch")}</span>`}
+                                  label=${sessionBranchLabel}
+                                />
+                              `
+                            : null}
+                          ${showContextTracker
+                            ? html`
+                                <${Chip}
+                                  size="small"
+                                  color=${contextTrackerTone(sessionContextSummary.percent)}
+                                  variant="outlined"
+                                  label=${`Context ${sessionContextSummary.percentLabel}`}
+                                  onClick=${() => setContextTrackerOpen((prev) => !prev)}
+                                />
+                              `
+                            : null}
+                        </${Stack}>
+                      `
+                    : null}
                 <//>
                 ${sessionId
                   ? html`
@@ -1302,7 +1713,7 @@ export function ChatTab() {
                                 onClick=${() => resumeSession(activeSession.id)}
                                 sx=${{ textTransform: "none" }}
                               >
-                                Restore
+                                Resume Work
                               <//>
                             `
                           : html`
@@ -1315,6 +1726,31 @@ export function ChatTab() {
                                 Archive
                               <//>
                             `}
+                        ${sessionHistory.canRevealFolder
+                          ? html`
+                              <${Button}
+                                variant="text"
+                                size="small"
+                                onClick=${handleRevealSessionFolder}
+                                sx=${{ textTransform: "none" }}
+                              >
+                                Reveal Folder
+                              <//>
+                            `
+                          : null}
+                        ${sessionHistory.canDeleteHistory
+                          ? html`
+                              <${Button}
+                                variant="text"
+                                size="small"
+                                color="error"
+                                onClick=${handleDeleteSessionHistory}
+                                sx=${{ textTransform: "none" }}
+                              >
+                                Delete History
+                              <//>
+                            `
+                          : null}
                       <//>
                     `
                   : null}
@@ -1342,7 +1778,26 @@ export function ChatTab() {
               />
             `}
             <${ChatSafeBoundary} label="Agent Toolbar">
-              <${ChatInputToolbar} />
+              ${showContextTracker && html`
+                <${Box} sx=${{ px: 1, pt: 0.75, pb: 0.5 }}>
+                  <${ContextTrackerPanel}
+                    contextWindow=${sessionContextWindow}
+                    tokenUsage=${sessionTokenUsage}
+                    compaction=${sessionCompaction}
+                    contextBreakdown=${sessionContextBreakdown}
+                    expanded=${contextTrackerOpen}
+                    onToggle=${() => setContextTrackerOpen((prev) => !prev)}
+                    onCompactConversation=${handleCompactConversation}
+                    canCompactConversation=${Boolean(sessionId && sessionCompaction?.canCompact)}
+                  />
+                </${Box}>
+              `}
+              <${ChatInputToolbar}
+                sessionId=${sessionId || ""}
+                sessionSurface=${sessionSurface}
+                sessionWorkspace=${sessionWorkspaceScope}
+                onSessionUpdated=${handleSessionSurfaceUpdated}
+              />
             <//>
             ${pendingAttachments.length > 0 && html`
               <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" className="chat-attachments-pending" sx=${{ px: 1, py: 0.5 }}>
@@ -1399,7 +1854,7 @@ export function ChatTab() {
                 disabled=${sending}
                 title="Live voice mode"
               />
-              ${activeAgentInfo.value?.busy && !stoppingAgent && html`
+              ${composerBusy && !stoppingAgent && html`
                 <${IconButton}
                   onClick=${handleStop}
                   title="Stop agent"
@@ -1412,8 +1867,8 @@ export function ChatTab() {
                 <${IconButton}
                   color="primary"
                   disabled=${(!inputValue.trim() && pendingAttachments.length === 0) || uploadingAttachments}
-                  onClick=${activeAgentInfo.value?.busy ? handleSteerWithMessage : handleSend}
-                  title=${activeAgentInfo.value?.busy ? "Steer with Message (Enter)" : "Send (Enter)"}
+                  onClick=${composerBusy ? handleAddToQueue : handleSend}
+                  title=${composerBusy ? "Queue message (Enter)" : "Send (Enter)"}
                   size="small"
                 >➤<//>
                 <${IconButton}
@@ -1430,27 +1885,49 @@ export function ChatTab() {
                         <${ListItemIcon} sx=${{ minWidth: 28 }}>⊳<//>
                         <${ListItemText} primary="Stop and Send" />
                       <//>
-                      <${ListItemButton} onClick=${handleAddToQueue}>
+                      <${ListItemButton} selected=${composerBusy} onClick=${handleAddToQueue}>
                         <${ListItemIcon} sx=${{ minWidth: 28 }}>+<//>
-                        <${ListItemText} primary="Add to Queue" secondary="Alt+Enter" />
+                        <${ListItemText} primary="Add to Queue" secondary="Enter" />
                       <//>
-                      <${ListItemButton} selected onClick=${handleSteerWithMessage}>
+                      <${ListItemButton} selected=${!composerBusy} onClick=${handleSteerWithMessage}>
                         <${ListItemIcon} sx=${{ minWidth: 28 }}>→<//>
-                        <${ListItemText} primary="Steer with Message" secondary="Enter" />
+                        <${ListItemText} primary="Steer with Message" secondary="Alt+Enter" />
                       <//>
                     <//>
                   <//>
                 `}
               <//>
             <//>
+            ${queuedFollowupCount > 0 && html`
+              <${Paper}
+                variant="outlined"
+                sx=${{ mx: 1, mb: 0.75, px: 1.25, py: 1, borderRadius: 2, borderColor: "info.light", bgcolor: "rgba(59,130,246,0.05)" }}
+              >
+                <${Stack} spacing=${0.75}>
+                  <${Typography} variant="caption" sx=${{ fontWeight: 700, color: "info.main" }}>
+                    Queued Follow-ups
+                  </${Typography}>
+                  ${queuedFollowups.map((entry) => html`
+                    <${Box} key=${entry.id || entry.queuedAt} sx=${{ borderTop: "1px solid rgba(148,163,184,0.18)", pt: 0.75 }}>
+                      <${Typography} variant="caption" color="text.secondary">
+                        ${entry.queuedAt ? new Date(entry.queuedAt).toLocaleTimeString() : "queued"}${entry.model ? ` · ${entry.model}` : ""}${entry.agent ? ` · ${entry.agent}` : ""}
+                      </${Typography}>
+                      <${Typography} variant="body2" sx=${{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                        ${entry.content || (Array.isArray(entry.attachments) && entry.attachments.length > 0 ? "(attachment-only follow-up)" : "")}
+                      </${Typography}>
+                    </${Box}>
+                  `)}
+                </${Stack}>
+              </${Paper}>
+            `}
             <${Stack} direction="row" spacing=${1} className="chat-input-hint" sx=${{ px: 1.5, py: 0.5 }}>
               <${Typography} variant="caption" color="text.secondary">Shift+Enter for new line<//>
               <${Typography} variant="caption" color="text.secondary">Type / for commands<//>
               ${offlineQueueSize.peek() > 0 && html`
                 <${Chip} label=${`${offlineQueueSize.peek()} queued`} size="small" color="warning" variant="outlined" />
               `}
-              ${queueCount > 0 && html`
-                <${Chip} label=${`⏳ ${queueCount} pending`} size="small" color="info" variant="outlined" />
+              ${queuedFollowupCount > 0 && html`
+                <${Chip} label=${`⏳ ${queuedFollowupCount} pending`} size="small" color="info" variant="outlined" />
               `}
             <//>
           <//>

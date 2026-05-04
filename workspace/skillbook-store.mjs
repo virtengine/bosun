@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { listPromotedStrategiesFromStateLedger, resolveStateLedgerPath } from "../lib/state-ledger-sqlite.mjs";
 
 const DEFAULT_SKILLBOOK_FILE = ".bosun/skillbook/strategies.json";
 const SKILLBOOK_VERSION = "1.0.0";
@@ -50,6 +51,31 @@ function normalizeConfidence(value) {
   return Math.max(0, Math.min(1, parsed));
 }
 
+function normalizePathHint(value) {
+  return normalizeText(value).replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function normalizePathList(value, { maxItems = 24, maxLength = 320 } = {}) {
+  const rawValues = Array.isArray(value)
+    ? value
+    : (typeof value === "string" && value.includes(",")
+        ? value.split(",")
+        : [value]);
+  const out = [];
+  const seen = new Set();
+  for (const raw of rawValues) {
+    const normalized = normalizePathHint(raw);
+    if (!normalized) continue;
+    const clipped = normalized.length > maxLength ? normalized.slice(0, maxLength).trim() : normalized;
+    const key = clipped.toLowerCase();
+    if (!clipped || seen.has(key)) continue;
+    seen.add(key);
+    out.push(clipped);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
 function tokenizeSearchTerms(value, { maxTokens = 24 } = {}) {
   const rawValues = Array.isArray(value) ? value : [value];
   const out = [];
@@ -85,6 +111,7 @@ function buildStrategySearchBlob(entry = {}) {
     ...(Array.isArray(entry.tags) ? entry.tags : []),
     ...(Array.isArray(entry.evidence) ? entry.evidence : []),
     ...(Array.isArray(entry.provenance) ? entry.provenance : []),
+    ...(Array.isArray(entry.relatedPaths) ? entry.relatedPaths : []),
   ]
     .filter(Boolean)
     .join(" ")
@@ -116,6 +143,12 @@ function scoreSkillbookStrategy(entry = {}, options = {}) {
   const requestedTags = normalizeStringList(options.tags || [], { maxItems: 16, maxLength: 80 })
     .map((value) => value.toLowerCase());
   const entryTags = Array.isArray(entry.tags) ? entry.tags.map((value) => String(value || "").toLowerCase()) : [];
+  const requestedPaths = normalizePathList([
+    ...(Array.isArray(options.relatedPaths) ? options.relatedPaths : []),
+    ...(Array.isArray(options.changedFiles) ? options.changedFiles : []),
+  ]);
+  const entryPaths = normalizePathList(entry.relatedPaths || []);
+  const pathMatchPaths = requestedPaths.filter((path) => entryPaths.includes(path));
   const tagMatches = requestedTags.filter((tag) => entryTags.includes(tag)).length;
   const queryMatches = countMatchingTokens(blob, queryTokens);
   const confidence = normalizeConfidence(entry.confidence) ?? 0.5;
@@ -134,15 +167,20 @@ function scoreSkillbookStrategy(entry = {}, options = {}) {
     score += 12;
   }
   if (String(entry.scopeLevel || "").trim().toLowerCase() === "workspace") score += 2;
-  return score;
+  score += pathMatchPaths.length * 22;
+  return {
+    score,
+    pathMatchPaths,
+  };
 }
 
-function toRankedSkillbookEntry(entry = {}, rank = 0, score = 0) {
+function toRankedSkillbookEntry(entry = {}, rank = 0, score = 0, pathMatchPaths = []) {
   return {
     ...entry,
     rank,
     score,
     relevanceScore: score,
+    pathMatchPaths: normalizePathList(pathMatchPaths || []),
   };
 }
 
@@ -152,6 +190,126 @@ function createEmptySkillbook() {
     updatedAt: new Date().toISOString(),
     strategies: [],
   };
+}
+
+function isLikelyTestRuntime() {
+  if (process.env.BOSUN_TEST_SANDBOX === "1") return true;
+  if (process.env.VITEST) return true;
+  if (process.env.VITEST_POOL_ID) return true;
+  if (process.env.VITEST_WORKER_ID) return true;
+  if (process.env.JEST_WORKER_ID) return true;
+  if (process.env.NODE_ENV === "test") return true;
+  const argv = Array.isArray(process.argv) ? process.argv.join(" ").toLowerCase() : "";
+  return argv.includes("vitest") || argv.includes("--test");
+}
+
+function shouldReadSkillbookFromStateLedger(options = {}) {
+  if (options.preferStateLedger === true) return true;
+  if (process.env.BOSUN_SKILLBOOK_LEDGER_READS === "1") return true;
+  if (!isLikelyTestRuntime()) return true;
+  if (existsSync(resolveSkillbookPath(options))) return false;
+  const ledgerPath = resolveStateLedgerPath(options);
+  return ledgerPath === ":memory:" || existsSync(ledgerPath);
+}
+
+function mapLedgerStrategyToSkillbookEntry(record = {}) {
+  if (!record || typeof record !== "object") return null;
+  const document = record.document && typeof record.document === "object" && !Array.isArray(record.document)
+    ? record.document
+    : {};
+  const strategy = document.strategy && typeof document.strategy === "object" && !Array.isArray(document.strategy)
+    ? document.strategy
+    : {};
+  const knowledgeEntry =
+    document.knowledge?.entry && typeof document.knowledge.entry === "object" && !Array.isArray(document.knowledge.entry)
+      ? document.knowledge.entry
+      : {};
+  try {
+    return normalizeSkillbookEntry({
+      ...document,
+      ...strategy,
+      strategyId:
+        normalizeNullable(record.strategyId)
+        || normalizeNullable(document.strategyId)
+        || normalizeNullable(strategy.strategyId),
+      workflowId:
+        normalizeNullable(record.workflowId)
+        || normalizeNullable(document.workflowId)
+        || normalizeNullable(strategy.workflowId),
+      runId:
+        normalizeNullable(record.runId)
+        || normalizeNullable(document.runId)
+        || normalizeNullable(strategy.runId),
+      category:
+        normalizeNullable(record.category)
+        || normalizeNullable(document.category)
+        || normalizeNullable(strategy.category),
+      decision:
+        normalizeNullable(record.decision)
+        || normalizeNullable(document.decision)
+        || normalizeNullable(strategy.decision),
+      status:
+        normalizeNullable(record.status)
+        || normalizeNullable(document.status)
+        || normalizeNullable(strategy.status),
+      verificationStatus:
+        normalizeNullable(record.verificationStatus)
+        || normalizeNullable(document.verificationStatus)
+        || normalizeNullable(strategy.verificationStatus),
+      confidence:
+        record.confidence ?? document.confidence ?? strategy.confidence ?? null,
+      recommendation:
+        normalizeNullable(record.recommendation)
+        || normalizeNullable(document.recommendation)
+        || normalizeNullable(strategy.recommendation),
+      rationale:
+        normalizeNullable(record.rationale)
+        || normalizeNullable(document.rationale)
+        || normalizeNullable(strategy.rationale),
+      relatedPaths:
+        document.relatedPaths
+        || strategy.relatedPaths
+        || knowledgeEntry.relatedPaths
+        || strategy?.knowledge?.entry?.relatedPaths
+        || [],
+      updatedAt:
+        normalizeNullable(record.updatedAt)
+        || normalizeNullable(document.updatedAt)
+        || normalizeNullable(strategy.updatedAt)
+        || normalizeNullable(record.promotedAt),
+      firstPromotedAt:
+        normalizeNullable(document.firstPromotedAt)
+        || normalizeNullable(strategy.firstPromotedAt)
+        || normalizeNullable(record.promotedAt),
+      history:
+        Array.isArray(document.history)
+          ? document.history
+          : (Array.isArray(strategy.history) ? strategy.history : []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function loadSkillbookFromStateLedger(options = {}) {
+  try {
+    const rows = listPromotedStrategiesFromStateLedger({
+      repoRoot: options.repoRoot,
+    });
+    const strategies = rows
+      .map((row) => mapLedgerStrategyToSkillbookEntry(row))
+      .filter(Boolean);
+    if (strategies.length === 0) return null;
+    strategies.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    return {
+      version: SKILLBOOK_VERSION,
+      updatedAt: normalizeTimestamp(strategies[0]?.updatedAt),
+      strategies,
+      source: "state-ledger",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeHistoryEntry(entry = {}) {
@@ -233,6 +391,7 @@ function normalizeSkillbookEntry(entry = {}, existing = null) {
     evidence: normalizeStringList(entry.evidence ?? existing?.evidence),
     provenance: normalizeStringList(entry.provenance ?? existing?.provenance),
     tags: normalizeStringList(entry.tags ?? existing?.tags, { maxItems: 32, maxLength: 80 }),
+    relatedPaths: normalizePathList(entry.relatedPaths ?? existing?.relatedPaths),
     benchmark: cloneJson(entry.benchmark ?? existing?.benchmark),
     metrics: cloneJson(entry.metrics ?? existing?.metrics),
     evaluation: cloneJson(entry.evaluation ?? existing?.evaluation),
@@ -256,7 +415,95 @@ export function resolveSkillbookPath(options = {}) {
   return resolve(repoRoot, explicit || DEFAULT_SKILLBOOK_FILE);
 }
 
+export function loadSkillbookSync(options = {}) {
+  const skillbookPath = resolveSkillbookPath(options);
+  if (!existsSync(skillbookPath)) {
+    return createEmptySkillbook();
+  }
+  try {
+    const raw = JSON.parse(readFileSync(skillbookPath, "utf8"));
+    const strategies = Array.isArray(raw?.strategies)
+      ? raw.strategies.map((entry) => normalizeSkillbookEntry(entry)).filter(Boolean)
+      : [];
+    strategies.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    return {
+      version: normalizeText(raw?.version) || SKILLBOOK_VERSION,
+      updatedAt: normalizeTimestamp(raw?.updatedAt),
+      strategies,
+    };
+  } catch {
+    return createEmptySkillbook();
+  }
+}
+
+function buildSkillbookProtocolTitle(entry = {}) {
+  return normalizeNullable(entry.recommendation)
+    || normalizeNullable(entry.strategyId)
+    || "Reusable strategy guidance";
+}
+
+function buildSkillbookProtocolTags(entry = {}) {
+  return normalizeStringList([
+    ...(Array.isArray(entry.tags) ? entry.tags : []),
+    ...(Array.isArray(entry.provenance) ? entry.provenance : []),
+    ...(Array.isArray(entry.evidence) ? entry.evidence : []),
+    entry.category,
+    entry.decision,
+    entry.scope,
+  ], { maxItems: 16, maxLength: 80 });
+}
+
+export function listSkillbookStrategyProtocolsSync(options = {}) {
+  const skillbook = loadSkillbookSync(options);
+  return (Array.isArray(skillbook.strategies) ? skillbook.strategies : []).map((entry) => ({
+    id: `skillbook-${normalizeText(entry.strategyId).replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`,
+    strategyId: normalizeText(entry.strategyId),
+    title: buildSkillbookProtocolTitle(entry),
+    description: normalizeNullable(entry.rationale) || normalizeNullable(entry.recommendation) || "",
+    tags: buildSkillbookProtocolTags(entry),
+    important: String(entry.status || "").toLowerCase() === "promoted" || (normalizeConfidence(entry.confidence) ?? 0) >= 0.75,
+    updatedAt: normalizeTimestamp(entry.updatedAt),
+    recommendation: normalizeNullable(entry.recommendation),
+    rationale: normalizeNullable(entry.rationale),
+    relatedPaths: normalizePathList(entry.relatedPaths || []),
+    status: normalizeNullable(entry.status) || "promoted",
+    confidence: normalizeConfidence(entry.confidence),
+  }));
+}
+
+export function buildSkillbookProtocolMarkdown(entry = {}) {
+  const title = buildSkillbookProtocolTitle(entry);
+  const tags = buildSkillbookProtocolTags(entry);
+  const relatedPaths = normalizePathList(entry.relatedPaths || []);
+  const lines = [
+    `# Skill: ${title}`,
+    "",
+  ];
+  if (normalizeNullable(entry.recommendation)) {
+    lines.push(`- Recommendation: ${normalizeNullable(entry.recommendation)}`);
+  }
+  if (normalizeNullable(entry.rationale)) {
+    lines.push(`- Rationale: ${normalizeNullable(entry.rationale)}`);
+  }
+  if (tags.length > 0) {
+    lines.push(`- Tags: ${tags.slice(0, 6).join(", ")}`);
+  }
+  if (relatedPaths.length > 0) {
+    lines.push(`- Related Paths: ${relatedPaths.slice(0, 4).join(", ")}`);
+  }
+  if (normalizeConfidence(entry.confidence) != null) {
+    lines.push(`- Confidence: ${normalizeConfidence(entry.confidence).toFixed(2)}`);
+  }
+  return lines.join("\n").trim();
+}
+
 export async function loadSkillbook(options = {}) {
+  if (shouldReadSkillbookFromStateLedger(options)) {
+    const ledgerSkillbook = loadSkillbookFromStateLedger(options);
+    if (ledgerSkillbook?.strategies?.length) {
+      return ledgerSkillbook;
+    }
+  }
   const skillbookPath = resolveSkillbookPath(options);
   if (!existsSync(skillbookPath)) {
     return createEmptySkillbook();
@@ -380,9 +627,9 @@ export async function listSkillbookStrategies(options = {}) {
   }
   if (String(sort || "").trim().toLowerCase() === "ranked") {
     entries = entries
-      .map((entry) => ({ entry, score: scoreSkillbookStrategy(entry, options) }))
+      .map((entry) => ({ entry, ...scoreSkillbookStrategy(entry, options) }))
       .sort((left, right) => right.score - left.score || String(right.entry.updatedAt).localeCompare(String(left.entry.updatedAt)))
-      .map(({ entry, score }, index) => toRankedSkillbookEntry(entry, index + 1, score));
+      .map(({ entry, score, pathMatchPaths }, index) => toRankedSkillbookEntry(entry, index + 1, score, pathMatchPaths));
   }
   const limitNumber = Number(limit);
   if (Number.isFinite(limitNumber) && limitNumber > 0) {
@@ -401,11 +648,13 @@ export function buildSkillbookGuidanceSummary(strategies = [], options = {}) {
     const rationale = normalizeNullable(entry?.rationale);
     const confidence = normalizeConfidence(entry?.confidence);
     const tags = Array.isArray(entry?.tags) ? entry.tags.slice(0, 4).join(", ") : "";
+    const pathMatches = normalizePathList(entry?.pathMatchPaths || []).slice(0, 2).join(", ");
     lines.push(
       [
         `- ${recommendation}`,
         confidence != null ? `confidence=${confidence.toFixed(2)}` : "",
         tags ? `tags=${tags}` : "",
+        pathMatches ? `matched=${pathMatches}` : "",
       ].filter(Boolean).join(" | "),
     );
     if (rationale) {

@@ -1,25 +1,30 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { execSync } from "node:child_process";
-import {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  unlinkSync,
-  mkdirSync,
-} from "node:fs";
+
+const execSyncMock = vi.hoisted(() => vi.fn());
+const spawnSyncMock = vi.hoisted(() => vi.fn(() => ({ status: 0, stdout: "", stderr: "" })));
+const existsSyncMock = vi.hoisted(() => vi.fn(() => false));
+const readFileSyncMock = vi.hoisted(() => vi.fn(() => ""));
+const writeFileSyncMock = vi.hoisted(() => vi.fn());
+const unlinkSyncMock = vi.hoisted(() => vi.fn());
+const mkdirSyncMock = vi.hoisted(() => vi.fn());
 
 // Mock child_process and fs before importing the module
-vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
-}));
+vi.mock("node:child_process", () => {
+  return {
+    execSync: execSyncMock,
+    spawnSync: spawnSyncMock,
+  };
+});
 
-vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => false),
-  readFileSync: vi.fn(() => ""),
-  writeFileSync: vi.fn(),
-  unlinkSync: vi.fn(),
-  mkdirSync: vi.fn(),
-}));
+vi.mock("node:fs", () => {
+  return {
+    existsSync: existsSyncMock,
+    readFileSync: readFileSyncMock,
+    writeFileSync: writeFileSyncMock,
+    unlinkSync: unlinkSyncMock,
+    mkdirSync: mkdirSyncMock,
+  };
+});
 
 describe("startup-service", () => {
   let mod;
@@ -27,6 +32,9 @@ describe("startup-service", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.resetAllMocks();
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "", stderr: "" });
+    existsSyncMock.mockReturnValue(false);
+    readFileSyncMock.mockReturnValue("");
 
     // Dynamic import to pick up fresh mocks each time
     mod = await import("../infra/startup-service.mjs");
@@ -41,10 +49,10 @@ describe("startup-service", () => {
 
     it("returns installed: false when no service is registered", () => {
       // execSync throws = not found
-      execSync.mockImplementation(() => {
+      execSyncMock.mockImplementation(() => {
         throw new Error("not found");
       });
-      existsSync.mockReturnValue(false);
+      existsSyncMock.mockReturnValue(false);
 
       const status = mod.getStartupStatus();
       expect(status.installed).toBe(false);
@@ -73,10 +81,10 @@ describe("startup-service", () => {
   describe("installStartupService", () => {
     it("returns a result object with success field", async () => {
       // Mock execSync for schtasks/launchctl/systemctl behaviors
-      execSync.mockImplementation(() => "");
-      existsSync.mockReturnValue(false);
-      mkdirSync.mockImplementation(() => {});
-      writeFileSync.mockImplementation(() => {});
+      execSyncMock.mockImplementation(() => "");
+      existsSyncMock.mockReturnValue(false);
+      mkdirSyncMock.mockImplementation(() => {});
+      writeFileSyncMock.mockImplementation(() => {});
 
       const result = await mod.installStartupService({ daemon: true });
       expect(result).toHaveProperty("success");
@@ -84,18 +92,18 @@ describe("startup-service", () => {
     });
 
     it("returns success: true on successful install", async () => {
-      execSync.mockImplementation(() => "");
-      existsSync.mockReturnValue(false);
+      execSyncMock.mockImplementation(() => "");
+      existsSyncMock.mockReturnValue(false);
 
       const result = await mod.installStartupService({ daemon: true });
       expect(result.success).toBe(true);
     });
 
     it("handles install failure gracefully", async () => {
-      execSync.mockImplementation(() => {
+      execSyncMock.mockImplementation(() => {
         throw new Error("permission denied");
       });
-      existsSync.mockReturnValue(false);
+      existsSyncMock.mockReturnValue(false);
 
       const result = await mod.installStartupService();
       expect(result.success).toBe(false);
@@ -105,8 +113,8 @@ describe("startup-service", () => {
 
   describe("removeStartupService", () => {
     it("returns a result object with success field", async () => {
-      execSync.mockImplementation(() => "");
-      existsSync.mockReturnValue(false);
+      execSyncMock.mockImplementation(() => "");
+      existsSyncMock.mockReturnValue(false);
 
       const result = await mod.removeStartupService();
       expect(result).toHaveProperty("success");
@@ -114,10 +122,10 @@ describe("startup-service", () => {
     });
 
     it("handles remove when no service exists gracefully", async () => {
-      execSync.mockImplementation(() => {
+      execSyncMock.mockImplementation(() => {
         throw new Error("not found");
       });
-      existsSync.mockReturnValue(false);
+      existsSyncMock.mockReturnValue(false);
 
       const result = await mod.removeStartupService();
       // On some platforms remove returns success:false when nothing to remove, that's fine

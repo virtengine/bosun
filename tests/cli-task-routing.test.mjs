@@ -14,6 +14,7 @@ describe("cli task routing", () => {
     expect(envSetupIndex).toBeGreaterThan(-1);
     expect(taskRoutingIndex).toBeGreaterThan(-1);
     expect(envSetupIndex).toBeLessThan(taskRoutingIndex);
+    expect(cliSource).toContain("const resolvedConfigDirArg = resolve(earlyConfigDirArg)");
     expect(cliSource).toContain("process.env.BOSUN_DIR = resolvedConfigDirArg");
     expect(cliSource).toContain("process.env.BOSUN_HOME = resolvedConfigDirArg");
   });

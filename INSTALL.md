@@ -8,7 +8,7 @@ This guide covers every way to install and run Bosun: from npm, from source, via
 
 | Requirement | Notes |
 |---|---|
-| **Node.js 18+** | v22 LTS recommended. Required for npm / source installs. Not needed for Docker. |
+| **Node.js 22.13+** | Required for npm / source installs because Bosun uses the built-in `node:sqlite` module. Node 24 LTS recommended. Not needed for Docker. |
 | **Git** | On PATH. Needed by all installation methods. |
 | **Bash** or **PowerShell 7+** | For executor wrapper scripts. Windows ships with PowerShell; macOS/Linux ship with bash. |
 | **GitHub CLI (`gh`)** | Recommended for PR workflows. `brew install gh` / `winget install GitHub.cli` / `apt install gh`. |
@@ -286,10 +286,12 @@ bosun --setup-terminal     # Legacy terminal wizard
 
 | File | Purpose |
 |---|---|
-| `.env` | Environment-based settings (API keys, tokens). |
+| `.env` | Canonical Bosun runtime env in the resolved config directory (`bosun --where`). Repo-root `.env` is legacy/bootstrap fallback only. |
 | `bosun.config.json` | Structured config (executor, routing, profiles). |
 | `bosun.config.example.json` | Canonical reference for config shape. |
-| `.env.example` | Canonical reference for environment variables. |
+| `.env.example` | Canonical reference for environment variables and bootstrap template. |
+
+The runtime reads the config-dir `.env` first. If that file does not exist yet, Bosun may fall back to a repo-root `.env` for compatibility, but new setups should keep the canonical file in the config directory.
 
 Find all config paths:
 
@@ -338,6 +340,8 @@ docker inspect bosun --format='{{json .State.Health}}'  # Health details
 ### Self-signed TLS warning
 
 Bosun auto-generates a self-signed certificate on first start. Your browser will show a security warning — this is expected for local development. Accept the certificate or use `curl -k` for API calls.
+
+When TLS is enabled, the UI server now negotiates HTTP/2 automatically and keeps HTTP/1.1 fallback enabled for secure WebSocket upgrades.
 
 ### Reset everything
 

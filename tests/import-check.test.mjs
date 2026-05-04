@@ -181,4 +181,22 @@ describe("import-check", () => {
     expect(stderr).toContain("task");
     expect(stderr).toContain("nonExistent");
   });
+
+  it("reports syntax errors in imported modules directly", () => {
+    mkdirSync(join(tmpDir, "workspace"));
+    writeFileSync(
+      join(tmpDir, "entry.mjs"),
+      `import { helper } from "./workspace/broken.mjs";\nconsole.log(helper);\n`,
+    );
+    writeFileSync(
+      join(tmpDir, "workspace", "broken.mjs"),
+      `export const helper = ;\n`,
+    );
+
+    const { exitCode, stderr } = runExpectFail(tmpDir, ["entry.mjs", "workspace/broken.mjs"]);
+    expect(exitCode).toBe(1);
+    expect(stderr.replaceAll("\\", "/")).toContain("workspace/broken.mjs");
+    expect(stderr).toContain("Syntax error");
+    expect(stderr).not.toContain("does not provide an export");
+  });
 });

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { taskCreate, taskList } from "../../task/task-cli.mjs";
 import { WorkflowEngine } from "../../workflow/workflow-engine.mjs";
+import "../../workflow/workflow-nodes.mjs";
 import { installTemplateSet } from "../../workflow/workflow-templates.mjs";
 
 const DEFAULT_SWEBENCH_TEMPLATE_IDS = Object.freeze(["template-task-lifecycle"]);

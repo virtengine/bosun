@@ -89,10 +89,21 @@ registerNodeType("condition.expression", {
   async execute(node, ctx) {
     const expr = node.config?.expression;
     if (!expr) throw new Error("Expression is required");
-    const normalizedExpr = String(expr).trim();
+    const normalizedExpr = String(expr)
+      .replace(/\{\{([A-Za-z0-9_][A-Za-z0-9_.-]*)\}\}/g, (match, path) => {
+        const resolved = ctx.resolve(`{{${path}}}`);
+        if (resolved === match || resolved == null) return match;
+        if (typeof resolved === "string") return JSON.stringify(resolved);
+        try {
+          return JSON.stringify(resolved);
+        } catch {
+          return String(resolved);
+        }
+      })
+      .trim();
     const blockedPatterns = [
-      /(?:^|[^\\w$.])(globalThis|global|window|document|process|require|module|exports)(?:[^\\w$]|$)/,
-      /(?:^|[^\\w$.])(Function|eval)(?:[^\\w$]|$)/,
+      /(?:^|[^\w$.])(globalThis|global|window|document|process|require|module|exports)(?:[^\w$]|$)/,
+      /(?:^|[^\w$.])(Function|eval)(?:[^\w$]|$)/,
     ];
     if (blockedPatterns.some((pattern) => pattern.test(normalizedExpr))) {
       throw new Error("Expression contains unsupported syntax");
@@ -213,30 +224,84 @@ registerNodeType("condition.slot_available", {
       baseBranch: { type: "string", description: "Base branch to check against" },
     },
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
     const maxParallel = node.config?.maxParallel ?? 3;
     const baseBranchLimit = node.config?.baseBranchLimit ?? 0;
-    const activeSlotCount = ctx.data?.activeSlotCount ?? 0;
+    const currentTaskId = String(ctx.data?.taskId || "").trim();
+    const reservedBaseBranch = cfgOrCtx(node, ctx, "baseBranch") || ctx.data?.baseBranch || "";
+    if (currentTaskId && engine && typeof engine.reserveTaskLifecycleSlot === "function") {
+      const reservation = engine.reserveTaskLifecycleSlot({
+        runId: ctx.id,
+        taskId: currentTaskId,
+        baseBranch: reservedBaseBranch,
+        maxParallel,
+        baseBranchLimit,
+      });
+      if (reservation.result) {
+        ctx.data._reservedTaskLifecycleSlot = {
+          taskId: currentTaskId,
+          baseBranch: String(reservedBaseBranch || "").trim(),
+          reservedAt: Date.now(),
+          status: "reserved",
+        };
+      } else if (
+        ctx.data?._reservedTaskLifecycleSlot
+        && String(ctx.data._reservedTaskLifecycleSlot.taskId || "").trim() === currentTaskId
+      ) {
+        ctx.data._reservedTaskLifecycleSlot = null;
+      }
+      ctx.log(node.id, `Slot check: ${reservation.activeSlotCount}/${maxParallel}, perBranch=${reservation.baseBranchOk} → ${reservation.result}`);
+      return reservation;
+    }
+
+    const slotSnapshot =
+      typeof engine?.getTaskLifecycleSlotSnapshot === "function"
+        ? engine.getTaskLifecycleSlotSnapshot({ excludeTaskId: currentTaskId })
+        : null;
+    const workflowActiveTaskIds = new Set(
+      Array.isArray(slotSnapshot?.activeTaskIds) && slotSnapshot.activeTaskIds.length > 0
+        ? slotSnapshot.activeTaskIds
+        : (typeof engine?.getActiveRuns === "function" ? engine.getActiveRuns() : [])
+          .filter((run) => String(run?.workflowName || "").trim().toLowerCase() === "task lifecycle")
+          .map((run) => String(run?.taskId || "").trim())
+          .filter((taskId) => taskId && taskId !== currentTaskId)
+          .filter(Boolean),
+    );
+    const activeSlotCount = Number(
+      ctx.data?.activeSlotCount
+      ?? slotSnapshot?.activeSlotCount
+      ?? (workflowActiveTaskIds.size > 0 ? workflowActiveTaskIds.size : 0),
+    ) || 0;
     const slotsAvailable = activeSlotCount < maxParallel;
 
     let baseBranchOk = true;
     if (baseBranchLimit > 0) {
-      const baseBranch = cfgOrCtx(node, ctx, "baseBranch");
+      const baseBranch = reservedBaseBranch;
       if (baseBranch) {
-        const counts = ctx.data?.baseBranchSlotCounts || {};
+        const counts = ctx.data?.baseBranchSlotCounts || slotSnapshot?.baseBranchSlotCounts || {};
         const key = baseBranch.replace(/^origin\//, "");
         baseBranchOk = (counts[key] ?? 0) < baseBranchLimit;
       }
     }
 
     const result = slotsAvailable && baseBranchOk;
+    if (result && currentTaskId) {
+      ctx.data._reservedTaskLifecycleSlot = {
+        taskId: currentTaskId,
+        baseBranch: String(reservedBaseBranch || "").trim(),
+        reservedAt: Date.now(),
+        status: "reserved",
+      };
+    } else if (
+      ctx.data?._reservedTaskLifecycleSlot
+      && String(ctx.data._reservedTaskLifecycleSlot.taskId || "").trim() === currentTaskId
+    ) {
+      ctx.data._reservedTaskLifecycleSlot = null;
+    }
     ctx.log(node.id, `Slot check: ${activeSlotCount}/${maxParallel}, perBranch=${baseBranchOk} → ${result}`);
     return { result, slotsAvailable, baseBranchOk, activeSlotCount, maxParallel };
   },
 });
 
 // ── action.allocate_slot ────────────────────────────────────────────────────
-
-
-
 

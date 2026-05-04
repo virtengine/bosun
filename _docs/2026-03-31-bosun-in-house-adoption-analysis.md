@@ -22,7 +22,7 @@ Bosun already exposes the foundation needed for this migration:
 - `lib/state-ledger-sqlite.mjs` already provides WAL-backed SQLite storage for workflow runs/events and is the correct nucleus for a broader SQL runtime store.
 - `workspace/context-indexer.mjs` already builds a local SQLite index of files and symbols under `.bosun/context-index`.
 - `workspace/shared-knowledge.mjs` already supports append-only knowledge capture, but its persistent registry is still JSON-based and too lightweight for long-term system memory.
-- `kanban/kanban-adapter.mjs` already supports `internal`, `github`, `jira`, and optional `gnap` backends, which means Bosun already understands projection-style task backends.
+- `kanban/kanban-adapter.mjs` already supports `internal`, `github`, `jira`, and optional `repo-mirror` backends, which means Bosun already understands projection-style task backends.
 - `ui/modules/settings-schema.js` already gives us an off-by-default settings plane for new subsystems.
 - `bosun/.bosun/library.json` already contains a Linear MCP entry, so Linear is present as a tool capability but not as a first-class Bosun task backend.
 
@@ -133,7 +133,7 @@ Jira is already implemented as a kanban backend. Linear is present only through 
 The right model for Bosun is:
 
 - Bosun internal SQL task graph = canonical execution truth
-- Jira / Linear / GitHub / GNAP = projection or synchronization targets
+- Jira / Linear / GitHub / RepoMirror = projection or synchronization targets
 
 Do not make external SaaS systems the primary runtime database for Bosun internals. That would repeat the same problem in a different place.
 

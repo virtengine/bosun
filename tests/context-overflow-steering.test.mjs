@@ -8,6 +8,12 @@ import {
   TOKEN_OVERFLOW_PATTERNS,
 } from "../infra/error-detector.mjs";
 import {
+  getActiveSessions,
+  hasActiveSession,
+  isContextOverflowError,
+  steerActiveThread,
+} from "../agent/agent-pool.mjs";
+import {
   AgentSupervisor,
   createAgentSupervisor,
   SITUATION,
@@ -225,14 +231,6 @@ describe("agent-supervisor — expanded TOKEN_OVERFLOW diagnosis", () => {
 // ---------------------------------------------------------------------------
 
 describe("isContextOverflowError", () => {
-  // Dynamic import to avoid full agent-pool mock scaffold
-  let isContextOverflowError;
-
-  beforeEach(async () => {
-    const mod = await import("../agent/agent-pool.mjs");
-    isContextOverflowError = mod.isContextOverflowError;
-  });
-
   const positives = [
     "context_length_exceeded",
     "prompt_too_long",
@@ -283,15 +281,6 @@ describe("isContextOverflowError", () => {
 // ---------------------------------------------------------------------------
 
 describe("steerActiveThread / hasActiveSession", () => {
-  let steerActiveThread, hasActiveSession, getActiveSessions;
-
-  beforeEach(async () => {
-    const mod = await import("../agent/agent-pool.mjs");
-    steerActiveThread = mod.steerActiveThread;
-    hasActiveSession = mod.hasActiveSession;
-    getActiveSessions = mod.getActiveSessions;
-  });
-
   it("returns false when no active session exists", () => {
     expect(hasActiveSession("nonexistent-task")).toBe(false);
     expect(steerActiveThread("nonexistent-task", "do something")).toBe(false);

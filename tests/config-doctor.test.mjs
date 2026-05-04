@@ -76,6 +76,31 @@ describe("config-doctor", () => {
     }
   });
 
+  it("warns when named tunnel is selected without Cloudflare tunnel credentials", () => {
+    const saved = {
+      TELEGRAM_UI_TUNNEL: process.env.TELEGRAM_UI_TUNNEL,
+      CLOUDFLARE_TUNNEL_NAME: process.env.CLOUDFLARE_TUNNEL_NAME,
+      CLOUDFLARE_TUNNEL_CREDENTIALS: process.env.CLOUDFLARE_TUNNEL_CREDENTIALS,
+    };
+    try {
+      process.env.TELEGRAM_UI_TUNNEL = "named";
+      process.env.CLOUDFLARE_TUNNEL_NAME = "";
+      process.env.CLOUDFLARE_TUNNEL_CREDENTIALS = "";
+
+      const result = runConfigDoctor();
+      expect(
+        result.warnings.some(
+          (issue) => issue.code === "CLOUDFLARE_NAMED_TUNNEL_CONFIG_MISSING",
+        ),
+      ).toBe(true);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("warns when WORKFLOW.md exists but workflow contract steps are not enabled", () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "config-doctor-workflow-contract-"));
     const workflowDir = join(repoRoot, ".bosun", "workflows");

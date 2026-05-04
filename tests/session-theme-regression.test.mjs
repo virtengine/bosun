@@ -18,6 +18,19 @@ describe("session ui interactions", () => {
     expect(source).toContain("onSessionViewChange");
     expect(source).toContain("workspace: getWorkspaceScopeForView(view)");
   });
+
+  it("adds right-click control menus to task cards, workflow cards, and run history rows", () => {
+    const boardSource = readFileSync(resolve(process.cwd(), "ui/components/kanban-board.js"), "utf8");
+    const workflowSource = readFileSync(resolve(process.cwd(), "ui/tabs/workflows.js"), "utf8");
+
+    expect(boardSource).toContain("onTaskContextMenu");
+    expect(boardSource).toContain("Move to In Progress");
+    expect(boardSource).toContain("Copy ID");
+    expect(workflowSource).toContain("workflowCardContextMenu");
+    expect(workflowSource).toContain("openWorkflowCardContextMenu");
+    expect(workflowSource).toContain("runRowContextMenu");
+    expect(workflowSource).toContain("Copy run ID");
+  });
 });
 
 describe("theme precedence safeguards", () => {

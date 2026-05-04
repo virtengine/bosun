@@ -226,39 +226,6 @@ describe("tui screen rendering", () => {
 
   it("scrolls the turn timeline independently inside session detail", async () => {
     const bridge = createMockBridge();
-    const detailWithManyTurns = {
-      ok: true,
-      session: {
-        ...sessionDetailFixture.session,
-        turns: Array.from({ length: 20 }, (_, index) => ({
-          id: `turn-${index + 1}`,
-          number: index + 1,
-          timestamp: `2026-03-23T00:00:${String(index).padStart(2, "0")}.000Z`,
-          tokenDelta: index + 1,
-          durationMs: 1000,
-          eventType: `event-${index + 1}`,
-        })),
-      },
-    };
-    globalThis.fetch = vi.fn(async (url, init = {}) => {
-      const href = String(url);
-      if (href.includes("/api/sessions?workspace=all")) {
-        return { ok: true, json: async () => ({ ok: true, sessions: sessionsFixture }) };
-      }
-      if (href.includes("/api/retry-queue")) {
-        return { ok: true, json: async () => ({ ok: true, ...monitorStatsFixture.retryQueue }) };
-      }
-      if (href.includes("/diff?workspace=all")) {
-        return { ok: true, json: async () => sessionDiffFixture };
-      }
-      if (href.includes("/api/sessions/") && init.method !== "POST") {
-        return { ok: true, json: async () => detailWithManyTurns };
-      }
-      if (href.includes("/api/sessions/") && init.method === "POST") {
-        return { ok: true, json: async () => ({ ok: true }) };
-      }
-      return { ok: false, json: async () => ({ error: `Unhandled URL ${href}` }) };
-    });
     const view = await renderInk(
       React.createElement(AgentsScreen, {
         wsBridge: bridge,
@@ -275,9 +242,7 @@ describe("tui screen rendering", () => {
     await waitFor(() => view.text().includes("| 2026-03-23 00:00:00.000 |"));
     expect(view.text()).not.toContain("| 2026-03-23 00:00:17.000 |");
 
-    for (let index = 0; index < 8; index += 1) {
-      await view.press("\u001b[B", 20);
-    }
+    await view.press("\u001b[6~", 80);
     await waitFor(() => view.text().includes("| 2026-03-23 00:00:17.000 |"));
 
     await view.unmount();
@@ -462,10 +427,13 @@ describe("tui screen rendering", () => {
     expect(view.latestText()).toContain("N New");
     expect(view.latestText()).toContain("? Help");
 
+    const baseline = view.latestText();
     await view.press("n");
     await waitFor(() => view.latestText().includes("New Task"));
-    await waitFor(() => view.text().includes("Ctrl+S Save"));
-    expect(view.text()).toContain("Esc Cancel");
+    const updated = view.latestText().slice(baseline.length);
+    expect(updated).toContain("Ctrl+S Save");
+    expect(updated).toContain("Esc Cancel");
+    expect(updated).not.toContain("N New  |  E Edit  |  D Delete");
 
     await view.unmount();
   });

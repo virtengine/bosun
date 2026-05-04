@@ -19,16 +19,19 @@
 import { isAbsolute, resolve, dirname } from "node:path";
 import {
   existsSync,
+  openSync,
   readFileSync,
   writeFileSync,
   unlinkSync,
   mkdirSync,
+  closeSync,
 } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { execFileSync, execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import { createDaemonCrashTracker } from "./infra/daemon-restart-policy.mjs";
 import { ensureTestRuntimeSandbox } from "./infra/test-runtime.mjs";
+import { followTextFile } from "./lib/log-tail.mjs";
 import { safeBanner, BOX } from "./lib/safe-box.mjs";
 import {
   applyAllCompatibility,
@@ -37,6 +40,7 @@ import {
 } from "./compat.mjs";
 import {
   resolveRepoLocalBosunDir,
+  resolveTrustedBosunConfigDir,
   resolveRepoRoot,
   detectBosunModuleRoot,
 } from "./config/repo-root.mjs";
@@ -48,6 +52,10 @@ const MONITOR_START_MAX_WAIT_MS = Math.max(
 const MONITOR_START_RETRY_MS = Math.max(
   100,
   Number(process.env.BOSUN_MONITOR_START_RETRY_MS || "500") || 500,
+);
+const DAEMON_START_STABILITY_MS = Math.max(
+  500,
+  Number(process.env.BOSUN_DAEMON_START_STABILITY_MS || "8000") || 8000,
 );
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -84,6 +92,9 @@ function showHelp() {
   COMMANDS
     workflow list              List declarative pipeline workflows
     workflow run <name>        Run a declarative pipeline workflow
+    workflow templates         List workflow-engine templates
+    workflow template-run <id> Run a workflow-engine template directly
+    simulate task [id|restart] Run the real task-lifecycle workflow
     workflow nodes             Inspect custom workflow node plugin health
     tui                        Launch the terminal UI
     audit <command>            Run codebase annotation audit tools (scan|generate|warn|manifest|index|trim|conformity|migrate)
@@ -93,7 +104,7 @@ function showHelp() {
     --doctor                    Validate bosun .env/config setup
     --tool-log <ID|list|prune>  Retrieve/list/prune cached tool outputs
     node:create <name>          Scaffold a custom workflow node in custom-nodes/
-    --context-index [mode]      Run context index workflow (run|status|search)
+    --context-index [mode]      Run context index workflow (run|status|search|graph)
     --context-index-query <text> Query text for context index search mode
     --context-index-limit <n>   Max results for context index search (default: 25)
     --context-index-task-type <type> Task scope for search (auto|ci-cd|frontend|backend|infra|docs|security)
@@ -172,6 +183,9 @@ function showHelp() {
   WORKFLOWS
     workflow list               List built-in and configured workflows
     workflow run <name>         Run a declarative fresh-context workflow
+    workflow templates          List built-in workflow-engine templates
+    workflow template-run <id>  Run a workflow-engine template directly
+    simulate task [id|restart]  Run the real task lifecycle workflow
 
     Run 'bosun workflow --help' for workflow CLI examples.
     Run 'bosun tui' to launch the terminal UI.
@@ -257,18 +271,21 @@ function isWslInteropRuntime() {
   );
 }
 
+function resolveRepoRootForCliRuntime(options = {}) {
+  const repoRootArg = getArgValue("--repo-root");
+  if (repoRootArg) return resolve(repoRootArg);
+  if (process.env.REPO_ROOT) return resolve(process.env.REPO_ROOT);
+  return resolveRepoRoot({ cwd: options.cwd || process.cwd() });
+}
+
 function resolveConfigDirForCli() {
   const configDirArg = getArgValue("--config-dir");
   if (configDirArg) return resolve(configDirArg);
-  if (process.env.BOSUN_HOME) return resolve(process.env.BOSUN_HOME);
-  if (process.env.BOSUN_DIR) return resolve(process.env.BOSUN_DIR);
 
-  const repoRootArg = getArgValue("--repo-root");
-  const repoRoot = repoRootArg
-    ? resolve(repoRootArg)
-    : process.env.REPO_ROOT
-      ? resolve(process.env.REPO_ROOT)
-      : resolveRepoRoot({ cwd: process.cwd() });
+  const repoRoot = resolveRepoRootForCliRuntime();
+  if (process.env.BOSUN_HOME) return resolveTrustedBosunConfigDir(process.env.BOSUN_HOME, repoRoot);
+  if (process.env.BOSUN_DIR) return resolveTrustedBosunConfigDir(process.env.BOSUN_DIR, repoRoot);
+
   const repoLocalConfigDir = resolveRepoLocalBosunDir(repoRoot);
   if (repoLocalConfigDir) return repoLocalConfigDir;
 
@@ -319,7 +336,7 @@ function printConfigLocations() {
 
 // ── Daemon Mode ──────────────────────────────────────────────────────────────
 
-const runtimeRepoRoot = resolveRepoRoot();
+const runtimeRepoRoot = resolveRepoRootForCliRuntime();
 const runtimeCacheDir = resolve(runtimeRepoRoot, ".cache");
 // Monitor singleton lock file (owned by monitor.mjs / maintenance.mjs).
 const PID_FILE = resolve(runtimeCacheDir, "bosun.pid");
@@ -349,6 +366,8 @@ const SENTINEL_SCRIPT_PATH = fileURLToPath(
 );
 const IS_DAEMON_CHILD =
   args.includes("--daemon-child") || process.env.BOSUN_DAEMON === "1";
+let daemonInlineSupervisorActive = false;
+let daemonPidCleanupInstalled = false;
 const DAEMON_RESTART_DELAY_MS = Math.max(
   1000,
   Number(process.env.BOSUN_DAEMON_RESTART_DELAY_MS || 5000) || 5000,
@@ -724,6 +743,19 @@ function removePidFile() {
   }
 }
 
+function isDaemonSupervisorRuntime() {
+  return IS_DAEMON_CHILD || daemonInlineSupervisorActive;
+}
+
+function installDaemonPidCleanup() {
+  if (daemonPidCleanupInstalled) return;
+  daemonPidCleanupInstalled = true;
+  process.on("exit", () => {
+    if (!isDaemonSupervisorRuntime()) return;
+    removePidFile();
+  });
+}
+
 function absolutizeDaemonArgPath(value) {
   const raw = String(value || "").trim();
   if (!raw) return raw;
@@ -758,7 +790,133 @@ function normalizeDetachedDaemonArgs(rawArgs = []) {
   return normalized;
 }
 
-function startDaemon() {
+function resolveDetachedDaemonEnvOverrides() {
+  const explicitRepoRoot = getArgValue("--repo-root");
+  return {
+    BOSUN_DAEMON: "1",
+    BOSUN_DIR: process.env.BOSUN_DIR || resolveConfigDirForCli(),
+    ...(process.env.REPO_ROOT
+      ? { REPO_ROOT: resolve(process.env.REPO_ROOT) }
+      : explicitRepoRoot
+        ? { REPO_ROOT: resolve(explicitRepoRoot) }
+      : (() => {
+          try {
+            const gitRoot = execSync("git rev-parse --show-toplevel", {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+            }).trim();
+            return gitRoot ? { REPO_ROOT: gitRoot } : {};
+          } catch {
+            return {};
+          }
+        })()),
+  };
+}
+
+function buildDetachedDaemonLaunchSpec() {
+  const runAsNode = process.versions?.electron ? ["--run-as-node"] : [];
+  return {
+    filePath: process.execPath,
+    args: [
+      ...runAsNode,
+      "--max-old-space-size=4096",
+      fileURLToPath(new URL("./cli.mjs", import.meta.url)),
+      ...normalizeDetachedDaemonArgs(
+        process.argv.slice(2).filter((a) => a !== "--daemon" && a !== "-d"),
+      ),
+      "--daemon-child",
+    ],
+    env: {
+      ...process.env,
+      ...resolveDetachedDaemonEnvOverrides(),
+    },
+    cwd: os.homedir(),
+  };
+}
+
+function buildDetachedMonitorLaunchSpec() {
+  const runAsNode = process.versions?.electron ? ["--run-as-node"] : [];
+  return {
+    filePath: process.execPath,
+    args: [
+      ...runAsNode,
+      "--max-old-space-size=4096",
+      fileURLToPath(new URL("./infra/monitor.mjs", import.meta.url)),
+      ...normalizeDetachedDaemonArgs(
+        process.argv.slice(2).filter(
+          (a) => a !== "--daemon" && a !== "-d" && a !== "--daemon-child",
+        ),
+      ),
+    ],
+    env: {
+      ...process.env,
+      BOSUN_DAEMON: "1",
+      BOSUN_DIR: process.env.BOSUN_DIR || resolveConfigDirForCli(),
+      ...(process.env.REPO_ROOT
+        ? { REPO_ROOT: resolve(process.env.REPO_ROOT) }
+        : getArgValue("--repo-root")
+          ? { REPO_ROOT: resolve(getArgValue("--repo-root")) }
+          : {}),
+    },
+    cwd: os.homedir(),
+  };
+}
+
+function escapePowerShellSingleQuoted(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function waitForTrackedDaemonPid(timeoutMs = 4000) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  while (Date.now() <= deadline) {
+    const pid = getDaemonPid();
+    if (pid) return pid;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  return null;
+}
+
+function startDaemonViaWindowsStartProcess(launchSpec) {
+  const envAssignments = Object.entries(launchSpec.env || {})
+    .filter(([key, value]) => {
+      if (value === undefined) return false;
+      return process.env[key] !== String(value);
+    })
+    .map(
+      ([key, value]) =>
+        `Set-Item -LiteralPath ${escapePowerShellSingleQuoted(`Env:${key}`)} -Value ${escapePowerShellSingleQuoted(String(value))};`,
+    )
+    .join(" ");
+  const argumentList = launchSpec.args
+    .map((arg) => escapePowerShellSingleQuoted(String(arg)))
+    .join(", ");
+  const command = [
+    envAssignments,
+    `$process = Start-Process -FilePath ${escapePowerShellSingleQuoted(launchSpec.filePath)}`,
+    `-ArgumentList @(${argumentList})`,
+    `-WorkingDirectory ${escapePowerShellSingleQuoted(launchSpec.cwd)}`,
+    "-WindowStyle Hidden -PassThru;",
+    "[Console]::Out.Write($process.Id)",
+  ].join(" ");
+  const output = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+      windowsHide: true,
+    },
+  ).trim();
+  const pid = Number.parseInt(output, 10);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    throw new Error(`Start-Process did not return a daemon PID (output: ${output || "empty"})`);
+  }
+  return pid;
+}
+
+async function startDaemon() {
+  installMonitorChildSignalHandlers();
   const existing = getDaemonPid();
   if (existing) {
     console.log(`  bosun daemon is already running (PID ${existing})`);
@@ -795,54 +953,162 @@ function startDaemon() {
     /* ok */
   }
 
-  const runAsNode = process.versions?.electron ? ["--run-as-node"] : [];
-  const child = spawn(
-    process.execPath,
-    [
-      ...runAsNode,
-      "--max-old-space-size=4096",
-      fileURLToPath(new URL("./cli.mjs", import.meta.url)),
-      ...normalizeDetachedDaemonArgs(
-        process.argv.slice(2).filter((a) => a !== "--daemon" && a !== "-d"),
-      ),
-      "--daemon-child",
-    ],
-    {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: process.platform === "win32",
-      env: {
-        ...process.env,
-        BOSUN_DAEMON: "1",
-        // Propagate the bosun config directory so repo-root detection works
-        // even when the daemon child's cwd is not inside a git repo.
-        // Use the proper config dir (APPDATA/bosun or ~/bosun), NOT __dirname.
-        BOSUN_DIR: process.env.BOSUN_DIR || resolveConfigDirForCli(),
-        // Propagate REPO_ROOT if available; otherwise resolve from cwd before detaching
-        ...(process.env.REPO_ROOT
-          ? {}
-          : (() => {
-              try {
-                const gitRoot = execSync("git rev-parse --show-toplevel", {
-                  encoding: "utf8",
-                  stdio: ["ignore", "pipe", "ignore"],
-                }).trim();
-                return gitRoot ? { REPO_ROOT: gitRoot } : {};
-              } catch {
-                return {};
-              }
-            })()),
-      },
-      // Use home dir so spawn never inherits a deleted CWD (e.g. old git worktree)
-      cwd: os.homedir(),
-    },
-  );
+  const launchPreflight =
+    process.platform === "win32" ? checkPipedChildProcessLaunch() : { ok: true, code: null };
+  const shouldInlineFallback =
+    process.platform === "win32" &&
+    launchPreflight?.ok === false &&
+    ["EPERM", "EACCES"].includes(String(launchPreflight?.code || "").trim().toUpperCase());
+  if (shouldInlineFallback) {
+    daemonInlineSupervisorActive = true;
+    installDaemonPidCleanup();
+    writePidFile(process.pid);
+    console.warn(
+      `\n  [cli] daemon detached startup is unavailable on this Windows host (${launchPreflight.code}); running Bosun inline in the current process instead`,
+    );
+    console.log(`
+${safeBanner([`bosun daemon fallback active (PID ${process.pid})`])}
 
-  child.unref();
-  writePidFile(child.pid);
+  Mode: inline supervisor fallback
+  Logs: ${DAEMON_LOG}
+  PID:  ${DAEMON_PID_FILE}
+
+  Commands:
+    bosun --daemon-status   Check if running
+    bosun --stop-daemon     Stop the daemon
+    bosun --echo-logs       Tail live logs
+  `);
+    await runMonitor({ restartReason: "daemon-inline-fallback" });
+    return;
+  }
+
+  const launchSpec = buildDetachedDaemonLaunchSpec();
+  let daemonPid = null;
+  let child = null;
+  let daemonLogFd = null;
+  const preferWindowsStartProcess = process.platform === "win32";
+  let usedDirectMonitorFallback = false;
+  const closeDaemonLogFd = () => {
+    if (daemonLogFd == null) return;
+    try {
+      closeSync(daemonLogFd);
+    } catch {
+      /* best effort */
+    }
+    daemonLogFd = null;
+  };
+  const startDetachedMonitorFallback = () => {
+    if (usedDirectMonitorFallback || process.platform !== "win32") return null;
+    usedDirectMonitorFallback = true;
+    closeDaemonLogFd();
+    const monitorLaunchSpec = buildDetachedMonitorLaunchSpec();
+    console.warn(
+      "\n  [cli] daemon-child detached startup was not durable; falling back to direct detached monitor process",
+    );
+    const monitorPid = startDaemonViaWindowsStartProcess(monitorLaunchSpec);
+    const stabilityDeadline = Date.now() + DAEMON_START_STABILITY_MS;
+    while (Date.now() < stabilityDeadline) {
+      if (!isProcessAlive(monitorPid)) {
+        throw new Error(
+          "Detached direct monitor exited during startup stability window; Windows child-process policy is preventing a durable Bosun background start in this runtime.",
+        );
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+    if (!isProcessAlive(monitorPid)) {
+      throw new Error(
+        "Detached direct monitor exited during startup stability window; Windows child-process policy is preventing a durable Bosun background start in this runtime.",
+      );
+    }
+    writePidFile(monitorPid);
+    return monitorPid;
+  };
+  try {
+    daemonLogFd = openSync(DAEMON_LOG, "a");
+  } catch {
+    daemonLogFd = null;
+  }
+  try {
+    if (preferWindowsStartProcess) {
+      closeDaemonLogFd();
+      console.warn(
+        "\n  [cli] using PowerShell Start-Process for durable Windows daemon detachment",
+      );
+      daemonPid = startDaemonViaWindowsStartProcess(launchSpec);
+    } else {
+      child = spawn(
+        launchSpec.filePath,
+        launchSpec.args,
+        {
+          detached: true,
+          stdio:
+            daemonLogFd == null ? "ignore" : ["ignore", daemonLogFd, daemonLogFd],
+          windowsHide: process.platform === "win32",
+          env: {
+            ...launchSpec.env,
+            ...(daemonLogFd == null
+              ? {}
+              : { BOSUN_DAEMON_STDIO_REDIRECTED: "1" }),
+          },
+          // Use home dir so spawn never inherits a deleted CWD (e.g. old git worktree)
+          cwd: launchSpec.cwd,
+        },
+      );
+      child.unref();
+      daemonPid = child.pid;
+    }
+  } catch (error) {
+    closeDaemonLogFd();
+    const canUseWindowsStartProcess =
+      process.platform === "win32" && error?.code === "EPERM";
+    if (!canUseWindowsStartProcess) throw error;
+    console.warn(
+      "\n  [cli] detached daemon spawn hit EPERM; launching daemon via PowerShell Start-Process for stable Windows detachment",
+    );
+    daemonPid = startDaemonViaWindowsStartProcess(launchSpec);
+  }
+  const trackedPid = waitForTrackedDaemonPid();
+  if (trackedPid) {
+    daemonPid = trackedPid;
+  } else if (!isProcessAlive(daemonPid)) {
+    const fallbackPid = startDetachedMonitorFallback();
+    if (fallbackPid) {
+      daemonPid = fallbackPid;
+    } else {
+      closeDaemonLogFd();
+      throw new Error("Detached daemon exited before writing its PID file");
+    }
+  }
+  const stabilityDeadline = Date.now() + DAEMON_START_STABILITY_MS;
+  while (Date.now() < stabilityDeadline) {
+    if (!isProcessAlive(daemonPid)) {
+      const fallbackPid = startDetachedMonitorFallback();
+      if (fallbackPid) {
+        daemonPid = fallbackPid;
+        break;
+      }
+      closeDaemonLogFd();
+      throw new Error(
+        "Detached daemon exited during startup stability window; Windows child-process policy is preventing a durable daemon start in this runtime.",
+      );
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+  if (!isProcessAlive(daemonPid)) {
+    const fallbackPid = startDetachedMonitorFallback();
+    if (fallbackPid) {
+      daemonPid = fallbackPid;
+    } else {
+      closeDaemonLogFd();
+      throw new Error(
+        "Detached daemon exited during startup stability window; Windows child-process policy is preventing a durable daemon start in this runtime.",
+      );
+    }
+  }
+  closeDaemonLogFd();
 
   console.log(`
-${safeBanner([`bosun daemon started (PID ${child.pid})`])}
+${safeBanner([`bosun daemon started (PID ${daemonPid})`])}
 
   Logs: ${DAEMON_LOG}
   PID:  ${DAEMON_PID_FILE}
@@ -1372,6 +1638,22 @@ async function main() {
     process.exit(0);
   }
 
+  const simulateFlagIndex = args.indexOf("--simulate");
+  const simulateCommandIndex =
+    args[0] === "simulate"
+      ? 0
+      : args[0]?.startsWith("--")
+        ? args.indexOf("simulate")
+        : -1;
+  if (simulateCommandIndex >= 0 || simulateFlagIndex >= 0) {
+    const { runTaskSimulationCli } = await import("./task/task-simulate-cli.mjs");
+    const commandStartIndex =
+      simulateCommandIndex >= 0 ? simulateCommandIndex : simulateFlagIndex;
+    const simulateArgs = args.slice(commandStartIndex + 1);
+    await runTaskSimulationCli(simulateArgs);
+    process.exit(0);
+  }
+
   const auditFlagIndex = args.indexOf("--audit");
   const auditCommandIndex =
     args[0] === "audit"
@@ -1585,10 +1867,10 @@ async function main() {
 
   if (args.includes("--context-index")) {
     const modeRaw = (getArgValue("--context-index") || "run").toLowerCase();
-    const validModes = new Set(["run", "status", "search"]);
+    const validModes = new Set(["run", "status", "search", "graph"]);
     if (!validModes.has(modeRaw)) {
       console.error(`Invalid --context-index mode: ${modeRaw}`);
-      console.error("Valid modes: run, status, search");
+      console.error("Valid modes: run, status, search, graph");
       process.exit(1);
     }
 
@@ -1596,6 +1878,7 @@ async function main() {
       const {
         runContextIndex,
         searchContextIndex,
+        getContextGraph,
         getContextIndexStatus,
       } = await import("./workspace/context-indexer.mjs");
 
@@ -1632,6 +1915,15 @@ async function main() {
       const taskType = getArgValue("--context-index-task-type") || "auto";
       const fallbackToGlobal = !args.includes("--context-index-no-fallback");
 
+      if (modeRaw === "graph") {
+        const graph = await getContextGraph(query, {
+          rootDir: runtimeRepoRoot,
+          limit,
+        });
+        console.log(JSON.stringify(graph, null, 2));
+        process.exit(0);
+      }
+
       const results = await searchContextIndex(query, {
         rootDir: runtimeRepoRoot,
         limit,
@@ -1665,7 +1957,7 @@ async function main() {
       await runSetup();
       console.log("\n  Setup complete. Starting daemon...\n");
     }
-    startDaemon();
+    await startDaemon();
     return;
   }
   if (args.includes("--stop-daemon")) {
@@ -1694,54 +1986,58 @@ async function main() {
       process.exit(0);
     }
     writePidFile(process.pid);
-    // Redirect console to log file on daemon child
-    const { createWriteStream } = await import("node:fs");
-    const logStream = createWriteStream(DAEMON_LOG, { flags: "a" });
-    let logStreamErrored = false;
-    logStream.on("error", () => {
-      logStreamErrored = true;
-    });
-    const origStdout = process.stdout.write.bind(process.stdout);
-    const origStderr = process.stderr.write.bind(process.stderr);
-    const isBenignDaemonStreamError = (err) => {
-      const message = String(err?.message || "");
-      return !!(
-        err &&
-        (err.code === "EPIPE" ||
-          err.code === "EIO" ||
-          err.code === "ERR_STREAM_DESTROYED" ||
-          err.code === "ERR_STREAM_WRITE_AFTER_END" ||
-          err.code === "ERR_STREAM_PREMATURE_CLOSE" ||
-          /\bEIO\b/.test(message) ||
-          /\bEPIPE\b/.test(message) ||
-          /\bEOF\b/.test(message) ||
-          /stream was destroyed/i.test(message) ||
-          /write after end/i.test(message) ||
-          /This socket has been ended/i.test(message))
-      );
-    };
-    const safeWrite = (writeFn, chunk, args) => {
-      try {
-        return writeFn(chunk, ...args);
-      } catch (err) {
-        if (isBenignDaemonStreamError(err)) {
-          return false;
+    const daemonStdIoRedirected = process.env.BOSUN_DAEMON_STDIO_REDIRECTED === "1";
+    if (!daemonStdIoRedirected) {
+      // Redirect console to log file on daemon child when the launcher did not
+      // already redirect stdio there (for example the Windows Start-Process fallback).
+      const { createWriteStream } = await import("node:fs");
+      const logStream = createWriteStream(DAEMON_LOG, { flags: "a" });
+      let logStreamErrored = false;
+      logStream.on("error", () => {
+        logStreamErrored = true;
+      });
+      const origStdout = process.stdout.write.bind(process.stdout);
+      const origStderr = process.stderr.write.bind(process.stderr);
+      const isBenignDaemonStreamError = (err) => {
+        const message = String(err?.message || "");
+        return !!(
+          err &&
+          (err.code === "EPIPE" ||
+            err.code === "EIO" ||
+            err.code === "ERR_STREAM_DESTROYED" ||
+            err.code === "ERR_STREAM_WRITE_AFTER_END" ||
+            err.code === "ERR_STREAM_PREMATURE_CLOSE" ||
+            /\bEIO\b/.test(message) ||
+            /\bEPIPE\b/.test(message) ||
+            /\bEOF\b/.test(message) ||
+            /stream was destroyed/i.test(message) ||
+            /write after end/i.test(message) ||
+            /This socket has been ended/i.test(message))
+        );
+      };
+      const safeWrite = (writeFn, chunk, args) => {
+        try {
+          return writeFn(chunk, ...args);
+        } catch (err) {
+          if (isBenignDaemonStreamError(err)) {
+            return false;
+          }
+          throw err;
         }
-        throw err;
-      }
-    };
-    process.stdout.write = (chunk, ...a) => {
-      if (!logStreamErrored) {
-        safeWrite(logStream.write.bind(logStream), chunk, []);
-      }
-      return safeWrite(origStdout, chunk, a);
-    };
-    process.stderr.write = (chunk, ...a) => {
-      if (!logStreamErrored) {
-        safeWrite(logStream.write.bind(logStream), chunk, []);
-      }
-      return safeWrite(origStderr, chunk, a);
-    };
+      };
+      process.stdout.write = (chunk, ...a) => {
+        if (!logStreamErrored) {
+          safeWrite(logStream.write.bind(logStream), chunk, []);
+        }
+        return safeWrite(origStdout, chunk, a);
+      };
+      process.stderr.write = (chunk, ...a) => {
+        if (!logStreamErrored) {
+          safeWrite(logStream.write.bind(logStream), chunk, []);
+        }
+        return safeWrite(origStderr, chunk, a);
+      };
+    }
     console.log(
       `\n[daemon] bosun started at ${new Date().toISOString()} (PID ${process.pid})`,
     );
@@ -1785,7 +2081,7 @@ async function main() {
       }
     }
 
-    if (sentinelExplicit && !IS_DAEMON_CHILD) {
+    if (sentinelExplicit && !isDaemonSupervisorRuntime()) {
       console.log(
         "  Sentinel started without launching monitor (use --daemon --sentinel to run both).",
       );
@@ -2180,7 +2476,7 @@ async function main() {
 
   // First-run detection — skip in daemon-child mode (parent already handled it,
   // and the detached child has no stdin for interactive prompts).
-  if (!IS_DAEMON_CHILD) {
+  if (!isDaemonSupervisorRuntime()) {
     const { shouldRunSetup } = await import("./setup.mjs");
     if (shouldRunSetup()) {
       const configDirArg = getArgValue("--config-dir");
@@ -2272,20 +2568,17 @@ async function main() {
             console.log(
               `\n  Tailing logs for active bosun (PID ${monitorPid}):\n  ${logFile}\n`,
             );
-            await new Promise((res) => {
-              // Spawn tail in its own process group (detached) so that
-              // Ctrl+C in this terminal only kills the tailing session,
-              // never the running daemon.
-              const tail = spawn("tail", ["-f", "-n", "200", logFile], {
-                stdio: ["ignore", "inherit", "inherit"],
-                detached: true,
+            const controller = new AbortController();
+            const stopFollowing = () => controller.abort();
+            process.once("SIGINT", stopFollowing);
+            try {
+              await followTextFile(logFile, {
+                initialLines: 200,
+                signal: controller.signal,
               });
-              tail.on("exit", res);
-              process.on("SIGINT", () => {
-                try { process.kill(-tail.pid, "SIGTERM"); } catch { tail.kill(); }
-                res();
-              });
-            });
+            } finally {
+              process.removeListener("SIGINT", stopFollowing);
+            }
             process.exit(0);
           } else {
             console.error(
@@ -2309,7 +2602,8 @@ async function main() {
     process.exit(0);
   }
 
-  const existingOwner = detectExistingMonitorLockOwner();
+  const configuredCacheDirs = await getConfiguredRuntimeCacheDirs();
+  const existingOwner = detectExistingMonitorLockOwner(null, configuredCacheDirs);
   if (existingOwner) {
     console.log(
       `\n  bosun is already running (PID ${existingOwner.pid}); exiting duplicate start.\n`,
@@ -2319,6 +2613,7 @@ async function main() {
 
   // Fork monitor as a child process — enables self-restart on source changes.
   // When monitor exits with code 75, cli re-forks with a fresh ESM module cache.
+  installMonitorChildSignalHandlers();
   await runMonitor();
 }
 
@@ -2406,6 +2701,9 @@ async function sendCrashNotification(exitCode, signal, options = {}) {
 // ── Self-restart exit code (must match monitor.mjs SELF_RESTART_EXIT_CODE) ───
 const SELF_RESTART_EXIT_CODE = 75;
 let monitorChild = null;
+let shutdownSignalCount = 0;
+let monitorShutdownForceTimer = null;
+let monitorChildSignalHandlersInstalled = false;
 
 function getMonitorPidFileCandidates(extraCacheDirs = []) {
   return uniqueResolvedPaths([
@@ -2424,6 +2722,38 @@ function tailLinesFromFile(filePath, maxLines = 200) {
     return lines.slice(-maxLines);
   } catch {
     return [];
+  }
+}
+
+function checkPipedChildProcessLaunch() {
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        timeout: 2000,
+      },
+    );
+    if (result?.error) {
+      return {
+        ok: false,
+        code: String(result.error?.code || "").trim().toUpperCase() || null,
+      };
+    }
+    return {
+      ok: Number(result?.status) === 0,
+      code:
+        Number(result?.status) === 0
+          ? null
+          : String(result?.status ?? "").trim() || null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      code: String(error?.code || "").trim().toUpperCase() || null,
+    };
   }
 }
 
@@ -2471,11 +2801,28 @@ function detectDaemonRestartStormSignals(options) {
   };
 }
 
+function installInlineMonitorKeepAlive() {
+  const existing = globalThis.__bosunInlineMonitorKeepAlive;
+  if (existing && typeof existing.refresh === "function") {
+    existing.refresh();
+    return existing;
+  }
+  if (existing && typeof existing.hasRef === "function" && existing.hasRef()) {
+    return existing;
+  }
+  const timer = setInterval(() => {}, 60_000);
+  globalThis.__bosunInlineMonitorKeepAlive = timer;
+  return timer;
+}
+
 function shouldPauseDaemonRestartStorm(options) {
   const resolvedOptions = options && typeof options === "object" ? options : {};
   const restartCount = Number(resolvedOptions.restartCount || 0);
   const logDir = resolvedOptions.logDir;
-  if (!IS_DAEMON_CHILD) return { pause: false, reasons: [] };
+  const daemonSupervisorActive =
+    IS_DAEMON_CHILD === true
+    || (typeof daemonInlineSupervisorActive !== "undefined" && daemonInlineSupervisorActive === true);
+  if (!daemonSupervisorActive) return { pause: false, reasons: [] };
   if (!DAEMON_MISCONFIG_GUARD_ENABLED) return { pause: false, reasons: [] };
   if (restartCount < DAEMON_MISCONFIG_GUARD_MIN_RESTARTS) {
     return { pause: false, reasons: [] };
@@ -2574,27 +2921,114 @@ function runMonitor({ restartReason = "" } = {}) {
         } else {
           delete childEnv.BOSUN_MONITOR_RESTART_REASON;
         }
+        let forceInlineMonitor = false;
+        if (process.platform === "win32") {
+          const childProcessLaunch = checkPipedChildProcessLaunch();
+          forceInlineMonitor =
+            childProcessLaunch?.ok === false &&
+            ["EPERM", "EACCES"].includes(
+              String(childProcessLaunch?.code || "").trim().toUpperCase(),
+            );
+          if (forceInlineMonitor) {
+            console.warn(
+              `\n  [cli] monitor child spawn preflight blocked (${childProcessLaunch.code}); forcing inline monitor execution`,
+            );
+          }
+        }
         const runAsNode = process.versions?.electron ? ["--run-as-node"] : [];
-        monitorChild = spawn(
-          process.execPath,
-          [...runAsNode, monitorPath, ...process.argv.slice(2)],
-          {
-            env: childEnv,
-            stdio: ["ignore", "pipe", "pipe"],
-            windowsHide: process.platform === "win32",
-            cwd: process.cwd(),
-          },
-        );
-        monitorChild.stdout?.on("data", (chunk) => {
-          process.stdout.write(chunk);
-        });
-        monitorChild.stderr?.on("data", (chunk) => {
-          process.stderr.write(chunk);
-        });
+        const monitorArgs = [...runAsNode, monitorPath, ...process.argv.slice(2)];
+        let usedWindowsShellFallback = false;
+        const spawnMonitorChild = (forceWindowsShell = false) => {
+          if (forceWindowsShell && process.platform === "win32") {
+            const command = [process.execPath, ...monitorArgs]
+              .map((part) => `"${String(part).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
+              .join(" ");
+            return spawn(
+              process.env.ComSpec || "cmd.exe",
+              ["/d", "/s", "/c", command],
+              {
+                env: childEnv,
+                stdio: ["ignore", "pipe", "pipe"],
+                windowsHide: true,
+                cwd: process.cwd(),
+              },
+            );
+          }
+          try {
+            return spawn(
+              process.execPath,
+              monitorArgs,
+              {
+                env: childEnv,
+                stdio: ["ignore", "pipe", "pipe"],
+                windowsHide: process.platform === "win32",
+                cwd: process.cwd(),
+              },
+            );
+          } catch (err) {
+            if (
+              process.platform === "win32"
+              && !forceWindowsShell
+              && err?.code === "EPERM"
+            ) {
+              usedWindowsShellFallback = true;
+              console.warn("\n  [cli] direct monitor spawn hit EPERM; retrying via cmd.exe shell wrapper");
+              return spawnMonitorChild(true);
+            }
+            throw err;
+          }
+        };
+        const launchInlineMonitor = async () => {
+          console.warn("\n  [cli] monitor child spawn is unavailable; falling back to inline monitor execution");
+          Object.assign(process.env, childEnv);
+          installInlineMonitorKeepAlive();
+          await import(`${pathToFileURL(monitorPath).href}?inline=${Date.now()}`);
+        };
+        const attachMonitorChildHandlers = (child) => {
+          child.stdout?.on("data", (chunk) => {
+            process.stdout.write(chunk);
+          });
+          child.stderr?.on("data", (chunk) => {
+            process.stderr.write(chunk);
+          });
+          child.on("error", (err) => {
+            if (monitorChild !== child) return;
+            const canRetryViaShell =
+              process.platform === "win32"
+              && !usedWindowsShellFallback
+              && err?.code === "EPERM";
+            if (canRetryViaShell) {
+              usedWindowsShellFallback = true;
+              console.warn("\n  [cli] direct monitor spawn hit EPERM; retrying via cmd.exe shell wrapper");
+              monitorChild = spawnMonitorChild(true);
+              attachMonitorChildHandlers(monitorChild);
+              return;
+            }
+            console.error(`\n  :close: Monitor failed to start: ${err.message}`);
+          });
+        };
+        try {
+          if (forceInlineMonitor) {
+            launchInlineMonitor().then(resolve).catch(reject);
+            return;
+          }
+          monitorChild = spawnMonitorChild(false);
+        } catch (spawnErr) {
+          if (process.platform === "win32" && spawnErr?.code === "EPERM") {
+            launchInlineMonitor().then(resolve).catch(reject);
+            return;
+          }
+          throw spawnErr;
+        }
+        attachMonitorChildHandlers(monitorChild);
         daemonCrashTracker.markStart();
 
         monitorChild.on("exit", (code, signal) => {
           const childPid = Number(monitorChild?.pid || 0) || null;
+          if (monitorShutdownForceTimer) {
+            clearTimeout(monitorShutdownForceTimer);
+            monitorShutdownForceTimer = null;
+          }
           monitorChild = null;
           if (code === SELF_RESTART_EXIT_CODE) {
             console.log(
@@ -2619,7 +3053,7 @@ function runMonitor({ restartReason = "" } = {}) {
             const isOSKill = exitCode === 4294967295 || exitCode === -1;
             const shouldAutoRestart =
               !gracefulShutdown &&
-              (isOSKill || (IS_DAEMON_CHILD && exitCode !== 0));
+              (isOSKill || (isDaemonSupervisorRuntime() && exitCode !== 0));
             if (shouldAutoRestart) {
               const crashState = daemonCrashTracker.recordExit();
               daemonRestartCount += 1;
@@ -2642,7 +3076,7 @@ function runMonitor({ restartReason = "" } = {}) {
                 );
                 return;
               }
-              if (IS_DAEMON_CHILD && crashState.exceeded) {
+              if (isDaemonSupervisorRuntime() && crashState.exceeded) {
                 const durationSec = Math.max(
                   1,
                   Math.round(crashState.runDurationMs / 1000),
@@ -2660,7 +3094,7 @@ function runMonitor({ restartReason = "" } = {}) {
                 return;
               }
               if (
-                IS_DAEMON_CHILD &&
+                isDaemonSupervisorRuntime() &&
                 DAEMON_MAX_RESTARTS > 0 &&
                 daemonRestartCount > DAEMON_MAX_RESTARTS
               ) {
@@ -2676,16 +3110,16 @@ function runMonitor({ restartReason = "" } = {}) {
                 ? `signal ${signal}`
                 : `exit code ${exitCode}`;
               const attemptLabel =
-                IS_DAEMON_CHILD && DAEMON_MAX_RESTARTS > 0
+                isDaemonSupervisorRuntime() && DAEMON_MAX_RESTARTS > 0
                   ? `${daemonRestartCount}/${DAEMON_MAX_RESTARTS}`
                   : `${daemonRestartCount}`;
               console.error(
-                `\n  :alert: Monitor exited (${reasonLabel}) — auto-restarting in ${Math.max(1, Math.round(delayMs / 1000))}s${IS_DAEMON_CHILD ? ` [attempt ${attemptLabel}]` : ""}...`,
+                `\n  :alert: Monitor exited (${reasonLabel}) — auto-restarting in ${Math.max(1, Math.round(delayMs / 1000))}s${isDaemonSupervisorRuntime() ? ` [attempt ${attemptLabel}]` : ""}...`,
               );
               sendCrashNotification(exitCode, signal, {
                 autoRestartInMs: delayMs,
                 restartAttempt: daemonRestartCount,
-                maxRestarts: IS_DAEMON_CHILD ? DAEMON_MAX_RESTARTS : 0,
+                maxRestarts: isDaemonSupervisorRuntime() ? DAEMON_MAX_RESTARTS : 0,
               }).catch(() => {});
               setTimeout(
                 () =>
@@ -2714,9 +3148,6 @@ function runMonitor({ restartReason = "" } = {}) {
           }
         });
 
-        monitorChild.on("error", (err) => {
-          console.error(`\n  :close: Monitor failed to start: ${err.message}`);
-        });
       })
       .catch((err) => {
         console.error(`\n  :close: Monitor failed to start: ${err.message}`);
@@ -2725,26 +3156,61 @@ function runMonitor({ restartReason = "" } = {}) {
   });
 }
 
-// Let forked monitor handle signal cleanup — prevent parent from dying first
-let gracefulShutdown = false;
-process.on("SIGINT", () => {
+function requestMonitorChildShutdown(signal = "SIGINT") {
   gracefulShutdown = true;
-  if (!monitorChild) process.exit(0);
-  // Child gets SIGINT too via shared terminal — just wait for it to exit
-});
-process.on("SIGTERM", () => {
-  gracefulShutdown = true;
-  if (!monitorChild) process.exit(0);
+  shutdownSignalCount += 1;
+  if (!monitorChild) {
+    process.exit(0);
+    return;
+  }
+
+  const requestedSignal = shutdownSignalCount > 1 ? "SIGTERM" : signal;
   try {
     if (typeof monitorChild.kill === "function") {
-      monitorChild.kill("SIGTERM");
+      monitorChild.kill(requestedSignal);
     } else if (typeof monitorChild.terminate === "function") {
       monitorChild.terminate().catch(() => {});
     }
   } catch {
     /* best effort */
   }
-});
+
+  if (monitorShutdownForceTimer) return;
+  monitorShutdownForceTimer = setTimeout(() => {
+    const child = monitorChild;
+    monitorShutdownForceTimer = null;
+    if (!child) {
+      process.exit(0);
+      return;
+    }
+    try {
+      if (typeof child.kill === "function") {
+        child.kill("SIGTERM");
+      } else if (typeof child.terminate === "function") {
+        child.terminate().catch(() => {});
+      }
+    } catch {
+      /* best effort */
+    }
+    const hardExitTimer = setTimeout(() => process.exit(0), 2000);
+    hardExitTimer.unref?.();
+  }, 15000);
+  monitorShutdownForceTimer.unref?.();
+}
+
+function installMonitorChildSignalHandlers() {
+  if (monitorChildSignalHandlersInstalled) return;
+  monitorChildSignalHandlersInstalled = true;
+  // Let forked monitor handle signal cleanup — prevent parent from dying first
+  process.on("SIGINT", () => {
+    requestMonitorChildShutdown("SIGINT");
+  });
+  process.on("SIGTERM", () => {
+    requestMonitorChildShutdown("SIGTERM");
+  });
+}
+
+let gracefulShutdown = false;
 
 main().catch(async (err) => {
   console.error(`bosun failed: ${err.message}`);

@@ -1615,10 +1615,32 @@ function createEnsureCodexConfigResult() {
   };
 }
 
+function looksLikeToml(content) {
+  // A valid TOML file either: starts with a comment (#), a section header ([...]),
+  // a key = value assignment, or is effectively empty (only whitespace/comments).
+  // Reject files that start with freeform prose (e.g., agent instruction text).
+  const trimmed = String(content || "").trimStart();
+  if (!trimmed) return true; // empty is fine
+  // TOML lines start with #, [, a bare/quoted key, or whitespace
+  const firstLine = trimmed.split(/\r?\n/)[0] || "";
+  return /^[\s]*([#\[]|[A-Za-z0-9_"'])/.test(firstLine) &&
+    !/^(You are |I am |As an |This is a |Here is |The following|REMAIN IN |While you )/.test(firstLine);
+}
+
 function initializeCodexConfigState(result) {
   const configExisted = existsSync(CONFIG_PATH);
   const originalToml = readCodexConfig();
   if (!configExisted) {
+    result.created = true;
+    return { originalToml, toml: "" };
+  }
+  if (!looksLikeToml(originalToml)) {
+    // The file contains non-TOML content (e.g., agent instructions written by
+    // an earlier Codex session or incorrect write). Treat as freshly created to
+    // avoid producing a hybrid file that breaks the Codex desktop app.
+    console.warn(
+      "[codex-config] ~/.codex/config.toml contains non-TOML content — treating as empty and regenerating",
+    );
     result.created = true;
     return { originalToml, toml: "" };
   }

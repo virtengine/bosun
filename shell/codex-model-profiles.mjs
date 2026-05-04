@@ -131,12 +131,19 @@ function profileRecord(env, profileName, globalProvider) {
 }
 
 function resolveCodexHomeDir(env = process.env) {
-  return clean(env?.HOME) || clean(env?.USERPROFILE) || homedir();
+  const explicitHome = clean(env?.HOME) || clean(env?.USERPROFILE);
+  if (explicitHome) return explicitHome;
+  if (env === process.env) return homedir();
+  return "";
 }
 
 export function readCodexConfigRuntimeDefaults(env = process.env) {
   try {
-    const configPath = resolve(resolveCodexHomeDir(env), ".codex", "config.toml");
+    const homeDir = resolveCodexHomeDir(env);
+    if (!homeDir) {
+      return { model: "", modelProvider: "", providers: {} };
+    }
+    const configPath = resolve(homeDir, ".codex", "config.toml");
     if (!existsSync(configPath)) {
       return { model: "", modelProvider: "", providers: {} };
     }
@@ -231,10 +238,9 @@ function selectConfigProviderForRuntime(configDefaults, env, preferredProvider =
 }
 
 function inferGlobalProvider(env, configDefaults = null) {
-  const baseUrl = clean(env.OPENAI_BASE_URL);
-  if (baseUrl) {
-    return isAzureOpenAIBaseUrl(baseUrl) ? "azure" : "openai";
-  }
+  const baseUrl = clean(env.OPENAI_BASE_URL).toLowerCase();
+  if (isAzureOpenAIBaseUrl(baseUrl)) return "azure";
+  if (baseUrl) return "openai";
   const configured = selectConfigProviderForRuntime(configDefaults, env);
   return configured?.provider || "openai";
 }
@@ -341,8 +347,14 @@ export function resolveCodexProfileRuntime(envInput = process.env) {
   }
 
   if (resolvedProvider === "azure") {
+    if (!clean(env.AZURE_OPENAI_API_KEY) && clean(sourceEnv.AZURE_OPENAI_KEY)) {
+      env.AZURE_OPENAI_API_KEY = clean(sourceEnv.AZURE_OPENAI_KEY);
+    }
     if (!clean(env.AZURE_OPENAI_API_KEY) && clean(env.OPENAI_API_KEY)) {
       env.AZURE_OPENAI_API_KEY = env.OPENAI_API_KEY;
+    }
+    if (!clean(env.OPENAI_API_KEY) && clean(env.AZURE_OPENAI_API_KEY)) {
+      env.OPENAI_API_KEY = env.AZURE_OPENAI_API_KEY;
     }
   }
 

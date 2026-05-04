@@ -6,10 +6,10 @@
  * preserving compacted output and artifact retrieval.
  */
 
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 
 const DEFAULT_RUNTIME = String(process.env.BOSUN_HEAVY_RUNNER_RUNTIME || "local-process").trim() || "local-process";
 const DEFAULT_RETRIES = Math.max(0, Number(process.env.BOSUN_HEAVY_RUNNER_RETRIES || 0) || 0);
@@ -241,6 +241,69 @@ function parseRunnerCommand(command) {
   };
 }
 
+function readEnvValue(env, key) {
+  if (!env || typeof env !== "object") return "";
+  if (env[key] != null) return String(env[key]);
+  const loweredKey = String(key || "").toLowerCase();
+  for (const [name, value] of Object.entries(env)) {
+    if (String(name || "").toLowerCase() === loweredKey) {
+      return String(value ?? "");
+    }
+  }
+  return "";
+}
+
+function hasFileExtension(command) {
+  const trimmed = String(command || "").trim();
+  const lastSegment = trimmed.split(/[\\/]/).pop() || "";
+  return /\.[^./\\]+$/.test(lastSegment);
+}
+
+function resolveWindowsLocalProcessCommand(command, cwd, env) {
+  const rawCommand = String(command || "").trim();
+  if (process.platform !== "win32" || !rawCommand || /[\\/]/.test(rawCommand) || hasFileExtension(rawCommand)) {
+    return rawCommand;
+  }
+
+  const rawPath = readEnvValue(env, "PATH");
+  const rawPathExt = readEnvValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD";
+  const pathEntries = [cwd, ...rawPath.split(delimiter)]
+    .map((entry) => String(entry || "").trim().replace(/^"+|"+$/g, ""))
+    .filter(Boolean);
+  const extensions = rawPathExt
+    .split(";")
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .map((entry) => (entry.startsWith(".") ? entry : `.${entry}`));
+
+  for (const baseDir of pathEntries) {
+    for (const extension of extensions) {
+      const candidate = resolve(baseDir, `${rawCommand}${extension}`);
+      if (existsSync(candidate)) return candidate;
+    }
+    const directCandidate = resolve(baseDir, rawCommand);
+    if (existsSync(directCandidate)) return directCandidate;
+  }
+  return rawCommand;
+}
+
+function resolveLocalProcessLaunch(command, args, cwd, env) {
+  if (process.platform !== "win32") {
+    return { command, args };
+  }
+  const resolvedCommand = resolveWindowsLocalProcessCommand(command, cwd, env);
+  if (/\.(?:cmd|bat)$/i.test(resolvedCommand)) {
+    return {
+      command: readEnvValue(env, "ComSpec") || process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", resolvedCommand, ...args],
+    };
+  }
+  return {
+    command: resolvedCommand,
+    args,
+  };
+}
+
 function buildBlockedResult(policy, attemptCount, message, artifactRoot) {
   const leaseId = randomUUID();
   const leaseDir = ensureLeaseDir(artifactRoot || policy.artifactDir, leaseId);
@@ -332,10 +395,14 @@ async function runLeaseAttempt({
     let stderr = "";
     let settled = false;
     let timedOut = false;
+    const launchEnv = { ...process.env, ...(env || {}) };
+    const resolvedLaunch = runtime === "local-process"
+      ? resolveLocalProcessLaunch(launchCommand, launchArgs, cwd, launchEnv)
+      : { command: launchCommand, args: launchArgs };
 
-    const child = spawn(launchCommand, launchArgs, {
+    const child = spawn(resolvedLaunch.command, resolvedLaunch.args, {
       cwd,
-      env: { ...process.env, ...(env || {}) },
+      env: launchEnv,
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],

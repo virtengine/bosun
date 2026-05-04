@@ -11,9 +11,9 @@
 import { h } from "preact";
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
-import { haptic } from "../../../ui/modules/telegram.js";
-import { apiFetch, onWsMessage } from "../../../ui/modules/api.js";
-import { showToast } from "../../../ui/modules/state.js";
+import { haptic } from "./telegram.js";
+import { apiFetch, onWsMessage } from "./api.js";
+import { showToast } from "./state.js";
 import {
   voiceState, voiceTranscript, voiceResponse, voiceError,
   voiceToolCalls, voiceDuration, isVoiceMicMuted,
@@ -22,18 +22,18 @@ import {
   audioInputDevices, audioOutputDevices, selectedAudioInput, selectedAudioOutput,
   micInputLevel, audioSettings,
   enumerateAudioDevices, switchAudioInput, switchAudioOutput, updateAudioSettings,
-} from "../../../ui/modules/voice-client.js";
+} from "./voice-client.js";
 import {
   sdkVoiceState, sdkVoiceTranscript, sdkVoiceResponse, sdkVoiceError,
   sdkVoiceToolCalls, sdkVoiceDuration, sdkVoiceSdkActive,
   startSdkVoiceSession, stopSdkVoiceSession, interruptSdkResponse,
   sendSdkTextMessage, sendSdkImageFrame, onSdkVoiceEvent, toggleSdkMicMute,
-} from "../../../ui/modules/voice-client-sdk.js";
+} from "./voice-client-sdk.js";
 import {
   fallbackState, fallbackTranscript, fallbackResponse,
   fallbackError,
   startFallbackSession, stopFallbackSession, interruptFallback,
-} from "../../../ui/modules/voice-fallback.js";
+} from "./voice-fallback.js";
 import {
   visionShareState,
   visionShareSource,
@@ -43,9 +43,9 @@ import {
   supportsVisionSource,
   toggleVisionShare,
   stopVisionShare,
-} from "../../../ui/modules/vision-stream.js";
-import { AudioVisualizer } from "../../../ui/modules/audio-visualizer.js";
-import { resolveIcon } from "../../../ui/modules/icon-utils.js";
+} from "./vision-stream.js";
+import { AudioVisualizer } from "./audio-visualizer.js";
+import { resolveIcon } from "./icon-utils.js";
 import {
   Select, MenuItem, TextField, Switch, FormControlLabel,
   Button, IconButton, Typography, Box, Stack, Chip,

@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { resolve, dirname, isAbsolute, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_FILES } from "./config-file-names.mjs";
 
@@ -47,6 +47,38 @@ export function resolveRepoLocalBosunDir(repoRoot, options = {}) {
   return markers.some((name) => existsSync(resolve(localDir, name)))
     ? localDir
     : null;
+}
+
+function pathIdentity(pathValue) {
+  const resolved = resolve(String(pathValue || ""));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isCheckoutLocalBosunDir(configDir) {
+  return basename(resolve(String(configDir || ""))).toLowerCase() === ".bosun";
+}
+
+export function shouldPreferRepoLocalBosunDir(configDir, repoRoot, options = {}) {
+  if (!configDir || !repoRoot) return false;
+  const repoLocalConfigDir = resolveRepoLocalBosunDir(repoRoot, options);
+  if (!repoLocalConfigDir) return false;
+
+  const resolvedConfigDir = resolve(configDir);
+  if (pathIdentity(resolvedConfigDir) === pathIdentity(repoLocalConfigDir)) return false;
+  if (!existsSync(resolvedConfigDir)) return true;
+  if (!isCheckoutLocalBosunDir(resolvedConfigDir)) return false;
+
+  const configParent = dirname(resolvedConfigDir);
+  if (pathIdentity(configParent) === pathIdentity(repoRoot)) return false;
+  return existsSync(resolve(configParent, ".git")) || isBosunModuleRoot(configParent);
+}
+
+export function resolveTrustedBosunConfigDir(configDir, repoRoot, options = {}) {
+  if (!configDir) return null;
+  if (shouldPreferRepoLocalBosunDir(configDir, repoRoot, options)) {
+    return resolveRepoLocalBosunDir(repoRoot, options);
+  }
+  return resolve(configDir);
 }
 
 /**

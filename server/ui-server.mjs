@@ -1,3 +1,11 @@
+/**
+ * Transitional architecture note:
+ * `ui-server.mjs` remains the broad HTTP/WebSocket composition shell, but
+ * harness business logic must be delegated to canonical route modules and
+ * harness control-plane owners. This file may compose surfaces, caching, and
+ * transport concerns, but it must not become a second harness control plane.
+ */
+
 import { execSync as nodeExecSync, spawn, spawnSync, exec } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomUUID as _genCallId } from "node:crypto";
@@ -5,6 +13,7 @@ import * as nodeCrypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, chmodSync, createWriteStream, createReadStream, writeFileSync, unlinkSync, watchFile, unwatchFile, readdirSync, statSync } from "node:fs";
 import { open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
+import { createSecureServer as createHttp2SecureServer } from "node:http2";
 import { get as httpsGet, request as httpsRequest } from "node:https";
 import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces, homedir, userInfo as getOsUserInfo } from "node:os";
@@ -17,8 +26,67 @@ import { gzip as zlibGzip } from "node:zlib";
 import { promisify } from "node:util";
 import * as wsModule from "ws";
 import Ajv2020 from "ajv/dist/2020.js";
+import { repairCommonMojibake } from "../lib/mojibake-repair.mjs";
+import { buildAgentConfigurationGuide } from "../lib/agent-configuration-guide.mjs";
+import { resolveSharedOAuthToken } from "../agent/provider-auth-state.mjs";
+import {
+  listHarnessExecutorProviderOptions,
+  readHarnessExecutorFabric,
+} from "../agent/harness-executor-config.mjs";
+import { createShellAdapterRegistry } from "../shell/shell-adapter-registry.mjs";
 
 const gzipAsync = promisify(zlibGzip);
+const DURABLE_ACTIVE_SESSION_EXPIRY_MS = 10 * 60 * 1000;
+const DURABLE_SESSION_PLACEHOLDER_OUTPUTS = new Set([
+  "continued",
+  "model response continued",
+  "turn completed",
+  "session completed",
+  "agent is composing a response...",
+  "agent is composing a response…",
+]);
+const DURABLE_REPO_BLOCK_PATTERNS = [
+  /merge conflict/i,
+  /unmerged files/i,
+  /protected branch/i,
+  /non-fast-forward/i,
+  /failed to push/i,
+  /push rejected/i,
+  /cannot rebase/i,
+  /pre-push hook/i,
+  /hook declined/i,
+  /working tree has changes/i,
+  /index contains uncommitted changes/i,
+];
+const DURABLE_ENV_BLOCK_PATTERNS = [
+  /prompt quality/i,
+  /missing task (description|url)/i,
+  /missing tool/i,
+  /not recognized as an internal or external command/i,
+  /command not found/i,
+  /spawn .*enoent/i,
+  /enoent/i,
+  /permission denied/i,
+  /access is denied/i,
+  /authentication failed/i,
+  /not authenticated/i,
+  /missing credentials/i,
+  /token/i,
+  /connection refused/i,
+  /connection reset/i,
+  /network/i,
+  /timeout/i,
+  /sdk unavailable/i,
+  /failed to list models/i,
+];
+const DURABLE_COMMIT_BLOCK_PATTERNS = [
+  /commit blocked/i,
+  /implementation_done_commit_blocked/i,
+  /git commit/i,
+  /git push/i,
+  /pre-push hook/i,
+  /hook/i,
+];
 
 function execSync(command, options = {}) {
   return nodeExecSync(command, {
@@ -111,6 +179,13 @@ async function getOrComputeCachedApiResponse(key, ttlMs, producer) {
   return pending;
 }
 
+function parseApiIncludeFlag(rawValue, defaultValue = false) {
+  const normalized = String(rawValue || "").trim().toLowerCase();
+  if (["1", "true", "yes"].includes(normalized)) return true;
+  if (["0", "false", "no"].includes(normalized)) return false;
+  return defaultValue === true;
+}
+
 // Static file ETag + cache header helper
 function cacheControlForPath(pathname) {
   if (pathname.endsWith(".html")) return "no-cache";
@@ -149,15 +224,13 @@ import {
   unmarkTaskIgnored,
 } from "../kanban/kanban-adapter.mjs";
 
-import {
-  addActiveSessionListener,
-  createCompiledInternalHarnessSession,
-  getActiveThreads,
-  launchEphemeralThread,
-  launchOrResumeThread,
-  execWithRetry,
-  invalidateThread,
-} from "../agent/agent-pool.mjs";
+import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
+import { getBosunSessionManager } from "../agent/session-manager.mjs";
+import { normalizeProviderAuthState } from "../agent/provider-auth-manager.mjs";
+import { getProviderCapabilities } from "../agent/provider-capabilities.mjs";
+import { getProviderModelCatalog } from "../agent/provider-model-catalog.mjs";
+import { createProviderRegistry } from "../agent/provider-registry.mjs";
+import { listBuiltInProviderDrivers, normalizeProviderDefinitionId } from "../agent/providers/index.mjs";
 import { withTaskLifetimeTotals } from "../infra/runtime-accumulator.mjs";
 import { resolveAgentPrompts } from "../agent/agent-prompts.mjs";
 import {
@@ -290,20 +363,31 @@ import {
   addSessionEventListener,
   addSessionStateListener,
 } from "../infra/session-tracker.mjs";
+import {
+  exportHarnessTelemetryTrace,
+  getHarnessLiveTelemetrySnapshot,
+  getHarnessProviderUsageSummary,
+  getHarnessTelemetrySummary,
+  listHarnessTelemetryEvents,
+} from "../infra/session-telemetry.mjs";
 import { withIncomingTraceContext } from "../infra/tracing.mjs";
 import {
+  deleteSessionRecordFromStateLedger,
   appendTaskTraceEventToStateLedger,
   appendOperatorActionToStateLedger,
   getAgentActivityFromStateLedger,
   getRunAuditBundleFromStateLedger,
   getTaskAuditBundleFromStateLedger,
   getSessionActivityFromStateLedger,
+  getWorkflowRunDetailFromStateLedger,
   listSessionActivitiesFromStateLedger,
   listAuditEventsFromStateLedger,
   listPromotedStrategiesFromStateLedger,
   listPromotedStrategyEventsFromStateLedger,
   listTaskAuditSummariesFromStateLedger,
   listTaskTraceEventsFromStateLedger,
+  listWorkflowRunSummariesPageFromStateLedger,
+  upsertSessionRecordToStateLedger,
   upsertStateLedgerKeyValue,
 } from "../lib/state-ledger-sqlite.mjs";
 import { ensureTestRuntimeSandbox } from "../infra/test-runtime.mjs";
@@ -333,6 +417,7 @@ import {
   readActiveHarnessState,
   readHarnessArtifact,
   readHarnessRunRecord,
+  readHarnessRunRecordById,
   readHarnessSourceFromPath,
   summarizeHarnessRuns,
   shouldEnforceHarnessValidation,
@@ -350,15 +435,23 @@ import {
 } from "../config/config-editor.mjs";
 import {
   getAvailableAgents,
-  getAgentMode,
   setAgentMode,
   execSdkCommand,
   getSdkCommands,
-  getPrimaryAgentName,
   getPrimaryAgentSelection,
-  switchPrimaryAgent,
   getPrimaryAgentInfo,
 } from "../agent/primary-agent.mjs";
+import { tryHandleHarnessApprovalRoutes } from "./routes/harness-approvals.mjs";
+import {
+  createWorkflowAgentPoolService,
+  executeHarnessBridgeServiceCall,
+  resolveBackgroundPromptExecutor,
+  resolveInteractiveSessionExecutor,
+} from "./routes/harness-agent-bridge.mjs";
+import { tryHandleHarnessEventRoutes } from "./routes/harness-events.mjs";
+import { tryHandleHarnessProviderRoutes } from "./routes/harness-providers.mjs";
+import { tryHandleHarnessSessionRoutes } from "./routes/harness-sessions.mjs";
+import { tryHandleHarnessSubagentRoutes } from "./routes/harness-subagents.mjs";
 import {
   buildBenchmarkModePreset,
   getBenchmarkProvider,
@@ -385,6 +478,7 @@ import {
   extractTaskReplanProposal,
   normalizeTaskPlanningMode,
   normalizeTaskReplanProposal,
+  uniqueStrings,
 } from "../task/task-replanner.mjs";
 import { getVisionSessionState } from "../voice/vision-session-state.mjs";
 import {
@@ -418,6 +512,26 @@ const TASK_STORE_SPRINT_EXPORTS = Object.freeze({
   update: ["updateSprint", "upsertSprint", "saveSprint", "setSprint"],
   remove: ["deleteSprint", "removeSprint"],
 });
+
+const harnessAgentService = createHarnessAgentService();
+const addActiveSessionListener = (...args) => harnessAgentService.addActiveSessionListener(...args);
+const clearThreadRegistry = (...args) => harnessAgentService.clearThreadRegistry(...args);
+const continueSession = (...args) => harnessAgentService.continueSession(...args);
+const createCompiledInternalHarnessSession = (...args) =>
+  harnessAgentService.createCompiledInternalHarnessSession(...args);
+const execPooledPrompt = (...args) => harnessAgentService.execPooledPrompt(...args);
+const getAvailableSdks = (...args) => harnessAgentService.getAvailableSdks(...args);
+const getActiveThreads = (...args) => harnessAgentService.getActiveThreads(...args);
+const getPoolSdkName = (...args) => harnessAgentService.getPoolSdkName(...args);
+const launchEphemeralThread = (...args) => harnessAgentService.launchEphemeralThread(...args);
+const launchOrResumeThread = (...args) => harnessAgentService.launchOrResumeThread(...args);
+const execWithRetry = (...args) => harnessAgentService.execWithRetry(...args);
+const invalidateThread = (...args) => harnessAgentService.invalidateThread(...args);
+const resetPoolSdkCache = (...args) => harnessAgentService.resetPoolSdkCache(...args);
+const setPoolSdk = (...args) => harnessAgentService.setPoolSdk(...args);
+const getPrimaryAgentName = (...args) => harnessAgentService.getPrimaryAgentName(...args);
+const getAgentMode = (...args) => harnessAgentService.getAgentMode(...args);
+const switchPrimaryAgent = (...args) => harnessAgentService.switchPrimaryAgent(...args);
 const TASK_STORE_DAG_EXPORTS = Object.freeze({
   sprint: ["getSprintDag", "getTaskDagForSprint", "buildSprintDag", "buildTaskDag"],
   global: ["getGlobalDagOfDags", "getDagOfDags", "buildGlobalDagOfDags"],
@@ -487,6 +601,14 @@ function getTaskStoreApiSync() {
   return resolveInjectedTaskStoreApi() || taskStoreApi;
 }
 
+function findTaskStoreFunction(api, candidates = []) {
+  if (!api || typeof api !== "object") return null;
+  for (const name of candidates) {
+    if (typeof api?.[name] === "function") return name;
+  }
+  return null;
+}
+
 function getAllInternalTasks() {
   try {
     const fn = getTaskStoreApiSync()?.getAllTasks;
@@ -549,6 +671,7 @@ function resetExecutorTaskThrottleState(taskId, options = {}) {
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const repoRoot = resolveRepoRoot();
+const sourceRepoRoot = resolve(__dirname, "..");
 const uiRootPreferred = resolve(__dirname, "..", "ui");
 const uiRootFallback = resolve(__dirname, "..", "site", "ui");
 const uiRoot = existsSync(uiRootPreferred) ? uiRootPreferred : uiRootFallback;
@@ -1383,6 +1506,28 @@ class WorkflowEngineProxy {
     this._listeners = new Map(); // eventName → Set<handler>
     this._ready = false;
     this._initPromise = null;
+    this._lastError = null;
+  }
+
+  _handleWorkerUnavailable(err) {
+    this._ready = false;
+    this._lastError = err instanceof Error ? err : null;
+    this._initPromise = null;
+    this._worker = null;
+    if (this._pending.size > 0) {
+      const pendingError =
+        err instanceof Error
+          ? err
+          : new Error("Workflow engine worker is unavailable");
+      for (const { reject } of this._pending.values()) {
+        try { reject(pendingError); } catch { /* best-effort */ }
+      }
+      this._pending.clear();
+    }
+  }
+
+  isAvailable() {
+    return Boolean(this._worker) && this._ready;
   }
 
   /** Start the Worker thread and wait for "ready". */
@@ -1390,26 +1535,59 @@ class WorkflowEngineProxy {
     if (this._initPromise !== null) return this._initPromise;
     this._initPromise = new Promise((resolve, reject) => {
       const workerPath = fileURLToPath(new URL("./workflow-engine-worker.mjs", import.meta.url));
+      if (!existsSync(workerPath)) {
+        const err = new Error(`workflow engine worker module is missing at ${workerPath}`);
+        this._handleWorkerUnavailable(err);
+        reject(err);
+        return;
+      }
+
+      const workerStartTimeoutMs = Math.max(
+        250,
+        Math.trunc(Number(process.env.BOSUN_WORKFLOW_WORKER_START_TIMEOUT_MS) || 15000),
+      );
+      let settled = false;
+      let startTimer = null;
       this._worker = new Worker(workerPath, {
         workerData: cfg,
         /* stdout/stderr inherit so worker logs appear in the same console */
       });
 
       const failStart = (err) => {
+        if (settled) return;
+        settled = true;
+        if (startTimer) {
+          clearTimeout(startTimer);
+          startTimer = null;
+        }
         if (!this._worker) {
+          this._handleWorkerUnavailable(err);
           reject(err);
           return;
         }
         this._worker.off("message", onReady);
         this._worker.off("message", onInitError);
+        try {
+          void this._worker.terminate().catch(() => {});
+        } catch {
+          // best-effort shutdown
+        }
+        this._handleWorkerUnavailable(err);
         reject(err);
       };
 
       const onReady = (msg) => {
         if (!msg || msg.type !== "ready") return;
+        if (settled) return;
+        settled = true;
+        if (startTimer) {
+          clearTimeout(startTimer);
+          startTimer = null;
+        }
         this._worker.off("message", onReady);
         this._worker.off("message", onInitError);
         this._ready = true;
+        this._lastError = null;
         resolve();
       };
       const onInitError = (msg) => {
@@ -1421,6 +1599,12 @@ class WorkflowEngineProxy {
       this._worker.on("message", onReady);
       this._worker.on("message", onInitError);
       this._worker.once("error", failStart);
+      startTimer = setTimeout(() => {
+        failStart(new Error(`Workflow engine worker startup timed out after ${workerStartTimeoutMs}ms`));
+      }, workerStartTimeoutMs);
+      if (typeof startTimer.unref === "function") {
+        startTimer.unref();
+      }
 
       this._worker.on("message", (msg) => this._onMessage(msg));
       this._worker.on("error", (err) => {
@@ -1428,7 +1612,13 @@ class WorkflowEngineProxy {
       });
       this._worker.on("exit", (code) => {
         if (code !== 0) console.warn(`[wf-worker] worker exited with code ${code}`);
-        this._ready = false;
+        this._handleWorkerUnavailable(
+          new Error(
+            code !== 0
+              ? `Workflow engine worker exited with code ${code}`
+              : "Workflow engine worker exited",
+          ),
+        );
       });
 
       /* Send init after attaching all listeners */
@@ -1482,33 +1672,13 @@ class WorkflowEngineProxy {
   async _executeService(method, args) {
     /* Dispatch to in-process service functions */
     const [svc, fn] = method.split(".");
+    const handledCall = await executeHarnessBridgeServiceCall(method, args, {
+      harnessAgentService,
+      sendWorkflowTelegramMessage,
+      getKanbanAdapter,
+    });
+    if (handledCall.handled) return handledCall.result;
     switch (svc) {
-      case "agentPool": {
-        if (fn === "launchEphemeralThread") return launchEphemeralThread(...args);
-        if (fn === "launchOrResumeThread")  return launchOrResumeThread(...args);
-        if (fn === "execWithRetry")         return execWithRetry(args[0], () => Promise.resolve(), args[2] || {});
-        if (fn === "continueSession") {
-          const [sessionId, prompt, opts = {}] = args;
-          return launchEphemeralThread(prompt, opts.cwd || process.cwd(), opts.timeout || 3600000, { resumeThreadId: sessionId, sdk: opts.sdk });
-        }
-        if (fn === "killSession") {
-          try { invalidateThread(args[0]); return true; } catch { return false; }
-        }
-        break;
-      }
-      case "telegram": {
-        if (fn === "sendMessage") return sendWorkflowTelegramMessage(args[0], args[1], args[2] || {});
-        break;
-      }
-      case "kanban": {
-        const adapter = getKanbanAdapter();
-        if (!adapter) throw new Error("Kanban adapter not available");
-        if (fn === "createTask")       return adapter.createTask?.(...args);
-        if (fn === "updateTaskStatus") return adapter.updateTaskStatus?.(...args);
-        if (fn === "listTasks")        return adapter.listTasks?.(...args);
-        if (fn === "getTask")          return adapter.getTask?.(...args);
-        break;
-      }
       case "meeting": {
         const meetMod = await import("../workflow/meeting-workflow-service.mjs").catch(() => null);
         const svc_ = meetMod?.createMeetingWorkflowService?.();
@@ -1523,7 +1693,7 @@ class WorkflowEngineProxy {
   _call(method, args) {
     return new Promise((resolve, reject) => {
       if (!this._ready || !this._worker) {
-        return reject(new Error("Workflow engine worker not ready"));
+        return reject(this._lastError || new Error("Workflow engine worker not ready"));
       }
       const callId = _genCallId();
       this._pending.set(callId, { resolve, reject });
@@ -1554,6 +1724,7 @@ class WorkflowEngineProxy {
   getRunForensics(runId)                 { return this._call("getRunForensics",       [runId]); }
   getNodeForensics(runId, nodeId)        { return this._call("getNodeForensics",      [runId, nodeId]); }
   getRetryOptions(runId)                 { return this._call("getRetryOptions",       [runId]); }
+  resolveOperatorRetry(runId, mode)      { return this._call("resolveOperatorRetry",  [runId, mode]); }
   retryRun(runId, opts)                  { return this._call("retryRun",             [runId, opts]); }
   restoreFromSnapshot(runId, opts)       { return this._call("restoreFromSnapshot",   [runId, opts]); }
   cancelRun(runId)                       { return this._call("cancelRun",            [runId]); }
@@ -1578,12 +1749,14 @@ let _wfServices = null;
 let _wfRecommendedInstalled = false;
 const _wfRecommendedInstalledByWorkspace = new Set();
 const _wfEngineByWorkspace = new Map();
+const _wfEngineInitByWorkspace = new Map();
 let _wfInitPromise = null;
 let _wfInitDone = false;
 let _wfLoadedBase = null;
 let _wfTaskTraceHookRegistered = false;
 let _workflowTelegramDigestPromise = null;
 const workflowTelegramDedup = new Map();
+const workflowBoundEngines = new Set();
 
 async function getWorkflowTelegramDigest() {
   if (_workflowTelegramDigestPromise) {
@@ -1656,11 +1829,14 @@ async function sendWorkflowTelegramMessage(chatId, text, options = {}) {
  */
 let _testDefaultEngine = null;
 export function _testInjectWorkflowEngine(mockModule, mockEngine) {
+  cleanupAllWorkflowEngineBindings();
   _wfEngine = mockModule;
   _wfInitDone = true;
   _wfInitPromise = null;
   _testDefaultEngine = mockEngine || null;
   _wfEngineByWorkspace.clear();
+  _wfEngineInitByWorkspace.clear();
+  _wfTaskTraceHookRegistered = false;
 }
 
 function traceHttpServerAction(req, span = {}, fn) {
@@ -1860,28 +2036,7 @@ async function getWorkflowEngineModule() {
           console.warn("[workflows] kanban adapter unavailable:", err.message);
         }
 
-        const agentPoolService = {
-          launchEphemeralThread,
-          launchOrResumeThread,
-          execWithRetry,
-          async continueSession(sessionId, prompt, opts = {}) {
-            const timeout = Number(opts.timeout) || 60 * 60 * 1000;
-            const cwd = opts.cwd || process.cwd();
-            return launchEphemeralThread(prompt, cwd, timeout, {
-              resumeThreadId: sessionId,
-              sdk: opts.sdk,
-            });
-          },
-          async killSession(sessionId) {
-            if (!sessionId) return false;
-            try {
-              invalidateThread(sessionId);
-              return true;
-            } catch {
-              return false;
-            }
-          },
-        };
+        const agentPoolService = createWorkflowAgentPoolService({ harnessAgentService });
 
         let promptBundle = null;
         try {
@@ -1915,43 +2070,50 @@ async function getWorkflowEngineModule() {
         _wfServicesReady = true;
 
         if (shouldBootstrapDefaultWorkflowSingleton()) {
+          const preferInProcessEngine = Boolean(process.env.VITEST);
           /* ── Start the workflow engine Worker thread (complete process decoupling) ── */
-          const defaultPaths = getWorkflowStoragePaths(repoRoot);
-          const proxy = new WorkflowEngineProxy();
-          try {
-            await proxy._start({
-              repoRoot,
+          if (!preferInProcessEngine) {
+            const defaultPaths = getWorkflowStoragePaths(repoRoot);
+            const proxy = new WorkflowEngineProxy();
+            try {
+              // The monitor owns startup interrupted-run recovery for the repo store.
+              await proxy._start({
+                repoRoot,
+                workflowDir: defaultPaths.workflowDir,
+                runsDir:     defaultPaths.runsDir,
+                detectInterruptedRuns: false,
+                resumeInterruptedRunsOnStart: false,
+              });
+              const defaultKey = getWorkflowWorkspaceKey(defaultPaths.workspaceRoot);
+              _wfEngineByWorkspace.set(defaultKey, proxy);
+              attachWorkflowEngineLiveBridge(proxy);
+              console.log("[workflows] Workflow engine Worker thread started");
+            } catch (err) {
+              console.warn("[workflows] Worker thread start failed, falling back to in-process engine:", err.message);
+              /* Fall back: create engine in-process */
+              const engine = _wfEngine.getWorkflowEngine({
+                services,
+                workflowDir: defaultPaths.workflowDir,
+                runsDir: defaultPaths.runsDir,
+                configDir: repoRoot,
+                detectInterruptedRuns: false,
+              });
+              attachWorkflowEngineLiveBridge(engine);
+              attachTaskWorkflowTraceHook(engine);
+              _wfTaskTraceHookRegistered = workflowTaskTraceHookCleanup.has(engine);
+            }
+          } else {
+            const defaultPaths = getWorkflowStoragePaths(repoRoot);
+            const engine = _wfEngine.getWorkflowEngine({
+              services,
               workflowDir: defaultPaths.workflowDir,
-              runsDir:     defaultPaths.runsDir,
+              runsDir: defaultPaths.runsDir,
+              configDir: repoRoot,
+              detectInterruptedRuns: false,
             });
-            const defaultKey = getWorkflowWorkspaceKey(defaultPaths.workspaceRoot);
-            _wfEngineByWorkspace.set(defaultKey, proxy);
-            attachWorkflowEngineLiveBridge(proxy);
-            console.log("[workflows] Workflow engine Worker thread started");
-
-            setTimeout(() => {
-              proxy.resumeInterruptedRuns().catch((err) => {
-                console.warn("[workflows] Failed to resume interrupted runs:", err.message);
-              });
-            }, 0);
-          } catch (err) {
-            console.warn("[workflows] Worker thread start failed, falling back to in-process engine:", err.message);
-            /* Fall back: create engine in-process */
-            const engine = _wfEngine.getWorkflowEngine({ services });
             attachWorkflowEngineLiveBridge(engine);
-            if (!_wfTaskTraceHookRegistered && typeof engine?.registerTaskTraceHook === "function") {
-              engine.registerTaskTraceHook((event) => {
-                handleTaskWorkflowTraceEvent(event);
-              });
-              _wfTaskTraceHookRegistered = true;
-            }
-            if (typeof engine.resumeInterruptedRuns === "function") {
-              setTimeout(() => {
-                engine.resumeInterruptedRuns().catch((err) => {
-                  console.warn("[workflows] Failed to resume interrupted runs:", err.message);
-                });
-              }, 0);
-            }
+            attachTaskWorkflowTraceHook(engine);
+            _wfTaskTraceHookRegistered = workflowTaskTraceHookCleanup.has(engine);
           }
         } else {
           _wfRecommendedInstalled = true;
@@ -2009,7 +2171,7 @@ async function getWorkflowEngineModule() {
         if (result.errors.length) {
           console.warn("[workflows] Default template install errors:", result.errors);
         }
-        if (typeof _wfTemplates.reconcileInstalledTemplates === "function") {
+        if (typeof _wfTemplates.reconcileInstalledTemplates === "function" && !engine?.isWorkflowEngineProxy) {
           const reconcile = _wfTemplates.reconcileInstalledTemplates(engine, {
             autoUpdateUnmodified: true,
           });
@@ -2063,6 +2225,103 @@ function getWorkflowStoragePaths(workspaceDir = "") {
     workflowDir: resolve(root, ".bosun", "workflows"),
     runsDir: resolve(root, ".bosun", "workflow-runs"),
   };
+}
+
+function readActiveWorkflowRunIndexEntries(runsDir) {
+  try {
+    const indexPath = resolve(String(runsDir || ""), "_active-runs.json");
+    if (!indexPath || !existsSync(indexPath)) return [];
+    const raw = JSON.parse(readFileSync(indexPath, "utf8"));
+    const entries = Array.isArray(raw) ? raw : [];
+    return entries
+      .map((entry) => {
+        const runId = String(entry?.runId || entry?.id || "").trim();
+        if (!runId) return null;
+        return {
+          runId,
+          workflowId: String(entry?.workflowId || "").trim() || null,
+          workflowName: String(entry?.workflowName || entry?.name || "").trim() || null,
+          startedAt: entry?.startedAt || null,
+          taskId: String(entry?.taskId || "").trim() || null,
+          taskTitle: String(entry?.taskTitle || "").trim() || null,
+          sessionId: String(entry?.sessionId || "").trim() || null,
+          sessionIds: Array.isArray(entry?.sessionIds) ? entry.sessionIds.slice(0, 12) : [],
+          activeNodeCount: Number.isFinite(Number(entry?.activeNodeCount))
+            ? Number(entry.activeNodeCount)
+            : 0,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => {
+        const leftTs = Date.parse(String(left?.startedAt || "")) || 0;
+        const rightTs = Date.parse(String(right?.startedAt || "")) || 0;
+        return rightTs - leftTs;
+      });
+  } catch {
+    return [];
+  }
+}
+
+function buildWorkflowOwnedExecutorSlots(workflowRunDetails = []) {
+  const seenTaskIds = new Set();
+  const seenRunIds = new Set();
+  const slots = [];
+  for (const entry of Array.isArray(workflowRunDetails) ? workflowRunDetails : []) {
+    const runId = String(entry?.runId || "").trim();
+    const taskId = String(entry?.taskId || "").trim();
+    const dedupeKey = taskId || runId;
+    if (!dedupeKey) continue;
+    if (taskId) {
+      if (seenTaskIds.has(taskId)) continue;
+      seenTaskIds.add(taskId);
+    } else if (seenRunIds.has(runId)) {
+      continue;
+    } else {
+      seenRunIds.add(runId);
+    }
+    const startedAtRaw = entry?.startedAt;
+    const startedAtMs =
+      Number.isFinite(Number(startedAtRaw))
+        ? Number(startedAtRaw)
+        : (Date.parse(String(startedAtRaw || "")) || Date.now());
+    slots.push({
+      taskId: taskId || runId,
+      taskTitle: String(entry?.taskTitle || entry?.workflowName || taskId || runId).trim() || runId,
+      branch: null,
+      baseBranch: null,
+      sdk: "workflow",
+      model: "",
+      attempt: 1,
+      agentInstanceId: runId || null,
+      startedAt: startedAtMs,
+      runningFor: Math.max(0, Math.round((Date.now() - startedAtMs) / 1000)),
+      status: "running",
+      workflowRunId: runId || null,
+      workflowId: String(entry?.workflowId || "").trim() || null,
+      workflowName: String(entry?.workflowName || "").trim() || null,
+      sessionId: String(entry?.sessionId || "").trim() || null,
+      sessionIds: Array.isArray(entry?.sessionIds) ? entry.sessionIds.slice(0, 12) : [],
+      synthetic: true,
+      workflowOwned: true,
+    });
+  }
+  return slots;
+}
+
+function mergeExecutorSlotsWithWorkflowRuns(execStatus = null, workflowRunDetails = []) {
+  const legacySlots = Array.isArray(execStatus?.slots)
+    ? execStatus.slots.map((slot) => ({ ...slot }))
+    : [];
+  const legacyTaskIds = new Set(
+    legacySlots
+      .map((slot) => String(slot?.taskId || slot?.task_id || "").trim())
+      .filter(Boolean),
+  );
+  const workflowSlots = buildWorkflowOwnedExecutorSlots(workflowRunDetails).filter((slot) => {
+    const taskId = String(slot?.taskId || "").trim();
+    return !taskId || !legacyTaskIds.has(taskId);
+  });
+  return [...legacySlots, ...workflowSlots];
 }
 
 
@@ -2400,9 +2659,13 @@ function mergeTaskWorkflowRuns(baseRuns = [], extraRuns = [], limit = 60) {
   return merged;
 }
 
-async function collectWorkflowRunsForTask(taskId, url, limit = 40) {
+async function collectWorkflowRunsForTask(taskId, url, limit = 40, options = {}) {
   const normalizedTaskId = String(taskId || "").trim();
   if (!normalizedTaskId) return [];
+  const shallow = options?.shallow === true;
+  const historyLimit = Number.isFinite(Number(options?.historyLimit))
+    ? Math.max(limit, Math.trunc(Number(options.historyLimit)))
+    : (shallow ? Math.max(limit, 80) : 240);
   const buildFallbackTaskRun = (summary, data = {}, traceEvents = []) => {
     const fallbackSessionId = (() => {
       for (const value of [
@@ -2467,7 +2730,7 @@ async function collectWorkflowRunsForTask(taskId, url, limit = 40) {
     };
   };
   try {
-    let engine = _testDefaultEngine;
+    let engine = options?.engine || _testDefaultEngine;
     if (!engine) {
       const wfCtx = await getWorkflowRequestContext(url, { bootstrapTemplates: false }).catch(() => null);
       engine = wfCtx?.ok && wfCtx.engine
@@ -2477,7 +2740,7 @@ async function collectWorkflowRunsForTask(taskId, url, limit = 40) {
     if (!engine) return [];
     let summaries = [];
     if (typeof engine.getRunHistory === "function") {
-      summaries = await engine.getRunHistory(null, 240);
+      summaries = await engine.getRunHistory(null, historyLimit);
     }
     const out = [];
     for (const summary of summaries) {
@@ -2496,18 +2759,19 @@ async function collectWorkflowRunsForTask(taskId, url, limit = 40) {
         ).trim();
         let matches = primaryTaskId === normalizedTaskId || summaryTaskIds.includes(normalizedTaskId);
         let detailRun = null;
-        if (!matches && engine.getRunDetail) {
-          detailRun = await engine.getRunDetail(summary.runId);
+        if (!matches && !shallow && engine.getRunDetail) {
+          detailRun = await engine.getRunDetail(summary.runId, { decorate: false });
           data = detailRun?.detail?.data || data;
           const detailTaskId = String(data.taskId || data.activeTaskId || data?.task?.id || "").trim();
           matches = detailTaskId === normalizedTaskId;
         }
-        if (!matches && typeof engine.getTaskTraceEvents === "function") {
+        if (!matches && !shallow && typeof engine.getTaskTraceEvents === "function") {
           traceEvents = (await engine.getTaskTraceEvents(summary.runId)) || [];
           matches = traceEvents.some((event) => String(event?.taskId || "").trim() === normalizedTaskId);
         }
         if (!matches) continue;
-        const needsObservedRun = (!summary?.proofBundle || !Array.isArray(summary?.plannerTimeline))
+        const needsObservedRun = !shallow
+          && (!summary?.proofBundle || !Array.isArray(summary?.plannerTimeline))
           && typeof engine.getRunDetail === "function";
         const observedRun = needsObservedRun && typeof engine.getRunDetail === "function"
           ? (detailRun && detailRun.runId === summary.runId ? detailRun : await engine.getRunDetail(summary.runId))
@@ -2550,6 +2814,19 @@ async function collectWorkflowRunsForTask(taskId, url, limit = 40) {
         const proofBundle = normalizeWorkflowRunProofBundle(observedRun?.proofBundle || summary?.proofBundle || null);
         const proofSummary = buildWorkflowRunProofSummary(observedRun || summary);
         const delegationTopology = normalizeTaskWorkflowRunDelegationTopology(observedRun || summary || {});
+        const runMeta = makeJsonSafe(
+          observedRun?.meta && typeof observedRun.meta === "object"
+            ? observedRun.meta
+            : (summary?.meta && typeof summary.meta === "object" ? summary.meta : null),
+          { maxDepth: 5 },
+        );
+        const failureKind = String(
+          observedRun?.failureKind
+          || summary?.failureKind
+          || runMeta?.failureKind
+          || runMeta?.worktreeFailure?.failureKind
+          || "",
+        ).trim() || null;
         out.push({
           runId: summary.runId,
           workflowId: summary.workflowId,
@@ -2564,7 +2841,9 @@ async function collectWorkflowRunsForTask(taskId, url, limit = 40) {
           duration: summary.duration || null,
           sessionId: delegationTopology?.sessionId || primarySessionId,
           primarySessionId,
+          failureKind,
           source: "workflow",
+          meta: runMeta,
           plannerTimeline: proofBundle.plannerTimeline,
           proofBundle,
           proofSummary,
@@ -2682,6 +2961,60 @@ function collectTaskTimelineDiagnostics(task, limit = 8) {
   return relevant.slice(-Math.max(1, limit));
 }
 
+function collectTaskWorkflowRunDiagnostics(task, limit = 8) {
+  const runs = Array.isArray(task?.workflowRuns) ? task.workflowRuns : [];
+  const relevant = [];
+  for (const run of runs) {
+    if (!run || typeof run !== "object") continue;
+    const meta = run?.meta && typeof run.meta === "object" ? run.meta : {};
+    const worktreeFailure =
+      meta?.worktreeFailure && typeof meta.worktreeFailure === "object"
+        ? meta.worktreeFailure
+        : null;
+    const failureKind = String(
+      run?.failureKind
+      || meta?.failureKind
+      || worktreeFailure?.failureKind
+      || "",
+    ).trim();
+    const errorText = sanitizeTaskDiagnosticText(
+      worktreeFailure?.error
+      || meta?.error
+      || meta?.blockedReason
+      || run?.summary
+      || "",
+      320,
+    );
+    const blockedReason = sanitizeTaskDiagnosticText(
+      worktreeFailure?.blockedReason || "",
+      280,
+    );
+    const isWorktreeFailure =
+      failureKind === "branch_refresh_conflict"
+      || failureKind === "worktree_acquisition_failed"
+      || failureKind === "worktree_runtime_setup_incomplete"
+      || /worktree/i.test(errorText)
+      || /refresh conflict/i.test(blockedReason)
+      || /managed worktree/i.test(errorText);
+    if (!isWorktreeFailure) continue;
+    relevant.push({
+      source: "workflow-run",
+      runId: String(run?.runId || "").trim() || null,
+      workflowId: String(run?.workflowId || "").trim() || null,
+      workflowName: String(run?.workflowName || "").trim() || null,
+      message: errorText || blockedReason || "Workflow run recorded a worktree failure.",
+      reason: blockedReason || null,
+      failureKind: failureKind || null,
+      timestamp: run?.endedAt || run?.startedAt || null,
+      kind: "workflow-run",
+      retryable: worktreeFailure?.retryable ?? null,
+      retryAt: worktreeFailure?.retryAt || null,
+      recordedAt: worktreeFailure?.recordedAt || null,
+    });
+  }
+  return relevant.slice(-Math.max(1, limit));
+}
+
 async function collectTaskLogDiagnostics(task, workspaceDir = "", limit = 8) {
   const taskId = String(task?.id || task?.taskId || "").trim();
   if (!taskId) {
@@ -2741,7 +3074,12 @@ async function collectTaskLogDiagnostics(task, workspaceDir = "", limit = 8) {
           counts.prePrValidationFailed += 1;
           matched = true;
         }
-        if (/Worktree failed for/i.test(text) || /Worktree acquisition failed/i.test(text)) {
+        if (
+          /Worktree failed for/i.test(text)
+          || /Worktree acquisition failed/i.test(text)
+          || /Worktree refresh failed/i.test(text)
+          || /managed worktree was removed after stale refresh state/i.test(text)
+        ) {
           counts.worktreeFailed += 1;
           matched = true;
         }
@@ -2781,12 +3119,38 @@ async function buildTaskBlockedContext(task, options = {}) {
       || "",
     280,
   );
+  const isDependencyBlocked = canStart?.canStart === false && String(canStart?.reason || "") === "dependency_blocked";
+  if (isDependencyBlocked) {
+    return {
+      status: normalizedStatus,
+      category: "dependency_blocked",
+      headline: "This task cannot start because one or more dependencies are not done yet.",
+      summary: "Bosun will not dispatch this task until every blocking dependency below is resolved.",
+      recommendation: "Complete or unblock the listed dependencies, then dispatch this task again.",
+      reason: explicitReason || sanitizeTaskDiagnosticText(canStart?.reason || ""),
+      workflowRunCount: 0,
+      prePrValidationFailureCount: 0,
+      worktreeFailureCount: 0,
+      blockedTransitionCount: 0,
+      createPrFailureCount: 0,
+      blockedBy: Array.isArray(canStart?.blockedBy) ? canStart.blockedBy : [],
+      blockingTaskIds: Array.isArray(canStart?.blockingTaskIds) ? canStart.blockingTaskIds : [],
+      repairArtifacts: null,
+      timelineEvidence: [],
+      workflowRunEvidence: [],
+      logEvidence: [],
+    };
+  }
   const workflowRuns = Array.isArray(options.workflowRuns)
     ? options.workflowRuns
     : Array.isArray(currentTask?.workflowRuns)
       ? currentTask.workflowRuns
       : [];
   const timelineEvidence = collectTaskTimelineDiagnostics(currentTask, 6);
+  const workflowRunEvidence = collectTaskWorkflowRunDiagnostics(
+    { ...currentTask, workflowRuns },
+    6,
+  );
   const logDiagnostics = await collectTaskLogDiagnostics(
     currentTask,
     normalizeCandidatePath(options.workspaceDir),
@@ -2800,9 +3164,9 @@ async function buildTaskBlockedContext(task, options = {}) {
       : null;
   const hasWorktreeFailure =
     Boolean(currentTask?.meta?.worktreeFailure) ||
+    workflowRunEvidence.length > 0 ||
     logDiagnostics.counts.worktreeFailed > 0 ||
     timelineEvidence.some((entry) => /worktree failed/i.test(String(entry?.message || "")));
-  const isDependencyBlocked = canStart?.canStart === false && String(canStart?.reason || "") === "dependency_blocked";
 
   let category = "";
   let headline = "";
@@ -2850,13 +3214,14 @@ async function buildTaskBlockedContext(task, options = {}) {
     reason: explicitReason || sanitizeTaskDiagnosticText(canStart?.reason || ""),
     workflowRunCount: workflowRuns.length,
     prePrValidationFailureCount: logDiagnostics.counts.prePrValidationFailed,
-    worktreeFailureCount: logDiagnostics.counts.worktreeFailed,
+    worktreeFailureCount: Math.max(logDiagnostics.counts.worktreeFailed, workflowRunEvidence.length),
     blockedTransitionCount: logDiagnostics.counts.blockedTransitions,
     createPrFailureCount: logDiagnostics.counts.createPrFailed,
     blockedBy: Array.isArray(canStart?.blockedBy) ? canStart.blockedBy : [],
     blockingTaskIds: Array.isArray(canStart?.blockingTaskIds) ? canStart.blockingTaskIds : [],
     repairArtifacts,
     timelineEvidence,
+    workflowRunEvidence,
     logEvidence: logDiagnostics.entries,
   };
 }
@@ -2925,6 +3290,9 @@ function selectTaskReplanRelatedTasks(task, allTasks = []) {
 async function updateTaskReplanState(adapter, task, proposal, options = {}) {
   if (!adapter || typeof adapter.updateTask !== "function" || !task?.id) return task;
   const planningMode = normalizeTaskPlanningMode(options.mode || proposal?.mode || "replan");
+  const queuePlan = proposal?.queuePlan && typeof proposal.queuePlan === "object"
+    ? proposal.queuePlan
+    : null;
   const plannerState = {
     mode: planningMode,
     proposalId: proposal?.proposalId || null,
@@ -2935,6 +3303,8 @@ async function updateTaskReplanState(adapter, task, proposal, options = {}) {
     summary: proposal?.summary || "",
     subtaskCount: Array.isArray(proposal?.subtasks) ? proposal.subtasks.length : 0,
     dependencyPatchCount: Array.isArray(proposal?.dependencyPatches) ? proposal.dependencyPatches.length : 0,
+    queueStepCount: Number(queuePlan?.counts?.stepCount || 0),
+    queueCreatedTaskCount: Number(queuePlan?.counts?.createdTaskCount || 0),
     status: options.status || proposal?.status || "proposed",
     ...(options.appliedAt ? { appliedAt: options.appliedAt } : {}),
     ...(options.createdTaskIds ? { createdTaskIds: uniqueTaskIds(options.createdTaskIds) } : {}),
@@ -2945,16 +3315,23 @@ async function updateTaskReplanState(adapter, task, proposal, options = {}) {
     status: options.status || proposal?.status || "proposed",
     ...(options.appliedAt ? { appliedAt: options.appliedAt } : {}),
     ...(options.createdTaskIds ? { createdTaskIds: uniqueTaskIds(options.createdTaskIds) } : {}),
+    ...(queuePlan ? { queuePlan } : {}),
   };
+  const decomposeProposal = planningMode === "decompose"
+    ? { ...nextProposal }
+    : null;
+  const decompositionPlannerState = planningMode === "decompose"
+    ? { ...plannerState }
+    : null;
   const nextMeta = buildTaskMetaPatch(task?.meta, {
     replanProposal: nextProposal,
-    ...(planningMode === "decompose" ? { decomposeProposal: nextProposal } : {}),
+    ...(planningMode === "decompose" ? { decomposeProposal } : {}),
     plannerState: {
       ...(task?.meta?.plannerState && typeof task.meta.plannerState === "object"
         ? task.meta.plannerState
         : {}),
       latestReplan: plannerState,
-      ...(planningMode === "decompose" ? { latestDecomposition: plannerState } : {}),
+      ...(planningMode === "decompose" ? { latestDecomposition: decompositionPlannerState } : {}),
     },
   });
   const patch = {
@@ -2997,6 +3374,73 @@ function getTaskPlanningModeMetadata(modeInput = "replan") {
   };
 }
 
+function buildTaskPlanningQueuePlan(proposal = {}, task = {}, modeInput = "replan", options = {}) {
+  const planning = getTaskPlanningModeMetadata(modeInput);
+  const parentTaskId = String(task?.id || proposal?.taskId || "").trim() || null;
+  const proposalId = String(proposal?.proposalId || "").trim() || null;
+  const subtasks = Array.isArray(proposal?.subtasks) ? proposal.subtasks : [];
+  const createdSubtasks = Array.isArray(options.createdSubtasks) ? options.createdSubtasks : [];
+  const createdByIndex = new Map(createdSubtasks.map((entry, index) => [index, entry]));
+  const stepIds = subtasks.map((_entry, index) => `step-${index + 1}`);
+  const steps = subtasks.map((entry, index) => {
+    const created = createdByIndex.get(index) || null;
+    const dependsOnStepIds = uniqueStrings(
+      (Array.isArray(entry?.dependsOnIndexes) ? entry.dependsOnIndexes : [])
+        .map((depIndex) => stepIds[depIndex])
+        .filter(Boolean),
+    );
+    const externalDependencyTaskIds = uniqueTaskIds(entry?.dependsOnTaskIds || []);
+    const status = created
+      ? "queued"
+      : (dependsOnStepIds.length > 0 || externalDependencyTaskIds.length > 0 ? "blocked" : "ready");
+    return {
+      id: stepIds[index],
+      order: index + 1,
+      title: String(entry?.title || `Subtask ${index + 1}`).trim(),
+      description: String(entry?.description || "").trim(),
+      status,
+      priority: String(entry?.priority || "").trim() || null,
+      sprintId: String(entry?.sprintId || "").trim() || null,
+      tags: Array.isArray(entry?.tags) ? entry.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [],
+      acceptanceCriteria: Array.isArray(entry?.acceptanceCriteria) ? entry.acceptanceCriteria : [],
+      dependsOnStepIds,
+      dependsOnTaskIds: externalDependencyTaskIds,
+      taskId: String(created?.id || created?.taskId || "").trim() || null,
+      taskTitle: String(created?.title || "").trim() || null,
+    };
+  });
+  const relatedTaskIds = uniqueTaskIds([
+    parentTaskId,
+    ...steps.map((step) => step.taskId),
+    ...steps.flatMap((step) => step.dependsOnTaskIds || []),
+  ]);
+  const statusCounts = {
+    ready: steps.filter((step) => step.status === "ready").length,
+    blocked: steps.filter((step) => step.status === "blocked").length,
+    queued: steps.filter((step) => step.status === "queued").length,
+  };
+  return {
+    version: 1,
+    mode: planning.mode,
+    proposalId,
+    parentTaskId,
+    queueStrategy: "explicit-only",
+    summary: String(proposal?.summary || "").trim() || null,
+    currentPlanStep: String(proposal?.currentPlanStep || "").trim() || null,
+    generatedAt: String(proposal?.generatedAt || new Date().toISOString()).trim(),
+    appliedAt: options.appliedAt ? String(options.appliedAt).trim() : null,
+    steps,
+    relatedTaskIds,
+    counts: {
+      stepCount: steps.length,
+      createdTaskCount: steps.filter((step) => Boolean(step.taskId)).length,
+      readyStepCount: statusCounts.ready,
+      blockedStepCount: statusCounts.blocked,
+      queuedStepCount: statusCounts.queued,
+    },
+  };
+}
+
 async function persistTaskPlanningTimeline(taskId, mode, phase, message, payload = {}) {
   const planning = getTaskPlanningModeMetadata(mode);
   appendInternalTaskTimelineEvent(taskId, {
@@ -3025,9 +3469,9 @@ async function generateTaskPlanningProposal({ taskId, url, mode }) {
   if (!task) {
     return { status: 404, body: { ok: false, error: "task not found" } };
   }
-  const exec = await resolveExecPrimaryPrompt();
+  const exec = await resolveBackgroundPromptExecutor({ uiDeps, harnessAgentService });
   if (typeof exec !== "function") {
-    return { status: 503, body: { ok: false, error: "Primary agent not available. Start bosun first." } };
+    return { status: 503, body: { ok: false, error: "Background prompt executor not available. Start bosun first." } };
   }
   const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
   const allTasks = await listAllTasksForApi(adapter);
@@ -3045,12 +3489,14 @@ async function generateTaskPlanningProposal({ taskId, url, mode }) {
     return false;
   });
   let auditActivity = null;
-  try {
-    auditActivity = buildTaskAuditActivity(taskId, {
-      repoRoot: workspaceContext?.workspaceDir || repoRoot,
-    });
-  } catch (auditErr) {
-    console.warn(`[ui] task ${planning.modeLabel} audit lookup failed: ${auditErr?.message || auditErr}`);
+  if (isUiAuditSummaryEnabled()) {
+    try {
+      auditActivity = buildTaskAuditActivity(taskId, {
+        repoRoot: workspaceContext?.workspaceDir || repoRoot,
+      });
+    } catch (auditErr) {
+      console.warn(`[ui] task ${planning.modeLabel} audit lookup failed: ${auditErr?.message || auditErr}`);
+    }
   }
   const context = buildTaskReplanContext(task, {
     mode: planning.mode,
@@ -3074,6 +3520,7 @@ async function generateTaskPlanningProposal({ taskId, url, mode }) {
     generatedAt,
     ...normalizeTaskReplanProposal(extracted, { parentTask: task, mode: planning.mode }),
   };
+  proposal.queuePlan = buildTaskPlanningQueuePlan(proposal, task, planning.mode);
   const updatedTask = await updateTaskReplanState(adapter, task, proposal, {
     mode: planning.mode,
     status: "proposed",
@@ -3129,7 +3576,6 @@ async function generateTaskPlanningProposal({ taskId, url, mode }) {
     body: {
       ok: true,
       planningMode: planning.mode,
-      data: proposal,
       proposal,
       task: updatedTask,
     },
@@ -3157,20 +3603,26 @@ async function applyTaskPlanningProposal({ taskId, body, url, mode }) {
     generatedAt: String(proposalSource.generatedAt || new Date().toISOString()).trim(),
     ...normalizeTaskReplanProposal(proposalSource, { parentTask: task, mode: planning.mode }),
   };
+  proposal.queuePlan = buildTaskPlanningQueuePlan(proposal, task, planning.mode);
   const needsDependencyWrites = proposal.subtasks.some((entry) => entry.dependsOnIndexes.length > 0 || entry.dependsOnTaskIds.length > 0)
     || proposal.dependencyPatches.length > 0;
   if (needsDependencyWrites) {
-    const probe = await callTaskStoreFunction(TASK_STORE_DEPENDENCY_EXPORTS.add, [taskId, taskId]);
-    if (!probe?.found) {
+    const taskStoreApi = await ensureTaskStoreApi();
+    if (!findTaskStoreFunction(taskStoreApi, TASK_STORE_DEPENDENCY_EXPORTS.add)) {
       return { status: 501, body: { ok: false, error: "Task dependency graph writes are unavailable." } };
     }
   }
 
-  const createdSubtasks = [];
-  const projectId = task?.projectId || task?.project_id || "";
-  for (let index = 0; index < proposal.subtasks.length; index += 1) {
-    const entry = proposal.subtasks[index];
-    const payload = {
+  const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false }) || resolveActiveWorkspaceExecutionContext();
+  const taskGraphManager = createManualFlowTaskManager(workspaceContext, {
+    repository: task?.repository || task?.meta?.repository || resolveDefaultRepositoryForWorkspaceContext(workspaceContext),
+    workspaceId: task?.workspace || task?.meta?.workspace || workspaceContext?.workspaceId || "",
+    projectId: task?.projectId || task?.project_id || "",
+    templateId: `task-${planning.mode}`,
+  });
+  const graphResult = await taskGraphManager.createTaskGraph({
+    tasks: proposal.subtasks.map((entry, index) => ({
+      clientId: `step-${index + 1}`,
       title: entry.title,
       description: entry.description,
       status: "todo",
@@ -3181,9 +3633,12 @@ async function applyTaskPlanningProposal({ taskId, body, url, mode }) {
       repository: task?.repository || task?.meta?.repository || undefined,
       repositories: Array.isArray(task?.repositories) ? task.repositories : task?.meta?.repositories,
       epicId: task?.epicId || task?.meta?.epicId || undefined,
-      tags: mergeTaskTagLists(task?.tags || task?.meta?.tags || [], entry.tags || [], [planning.subtaskTag]),
+      labels: mergeTaskTagLists(task?.tags || task?.meta?.tags || [], entry.tags || [], [planning.subtaskTag]),
       storyPoints: Number.isFinite(Number(entry.storyPoints)) ? Number(entry.storyPoints) : undefined,
-      ...(entry.sprintId ? { sprintId: entry.sprintId } : {}),
+      sprintId: entry.sprintId || undefined,
+      dependsOnTaskClientIds: (Array.isArray(entry.dependsOnIndexes) ? entry.dependsOnIndexes : [])
+        .map((depIndex) => `step-${depIndex + 1}`),
+      dependsOnTaskIds: entry.dependsOnTaskIds || [],
       meta: {
         parentTaskId: taskId,
         acceptanceCriteria: Array.isArray(entry.acceptanceCriteria) ? entry.acceptanceCriteria : [],
@@ -3205,51 +3660,24 @@ async function applyTaskPlanningProposal({ taskId, body, url, mode }) {
             }
           : {}),
       },
-    };
-    const createdRaw = await adapter.createTask(projectId, payload);
-    createdSubtasks.push(withTaskMetadataTopLevel(createdRaw));
-  }
-
-  const createdTaskIds = createdSubtasks.map((entry) => String(entry?.id || "").trim()).filter(Boolean);
-  const addDependency = async (dependentTaskId, dependencyTaskId) => {
-    if (!dependentTaskId || !dependencyTaskId || dependentTaskId === dependencyTaskId) return;
-    await callTaskStoreFunction(TASK_STORE_DEPENDENCY_EXPORTS.add, [dependentTaskId, dependencyTaskId]);
-    if (typeof adapter?.addTaskDependency === "function") {
-      await Promise.resolve(adapter.addTaskDependency(dependentTaskId, dependencyTaskId)).catch(() => null);
-    } else if (typeof adapter?.updateTask === "function") {
-      const current = await getTaskByIdForApi(dependentTaskId, adapter).catch(() => null);
-      const dependencyTaskIds = uniqueTaskIds([
-        ...(Array.isArray(current?.dependencyTaskIds) ? current.dependencyTaskIds : []),
-        ...(Array.isArray(current?.dependsOn) ? current.dependsOn : []),
-        dependencyTaskId,
-      ]);
-      await Promise.resolve(adapter.updateTask(dependentTaskId, {
-        dependencyTaskIds,
-        dependsOn: dependencyTaskIds,
-        dependencies: dependencyTaskIds,
-      })).catch(() => null);
-    }
-  };
-  for (let index = 0; index < proposal.subtasks.length; index += 1) {
-    const subtask = proposal.subtasks[index];
-    const dependentTaskId = createdTaskIds[index];
-    for (const depIndex of subtask.dependsOnIndexes) {
-      if (createdTaskIds[depIndex]) await addDependency(dependentTaskId, createdTaskIds[depIndex]);
-    }
-    for (const depTaskId of subtask.dependsOnTaskIds) {
-      await addDependency(dependentTaskId, depTaskId);
-    }
-  }
+    })),
+  });
   for (const patch of proposal.dependencyPatches) {
     for (const dependencyTaskId of patch.dependsOnTaskIds) {
-      await addDependency(patch.taskId, dependencyTaskId);
+      await addTaskDependencyForApi(adapter, patch.taskId, dependencyTaskId);
     }
   }
   const persistedSubtasks = await Promise.all(
-    createdTaskIds.map((createdTaskId) => getTaskByIdForApi(createdTaskId, adapter).catch(() => null)),
+    (Array.isArray(graphResult?.tasks) ? graphResult.tasks : [])
+      .map((created) => getTaskByIdForApi(created.taskId || created.id, adapter).catch(() => null)),
   );
+  const createdTaskIds = persistedSubtasks.map((entry) => String(entry?.id || "").trim()).filter(Boolean);
 
   const appliedAt = new Date().toISOString();
+  proposal.queuePlan = buildTaskPlanningQueuePlan(proposal, task, planning.mode, {
+    createdSubtasks: persistedSubtasks.filter(Boolean),
+    appliedAt,
+  });
   const updatedTask = await updateTaskReplanState(adapter, task, proposal, {
     mode: planning.mode,
     status: "applied",
@@ -3268,7 +3696,6 @@ async function applyTaskPlanningProposal({ taskId, body, url, mode }) {
       recommendedAction: proposal.recommendedAction,
     },
   );
-  const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
   try {
     appendOperatorActionToStateLedger({
       actionId: `${planning.appliedLedgerActionIdPrefix}:${taskId}:${proposal.proposalId}`,
@@ -3313,12 +3740,9 @@ async function applyTaskPlanningProposal({ taskId, body, url, mode }) {
     body: {
       ok: true,
       planningMode: planning.mode,
-      data: {
-        proposal: appliedProposal,
-        createdSubtasks: persistedSubtasks.filter(Boolean),
-        task: updatedTask,
-      },
       proposal: appliedProposal,
+      queuePlan: proposal.queuePlan,
+      taskGraph: graphResult,
       createdSubtasks: persistedSubtasks.filter(Boolean),
       task: updatedTask,
     },
@@ -3351,7 +3775,7 @@ function maybeBootstrapWorkspaceWorkflowTemplates(engine, workspaceKey, workspac
         result = _wfTemplates.installRecommendedTemplates(engine);
       }
     }
-    if (typeof _wfTemplates.reconcileInstalledTemplates === "function") {
+    if (typeof _wfTemplates.reconcileInstalledTemplates === "function" && !engine?.isWorkflowEngineProxy) {
       _wfTemplates.reconcileInstalledTemplates(engine, {
         autoUpdateUnmodified: true,
       });
@@ -3382,43 +3806,57 @@ async function getWorkflowRequestContext(reqUrl, options = {}) {
   const paths = getWorkflowStoragePaths(workspaceContext.workspaceDir);
   const workspaceKey = getWorkflowWorkspaceKey(paths.workspaceRoot);
   let engine = _wfEngineByWorkspace.get(workspaceKey) || null;
+  if (engine?.isWorkflowEngineProxy && typeof engine.isAvailable === "function" && !engine.isAvailable()) {
+    _wfEngineByWorkspace.delete(workspaceKey);
+    engine = null;
+  }
   if (!engine) {
-    if (_testDefaultEngine) {
-      engine = _testDefaultEngine;
-    } else {
-      const preferInProcessEngine = Boolean(process.env.VITEST);
-      if (!preferInProcessEngine) {
-        /* Use Worker thread proxy for complete decoupling from the HTTP event loop */
-        const proxy = new WorkflowEngineProxy();
-        try {
-          await proxy._start({
-            repoRoot,
-            workflowDir: paths.workflowDir,
-            runsDir:     paths.runsDir,
-          });
-          engine = proxy;
-        } catch (startErr) {
-          console.warn("[workflows] Worker thread unavailable, using in-process engine:", startErr.message);
+    let initPromise = _wfEngineInitByWorkspace.get(workspaceKey);
+    if (!initPromise) {
+      initPromise = (async () => {
+        let nextEngine = null;
+        if (_testDefaultEngine) {
+          nextEngine = _testDefaultEngine;
+        } else {
+          const preferInProcessEngine = Boolean(process.env.VITEST);
+          if (!preferInProcessEngine) {
+            /* Use Worker thread proxy for complete decoupling from the HTTP event loop */
+            const proxy = new WorkflowEngineProxy();
+            try {
+              await proxy._start({
+                repoRoot,
+                workflowDir: paths.workflowDir,
+                runsDir:     paths.runsDir,
+                detectInterruptedRuns: false,
+                resumeInterruptedRunsOnStart: false,
+              });
+              nextEngine = proxy;
+            } catch (startErr) {
+              console.warn("[workflows] Worker thread unavailable, using in-process engine:", startErr.message);
+            }
+          }
+          if (!nextEngine) {
+            nextEngine = new wfMod.WorkflowEngine({
+              workflowDir: paths.workflowDir,
+              runsDir: paths.runsDir,
+              detectInterruptedRuns: false,
+              services: _wfServices || {},
+              onTaskWorkflowEvent: handleTaskWorkflowTraceEvent,
+            });
+            attachTaskWorkflowTraceHook(nextEngine);
+            await nextEngine.load();
+          }
         }
-      }
-      if (!engine) {
-        engine = new wfMod.WorkflowEngine({
-          workflowDir: paths.workflowDir,
-          runsDir: paths.runsDir,
-          detectInterruptedRuns: false,
-          services: _wfServices || {},
-          onTaskWorkflowEvent: handleTaskWorkflowTraceEvent,
-        });
-        if (typeof engine.registerTaskTraceHook === "function") {
-          engine.registerTaskTraceHook((event) => {
-            handleTaskWorkflowTraceEvent(event);
-          });
-        }
-        await engine.load();
-      }
-      attachWorkflowEngineLiveBridge(engine);
+        attachTaskWorkflowTraceHook(nextEngine);
+        attachWorkflowEngineLiveBridge(nextEngine);
+        _wfEngineByWorkspace.set(workspaceKey, nextEngine);
+        return nextEngine;
+      })().finally(() => {
+        _wfEngineInitByWorkspace.delete(workspaceKey);
+      });
+      _wfEngineInitByWorkspace.set(workspaceKey, initPromise);
     }
-    _wfEngineByWorkspace.set(workspaceKey, engine);
+    engine = await initPromise;
   }
   if (options.bootstrapTemplates !== false) {
     maybeBootstrapWorkspaceWorkflowTemplates(
@@ -3469,6 +3907,7 @@ function resolveRepoLocalWorkspaceConfigDir() {
 function resolveManagedWorkspaceInventory() {
   const seen = new Set();
   const configDirs = [];
+  const explicitUiConfigDir = Boolean(uiDeps.configDir || process.env.BOSUN_CONFIG_PATH);
   const pushConfigDir = (value) => {
     const normalized = normalizeCandidatePath(value);
     if (!normalized || seen.has(normalized)) return;
@@ -3476,7 +3915,9 @@ function resolveManagedWorkspaceInventory() {
     configDirs.push(normalized);
   };
   pushConfigDir(resolveUiConfigDir());
-  pushConfigDir(resolveRepoLocalWorkspaceConfigDir());
+  if (!explicitUiConfigDir) {
+    pushConfigDir(resolveRepoLocalWorkspaceConfigDir());
+  }
 
   for (const configDir of configDirs) {
     try {
@@ -3536,7 +3977,17 @@ function collectTaskDiffSessionIds(task) {
   return [...ids];
 }
 
-function collectTaskLinkedSessionIds(task, tracker = null) {
+function collectTaskLinkedSessionIdsFromSummaries(taskKeySet, sessions = [], ids = new Set()) {
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const sessionTaskId = normalizeDiffTaskRef(session?.taskId);
+    if (!sessionTaskId || !taskKeySet.has(sessionTaskId)) continue;
+    const sessionId = normalizeDiffTaskRef(session?.id || session?.sessionId || sessionTaskId);
+    if (sessionId) ids.add(sessionId);
+  }
+  return ids;
+}
+
+function collectTaskLinkedSessionIds(task, tracker = null, options = {}) {
   const ids = new Set(collectTaskDiffSessionIds(task));
   const taskKeys = [
     task?.id,
@@ -3549,14 +4000,23 @@ function collectTaskLinkedSessionIds(task, tracker = null) {
 
   const taskKeySet = new Set(taskKeys);
   const sessionTracker = tracker || getSessionTracker();
-  const sessions = typeof sessionTracker?.listAllSessions === "function"
-    ? sessionTracker.listAllSessions({ includePersisted: true })
+  const includePersisted = options.includePersisted === true;
+  const liveSessions = typeof sessionTracker?.listAllSessions === "function"
+    ? sessionTracker.listAllSessions({
+      includePersisted: false,
+      lightweight: true,
+      includeRuntimeProgress: false,
+    })
     : [];
-  for (const session of sessions) {
-    const sessionTaskId = normalizeDiffTaskRef(session?.taskId);
-    if (!sessionTaskId || !taskKeySet.has(sessionTaskId)) continue;
-    const sessionId = normalizeDiffTaskRef(session?.id || session?.sessionId || sessionTaskId);
-    if (sessionId) ids.add(sessionId);
+  collectTaskLinkedSessionIdsFromSummaries(taskKeySet, liveSessions, ids);
+
+  if (includePersisted && typeof sessionTracker?.listAllSessions === "function") {
+    const persistedSessions = sessionTracker.listAllSessions({
+      includePersisted: true,
+      lightweight: true,
+      includeRuntimeProgress: false,
+    });
+    collectTaskLinkedSessionIdsFromSummaries(taskKeySet, persistedSessions, ids);
   }
 
   return [...ids];
@@ -3652,12 +4112,13 @@ function resolveTaskRepositoryDir(task, workspaceContext = {}) {
           const values = [
             normalizeDiffTaskRef(repo?.name),
             normalizeDiffTaskRef(repo?.slug),
-            normalizeCandidatePath(repo?.path),
+            resolveWorkspaceRepoLocation(repo),
           ].filter(Boolean);
           return values.includes(repositoryName) || values.includes(normalizeCandidatePath(repositoryName));
         })
       : null;
-    if (matchedRepo?.path) pushCandidate(matchedRepo.path);
+    const matchedRepoPath = resolveWorkspaceRepoLocation(matchedRepo);
+    if (matchedRepoPath) pushCandidate(matchedRepoPath);
     if (workspaceEntry.path && repositoryName) pushCandidate(resolve(workspaceEntry.path, repositoryName));
     pushCandidate(pickWorkspaceRepoDir(workspaceEntry));
     pushCandidate(workspaceEntry.path);
@@ -3823,11 +4284,10 @@ function resolveWorkspaceFleetConfig(workspaceContext = {}) {
   return workspace && typeof workspace === "object" ? workspace : null;
 }
 
-function buildWorkspaceExecutorSummary(execStatus, workspaceContext) {
+function buildWorkspaceExecutorSummary(execStatus, workspaceContext, workflowRunDetails = []) {
   if (!execStatus || typeof execStatus !== "object" || !workspaceContext) return null;
-  const allSlots = Array.isArray(execStatus.slots)
-    ? execStatus.slots.map((slot, slotIndex) => ({ ...slot, slotIndex }))
-    : [];
+  const allSlots = mergeExecutorSlotsWithWorkflowRuns(execStatus, workflowRunDetails)
+    .map((slot, slotIndex) => ({ ...slot, slotIndex }));
   const workspace = resolveWorkspaceFleetConfig(workspaceContext);
   const executors =
     workspace?.executors && typeof workspace.executors === "object"
@@ -3872,7 +4332,7 @@ function buildWorkspaceExecutorSummary(execStatus, workspaceContext) {
     freeSlots: Math.max(0, maxParallel - activeSlots),
     capacityPct: maxParallel > 0 ? Math.round((activeSlots / maxParallel) * 100) : 0,
     globalMaxParallel,
-    globalActiveSlots: Math.max(0, Number(execStatus.activeSlots || 0) || 0),
+    globalActiveSlots: Math.max(activeSlots, Math.max(0, Number(execStatus.activeSlots || 0) || 0)),
     slots,
   };
 }
@@ -3893,9 +4353,81 @@ async function listTasksForWorkspaceContext(workspaceContext, { status = "", pro
 
 function sortTasksByRecency(tasks = []) {
   return [...tasks].sort((a, b) => {
-    const aTs = Date.parse(a?.updatedAt || a?.createdAt || 0) || 0;
-    const bTs = Date.parse(b?.updatedAt || b?.createdAt || 0) || 0;
+    const aTs = resolveTaskUpdatedSortTimestamp(a);
+    const bTs = resolveTaskUpdatedSortTimestamp(b);
     return bTs - aTs;
+  });
+}
+
+const TASK_PRIORITY_SORT_ORDER = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+function parseTaskSortTimestamp(...values) {
+  for (const value of values) {
+    if (value == null || value === "") continue;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    const parsed = Date.parse(String(value));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function resolveTaskUpdatedSortTimestamp(task = {}) {
+  return parseTaskSortTimestamp(
+    task?.lastActivityAt,
+    task?.last_activity_at,
+    task?.updatedAt,
+    task?.updated_at,
+    task?.reviewedAt,
+    task?.reviewed_at,
+    task?.createdAt,
+    task?.created_at,
+  );
+}
+
+function resolveTaskCreatedSortTimestamp(task = {}) {
+  return parseTaskSortTimestamp(
+    task?.createdAt,
+    task?.created_at,
+    task?.updatedAt,
+    task?.updated_at,
+  );
+}
+
+function compareTaskTitleThenId(left = {}, right = {}) {
+  return String(left?.title || left?.id || "")
+    .localeCompare(String(right?.title || right?.id || ""));
+}
+
+function sortTasksForApi(tasks = [], sortBy = "updated") {
+  const normalizedSort = String(sortBy || "updated").trim().toLowerCase() || "updated";
+  return [...tasks].sort((left, right) => {
+    if (normalizedSort === "created") {
+      const delta =
+        resolveTaskCreatedSortTimestamp(right) - resolveTaskCreatedSortTimestamp(left);
+      return delta || compareTaskTitleThenId(left, right);
+    }
+    if (normalizedSort === "priority") {
+      const leftRank =
+        TASK_PRIORITY_SORT_ORDER[String(left?.priority || "").trim().toLowerCase()] ?? Number.MAX_SAFE_INTEGER;
+      const rightRank =
+        TASK_PRIORITY_SORT_ORDER[String(right?.priority || "").trim().toLowerCase()] ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      const recencyDelta =
+        resolveTaskUpdatedSortTimestamp(right) - resolveTaskUpdatedSortTimestamp(left);
+      return recencyDelta || compareTaskTitleThenId(left, right);
+    }
+    if (normalizedSort === "title") {
+      return compareTaskTitleThenId(left, right)
+        || (resolveTaskUpdatedSortTimestamp(right) - resolveTaskUpdatedSortTimestamp(left));
+    }
+    const recencyDelta =
+      resolveTaskUpdatedSortTimestamp(right) - resolveTaskUpdatedSortTimestamp(left);
+    return recencyDelta || compareTaskTitleThenId(left, right);
   });
 }
 
@@ -3917,7 +4449,7 @@ async function collectBenchmarkWorkflowRuns(url, taskIds = new Set(), limit = 12
         matches = summaryTaskIds.some((taskId) => taskIds.has(taskId));
       }
       if (!matches && typeof wfCtx.engine.getRunDetail === "function") {
-        const detail = await wfCtx.engine.getRunDetail(summary.runId);
+        const detail = await wfCtx.engine.getRunDetail(summary.runId, { decorate: false });
         if (detail?.detail) {
           const data = detail.detail?.data || {};
           const detailTaskId = String(
@@ -5563,6 +6095,9 @@ function buildPersistedHarnessRunSummary(runRecord = {}, runPath = null) {
 function hydrateHarnessRunListItems(entries = []) {
   return (Array.isArray(entries) ? entries : []).map((entry) => {
     if (entry?.active === true) return entry;
+    if (entry?.runRecord && typeof entry.runRecord === "object") {
+      return buildPersistedHarnessRunSummary(entry.runRecord, entry.runPath || null);
+    }
     try {
       const runPath = String(entry?.runPath || "").trim()
         || resolve(resolveUiConfigDir(), ".cache", "harness", "runs", `${String(entry?.runId || "").trim()}.json`);
@@ -5732,36 +6267,147 @@ async function executeHarnessRunRequest(body = {}, options = {}) {
 }
 
 function buildHarnessOverview(configDir = resolveUiConfigDir()) {
+  const activeRuns = listActiveHarnessRunSnapshots();
+  const emptyOverview = {
+    enabled: false,
+    activeArtifactId: null,
+    activeArtifactPath: null,
+    activeProfile: null,
+    validationMode: null,
+    totals: { total: 0, successful: 0, failed: 0, dryRuns: 0, active: 0 },
+    activeRunCount: 0,
+    activeRuns: [],
+    lastRun: null,
+    recentRuns: [],
+  };
+  let persisted = emptyOverview;
   try {
-    const persisted = summarizeHarnessRuns(configDir, { limit: 5 });
-    const activeRuns = listActiveHarnessRunSnapshots();
-    const persistedRecentRuns = hydrateHarnessRunListItems(persisted?.recentRuns || []);
-    const recentRuns = mergeHarnessRunSummaries(persistedRecentRuns, activeRuns, 5);
-    return {
-      ...persisted,
-      totals: {
-        ...(persisted?.totals || {}),
-        active: activeRuns.length,
-      },
-      activeRunCount: activeRuns.length,
-      activeRuns,
-      lastRun: recentRuns[0] || persisted?.lastRun || activeRuns[0] || null,
-      recentRuns,
+    persisted = {
+      ...emptyOverview,
+      ...summarizeHarnessRuns(configDir, { limit: 5 }),
     };
   } catch {
+    persisted = { ...emptyOverview };
+  }
+  let persistedRecentRuns = [];
+  try {
+    persistedRecentRuns = hydrateHarnessRunListItems(persisted?.recentRuns || []);
+  } catch {
+    persistedRecentRuns = [];
+  }
+  const recentRuns = mergeHarnessRunSummaries(persistedRecentRuns, activeRuns, 5);
+  return {
+    ...persisted,
+    totals: {
+      ...(persisted?.totals || {}),
+      active: activeRuns.length,
+    },
+    activeRunCount: activeRuns.length,
+    activeRuns,
+    lastRun: recentRuns[0] || persisted?.lastRun || activeRuns[0] || null,
+    recentRuns,
+  };
+}
+
+async function listWorkflowSurfaceApprovals(limit = 25) {
+  try {
+    const {
+      listApprovalRequests,
+      reconcileWorkflowRunApprovalRequests,
+    } = await import("../workflow/approval-queue.mjs");
+    const workspaceContext = resolveActiveWorkspaceExecutionContext();
+    const workspaceDir = workspaceContext?.workspaceDir || repoRoot;
+    const workspacePaths = getWorkflowStoragePaths(workspaceDir);
+    const approvalsRepoRoot = workspacePaths.workspaceRoot || repoRoot;
+    reconcileWorkflowRunApprovalRequests({ repoRoot: approvalsRepoRoot });
+    const listed = listApprovalRequests({
+      repoRoot: approvalsRepoRoot,
+      scopeType: "workflow-run",
+      status: "pending",
+      includeResolved: false,
+      limit: Math.max(1, Math.min(Number(limit) || 25, 100)),
+    });
+    return Array.isArray(listed?.requests) ? listed.requests : [];
+  } catch {
+    return [];
+  }
+}
+
+async function listWorkflowSurfaceRuns(limit = 8) {
+  try {
+    const wfUrl = new URL("http://127.0.0.1/api/workflows/runs?workspace=active");
+    const wfCtx = await getWorkflowRequestContext(wfUrl, { bootstrapTemplates: false });
+    if (!wfCtx?.ok) return [];
+    const engine = wfCtx.engine;
+    const resolvedLimit = Math.max(1, Math.min(Number(limit) || 8, 100));
+    const page = typeof engine.getRunHistoryPage === "function"
+      ? await engine.getRunHistoryPage(null, { offset: 0, limit: resolvedLimit })
+      : {
+          runs: engine.getRunHistory ? await engine.getRunHistory(null, resolvedLimit) : [],
+        };
+    return Array.isArray(page?.runs) ? page.runs : [];
+  } catch {
+    return [];
+  }
+}
+
+function getAgentSurfaceSnapshot(limit = 25) {
+  const bus = _resolveEventBus();
+  if (!bus) {
     return {
-      enabled: false,
-      activeArtifactId: null,
-      activeArtifactPath: null,
-      activeProfile: null,
-      validationMode: null,
-      totals: { total: 0, successful: 0, failed: 0, dryRuns: 0, active: 0 },
-      activeRunCount: 0,
-      activeRuns: [],
-      lastRun: null,
-      recentRuns: [],
+      status: { ok: true, started: false, source: "unavailable" },
+      liveness: [],
+      patterns: {},
+      events: [],
     };
   }
+  let status = { ok: true };
+  let liveness = [];
+  let patterns = {};
+  let events = [];
+  try {
+    status = { ok: true, ...bus.getStatus() };
+  } catch {
+    status = { ok: false, started: false, source: "error" };
+  }
+  try {
+    liveness = Array.isArray(bus.getAgentLiveness()) ? bus.getAgentLiveness() : [];
+  } catch {
+    liveness = [];
+  }
+  try {
+    patterns = bus.getErrorPatternSummary() || {};
+  } catch {
+    patterns = {};
+  }
+  try {
+    const eventLog = bus.getEventLog({ limit: Math.max(1, Math.min(Number(limit) || 25, 200)) });
+    events = Array.isArray(eventLog) ? eventLog : [];
+  } catch {
+    events = [];
+  }
+  return { status, liveness, patterns, events };
+}
+
+function getRetryQueueSurfaceSnapshot() {
+  const bus = _resolveEventBus();
+  if (bus && typeof bus.getRetryQueue === "function") {
+    try {
+      const snapshot = bus.getRetryQueue();
+      if (snapshot && typeof snapshot === "object") return snapshot;
+    } catch {
+      // fall through
+    }
+  }
+  return {
+    count: 0,
+    items: [],
+    stats: {
+      totalRetriesToday: 0,
+      peakRetryDepth: 0,
+      exhaustedTaskIds: [],
+    },
+  };
 }
 
 function resolveHarnessApprovalRepoRoot() {
@@ -6133,6 +6779,12 @@ function parseExecutorsValue(value) {
     const parts = entries[i].split(":").map((part) => part.trim());
     if (parts.length < 2) continue;
     const weight = parts[2] ? Number(parts[2]) : Math.floor(100 / entries.length);
+    const models = parts
+      .slice(3)
+      .join(":")
+      .split("|")
+      .map((model) => model.trim())
+      .filter(Boolean);
     executors.push({
       name: `${parts[0].toLowerCase()}-${parts[1].toLowerCase()}`,
       executor: parts[0].toUpperCase(),
@@ -6140,6 +6792,7 @@ function parseExecutorsValue(value) {
       weight: Number.isFinite(weight) ? weight : 0,
       role: roles[i] || `executor-${i + 1}`,
       enabled: true,
+      ...(models.length > 0 ? { models } : {}),
     });
   }
   return executors.length ? executors : value;
@@ -6221,6 +6874,82 @@ async function applySharedStateToTasks(tasks) {
   });
 }
 
+async function enrichTaskListRuntimeContext(tasks, options = {}) {
+  if (!Array.isArray(tasks) || tasks.length === 0) return [];
+  const adapter = options.adapter || null;
+  const reqUrl = options.reqUrl || null;
+  const workflowEngine = options.workflowEngine || null;
+  const workspaceDir = normalizeCandidatePath(options.workspaceDir) || repoRoot;
+  const includeStartGuards = options.includeStartGuards === true;
+  const includeBlockedDiagnostics = options.includeBlockedDiagnostics === true;
+  const includeWorkflowRuns = options.includeWorkflowRuns === true;
+  const includeSupervisorDiagnostics = options.includeSupervisorDiagnostics === true;
+  const supervisor = typeof uiDeps.getAgentSupervisor === "function"
+    ? uiDeps.getAgentSupervisor()
+    : null;
+  return Promise.all(tasks.map(async (task) => {
+    if (!task || typeof task !== "object" || !task.id) {
+      return withTaskRuntimeSnapshot(task);
+    }
+    const nextTask = withTaskRuntimeSnapshot(task);
+    const canStart = includeStartGuards
+      ? await evaluateTaskCanStart({
+        taskId: nextTask.id,
+        task: nextTask,
+        reqUrl,
+        adapter,
+      })
+      : (nextTask?.canStart && typeof nextTask.canStart === "object"
+        ? nextTask.canStart
+        : (nextTask?.meta?.canStart && typeof nextTask.meta.canStart === "object"
+          ? nextTask.meta.canStart
+          : null));
+    const shouldAttachBlockedContext =
+      includeBlockedDiagnostics
+      && (
+        normalizeTaskStatusKey(nextTask.status) === "blocked"
+        || canStart?.canStart === false
+      );
+    let workflowRuns = Array.isArray(nextTask.workflowRuns) ? nextTask.workflowRuns : [];
+    if (includeWorkflowRuns && shouldAttachBlockedContext && reqUrl) {
+      const linkedRuns = await collectWorkflowRunsForTask(nextTask.id, reqUrl, 12, {
+        engine: workflowEngine,
+        shallow: true,
+        historyLimit: 80,
+      });
+      workflowRuns = mergeTaskWorkflowRuns(workflowRuns, linkedRuns, 40);
+    }
+    if (workflowRuns.length > 0) {
+      nextTask.workflowRuns = workflowRuns;
+    }
+    const blockedContext = includeBlockedDiagnostics && shouldAttachBlockedContext
+      ? await buildTaskBlockedContext(nextTask, {
+        canStart,
+        workflowRuns,
+        workspaceDir,
+      })
+      : null;
+    const supervisorDiagnostics = includeSupervisorDiagnostics && typeof supervisor?.getTaskDiagnostics === "function"
+      ? supervisor.getTaskDiagnostics(nextTask.id)
+      : null;
+    const diagnostics = buildTaskDiagnostics(nextTask, supervisorDiagnostics);
+    const nextMeta = {
+      ...(nextTask.meta || {}),
+      canStart,
+      ...(includeWorkflowRuns && workflowRuns.length > 0 ? { workflowRuns } : {}),
+    };
+    if (blockedContext) nextMeta.blockedContext = blockedContext;
+    if (diagnostics) nextMeta.diagnostics = diagnostics;
+    return {
+      ...nextTask,
+      canStart,
+      ...(blockedContext ? { blockedContext } : {}),
+      ...(diagnostics ? { diagnostics } : {}),
+      meta: nextMeta,
+    };
+  }));
+}
+
 
 function mapTaskStatusToBoardColumn(status) {
   const normalized = String(status || "").trim().toLowerCase();
@@ -6244,6 +6973,40 @@ function normalizeCandidatePath(input) {
   }
 }
 
+function isPathWithinPath(parentPath, childPath) {
+  const normalizedParent = normalizeCandidatePath(parentPath);
+  const normalizedChild = normalizeCandidatePath(childPath);
+  if (!normalizedParent || !normalizedChild) return false;
+  if (normalizedParent === normalizedChild) return true;
+  const parentWithSep = normalizedParent.endsWith(sep) ? normalizedParent : `${normalizedParent}${sep}`;
+  if (process.platform === "win32") {
+    return normalizedChild.toLowerCase().startsWith(parentWithSep.toLowerCase());
+  }
+  return normalizedChild.startsWith(parentWithSep);
+}
+
+function resolveWorkspaceRepoLocation(repo) {
+  if (!repo || typeof repo !== "object") return "";
+  return normalizeCandidatePath(
+    repo.url ||
+    repo.path ||
+    repo.repoRoot ||
+    repo.root ||
+    "",
+  );
+}
+
+function normalizeResolvedWorkspaceEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const workspaceId = String(entry.id || "").trim();
+  const workspacePath = normalizeCandidatePath(entry.path);
+  const repos = Array.isArray(entry.repos) ? entry.repos : [];
+  if (!workspaceId && !workspacePath && repos.length === 0) {
+    return null;
+  }
+  return entry;
+}
+
 function pickWorkspaceRepoDir(workspace) {
   if (!workspace || typeof workspace !== "object") return "";
   const repos = Array.isArray(workspace.repos) ? workspace.repos : [];
@@ -6257,7 +7020,7 @@ function pickWorkspaceRepoDir(workspace) {
     null;
 
   const candidates = [];
-  const selectedRepoPath = normalizeCandidatePath(selectedRepo?.path);
+  const selectedRepoPath = resolveWorkspaceRepoLocation(selectedRepo);
   if (selectedRepoPath) candidates.push(selectedRepoPath);
   const workspacePath = normalizeCandidatePath(workspace.path);
   if (workspacePath && selectedRepo?.name) {
@@ -6276,6 +7039,36 @@ function pickWorkspaceRepoDir(workspace) {
   return "";
 }
 
+function pickWorkspaceRootDir(workspace, workspaceDir = "", fallbackRoot = "") {
+  const normalizedWorkspaceDir = normalizeCandidatePath(workspaceDir);
+  const normalizedFallbackRoot = normalizeCandidatePath(fallbackRoot);
+  const workspacePath = normalizeCandidatePath(workspace?.path);
+  if (workspacePath) {
+    if (!normalizedWorkspaceDir || workspacePath === normalizedWorkspaceDir || isPathWithinPath(workspacePath, normalizedWorkspaceDir)) {
+      return workspacePath;
+    }
+  }
+
+  const repos = Array.isArray(workspace?.repos) ? workspace.repos : [];
+  const activeRepoName = String(workspace?.activeRepo || "").trim();
+  const selectedRepo =
+    (activeRepoName
+      ? repos.find((repo) => String(repo?.name || "").trim() === activeRepoName)
+      : null) ||
+    repos.find((repo) => repo?.primary) ||
+    repos[0] ||
+    null;
+  const selectedRepoName = String(selectedRepo?.name || "").trim().toLowerCase();
+  if (normalizedWorkspaceDir && selectedRepoName) {
+    const repoBaseName = basename(normalizedWorkspaceDir).trim().toLowerCase();
+    if (repoBaseName === selectedRepoName) {
+      return dirname(normalizedWorkspaceDir);
+    }
+  }
+
+  return workspacePath || normalizedWorkspaceDir || normalizedFallbackRoot;
+}
+
 function resolveActiveWorkspaceExecutionContext() {
   const fallback = { workspaceId: "", workspaceDir: repoRoot, workspaceRoot: repoRoot };
   const { configDir, listed, active } = resolveManagedWorkspaceInventory();
@@ -6288,16 +7081,55 @@ function resolveActiveWorkspaceExecutionContext() {
     || process.env.BOSUN_DIR,
   );
 
-  const activeId = String(active?.id || "").trim();
+  const normalizedActive = normalizeResolvedWorkspaceEntry(active);
+  const normalizedListed = Array.isArray(listed)
+    ? listed.map((entry) => normalizeResolvedWorkspaceEntry(entry)).filter(Boolean)
+    : [];
+  const activeId = String(normalizedActive?.id || "").trim();
   const workspace =
     (activeId
-      ? listed.find((entry) => String(entry?.id || "") === activeId)
+      ? normalizedListed.find((entry) => String(entry?.id || "") === activeId)
       : null) ||
-    active ||
-    listed[0] ||
+    normalizedActive ||
+    normalizedListed[0] ||
     null;
   if (!workspace) {
-    if (process.env.VITEST && explicitWorkspaceDirHint) {
+    try {
+      const cfg = loadConfig([
+        "node",
+        "bosun",
+        "--repo-root",
+        repoRoot,
+        "--config-dir",
+        configDir,
+      ]);
+      const selectedRepoDir = normalizeCandidatePath(cfg?.selectedRepository?.path);
+      if (selectedRepoDir) {
+        return {
+          workspaceId: String(cfg?.activeWorkspace || "").trim(),
+          workspaceDir: selectedRepoDir,
+          workspaceRoot: selectedRepoDir,
+        };
+      }
+      if (explicitWorkspaceDirHint) {
+        return {
+          workspaceId: String(cfg?.activeWorkspace || "").trim(),
+          workspaceDir: explicitWorkspaceDirHint,
+          workspaceRoot: explicitWorkspaceDirHint,
+        };
+      }
+      const configRepoDir = normalizeCandidatePath(cfg?.repoRoot || cfg?.agentRepoRoot);
+      if (configRepoDir) {
+        return {
+          workspaceId: String(cfg?.activeWorkspace || "").trim(),
+          workspaceDir: configRepoDir,
+          workspaceRoot: configRepoDir,
+        };
+      }
+    } catch {
+      // Fall back to test/runtime hints below.
+    }
+    if (explicitWorkspaceDirHint) {
       return {
         workspaceId: "",
         workspaceDir: explicitWorkspaceDirHint,
@@ -6309,7 +7141,7 @@ function resolveActiveWorkspaceExecutionContext() {
 
   const workspaceId = String(workspace.id || "").trim();
   const workspaceDir = pickWorkspaceRepoDir(workspace) || fallback.workspaceDir;
-  const workspaceRoot = normalizeCandidatePath(workspace.path) || workspaceDir || fallback.workspaceRoot;
+  const workspaceRoot = pickWorkspaceRootDir(workspace, workspaceDir, fallback.workspaceRoot);
   return {
     workspaceId,
     workspaceDir,
@@ -6337,6 +7169,254 @@ function resolveDefaultRepositoryForWorkspaceContext(workspaceContext = {}) {
   ).trim();
 }
 
+const REPO_BRANCH_CACHE_TTL_MS = 5_000;
+const REPO_BRANCH_LIST_CACHE_TTL_MS = 15_000;
+const repoBranchCache = new Map();
+const repoBranchListCache = new Map();
+
+function runGitInRepo(repoDir, args, timeoutMs = 10000) {
+  const cwd = normalizeCandidatePath(repoDir) || repoRoot;
+  const argList = Array.isArray(args)
+    ? args
+    : String(args || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  const res = spawnSync("git", argList, {
+    cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (res.error) throw res.error;
+  if (res.status !== 0) {
+    throw new Error(String(res.stderr || res.stdout || "git command failed").trim());
+  }
+  return String(res.stdout || "").trim();
+}
+
+function readCurrentBranchForRepo(repoDir = "") {
+  const normalizedRepoDir = normalizeCandidatePath(repoDir);
+  if (!normalizedRepoDir || !existsSync(normalizedRepoDir)) return null;
+  const cached = repoBranchCache.get(normalizedRepoDir);
+  if (cached && (Date.now() - cached.readAt) < REPO_BRANCH_CACHE_TTL_MS) {
+    return cached.branch;
+  }
+  try {
+    const branch = runGitInRepo(normalizedRepoDir, ["branch", "--show-current"], 5000);
+    const normalizedBranch = String(branch || "").trim() || null;
+    repoBranchCache.set(normalizedRepoDir, {
+      readAt: Date.now(),
+      branch: normalizedBranch,
+    });
+    return normalizedBranch;
+  } catch {
+    repoBranchCache.set(normalizedRepoDir, {
+      readAt: Date.now(),
+      branch: null,
+    });
+    return null;
+  }
+}
+
+function listGitBranchesForRepo(repoDir = "", options = {}) {
+  const normalizedRepoDir = normalizeCandidatePath(repoDir);
+  if (!normalizedRepoDir || !existsSync(normalizedRepoDir)) {
+    return {
+      repoPath: normalizedRepoDir || null,
+      current: null,
+      branches: [],
+    };
+  }
+  const limit = Number.isFinite(Number(options.limit))
+    ? Math.max(1, Math.min(Math.trunc(Number(options.limit)), 200))
+    : 40;
+  const cacheKey = `${normalizedRepoDir}::${limit}`;
+  const cached = repoBranchListCache.get(cacheKey);
+  if (cached && (Date.now() - cached.readAt) < REPO_BRANCH_LIST_CACHE_TTL_MS) {
+    return {
+      repoPath: cached.value.repoPath,
+      current: cached.value.current,
+      branches: cached.value.branches.map((entry) => ({ ...entry })),
+    };
+  }
+  const current = readCurrentBranchForRepo(normalizedRepoDir);
+  let raw = "";
+  try {
+    raw = runGitInRepo(
+      normalizedRepoDir,
+      [
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname:short)||%(HEAD)||%(objectname:short)||%(upstream:short)",
+        "refs/heads",
+        "refs/remotes",
+      ],
+      15000,
+    );
+  } catch {
+    raw = "";
+  }
+  const seen = new Set();
+  const branches = [];
+  for (const line of String(raw || "").split("\n")) {
+    const trimmed = String(line || "").trim();
+    if (!trimmed) continue;
+    const [nameRaw, headRaw, shortHashRaw, upstreamRaw] = trimmed.split("||");
+    const name = String(nameRaw || "").trim();
+    if (!name || name === "origin/HEAD") continue;
+    const scope = name.startsWith("origin/") || name.startsWith("remotes/")
+      ? "remote"
+      : "local";
+    const key = `${scope}:${name}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const isCurrent =
+      String(headRaw || "").trim() === "*"
+      || (current && (name === current || name.endsWith(`/${current}`)));
+    branches.push({
+      name,
+      current: Boolean(isCurrent),
+      scope,
+      shortHash: String(shortHashRaw || "").trim() || null,
+      upstream: String(upstreamRaw || "").trim() || null,
+    });
+  }
+  branches.sort((left, right) => {
+    if (left.current && !right.current) return -1;
+    if (!left.current && right.current) return 1;
+    if (left.scope !== right.scope) return left.scope === "local" ? -1 : 1;
+    return String(left.name || "").localeCompare(String(right.name || ""));
+  });
+  const value = {
+    repoPath: normalizedRepoDir,
+    current,
+    branches: branches.slice(0, limit),
+  };
+  repoBranchListCache.set(cacheKey, {
+    readAt: Date.now(),
+    value,
+  });
+  return {
+    repoPath: value.repoPath,
+    current: value.current,
+    branches: value.branches.map((entry) => ({ ...entry })),
+  };
+}
+
+function listWorkspaceReposForSessionSurface(workspaceContext = {}, session = null) {
+  const sessionMeta =
+    session?.metadata && typeof session.metadata === "object"
+      ? session.metadata
+      : {};
+  const sessionWorkspaceId = String(
+    session?.workspaceId
+    || sessionMeta.workspaceId
+    || workspaceContext?.workspaceId
+    || "",
+  ).trim();
+  const sessionWorkspaceDir = normalizeCandidatePath(
+    session?.workspaceDir
+    || sessionMeta.workspaceDir
+    || sessionMeta.selectedRepoPath
+    || workspaceContext?.workspaceDir,
+  );
+  const sessionWorkspaceRoot = normalizeCandidatePath(
+    session?.workspaceRoot
+    || sessionMeta.workspaceRoot
+    || workspaceContext?.workspaceRoot,
+  );
+  const { listed, active } = resolveManagedWorkspaceInventory();
+  const normalizedListed = Array.isArray(listed)
+    ? listed.map((entry) => normalizeResolvedWorkspaceEntry(entry)).filter(Boolean)
+    : [];
+  const normalizedActive = normalizeResolvedWorkspaceEntry(active);
+  let workspace =
+    (sessionWorkspaceId
+      ? normalizedListed.find((entry) => String(entry?.id || "").trim() === sessionWorkspaceId)
+      : null)
+    || null;
+  if (!workspace) {
+    workspace = normalizedListed.find((entry) => {
+      const workspacePath = normalizeCandidatePath(entry?.path);
+      const repoDir = pickWorkspaceRepoDir(entry);
+      const rootDir = pickWorkspaceRootDir(entry, repoDir, workspacePath);
+      return Boolean(
+        (sessionWorkspaceDir && (sessionWorkspaceDir === repoDir || isPathWithinPath(rootDir, sessionWorkspaceDir)))
+        || (sessionWorkspaceRoot && rootDir && sessionWorkspaceRoot === rootDir),
+      );
+    }) || null;
+  }
+  workspace = workspace || normalizedActive || normalizedListed[0] || null;
+
+  const availableRepos = [];
+  const seenRepoPaths = new Set();
+  const workspacePath = normalizeCandidatePath(workspace?.path);
+  const workspaceRoot = pickWorkspaceRootDir(workspace, sessionWorkspaceDir || pickWorkspaceRepoDir(workspace), workspacePath || sessionWorkspaceRoot || repoRoot)
+    || sessionWorkspaceRoot
+    || repoRoot;
+  const pushRepoEntry = (entry, index = 0) => {
+    if (!entry || typeof entry !== "object") return;
+    const repoPath =
+      resolveWorkspaceRepoLocation(entry)
+      || (workspacePath && entry.name ? normalizeCandidatePath(resolve(workspacePath, String(entry.name))) : "")
+      || "";
+    const normalizedRepoPath = normalizeCandidatePath(repoPath);
+    const displayName = String(
+      entry.name
+      || (normalizedRepoPath ? basename(normalizedRepoPath) : "")
+      || `repo-${index + 1}`,
+    ).trim();
+    const repoId = normalizedRepoPath || displayName;
+    const dedupeKey = String(repoId || "").trim().toLowerCase();
+    if (!dedupeKey || seenRepoPaths.has(dedupeKey)) return;
+    seenRepoPaths.add(dedupeKey);
+    const selected =
+      Boolean(
+        normalizedRepoPath && sessionWorkspaceDir && normalizedRepoPath === sessionWorkspaceDir,
+      )
+      || (!normalizedRepoPath && displayName.toLowerCase() === String(sessionMeta.selectedRepoName || "").trim().toLowerCase());
+    availableRepos.push({
+      id: repoId,
+      name: displayName,
+      displayName,
+      path: normalizedRepoPath || null,
+      branch: normalizedRepoPath ? readCurrentBranchForRepo(normalizedRepoPath) : null,
+      primary: Boolean(entry.primary),
+      selected,
+    });
+  };
+  const workspaceRepos = Array.isArray(workspace?.repos) ? workspace.repos : [];
+  workspaceRepos.forEach(pushRepoEntry);
+  if (availableRepos.length === 0 && sessionWorkspaceDir) {
+    pushRepoEntry({
+      name: basename(sessionWorkspaceDir),
+      path: sessionWorkspaceDir,
+      primary: true,
+    });
+  }
+  if (sessionWorkspaceDir && !availableRepos.some((repo) => repo.path === sessionWorkspaceDir)) {
+    pushRepoEntry({
+      name: basename(sessionWorkspaceDir),
+      path: sessionWorkspaceDir,
+      primary: availableRepos.length === 0,
+    }, availableRepos.length);
+  }
+  availableRepos.sort((left, right) => {
+    if (left.selected && !right.selected) return -1;
+    if (!left.selected && right.selected) return 1;
+    if (left.primary && !right.primary) return -1;
+    if (!left.primary && right.primary) return 1;
+    return String(left.displayName || left.name || "").localeCompare(String(right.displayName || right.name || ""));
+  });
+  return {
+    workspaceId: String(workspace?.id || sessionWorkspaceId || "").trim() || null,
+    workspaceRoot,
+    selectedRepoPath: sessionWorkspaceDir || availableRepos.find((repo) => repo.selected)?.path || null,
+    repos: availableRepos,
+  };
+}
+
 async function resolveDefaultKanbanProjectId(adapter, requestedProjectId = "") {
   const explicitProjectId = String(requestedProjectId || "").trim();
   if (explicitProjectId) return explicitProjectId;
@@ -6349,50 +7429,145 @@ async function resolveDefaultKanbanProjectId(adapter, requestedProjectId = "") {
   }
 }
 
+async function addTaskDependencyForApi(adapter, dependentTaskId, dependencyTaskId) {
+  if (!dependentTaskId || !dependencyTaskId || dependentTaskId === dependencyTaskId) return;
+  await callTaskStoreFunction(TASK_STORE_DEPENDENCY_EXPORTS.add, [dependentTaskId, dependencyTaskId]);
+  if (typeof adapter?.addTaskDependency === "function") {
+    await Promise.resolve(adapter.addTaskDependency(dependentTaskId, dependencyTaskId)).catch(() => null);
+    return;
+  }
+  if (typeof adapter?.updateTask === "function") {
+    const current = await getTaskByIdForApi(dependentTaskId, adapter).catch(() => null);
+    const dependencyTaskIds = uniqueTaskIds([
+      ...(Array.isArray(current?.dependencyTaskIds) ? current.dependencyTaskIds : []),
+      ...(Array.isArray(current?.dependsOn) ? current.dependsOn : []),
+      dependencyTaskId,
+    ]);
+    await Promise.resolve(adapter.updateTask(dependentTaskId, {
+      dependencyTaskIds,
+      dependsOn: dependencyTaskIds,
+      dependencies: dependencyTaskIds,
+    })).catch(() => null);
+  }
+}
+
 function createManualFlowTaskManager(workspaceContext = {}, opts = {}) {
+  const createTaskSpec = async (adapter, projectId, spec = {}, extraMeta = {}) => {
+    const title = String(spec?.title || "").trim();
+    if (!title) throw new Error("title is required");
+    const labels = normalizeTagsInput(spec?.labels || spec?.tags);
+    const workspace = String(
+      spec?.workspace || opts?.workspaceId || workspaceContext?.workspaceId || "",
+    ).trim();
+    const repository = String(
+      spec?.repository ||
+        spec?.meta?.repository ||
+        opts?.repository ||
+        resolveDefaultRepositoryForWorkspaceContext(workspaceContext),
+    ).trim();
+    const repositories = Array.isArray(spec?.repositories)
+      ? spec.repositories.filter((value) => typeof value === "string" && value.trim())
+      : [];
+    const taskPayload = {
+      title,
+      description: String(spec?.description || ""),
+      status: String(spec?.status || "todo").trim() || "todo",
+      priority: spec?.priority || undefined,
+      parentTaskId: String(spec?.parentTaskId || "").trim() || undefined,
+      ...(workspace ? { workspace } : {}),
+      ...(repository ? { repository } : {}),
+      ...(repositories.length ? { repositories } : {}),
+      ...(labels.length ? { labels, tags: labels } : {}),
+      meta: {
+        ...(workspace ? { workspace } : {}),
+        ...(repository ? { repository } : {}),
+        ...(repositories.length ? { repositories } : {}),
+        ...(labels.length ? { tags: labels } : {}),
+        manualFlowTemplateId: String(opts?.templateId || "").trim() || undefined,
+        ...(spec?.meta && typeof spec.meta === "object" ? spec.meta : {}),
+        ...(extraMeta && typeof extraMeta === "object" ? extraMeta : {}),
+      },
+    };
+    const createdRaw = await adapter.createTask(projectId, taskPayload);
+    return withTaskMetadataTopLevel(createdRaw);
+  };
+
   return {
     async createTask(spec = {}) {
-      const title = String(spec?.title || "").trim();
-      if (!title) throw new Error("title is required");
-
       const adapter = getKanbanAdapter();
       const projectId = await resolveDefaultKanbanProjectId(
         adapter,
         opts?.projectId || spec?.projectId || spec?.project || "",
       );
-      const labels = normalizeTagsInput(spec?.labels || spec?.tags);
-      const workspace = String(
-        spec?.workspace || opts?.workspaceId || workspaceContext?.workspaceId || "",
-      ).trim();
-      const repository = String(
-        spec?.repository ||
-          spec?.meta?.repository ||
-          opts?.repository ||
-          resolveDefaultRepositoryForWorkspaceContext(workspaceContext),
-      ).trim();
-      const repositories = Array.isArray(spec?.repositories)
-        ? spec.repositories.filter((value) => typeof value === "string" && value.trim())
-        : [];
-      const taskPayload = {
-        title,
-        description: String(spec?.description || ""),
-        status: String(spec?.status || "todo").trim() || "todo",
-        priority: spec?.priority || undefined,
-        ...(workspace ? { workspace } : {}),
-        ...(repository ? { repository } : {}),
-        ...(repositories.length ? { repositories } : {}),
-        ...(labels.length ? { labels, tags: labels } : {}),
-        meta: {
-          ...(workspace ? { workspace } : {}),
-          ...(repository ? { repository } : {}),
-          ...(repositories.length ? { repositories } : {}),
-          ...(labels.length ? { tags: labels } : {}),
-          manualFlowTemplateId: String(opts?.templateId || "").trim() || undefined,
-          ...(spec?.meta && typeof spec.meta === "object" ? spec.meta : {}),
-        },
+      return createTaskSpec(adapter, projectId, spec);
+    },
+
+    async createTaskGraph(spec = {}) {
+      const adapter = getKanbanAdapter();
+      const projectId = await resolveDefaultKanbanProjectId(
+        adapter,
+        opts?.projectId || spec?.projectId || spec?.project || "",
+      );
+      const tasks = Array.isArray(spec?.tasks) ? spec.tasks : [];
+      const createdTasks = [];
+      let parentTask = null;
+      if (spec?.parentTask && typeof spec.parentTask === "object") {
+        parentTask = await createTaskSpec(adapter, projectId, spec.parentTask, {
+          manualPlanParent: true,
+        });
+      }
+
+      for (const entry of tasks) {
+        const created = await createTaskSpec(adapter, projectId, {
+          ...entry,
+          parentTaskId: entry?.parentTaskId || parentTask?.id || parentTask?._id || undefined,
+        }, {
+          clientId: String(entry?.clientId || "").trim() || undefined,
+        });
+        createdTasks.push({
+          clientId: String(entry?.clientId || "").trim() || null,
+          taskId: created?.id || created?._id || null,
+          title: created?.title || entry?.title || null,
+        });
+      }
+
+      const taskIdByClientId = new Map(
+        createdTasks
+          .filter((entry) => entry.clientId && entry.taskId)
+          .map((entry) => [entry.clientId, entry.taskId]),
+      );
+
+      let dependencyCount = 0;
+      for (const entry of tasks) {
+        const dependentTaskId = taskIdByClientId.get(String(entry?.clientId || "").trim());
+        if (!dependentTaskId) continue;
+        const dependencyIds = uniqueTaskIds([
+          ...(Array.isArray(entry?.dependsOnTaskIds) ? entry.dependsOnTaskIds : []),
+          ...(Array.isArray(entry?.dependsOnTaskClientIds)
+            ? entry.dependsOnTaskClientIds.map((clientId) => taskIdByClientId.get(String(clientId || "").trim()))
+            : []),
+        ]);
+        for (const dependencyTaskId of dependencyIds) {
+          await addTaskDependencyForApi(adapter, dependentTaskId, dependencyTaskId);
+          dependencyCount += 1;
+        }
+        const sprintId = String(entry?.sprintId || spec?.sprintId || "").trim();
+        if (sprintId) {
+          await assignTaskToSprintForApi({
+            taskId: dependentTaskId,
+            sprintId,
+            adapter,
+          }).catch(() => null);
+        }
+      }
+
+      return {
+        ok: true,
+        parentTaskId: parentTask?.id || parentTask?._id || null,
+        taskCount: createdTasks.length,
+        dependencyCount,
+        tasks: createdTasks,
       };
-      const createdRaw = await adapter.createTask(projectId, taskPayload);
-      return withTaskMetadataTopLevel(createdRaw);
     },
   };
 }
@@ -6408,7 +7583,7 @@ function resolveWorkspaceContextById(workspaceId = "") {
   if (!workspace) return null;
   const id = String(workspace.id || "").trim();
   const workspaceDir = pickWorkspaceRepoDir(workspace) || repoRoot;
-  const workspaceRoot = normalizeCandidatePath(workspace.path) || workspaceDir || repoRoot;
+  const workspaceRoot = pickWorkspaceRootDir(workspace, workspaceDir, repoRoot);
   return {
     workspaceId: id,
     workspaceDir,
@@ -6511,6 +7686,23 @@ function resolveSessionWorkspaceDir(session = null) {
   if (explicit && existsSync(explicit)) return explicit;
   const context = resolveActiveWorkspaceExecutionContext();
   return context.workspaceDir || repoRoot;
+}
+
+function findTrackedSessionById(sessionId = "") {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) return null;
+  try {
+    const tracker = getSessionTracker();
+    return (
+      tracker?.getSessionById?.(normalizedSessionId)
+      || tracker?.getSessionMessages?.(normalizedSessionId)
+      || tracker?.getSession?.(normalizedSessionId)
+      || null
+    );
+  } catch {
+    // Best effort; fall through to the in-memory surface snapshot.
+  }
+  return _activeSessions.find((session) => String(session?.id || "").trim() === normalizedSessionId) || null;
 }
 
 const HIDDEN_GENERATED_WORKFLOW_NAME_SET = new Set([
@@ -6660,6 +7852,10 @@ function buildTaskAuditActivity(taskId, options = {}) {
     console.warn("[tasks] Failed to build task audit activity:", err?.message || err);
     return null;
   }
+}
+
+function isUiAuditSummaryEnabled() {
+  return parseBooleanEnv(process.env.BOSUN_UI_AUDIT_SUMMARY_ENABLED, false);
 }
 
 const SERVER_STATE_SECTION_ORDER = Object.freeze([
@@ -7809,12 +9005,76 @@ const INTERNAL_EXECUTOR_MAP = {
   STREAM_MAX_ITEM_CHARS: ["internalExecutor", "stream", "maxItemChars"],
 };
 const CONFIG_PATH_OVERRIDES = {
+  BOSUN_AGENT_RUNTIME: ["agentRuntime"],
   EXECUTOR_MODE: ["internalExecutor", "mode"],
   PROJECT_REQUIREMENTS_PROFILE: ["projectRequirements", "profile"],
   BOSUN_HARNESS_ENABLED: ["harness", "enabled"],
   BOSUN_HARNESS_SOURCE: ["harness", "source"],
   BOSUN_HARNESS_VALIDATION_MODE: ["harness", "validation", "mode"],
-
+  SELF_RESTART_QUIET_MS: ["monitor", "selfRestartQuietMs"],
+  BOSUN_PROVIDER_DEFAULT: ["providers", "defaultProvider"],
+  BOSUN_PROVIDER_ROUTING_MODE: ["providers", "routingMode"],
+  BOSUN_PROVIDER_DEFAULT_MODEL: ["providers", "defaultModel"],
+  BOSUN_PROVIDER_OPENAI_RESPONSES_ENABLED: ["providers", "openai", "enabled"],
+  BOSUN_PROVIDER_OPENAI_RESPONSES_MODEL: ["providers", "openai", "defaultModel"],
+  BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_ENABLED: ["providers", "chatgptCodex", "enabled"],
+  BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_MODE: ["providers", "chatgptCodex", "mode"],
+  BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_MODEL: ["providers", "chatgptCodex", "defaultModel"],
+  BOSUN_PROVIDER_OPENAI_CODEX_SUBSCRIPTION_WORKSPACE: ["providers", "chatgptCodex", "workspace"],
+  BOSUN_PROVIDER_AZURE_OPENAI_ENABLED: ["providers", "azureOpenai", "enabled"],
+  BOSUN_PROVIDER_AZURE_OPENAI_MODE: ["providers", "azureOpenai", "mode"],
+  BOSUN_PROVIDER_AZURE_OPENAI_MODEL: ["providers", "azureOpenai", "defaultModel"],
+  BOSUN_PROVIDER_AZURE_OPENAI_ENDPOINT: ["providers", "azureOpenai", "endpoint"],
+  BOSUN_PROVIDER_AZURE_OPENAI_DEPLOYMENT: ["providers", "azureOpenai", "deployment"],
+  BOSUN_PROVIDER_AZURE_OPENAI_API_VERSION: ["providers", "azureOpenai", "apiVersion"],
+  BOSUN_PROVIDER_ANTHROPIC_ENABLED: ["providers", "anthropic", "enabled"],
+  BOSUN_PROVIDER_ANTHROPIC_MODEL: ["providers", "anthropic", "defaultModel"],
+  BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_ENABLED: ["providers", "claudeSubscription", "enabled"],
+  BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_MODE: ["providers", "claudeSubscription", "mode"],
+  BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_MODEL: ["providers", "claudeSubscription", "defaultModel"],
+  BOSUN_PROVIDER_CLAUDE_SUBSCRIPTION_WORKSPACE: ["providers", "claudeSubscription", "workspace"],
+  BOSUN_PROVIDER_OPENAI_COMPATIBLE_ENABLED: ["providers", "openaiCompatible", "enabled"],
+  BOSUN_PROVIDER_OPENAI_COMPATIBLE_MODE: ["providers", "openaiCompatible", "mode"],
+  BOSUN_PROVIDER_OPENAI_COMPATIBLE_MODEL: ["providers", "openaiCompatible", "defaultModel"],
+  BOSUN_PROVIDER_OPENAI_COMPATIBLE_BASE_URL: ["providers", "openaiCompatible", "baseUrl"],
+  BOSUN_PROVIDER_OLLAMA_ENABLED: ["providers", "ollama", "enabled"],
+  BOSUN_PROVIDER_OLLAMA_MODEL: ["providers", "ollama", "defaultModel"],
+  BOSUN_PROVIDER_OLLAMA_BASE_URL: ["providers", "ollama", "baseUrl"],
+  BOSUN_PROVIDER_COPILOT_OAUTH_ENABLED: ["providers", "copilot", "enabled"],
+  BOSUN_PROVIDER_COPILOT_OAUTH_MODEL: ["providers", "copilot", "defaultModel"],
+  BOSUN_PROVIDER_OPENROUTER_ENABLED: ["providers", "openrouter", "enabled"],
+  BOSUN_PROVIDER_OPENROUTER_MODEL: ["providers", "openrouter", "defaultModel"],
+  BOSUN_PROVIDER_OPENROUTER_BASE_URL: ["providers", "openrouter", "baseUrl"],
+  BOSUN_PROVIDER_PERPLEXITY_ENABLED: ["providers", "perplexity", "enabled"],
+  BOSUN_PROVIDER_PERPLEXITY_MODEL: ["providers", "perplexity", "defaultModel"],
+  BOSUN_PROVIDER_PERPLEXITY_BASE_URL: ["providers", "perplexity", "baseUrl"],
+  BOSUN_PROVIDER_DEEPINFRA_ENABLED: ["providers", "deepinfra", "enabled"],
+  BOSUN_PROVIDER_DEEPINFRA_MODEL: ["providers", "deepinfra", "defaultModel"],
+  BOSUN_PROVIDER_DEEPINFRA_BASE_URL: ["providers", "deepinfra", "baseUrl"],
+  BOSUN_PROVIDER_GROQ_ENABLED: ["providers", "groq", "enabled"],
+  BOSUN_PROVIDER_GROQ_MODEL: ["providers", "groq", "defaultModel"],
+  BOSUN_PROVIDER_GROQ_BASE_URL: ["providers", "groq", "baseUrl"],
+  BOSUN_PROVIDER_TOGETHER_ENABLED: ["providers", "together", "enabled"],
+  BOSUN_PROVIDER_TOGETHER_MODEL: ["providers", "together", "defaultModel"],
+  BOSUN_PROVIDER_TOGETHER_BASE_URL: ["providers", "together", "baseUrl"],
+  BOSUN_PROVIDER_XAI_ENABLED: ["providers", "xai", "enabled"],
+  BOSUN_PROVIDER_XAI_MODEL: ["providers", "xai", "defaultModel"],
+  BOSUN_PROVIDER_XAI_BASE_URL: ["providers", "xai", "baseUrl"],
+  BOSUN_PROVIDER_FIREWORKS_ENABLED: ["providers", "fireworks", "enabled"],
+  BOSUN_PROVIDER_FIREWORKS_MODEL: ["providers", "fireworks", "defaultModel"],
+  BOSUN_PROVIDER_FIREWORKS_BASE_URL: ["providers", "fireworks", "baseUrl"],
+  BOSUN_PROVIDER_CEREBRAS_ENABLED: ["providers", "cerebras", "enabled"],
+  BOSUN_PROVIDER_CEREBRAS_MODEL: ["providers", "cerebras", "defaultModel"],
+  BOSUN_PROVIDER_CEREBRAS_BASE_URL: ["providers", "cerebras", "baseUrl"],
+  BOSUN_PROVIDER_SAMBANOVA_ENABLED: ["providers", "sambanova", "enabled"],
+  BOSUN_PROVIDER_SAMBANOVA_MODEL: ["providers", "sambanova", "defaultModel"],
+  BOSUN_PROVIDER_SAMBANOVA_BASE_URL: ["providers", "sambanova", "baseUrl"],
+  BOSUN_PROVIDER_NEBIUS_ENABLED: ["providers", "nebius", "enabled"],
+  BOSUN_PROVIDER_NEBIUS_MODEL: ["providers", "nebius", "defaultModel"],
+  BOSUN_PROVIDER_NEBIUS_BASE_URL: ["providers", "nebius", "baseUrl"],
+  BOSUN_PROVIDER_GEMINI_ENABLED: ["providers", "gemini", "enabled"],
+  BOSUN_PROVIDER_GEMINI_MODEL: ["providers", "gemini", "defaultModel"],
+  BOSUN_PROVIDER_GEMINI_BASE_URL: ["providers", "gemini", "baseUrl"],
 };
 const ROOT_PREFIX_ALLOWLIST = [
   "TELEGRAM_",
@@ -7898,11 +9158,11 @@ function mapEnvKeyToConfigPath(key, schema) {
     const sub = toCamelCaseFromEnv(rest);
     if (schema.properties.kanban.properties[sub]) return buildConfigPath(["kanban", sub]);
   }
-  if (envKey.startsWith("GNAP_")) {
-    const gnapSchema = schema.properties.kanban?.properties?.gnap?.properties;
-    const rest = envKey.slice("GNAP_".length);
+  if (envKey.startsWith("REPO_MIRROR_")) {
+    const repoMirrorSchema = schema.properties.kanban?.properties?.repoMirror?.properties;
+    const rest = envKey.slice("REPO_MIRROR_".length);
     const sub = toCamelCaseFromEnv(rest);
-    if (gnapSchema?.[sub]) return buildConfigPath(["kanban", "gnap", sub]);
+    if (repoMirrorSchema?.[sub]) return buildConfigPath(["kanban", "repoMirror", sub]);
   }
   if (envKey.startsWith("JIRA_STATUS_")) {
     const jiraSchema = schema.properties.kanban?.properties?.jira?.properties?.statusMapping?.properties;
@@ -8027,6 +9287,7 @@ const MIME_TYPES = {
 let uiServer = null;
 let uiServerUrl = null;
 let uiServerTls = false;
+let uiServerHttp2 = false;
 let wsServer = null;
 /** Auto-open browser: only once per process, never during tests */
 let _browserOpened = false;
@@ -8035,6 +9296,7 @@ const UI_INSTANCE_LOCK_FILE = "ui-server.instance.lock.json";
 const UI_SESSION_TOKEN_FILE = "ui-session-token.json";
 const TUI_SESSION_TOKEN_FILE = "ui-token";
 const UI_LAST_PORT_FILE = "ui-last-port.json";
+const DEFAULT_UI_HTTP2_MAX_STREAMS = 100;
 const DEFAULT_UI_INSTANCE_PROBE_TIMEOUT_MS = 1500;
 const DEFAULT_UI_INSTANCE_STALE_GRACE_MS = 2 * 60 * 1000;
 const DEFAULT_AUTO_OPEN_COOLDOWN_MS = 12 * 60 * 60 * 1000; // 12h
@@ -8054,6 +9316,7 @@ let tuiStatsEmitter = null;
 const WORKFLOW_WS_BATCH_MS = 80;
 const workflowWsBatchByKey = new Map();
 const workflowEngineListenerCleanup = new WeakMap();
+const workflowTaskTraceHookCleanup = new WeakMap();
 let workflowWsSeq = 0;
 let uiInstanceLockPath = "";
 let uiInstanceLockHeld = false;
@@ -8100,17 +9363,63 @@ async function resolveVoiceRelay() {
   };
 }
 
-/**
- * Resolve the execPrimaryPrompt function. Prefers the injected dependency,
- * falls back to importing directly from primary-agent.mjs so the chat
- * agent works even when the UI server starts standalone.
- */
-let _fallbackExecPrimaryPrompt = null;
 /** Track in-flight chat turns so /api/sessions/:id/stop can abort them. */
 const sessionRunAbortControllers = new Map();
 let _activeSessions = [];
 
-function normalizeLedgerSessionDocument(activity) {
+function getDurableSessionTextCandidates(document = {}) {
+  const candidates = [];
+  const pushText = (value) => {
+    const text = String(value || "").trim();
+    if (text) candidates.push(text);
+  };
+  pushText(document.preview);
+  pushText(document.lastMessage);
+  pushText(document.summary?.latestStep?.summary);
+  pushText(document.summary?.summary);
+  for (const message of Array.isArray(document.messages) ? document.messages : []) {
+    pushText(message?.content || message?.summary);
+  }
+  for (const turn of Array.isArray(document.turns) ? document.turns : []) {
+    pushText(turn?.summary);
+  }
+  return candidates;
+}
+
+function hasMeaningfulDurableSessionOutput(document = {}) {
+  return getDurableSessionTextCandidates(document).some((text) => {
+    const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!normalized || DURABLE_SESSION_PLACEHOLDER_OUTPUTS.has(normalized)) return false;
+    return /edit|write|create|patch|commit|push|search|diff|test|tool|agent/i.test(text) || normalized.length > 0;
+  });
+}
+
+function classifyDurableBlockedSessionText(document = {}) {
+  const normalized = getDurableSessionTextCandidates(document)
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return null;
+  if (DURABLE_COMMIT_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return "implementation_done_commit_blocked";
+  }
+  if (DURABLE_REPO_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return "blocked_by_repo";
+  }
+  if (DURABLE_ENV_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return "blocked_by_env";
+  }
+  return null;
+}
+
+function deriveExpiredDurableSessionStatus(document = {}) {
+  const blockedStatus = classifyDurableBlockedSessionText(document);
+  if (blockedStatus) return blockedStatus;
+  return hasMeaningfulDurableSessionOutput(document) ? "stalled" : "no_output";
+}
+
+function normalizeLedgerSessionDocument(activity, options = {}) {
+  const includeMessages = options.includeMessages === true;
   const document = activity?.document && typeof activity.document === "object"
     ? { ...activity.document }
     : null;
@@ -8133,29 +9442,65 @@ function normalizeLedgerSessionDocument(activity) {
   const metadata = document.metadata && typeof document.metadata === "object"
     ? { ...document.metadata }
     : {};
+  const repairText = (value) => {
+    if (value == null) return value;
+    const normalized = String(value || "");
+    if (!normalized) return normalized;
+    return repairCommonMojibake(normalized);
+  };
   const workspaceId = document.workspaceId || metadata.workspaceId || activity?.workspaceId || null;
   const workspaceDir = normalizeCandidatePath(document.workspaceDir || metadata.workspaceDir);
   const workspaceRoot = normalizeCandidatePath(document.workspaceRoot || metadata.workspaceRoot || workspaceDir);
+  const rawLifecycleStatus = String(
+    document.lifecycleStatus || activity?.latestStatus || document.status || "completed",
+  ).trim() || "completed";
+  const rawStatus = String(
+    document.status || document.lifecycleStatus || activity?.latestStatus || "completed",
+  ).trim() || "completed";
+  const rawRuntimeState = String(
+    document.runtimeState || document.status || activity?.latestStatus || "",
+  ).trim() || null;
+  const rawLifecycleLower = rawLifecycleStatus.toLowerCase();
+  const lastActiveMs = Date.parse(lastActiveAt);
+  const durableActiveExpired =
+    rawLifecycleLower === "active"
+    && Number.isFinite(lastActiveMs)
+    && (Date.now() - lastActiveMs) >= DURABLE_ACTIVE_SESSION_EXPIRY_MS;
+  const effectiveLifecycleStatus = durableActiveExpired
+    ? deriveExpiredDurableSessionStatus(document)
+    : rawLifecycleStatus;
+  const effectiveStatus = durableActiveExpired
+    ? effectiveLifecycleStatus
+    : rawStatus;
+  const effectiveRuntimeState = durableActiveExpired
+    ? "stopped"
+    : rawRuntimeState;
   return {
     ...document,
     id: sessionId,
     sessionId,
     taskId: document.taskId || activity?.latestTaskId || sessionId,
-    taskTitle: document.taskTitle || document.title || activity?.latestTaskTitle || null,
-    title: document.title || document.taskTitle || activity?.latestTaskTitle || null,
+    taskTitle: repairText(document.taskTitle || document.title || activity?.latestTaskTitle || null),
+    title: repairText(document.title || document.taskTitle || activity?.latestTaskTitle || null),
     type: document.type || document.sessionType || activity?.sessionType || "task",
-    status: document.status || document.lifecycleStatus || activity?.latestStatus || "completed",
-    lifecycleStatus: document.lifecycleStatus || activity?.latestStatus || document.status || "completed",
-    runtimeState: document.runtimeState || document.status || activity?.latestStatus || null,
+    status: effectiveStatus,
+    lifecycleStatus: effectiveLifecycleStatus,
+    runtimeState: effectiveRuntimeState,
+    runtimeIsLive: false,
     workspaceId,
     workspaceDir,
     workspaceRoot,
     createdAt,
     lastActiveAt,
+    endedAt: document.endedAt || (durableActiveExpired ? lastActiveAt : null),
     totalEvents: Math.max(0, Number(document.totalEvents ?? document.eventCount ?? activity?.eventCount ?? 0) || 0),
     turnCount: Math.max(0, Number(document.turnCount || 0) || 0),
     turns: Array.isArray(document.turns) ? document.turns.map((turn) => ({ ...turn })) : [],
-    messages: Array.isArray(document.messages) ? document.messages.map((message) => ({ ...message })) : [],
+    messages: includeMessages && Array.isArray(document.messages)
+      ? document.messages.map((message) => ({ ...message }))
+      : [],
+    preview: repairText(document.preview || document.lastMessage || null),
+    lastMessage: repairText(document.lastMessage || document.preview || null),
     metadata: {
       ...metadata,
       ...(workspaceId ? { workspaceId } : {}),
@@ -8165,18 +9510,30 @@ function normalizeLedgerSessionDocument(activity) {
   };
 }
 
+function resolveRepoLocalStateLedgerPath(rootPath = "") {
+  const normalizedRoot = normalizeCandidatePath(rootPath);
+  if (!normalizedRoot) return "";
+  return resolve(normalizedRoot, ".bosun", ".cache", "state-ledger.sqlite");
+}
+
 function resolveUiStateLedgerOptions(workspaceContext = null) {
   const explicitRepoRoot = normalizeCandidatePath(process.env.REPO_ROOT);
   const repoRootPath = explicitRepoRoot || normalizeCandidatePath(repoRoot);
   const workspaceRoot = normalizeCandidatePath(workspaceContext?.workspaceRoot);
   const workspaceDir = normalizeCandidatePath(workspaceContext?.workspaceDir);
   const explicitLedgerPath = String(process.env.BOSUN_STATE_LEDGER_PATH || "").trim();
+  const defaultRepoLocalLedgerPath = !explicitRepoRoot
+    ? resolveRepoLocalStateLedgerPath(sourceRepoRoot)
+    : "";
   if (workspaceContext?.allWorkspaces === true) {
     if (explicitRepoRoot) {
       return { repoRoot: explicitRepoRoot };
     }
     if (explicitLedgerPath) {
       return { ledgerPath: explicitLedgerPath };
+    }
+    if (defaultRepoLocalLedgerPath) {
+      return { ledgerPath: defaultRepoLocalLedgerPath };
     }
     if (repoRootPath) {
       return { repoRoot: repoRootPath };
@@ -8194,6 +9551,9 @@ function resolveUiStateLedgerOptions(workspaceContext = null) {
   }
   if (workspaceDir) {
     return { repoRoot: workspaceDir };
+  }
+  if (defaultRepoLocalLedgerPath) {
+    return { ledgerPath: defaultRepoLocalLedgerPath };
   }
   if (repoRootPath) {
     return { repoRoot: repoRootPath };
@@ -8246,6 +9606,11 @@ function mergeSessionRecords(primarySession, fallbackSession) {
   const preferPrimaryIfLive = (...values) => (
     primaryIsLive ? values : [...values].reverse()
   );
+  const repairText = (value) => {
+    const normalized = String(value || "").trim();
+    if (!normalized) return null;
+    return repairCommonMojibake(normalized);
+  };
   const workspaceId = pickString(fallback.workspaceId, fallbackMeta.workspaceId, primary.workspaceId, primaryMeta.workspaceId);
   const workspaceDir = pickString(fallback.workspaceDir, fallbackMeta.workspaceDir, primary.workspaceDir, primaryMeta.workspaceDir);
   const workspaceRoot = pickString(fallback.workspaceRoot, fallbackMeta.workspaceRoot, primary.workspaceRoot, primaryMeta.workspaceRoot, workspaceDir);
@@ -8277,12 +9642,12 @@ function mergeSessionRecords(primarySession, fallbackSession) {
     taskId: preferFallbackIdentity
       ? pickString(fallback.taskId, fallback.sessionId, primary.taskId, primary.sessionId)
       : pickString(primary.taskId, primary.sessionId, fallback.taskId, fallback.sessionId),
-    taskTitle: preferFallbackIdentity
+    taskTitle: repairText(preferFallbackIdentity
       ? pickString(fallback.taskTitle, fallback.title, primary.taskTitle, primary.title)
-      : pickString(primary.taskTitle, primary.title, fallback.taskTitle, fallback.title),
-    title: preferFallbackIdentity
+      : pickString(primary.taskTitle, primary.title, fallback.taskTitle, fallback.title)),
+    title: repairText(preferFallbackIdentity
       ? pickString(fallback.title, fallback.taskTitle, primary.title, primary.taskTitle)
-      : pickString(primary.title, primary.taskTitle, fallback.title, fallback.taskTitle),
+      : pickString(primary.title, primary.taskTitle, fallback.title, fallback.taskTitle)),
     type: pickString(primary.type, fallback.type),
     status,
     lifecycleStatus,
@@ -8306,18 +9671,18 @@ function mergeSessionRecords(primarySession, fallbackSession) {
     turnCount: Math.max(0, Number(primary.turnCount ?? fallback.turnCount ?? 0) || 0),
     turns: pickList(...preferPrimaryIfLive(primary.turns, fallback.turns)),
     messages: pickList(...preferPrimaryIfLive(primary.messages, fallback.messages)),
-    preview: pickString(...preferPrimaryIfLive(
+    preview: repairText(pickString(...preferPrimaryIfLive(
       primary.preview,
       primary.lastMessage,
       fallback.preview,
       fallback.lastMessage,
-    )),
-    lastMessage: pickString(...preferPrimaryIfLive(
+    ))),
+    lastMessage: repairText(pickString(...preferPrimaryIfLive(
       primary.lastMessage,
       primary.preview,
       fallback.lastMessage,
       fallback.preview,
-    )),
+    ))),
     metadata: {
       ...fallbackMeta,
       ...primaryMeta,
@@ -8328,38 +9693,104 @@ function mergeSessionRecords(primarySession, fallbackSession) {
   };
 }
 
+const DURABLE_SESSION_LIST_LIMIT = 750;
+const DURABLE_SESSION_LIST_CACHE_TTL_MS = 5000;
+const durableSessionListCache = new Map();
+
+function invalidateDurableSessionListCache() {
+  durableSessionListCache.clear();
+}
+
+function buildDurableSessionListCacheKey(workspaceContext = null) {
+  try {
+    return JSON.stringify(resolveUiStateLedgerOptions(workspaceContext));
+  } catch {
+    return "__default__";
+  }
+}
+
+function cloneSessionSummaryRecords(sessions = [], options = {}) {
+  const summaryOnly = options.summaryOnly === true;
+  return (Array.isArray(sessions) ? sessions : []).map((session) => {
+    const clone = {
+      ...session,
+      metadata:
+        session?.metadata && typeof session.metadata === "object"
+          ? { ...session.metadata }
+          : {},
+    };
+    if (summaryOnly) {
+      delete clone.turns;
+      delete clone.messages;
+      delete clone.trajectory;
+      return clone;
+    }
+    clone.turns = Array.isArray(session?.turns)
+      ? session.turns.map((turn) => ({ ...turn }))
+      : [];
+    clone.messages = Array.isArray(session?.messages)
+      ? session.messages.map((message) => ({ ...message }))
+      : [];
+    return clone;
+  });
+}
+
 function listDurableSessionsFromLedger(workspaceContext = null, options = {}) {
+  const cacheKey = buildDurableSessionListCacheKey(workspaceContext);
+  const now = Date.now();
+  const cached = durableSessionListCache.get(cacheKey);
+  if (
+    cached
+    && Array.isArray(cached.sessions)
+    && now - Number(cached.loadedAt || 0) < DURABLE_SESSION_LIST_CACHE_TTL_MS
+  ) {
+    return cloneSessionSummaryRecords(
+      cached.sessions.filter((session) => sessionMatchesWorkspaceContext(session, workspaceContext, options)),
+      options,
+    );
+  }
+
   const ledgerOptions = {
     ...resolveUiStateLedgerOptions(workspaceContext),
-    limit: 5000,
+    limit: DURABLE_SESSION_LIST_LIMIT,
   };
-  return listSessionActivitiesFromStateLedger(ledgerOptions)
-    .map((activity) => {
-      const sessionId = String(activity?.sessionId || "").trim();
-      if (!sessionId) return normalizeLedgerSessionDocument(activity);
-      return normalizeLedgerSessionDocument(
-        getSessionActivityFromStateLedger(sessionId, ledgerOptions) || activity,
-      );
-    })
-    .filter(Boolean)
-    .filter((session) => sessionMatchesWorkspaceContext(session, workspaceContext, options));
+  try {
+    const sessions = listSessionActivitiesFromStateLedger(ledgerOptions)
+      .map((activity) => normalizeLedgerSessionDocument(activity))
+      .filter(Boolean);
+    durableSessionListCache.set(cacheKey, {
+      loadedAt: now,
+      sessions,
+    });
+    return cloneSessionSummaryRecords(
+      sessions.filter((session) => sessionMatchesWorkspaceContext(session, workspaceContext, options)),
+      options,
+    );
+  } catch {
+    durableSessionListCache.delete(cacheKey);
+    return [];
+  }
 }
 
 function mergeTrackerAndLedgerSessions(baseSessions = [], workspaceContext = null, options = {}) {
-  const ledgerOptions = resolveUiStateLedgerOptions(workspaceContext);
+  const durableSessions = listDurableSessionsFromLedger(workspaceContext, options);
+  const durableById = new Map();
+  for (const session of durableSessions) {
+    const sessionId = String(session?.id || session?.taskId || "").trim();
+    if (!sessionId) continue;
+    durableById.set(sessionId, session);
+  }
   const byId = new Map();
   for (const session of Array.isArray(baseSessions) ? baseSessions : []) {
     const sessionId = String(session?.id || session?.taskId || "").trim();
     if (!sessionId) continue;
-    const directLedgerSession = normalizeLedgerSessionDocument(
-      getSessionActivityFromStateLedger(sessionId, ledgerOptions),
-    );
+    const directLedgerSession = durableById.get(sessionId) || null;
     byId.set(
       sessionId,
       directLedgerSession ? mergeSessionRecords(session, directLedgerSession) : session,
     );
   }
-  for (const session of listDurableSessionsFromLedger(workspaceContext, options)) {
+  for (const session of durableSessions) {
     const sessionId = String(session?.id || session?.taskId || "").trim();
     if (!sessionId) continue;
     const existing = byId.get(sessionId) || null;
@@ -8404,22 +9835,6 @@ function updateActiveSessions(sessions) {
       broadcastCanonicalEvent(["sessions", "tui"], "session:event", sessionEvent);
     }
   }
-}
-
-async function resolveExecPrimaryPrompt() {
-  if (typeof uiDeps.execPrimaryPrompt === "function") return uiDeps.execPrimaryPrompt;
-  if (_fallbackExecPrimaryPrompt) return _fallbackExecPrimaryPrompt;
-  try {
-    const mod = await import("../agent/primary-agent.mjs");
-    if (typeof mod.execPrimaryPrompt === "function") {
-      _fallbackExecPrimaryPrompt = mod.execPrimaryPrompt;
-      console.log("[ui-server] loaded execPrimaryPrompt fallback from primary-agent.mjs");
-      return _fallbackExecPrimaryPrompt;
-    }
-  } catch (err) {
-    console.warn("[ui-server] failed to load execPrimaryPrompt fallback:", err.message);
-  }
-  return null;
 }
 
 /**
@@ -9142,10 +10557,22 @@ function getRequestIp(req) {
   ).split(",")[0].trim().toLowerCase();
 }
 
+function pruneFallbackAuthRateLimits(now = Date.now()) {
+  for (const [ip, bucket] of fallbackAuthRateLimitByIp) {
+    if (now - Number(bucket?.windowStart || 0) > 120_000) {
+      fallbackAuthRateLimitByIp.delete(ip);
+    }
+  }
+  if (now - Number(fallbackAuthGlobalWindow?.windowStart || 0) > 120_000) {
+    fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
+  }
+}
+
 function consumeFallbackRateLimits(req, config) {
   const now = Date.now();
   const windowMs = 60_000;
   const ip = getRequestIp(req);
+  pruneFallbackAuthRateLimits(now);
 
   const globalBucket = fallbackAuthGlobalWindow;
   if (!globalBucket.windowStart || now - globalBucket.windowStart > windowMs) {
@@ -9257,18 +10684,6 @@ function getFallbackAuthStatus() {
   };
 }
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, bucket] of fallbackAuthRateLimitByIp) {
-    if (now - bucket.windowStart > 120_000) {
-      fallbackAuthRateLimitByIp.delete(ip);
-    }
-  }
-  if (now - fallbackAuthGlobalWindow.windowStart > 120_000) {
-    fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
-  }
-}, 300_000).unref();
-
 const projectSyncWebhookMetrics = {
   received: 0,
   processed: 0,
@@ -9302,7 +10717,7 @@ const SETTINGS_KNOWN_KEYS = [
   "TELEGRAM_UI_FALLBACK_AUTH_RATE_LIMIT_GLOBAL_PER_MIN", "TELEGRAM_UI_FALLBACK_AUTH_MAX_FAILURES",
   "TELEGRAM_UI_FALLBACK_AUTH_LOCKOUT_MS", "TELEGRAM_UI_FALLBACK_AUTH_ROTATE_DAYS",
   "TELEGRAM_UI_FALLBACK_AUTH_TRANSIENT_COOLDOWN_MS",
-  "EXECUTOR_MODE", "INTERNAL_EXECUTOR_PARALLEL", "INTERNAL_EXECUTOR_SDK",
+  "BOSUN_AGENT_RUNTIME", "EXECUTOR_MODE", "INTERNAL_EXECUTOR_PARALLEL", "INTERNAL_EXECUTOR_SDK",
   "INTERNAL_EXECUTOR_TIMEOUT_MS", "INTERNAL_EXECUTOR_MAX_RETRIES", "INTERNAL_EXECUTOR_POLL_MS",
   "INTERNAL_EXECUTOR_REVIEW_AGENT_ENABLED", "INTERNAL_EXECUTOR_REPLENISH_ENABLED",
   "INTERNAL_EXECUTOR_STREAM_MAX_RETRIES", "INTERNAL_EXECUTOR_STREAM_RETRY_BASE_MS",
@@ -9311,15 +10726,15 @@ const SETTINGS_KNOWN_KEYS = [
   "CODEX_SDK_DISABLED", "COPILOT_SDK_DISABLED", "CLAUDE_SDK_DISABLED",
   "PRIMARY_AGENT", "EXECUTORS", "EXECUTOR_DISTRIBUTION", "FAILOVER_STRATEGY",
   "COMPLEXITY_ROUTING_ENABLED", "PROJECT_REQUIREMENTS_PROFILE",
-  "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "CODEX_MODEL",
+  "BOSUN_PROVIDER_ROUTING_MODE", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "CODEX_MODEL",
   "CODEX_MODEL_PROFILE", "CODEX_MODEL_PROFILE_SUBAGENT",
   "CODEX_MODEL_PROFILE_XL_PROVIDER", "CODEX_MODEL_PROFILE_XL_MODEL", "CODEX_MODEL_PROFILE_XL_BASE_URL", "CODEX_MODEL_PROFILE_XL_API_KEY",
   "CODEX_MODEL_PROFILE_M_PROVIDER", "CODEX_MODEL_PROFILE_M_MODEL", "CODEX_MODEL_PROFILE_M_BASE_URL", "CODEX_MODEL_PROFILE_M_API_KEY",
   "CODEX_SUBAGENT_MODEL", "ANTHROPIC_API_KEY", "CLAUDE_MODEL",
   "COPILOT_MODEL", "COPILOT_CLI_TOKEN",
   "KANBAN_BACKEND", "KANBAN_SYNC_POLICY", "BOSUN_TASK_LABEL",
-  "GNAP_ENABLED", "GNAP_REPO_PATH", "GNAP_SYNC_MODE",
-  "GNAP_RUN_STORAGE", "GNAP_MESSAGE_STORAGE", "GNAP_PUBLIC_ROADMAP_ENABLED",
+  "REPO_MIRROR_ENABLED", "REPO_MIRROR_REPO_PATH", "REPO_MIRROR_SYNC_MODE",
+  "REPO_MIRROR_RUN_STORAGE", "REPO_MIRROR_MESSAGE_STORAGE", "REPO_MIRROR_PUBLIC_ROADMAP_ENABLED",
   "BOSUN_ENFORCE_TASK_LABEL", "STALE_TASK_AGE_HOURS",
   "TASK_TRIGGER_SYSTEM_ENABLED",
   "TASK_BRANCH_MODE", "TASK_BRANCH_AUTO_MODULE", "TASK_UPSTREAM_SYNC_MAIN",
@@ -9356,7 +10771,7 @@ const SETTINGS_KNOWN_KEYS = [
   "AGENT_WORK_METRICS_ROTATION_ENABLED",
   "AGENT_SESSION_LOG_RETENTION", "AGENT_ERROR_LOOP_THRESHOLD",
   "AGENT_STUCK_THRESHOLD_MS", "LOG_MAX_SIZE_MB", "BOSUN_TELEMETRY_SAMPLE_RATE",
-  "DEVMODE", "SELF_RESTART_WATCH_ENABLED", "MAX_PARALLEL",
+  "DEVMODE", "SELF_RESTART_WATCH_ENABLED", "SELF_RESTART_QUIET_MS", "MAX_PARALLEL",
   "RESTART_DELAY_MS", "SHARED_STATE_ENABLED", "WORKFLOW_AUTOMATION_ENABLED",
   "SHARED_STATE_STALE_THRESHOLD_MS",
   "VE_CI_SWEEP_EVERY",
@@ -9432,9 +10847,10 @@ function resolveDerivedSettingsValue(key) {
   return null;
 }
 
-function buildSettingsResponseData() {
+function buildResolvedSettingsState() {
   const data = {};
   const sources = {};
+  const rawValues = {};
   const schema = getConfigSchema();
   const defsByKey = new Map(
     SETTINGS_SCHEMA.map((def) => [String(def?.key || ""), def]),
@@ -9483,9 +10899,405 @@ function buildSettingsResponseData() {
       data[key] = displayValue;
     }
     sources[key] = source;
+    rawValues[key] = rawValue;
   }
 
+  return { data, sources, rawValues };
+}
+
+function buildSettingsResponseData() {
+  const { data, sources } = buildResolvedSettingsState();
   return { data, sources };
+}
+
+function sanitizeProviderAuthState(auth = {}) {
+  const methods = Array.isArray(auth.methods)
+    ? auth.methods.map((entry) => ({
+        type: entry.type,
+        supported: entry.supported,
+        available: entry.available,
+        configured: entry.configured,
+        authenticated: entry.authenticated,
+        source: entry.source,
+        credentialKey: entry.credentialKey,
+        lastError: entry.lastError || null,
+        expiresAt: entry.expiresAt || null,
+      }))
+    : [];
+  const sanitizeEnvEntry = (entry) => ({
+    configured: entry?.configured === true,
+    key: entry?.key || null,
+    source: entry?.source || null,
+    keys: Array.isArray(entry?.keys) ? entry.keys.slice() : undefined,
+  });
+  return {
+    providerId: auth.providerId || null,
+    status: auth.status || "unknown",
+    enabled: auth.enabled !== false,
+    available: auth.available === true,
+    authenticated: auth.authenticated === true,
+    canRun: auth.canRun === true,
+    requiresAction: auth.requiresAction === true,
+    preferredMode: auth.preferredMode || null,
+    supportedModes: Array.isArray(auth.supportedModes) ? auth.supportedModes.slice() : [],
+    lastError: auth.lastError || null,
+    expiresAt: auth.expiresAt || null,
+    connection: auth.connection && typeof auth.connection === "object"
+      ? {
+          authSource: auth.connection.authSource || null,
+          accountId: auth.connection.accountId || null,
+          authPath: auth.connection.authPath || null,
+          lastRefresh: auth.connection.lastRefresh || null,
+        }
+      : {},
+    settings: auth.settings && typeof auth.settings === "object" ? { ...auth.settings } : {},
+    warnings: Array.isArray(auth.warnings)
+      ? auth.warnings.map((warning) => ({
+          code: warning?.code || null,
+          severity: warning?.severity || "warning",
+          message: warning?.message || "",
+        }))
+      : [],
+    methods,
+    env: auth.env && typeof auth.env === "object"
+      ? Object.fromEntries(
+          Object.entries(auth.env).map(([key, value]) => [key, sanitizeEnvEntry(value)]),
+        )
+      : {},
+  };
+}
+
+function describeProviderRuntimeBinding(adapterId = "") {
+  const normalized = String(adapterId || "").trim().toLowerCase();
+  if (normalized.endsWith("-native")) {
+    return {
+      runtimeOwnership: "native",
+      runtimeLabel: "Bosun-native",
+    };
+  }
+  if (normalized.endsWith("-sdk")) {
+    return {
+      runtimeOwnership: "external-sdk",
+      runtimeLabel: "External SDK",
+    };
+  }
+  return {
+    runtimeOwnership: "runtime-managed",
+    runtimeLabel: "Runtime-managed",
+  };
+}
+
+function buildProviderInventory(settings = null) {
+  const effectiveConfig = readConfigDocument().configData;
+  const effectiveSettings = settings && typeof settings === "object"
+    ? settings
+    : buildResolvedSettingsState().rawValues;
+  const runtimeRegistry = createProviderRegistry({
+    adapters: createShellAdapterRegistry(),
+    env: process.env,
+    includeBuiltins: true,
+    preferNativeAdapters:
+      normalizeAgentRuntimeValue(effectiveSettings?.BOSUN_AGENT_RUNTIME || effectiveConfig?.agentRuntime || "harness") === "harness",
+    settings: effectiveSettings,
+  });
+  const runtimeProvidersById = new Map(
+    runtimeRegistry
+      .listProviders()
+      .map((entry) => [String(entry?.providerId || entry?.id || "").trim(), entry])
+      .filter(([id]) => id),
+  );
+  const items = listBuiltInProviderDrivers().map((driver) => {
+    const runtimeEntry = runtimeProvidersById.get(driver.id) || null;
+    const auth = runtimeEntry?.auth || normalizeProviderAuthState(driver.id, {}, {
+      env: process.env,
+      settings: effectiveSettings,
+    });
+    const adapterId = runtimeEntry?.adapterId || driver.adapterId || driver.adapterHints?.adapterId || null;
+    return {
+      providerId: driver.id,
+      label: driver.name,
+      description: driver.description || "",
+      adapterId,
+      advanced: driver.visibility?.advanced === true,
+      defaultEnabled: driver.visibility?.defaultEnabled === true,
+      enabled: auth.enabled !== false,
+      capabilities: getProviderCapabilities(driver.id),
+      transport: driver.transport ? { ...driver.transport } : null,
+      auth: sanitizeProviderAuthState(auth),
+      modelCatalog: runtimeEntry?.modelCatalog || getProviderModelCatalog(driver.id, {
+        env: process.env,
+        settings: effectiveSettings,
+      }),
+      ...describeProviderRuntimeBinding(adapterId),
+    };
+  });
+  const requestedDefaultProviderId = normalizeProviderDefinitionId(
+    effectiveSettings.BOSUN_PROVIDER_DEFAULT || "",
+    "",
+  );
+  const defaultProviderId = items.find((entry) => entry.providerId === requestedDefaultProviderId)?.providerId
+    || items[0]?.providerId
+    || null;
+  const routingModeRaw = String(effectiveSettings.BOSUN_PROVIDER_ROUTING_MODE || "default-only").trim().toLowerCase();
+  return {
+    defaultProviderId,
+    routingMode: ["default-only", "fallback", "spread"].includes(routingModeRaw)
+      ? routingModeRaw
+      : "default-only",
+    items,
+  };
+}
+
+function buildHarnessExecutorInventory(configData = null, rawSettings = null, providerInventory = null) {
+  const effectiveConfig = configData && typeof configData === "object"
+    ? configData
+    : readConfigDocument().configData;
+  const effectiveSettings = rawSettings && typeof rawSettings === "object"
+    ? rawSettings
+    : buildResolvedSettingsState().rawValues;
+  const effectiveProviderInventory = providerInventory || buildProviderInventory(effectiveSettings);
+  const fabric = readHarnessExecutorFabric(effectiveConfig, {
+    providerInventory: effectiveProviderInventory,
+    providerRoutingMode: effectiveProviderInventory?.routingMode || effectiveSettings?.BOSUN_PROVIDER_ROUTING_MODE,
+  });
+  const runtimeRegistry = createProviderRegistry({
+    adapters: createShellAdapterRegistry(),
+    configExecutors: fabric.executors,
+    env: process.env,
+    includeBuiltins: false,
+    preferNativeAdapters:
+      normalizeAgentRuntimeValue(effectiveSettings?.BOSUN_AGENT_RUNTIME || effectiveConfig?.agentRuntime || "harness") === "harness",
+    settings: effectiveSettings,
+  });
+  const runtimeProvidersById = new Map(
+    runtimeRegistry
+      .listProviders()
+      .map((entry) => [String(entry?.id || "").trim(), entry])
+      .filter(([id]) => id),
+  );
+  return {
+    ...fabric,
+    executors: fabric.executors.map((entry) => {
+      const runtimeEntry = runtimeProvidersById.get(String(entry?.id || "").trim()) || null;
+      return runtimeEntry
+        ? {
+            ...entry,
+            adapterId: runtimeEntry.adapterId || entry.adapterId || null,
+            auth: runtimeEntry.auth || null,
+            modelCatalog: runtimeEntry.modelCatalog || null,
+            available: runtimeEntry.available !== false,
+            ...describeProviderRuntimeBinding(runtimeEntry.adapterId || entry.adapterId || null),
+          }
+        : {
+            ...entry,
+            ...describeProviderRuntimeBinding(entry.adapterId || null),
+          };
+    }),
+    providerOptions: listHarnessExecutorProviderOptions(),
+    providers: effectiveProviderInventory,
+  };
+}
+
+function normalizeAgentRuntimeValue(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "sdk-cli" ? "sdk-cli" : "harness";
+}
+
+function normalizeAgentCapabilitiesList(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry || "").trim()).filter(Boolean);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value).filter((key) => value[key]);
+  }
+  return [];
+}
+
+function formatAgentApiStyleLabel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized || normalized === "provider-default") return "";
+  if (normalized === "responses") return "Responses API";
+  if (normalized === "chat-completions") return "Chat Completions API";
+  return normalized;
+}
+
+function buildAgentRuntimeHint(agent = {}) {
+  const rawEndpoint = String(
+    agent?.endpoint
+    || agent?.baseUrl
+    || agent?.auth?.settings?.endpoint
+    || agent?.auth?.settings?.baseUrl
+    || "",
+  ).trim();
+  let endpointHost = "";
+  if (rawEndpoint) {
+    try {
+      const parsed = new URL(rawEndpoint);
+      endpointHost = String(parsed.host || parsed.hostname || "").trim();
+    } catch {
+      endpointHost = rawEndpoint
+        .replace(/^https?:\/\//i, "")
+        .split(/[/?#]/)[0]
+        .trim();
+    }
+  }
+  const deployment = String(
+    agent?.deployment
+    || agent?.auth?.settings?.deployment
+    || "",
+  ).trim();
+  const workspace = String(
+    agent?.workspace
+    || agent?.organization
+    || agent?.project
+    || agent?.auth?.settings?.workspace
+    || agent?.auth?.settings?.organization
+    || agent?.auth?.settings?.project
+    || "",
+  ).trim();
+  return [endpointHost, deployment, workspace].filter(Boolean).join(" · ");
+}
+
+function buildAgentSubtitle(agent = {}, providerEntry = null, options = {}) {
+  const providerLabel =
+    String(
+      providerEntry?.label
+      || agent?.providerLabel
+      || agent?.providerId
+      || agent?.provider
+      || "",
+    ).trim();
+  const modelLabel = String(
+    agent?.defaultModel
+    || agent?.modelCatalog?.defaultModel
+    || agent?.model
+    || "",
+  ).trim();
+  const apiStyleLabel = formatAgentApiStyleLabel(
+    agent?.apiStyle
+    || agent?.transportConfig?.apiStyle
+    || providerEntry?.transport?.apiStyle
+    || "",
+  );
+  const parts = [providerLabel, modelLabel, apiStyleLabel].filter(Boolean);
+  if (options?.includeRuntimeHint) {
+    const runtimeHint = buildAgentRuntimeHint(agent);
+    if (runtimeHint) parts.push(runtimeHint);
+  }
+  return parts.join(" · ");
+}
+
+function buildHarnessVisibleAgentInventory(executorFabric = {}, providerAgents = [], providerInventory = null) {
+  const providersBySelectionId = new Map(
+    providerAgents.map((entry) => [String(entry?.id || "").trim(), entry]).filter(([id]) => id),
+  );
+  const providersByProviderId = new Map();
+  for (const entry of providerAgents) {
+    const providerId = String(entry?.providerId || "").trim();
+    if (!providerId || providersByProviderId.has(providerId)) continue;
+    providersByProviderId.set(providerId, entry);
+  }
+  const providerInventoryById = new Map(
+    (providerInventory?.items || [])
+      .map((entry) => [String(entry?.providerId || "").trim(), entry])
+      .filter(([id]) => id),
+  );
+  const providerExecutorCounts = new Map();
+  for (const executorEntry of executorFabric?.executors || []) {
+    const providerId = String(executorEntry?.providerId || "").trim();
+    if (!providerId) continue;
+    providerExecutorCounts.set(providerId, (providerExecutorCounts.get(providerId) || 0) + 1);
+  }
+  return (executorFabric?.executors || [])
+    .filter((entry) => entry?.enabled !== false)
+    .map((entry) => {
+      const selectionId = String(entry?.id || "").trim();
+      const providerId = String(entry?.providerId || "").trim();
+      const runtimeEntry =
+        providersBySelectionId.get(selectionId)
+        || providersByProviderId.get(providerId)
+        || null;
+      const providerEntry = providerInventoryById.get(providerId) || null;
+      const runtimeModels = Array.isArray(runtimeEntry?.models)
+        ? runtimeEntry.models.map((model) => String(model || "").trim()).filter(Boolean)
+        : [];
+      const providerModels = Array.isArray(providerEntry?.modelCatalog?.models)
+        ? providerEntry.modelCatalog.models.map((model) => String(model?.id || model || "").trim()).filter(Boolean)
+        : [];
+      const executorModels = Array.isArray(entry?.models)
+        ? entry.models.map((model) => String(model || "").trim()).filter(Boolean)
+        : [];
+      const runtimeModelEntries = Array.isArray(runtimeEntry?.modelCatalog?.models)
+        ? runtimeEntry.modelCatalog.models
+        : [];
+      const providerModelEntries = Array.isArray(providerEntry?.modelCatalog?.models)
+        ? providerEntry.modelCatalog.models
+        : [];
+      const executorModelEntries = Array.isArray(entry?.modelEntries)
+        ? entry.modelEntries
+        : [];
+      const mergedModelEntries = (executorModelEntries.length > 0
+        ? executorModelEntries
+        : (runtimeModelEntries.length > 0 ? runtimeModelEntries : providerModelEntries)
+      ).map((model) => ({
+        id: String(model?.id || model || "").trim(),
+        label: String(model?.label || model?.name || model?.id || model || "").trim(),
+        apiStyle: String(model?.apiStyle || model?.transport?.apiStyle || entry?.apiStyle || runtimeEntry?.apiStyle || providerEntry?.transport?.apiStyle || "").trim() || null,
+        reasoningEffort: String(model?.reasoningEffort || model?.reasoning || "").trim() || null,
+        contextWindow: Number.isFinite(Number(model?.contextWindow)) ? Number(model.contextWindow) : null,
+        enabled: model?.enabled !== false,
+      })).filter((model) => model.id);
+      return {
+        ...(runtimeEntry || {}),
+        id: selectionId || providerId,
+        name: String(entry?.name || runtimeEntry?.name || providerEntry?.label || selectionId || providerId).trim(),
+        providerId: providerId || String(runtimeEntry?.providerId || "").trim() || null,
+        providerLabel: String(providerEntry?.label || runtimeEntry?.providerLabel || providerId || "").trim() || null,
+        apiStyle: entry?.apiStyle || runtimeEntry?.apiStyle || providerEntry?.transport?.apiStyle || null,
+        transportConfig: entry?.transport || runtimeEntry?.transportConfig || providerEntry?.transport || null,
+        source: entry?.source || runtimeEntry?.source || "configured",
+        enabled: entry?.enabled !== false,
+        available:
+          runtimeEntry?.available !== undefined
+            ? runtimeEntry.available
+            : (providerEntry?.auth?.canRun === true || providerEntry?.enabled !== false),
+        busy: runtimeEntry?.busy === true,
+        authMode: String(entry?.authMode || runtimeEntry?.auth?.preferredMode || providerEntry?.auth?.preferredMode || "").trim() || null,
+        defaultModel:
+          String(entry?.defaultModel || runtimeEntry?.defaultModel || providerEntry?.modelCatalog?.defaultModel || "").trim()
+          || null,
+        endpoint: String(entry?.endpoint || runtimeEntry?.endpoint || runtimeEntry?.auth?.settings?.endpoint || providerEntry?.auth?.settings?.endpoint || "").trim() || null,
+        baseUrl: String(entry?.baseUrl || runtimeEntry?.baseUrl || runtimeEntry?.auth?.settings?.baseUrl || providerEntry?.auth?.settings?.baseUrl || "").trim() || null,
+        deployment: String(entry?.deployment || runtimeEntry?.deployment || runtimeEntry?.auth?.settings?.deployment || providerEntry?.auth?.settings?.deployment || "").trim() || null,
+        apiVersion: String(entry?.apiVersion || runtimeEntry?.apiVersion || runtimeEntry?.auth?.settings?.apiVersion || providerEntry?.auth?.settings?.apiVersion || "").trim() || null,
+        workspace: String(entry?.workspace || runtimeEntry?.workspace || runtimeEntry?.auth?.settings?.workspace || providerEntry?.auth?.settings?.workspace || "").trim() || null,
+        organization: String(entry?.organization || runtimeEntry?.organization || runtimeEntry?.auth?.settings?.organization || providerEntry?.auth?.settings?.organization || "").trim() || null,
+        project: String(entry?.project || runtimeEntry?.project || runtimeEntry?.auth?.settings?.project || providerEntry?.auth?.settings?.project || "").trim() || null,
+        weight: Number.isFinite(Number(entry?.weight)) ? Number(entry.weight) : 0,
+        models: executorModels.length > 0 ? executorModels : (runtimeModels.length > 0 ? runtimeModels : providerModels),
+        modelEntries: mergedModelEntries,
+        capabilities: normalizeAgentCapabilitiesList(runtimeEntry?.capabilities || providerEntry?.capabilities),
+        auth: runtimeEntry?.auth || providerEntry?.auth || null,
+        modelCatalog: runtimeEntry?.modelCatalog || providerEntry?.modelCatalog || null,
+        runtimeOwnership:
+          String(runtimeEntry?.runtimeOwnership || providerEntry?.runtimeOwnership || "").trim()
+          || null,
+        runtimeLabel:
+          String(runtimeEntry?.runtimeLabel || providerEntry?.runtimeLabel || "").trim()
+          || null,
+        runtimeKind: "harness",
+        subtitle: buildAgentSubtitle({
+          ...runtimeEntry,
+          ...entry,
+          defaultModel:
+            String(entry?.defaultModel || runtimeEntry?.defaultModel || providerEntry?.modelCatalog?.defaultModel || "").trim()
+            || null,
+          apiStyle: entry?.apiStyle || runtimeEntry?.apiStyle || providerEntry?.transport?.apiStyle || null,
+        }, providerEntry, {
+          includeRuntimeHint: (providerExecutorCounts.get(providerId) || 0) > 1,
+        }),
+      };
+    });
 }
 
 function buildEnvOverrideMapForConfigEditor(schema) {
@@ -9802,7 +11614,17 @@ function buildManualFlowGuardrailsInput(template, templateId, formValues = {}, e
 
 function buildGuardrailsSnapshot(targetWorkspaceDir) {
   const workspaceContext = resolveActiveWorkspaceExecutionContext();
-  const workspaceDir = targetWorkspaceDir || String(workspaceContext?.workspaceDir || repoRoot).trim() || repoRoot;
+  const explicitWorkspaceDirHint = normalizeCandidatePath(
+    process.env.CODEX_MONITOR_HOME
+    || process.env.CODEX_MONITOR_DIR
+    || process.env.BOSUN_HOME
+    || process.env.BOSUN_DIR,
+  );
+  const workspaceDir =
+    targetWorkspaceDir
+    || (!String(workspaceContext?.workspaceId || "").trim() && explicitWorkspaceDirHint)
+    || String(workspaceContext?.workspaceDir || repoRoot).trim()
+    || repoRoot;
   const { configData } = readConfigDocument();
   const guardrailsPolicy = ensureGuardrailsPolicy(workspaceDir);
   const hooks = buildHookGuardrailsOverview(workspaceDir);
@@ -9914,19 +11736,19 @@ function validateConfigSchemaChanges(changes) {
     const kanbanBackend = String(candidate?.kanban?.backend || "")
       .trim()
       .toLowerCase();
-    if (kanbanBackend === "gnap") {
-      const gnap = candidate?.kanban?.gnap && typeof candidate.kanban.gnap === "object"
-        ? candidate.kanban.gnap
+    if (kanbanBackend === "repo-mirror") {
+      const repoMirror = candidate?.kanban?.repoMirror && typeof candidate.kanban.repoMirror === "object"
+        ? candidate.kanban.repoMirror
         : {};
       const fieldErrors = {};
-      if (gnap.enabled !== true) {
-        fieldErrors.GNAP_ENABLED = "GNAP must be enabled before selecting the GNAP backend.";
+      if (repoMirror.enabled !== true) {
+        fieldErrors.REPO_MIRROR_ENABLED = "RepoMirror must be enabled before selecting the RepoMirror backend.";
       }
-      if (!String(gnap.repoPath || "").trim()) {
-        fieldErrors.GNAP_REPO_PATH = "GNAP repo path is required when the GNAP backend is selected.";
+      if (!String(repoMirror.repoPath || "").trim()) {
+        fieldErrors.REPO_MIRROR_REPO_PATH = "RepoMirror repo path is required when the RepoMirror backend is selected.";
       }
-      if (String(gnap.syncMode || "projection").trim().toLowerCase() !== "projection") {
-        fieldErrors.GNAP_SYNC_MODE = "Only projection sync mode is supported for the GNAP backend.";
+      if (String(repoMirror.syncMode || "projection").trim().toLowerCase() !== "projection") {
+        fieldErrors.REPO_MIRROR_SYNC_MODE = "Only projection sync mode is supported for the RepoMirror backend.";
       }
       if (Object.keys(fieldErrors).length > 0) {
         return fieldErrors;
@@ -10009,6 +11831,10 @@ function shouldHideSessionFromDefaultList(session) {
       : {};
   const normalizedVisibility = String(metadata.visibility || "").trim().toLowerCase();
   const normalizedSource = String(metadata.source || "").trim().toLowerCase();
+  const normalizedType = String(session.type || session.sessionType || metadata.type || "").trim().toLowerCase();
+  const normalizedWorkspaceDir = normalizeCandidatePath(session.workspaceDir || metadata.workspaceDir);
+  const normalizedWorkspaceRoot = normalizeCandidatePath(session.workspaceRoot || metadata.workspaceRoot);
+  const normalizedRepoRoot = normalizeCandidatePath(repoRoot);
   if (
     metadata.hiddenInLists === true
     || metadata.hidden === true
@@ -10023,6 +11849,12 @@ function shouldHideSessionFromDefaultList(session) {
     session.title,
     session.taskTitle,
   ];
+  const hasGeneratedCopilotIdentifier = identifiers.some((value) =>
+    /^(?:Ask about workflow run|Fix failed workflow run|Ask Bosun about node)\b/i.test(
+      String(value || "").trim(),
+    )
+  );
+  if (hasGeneratedCopilotIdentifier) return true;
   const internalTransportSession =
     normalizedSource === "voice-http"
     || normalizedSource === "voice-http-tool"
@@ -10033,7 +11865,129 @@ function shouldHideSessionFromDefaultList(session) {
       )
     );
   if (internalTransportSession) return true;
-  return identifiers.some((value) => /^smoke(?:-vision)?-/i.test(String(value || "").trim()));
+  const hasSmokeIdentifier = identifiers.some((value) => /^smoke(?:-vision)?-/i.test(String(value || "").trim()));
+  if (hasSmokeIdentifier) return true;
+  const hasSyntheticHistoricIdentifier = identifiers.some((value) =>
+    /^(?:hist(?:-live)?-\d+)$/i.test(String(value || "").trim()),
+  );
+  if (hasSyntheticHistoricIdentifier) return true;
+  const normalizedWorkspaceId = String(session.workspaceId || metadata.workspaceId || "").trim();
+  const hasWorkspaceAssignment =
+    Boolean(normalizedWorkspaceId)
+    || Boolean(normalizedWorkspaceDir)
+    || Boolean(normalizedWorkspaceRoot);
+  const detachedManagedWorkspaceSession =
+    Boolean(normalizedWorkspaceDir)
+    && Boolean(normalizedWorkspaceRoot)
+    && normalizedWorkspaceDir !== normalizedWorkspaceRoot
+    && !isPathWithinPath(normalizedWorkspaceRoot, normalizedWorkspaceDir);
+  const tempWorkspacePattern = /(?:\\|\/)(?:temp|tmp)(?:\\|\/)/i;
+  const looksTemporaryWorkspace =
+    tempWorkspacePattern.test(normalizedWorkspaceDir)
+    || tempWorkspacePattern.test(normalizedWorkspaceRoot);
+  const normalizedLifecycleStatus = String(
+    session.lifecycleStatus || session.status || "",
+  ).trim().toLowerCase();
+  if (normalizedLifecycleStatus === "archived") return true;
+  const lifecycleLooksActive =
+    normalizedLifecycleStatus === "active"
+    || normalizedLifecycleStatus === "idle"
+    || normalizedLifecycleStatus === "stalled"
+    || normalizedLifecycleStatus === "recent";
+  const normalizedRuntimeState = String(
+    session.runtimeState || session.runtimeStatus || "",
+  ).trim().toLowerCase();
+  const normalizedPreview = String(
+    session.preview || session.lastMessage || metadata.preview || "",
+  ).trim();
+  const totalEvents = Number(session.totalEvents || session.eventCount || 0);
+  const turnCount = Number(session.turnCount || 0);
+  const nullishFixtureIdentifier = identifiers.some((value) =>
+    /^(?:null|undefined|\(null\)|session|null session)$/i.test(String(value || "").trim()),
+  );
+  if (nullishFixtureIdentifier && !hasWorkspaceAssignment) return true;
+  const createdAtMs = Date.parse(
+    String(
+      session.createdAt
+      || session.startedAt
+      || session.lastActiveAt
+      || session.runtimeUpdatedAt
+      || "",
+    ),
+  );
+  const staleBlankPrimaryWithoutWorkspacePaths =
+    ["primary", "manual", "chat"].includes(normalizedType) &&
+    !normalizedWorkspaceDir &&
+    !normalizedWorkspaceRoot &&
+    turnCount <= 0 &&
+    totalEvents <= 0 &&
+    !normalizedPreview &&
+    Number.isFinite(createdAtMs) &&
+    (Date.now() - createdAtMs) >= (5 * 60 * 1000);
+  if (staleBlankPrimaryWithoutWorkspacePaths) return true;
+  const staleEmptyPrimaryAgeMs = 30 * 60 * 1000;
+  const staleEmptyPrimarySession =
+    ["primary", "manual", "chat"].includes(normalizedType) &&
+    lifecycleLooksActive &&
+    (normalizedRuntimeState === ""
+      || normalizedRuntimeState === "idle"
+      || normalizedRuntimeState === "stalled"
+      || normalizedRuntimeState === "recent") &&
+    turnCount <= 0 &&
+    totalEvents <= 0 &&
+    !normalizedPreview &&
+    Number.isFinite(createdAtMs) &&
+    (Date.now() - createdAtMs) >= staleEmptyPrimaryAgeMs;
+  if (staleEmptyPrimarySession) return true;
+  const staleDetachedPrimaryShell =
+    detachedManagedWorkspaceSession &&
+    normalizedRepoRoot &&
+    normalizedWorkspaceDir === normalizedRepoRoot &&
+    ["primary", "manual", "chat"].includes(normalizedType) &&
+    Number.isFinite(createdAtMs) &&
+    (Date.now() - createdAtMs) >= (5 * 60 * 1000) &&
+    identifiers.some((value) => /^primary-\d+-[a-z0-9]+$/i.test(String(value || "").trim()));
+  if (staleDetachedPrimaryShell) return true;
+  const syntheticChatFixtureIdentifier = identifiers.some((value) =>
+    /^(?:chat-(?:idle|stalled|runtime|replay|\d+))$/i.test(String(value || "").trim()),
+  );
+  if (
+    syntheticChatFixtureIdentifier &&
+    !normalizedWorkspaceId &&
+    !normalizedWorkspaceDir &&
+    !normalizedWorkspaceRoot
+  ) {
+    return true;
+  }
+  const syntheticListLeakIdentifier = identifiers.some((value) =>
+    /^(?:primary-stale-empty-hidden|primary-stale-empty-[a-z0-9-]+|meeting-(?:1|vision|msg|transcript|archived|stop))$/i.test(
+      String(value || "").trim(),
+    ),
+  );
+  if (
+    syntheticListLeakIdentifier &&
+    !normalizedWorkspaceId &&
+    !normalizedWorkspaceDir &&
+    !normalizedWorkspaceRoot
+  ) {
+    return true;
+  }
+  const hasTemplatePlaceholderIdentifier = identifiers.some((value) =>
+    /\{\{[^}]+\}\}/.test(String(value || "").trim()),
+  );
+  if (hasTemplatePlaceholderIdentifier) return true;
+  if (!looksTemporaryWorkspace) return false;
+  // Sessions with an explicit workspace assignment are intentional, not leaked fixtures.
+  if (normalizedWorkspaceId) return false;
+  const fixturePattern = /^(?:meeting-(?:1|vision)|nonexistent|session-linked-task-1|workspace-scope-test(?:-.+)?|task-\d+(?:-[a-z0-9]+)?)$/i;
+  const hasFixtureIdentifier = identifiers.some((value) => fixturePattern.test(String(value || "").trim()));
+  const looksLikeSyntheticType =
+    normalizedType.includes("scope-test")
+    || normalizedType === "workspace-scope-test";
+  const syntheticTempSource =
+    normalizedSource === "workflow-meeting"
+    || identifiers.some((value) => /workflow linked task/i.test(String(value || "")));
+  return hasFixtureIdentifier || looksLikeSyntheticType || syntheticTempSource;
 }
 
 function buildInternalVoiceSessionMetadata(base = {}, source = "voice-http") {
@@ -10050,6 +12004,14 @@ function buildInternalVoiceSessionMetadata(base = {}, source = "voice-http") {
   };
 }
 
+function pruneUiRateLimitBuckets(now = Date.now()) {
+  for (const [key, value] of _rateLimitMap) {
+    if (now - Number(value?.windowStart || 0) > 120_000) {
+      _rateLimitMap.delete(key);
+    }
+  }
+}
+
 function checkRateLimit(req, maxPerMin = 30, scope = "global") {
   const keyParts = [
     scope,
@@ -10057,6 +12019,7 @@ function checkRateLimit(req, maxPerMin = 30, scope = "global") {
   ];
   const key = keyParts.join(":");
   const now = Date.now();
+  pruneUiRateLimitBuckets(now);
   let bucket = _rateLimitMap.get(key);
   if (!bucket || now - bucket.windowStart > 60000) {
     bucket = { windowStart: now, count: 0 };
@@ -10066,13 +12029,6 @@ function checkRateLimit(req, maxPerMin = 30, scope = "global") {
   if (bucket.count > maxPerMin) return false;
   return true;
 }
-// Cleanup stale entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of _rateLimitMap) {
-    if (now - v.windowStart > 120000) _rateLimitMap.delete(k);
-  }
-}, 300000).unref();
 
 // ── Session token (auto-generated per startup for browser access) ────
 let sessionToken = "";
@@ -11771,24 +13727,44 @@ function isStackLikeErrorText(value) {
   return (value.includes("\n") && lower.includes(" at ")) || lower.includes("error:\n    at ");
 }
 
-function scrubStackTraces(payload) {
+function scrubStackTraces(payload, options = {}) {
+  const depth = Number.isFinite(options.depth) ? options.depth : 0;
+  const maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 12;
+  const seen = options.seen instanceof WeakSet ? options.seen : new WeakSet();
   if (payload == null) return payload;
   if (payload instanceof Error) {
     const safeMessage = String(payload.message || "Internal server error");
-    return scrubStackTraces({ error: safeMessage });
+    return scrubStackTraces({ error: safeMessage }, { depth: depth + 1, maxDepth, seen });
   }
   if (typeof payload === "string") {
     return isStackLikeErrorText(payload) ? "Internal server error" : payload;
   }
-  if (Array.isArray(payload)) return payload.map((item) => scrubStackTraces(item));
-  if (typeof payload !== "object") return payload;
-  const out = {};
-  for (const [key, value] of Object.entries(payload)) {
-    const keyLower = key.toLowerCase();
-    if (keyLower === "stack") continue;
-    out[key] = scrubStackTraces(value);
+  if (depth >= maxDepth) return "[Truncated]";
+  if (Array.isArray(payload)) {
+    return payload.map((item) => scrubStackTraces(item, {
+      depth: depth + 1,
+      maxDepth,
+      seen,
+    }));
   }
-  return out;
+  if (typeof payload !== "object") return payload;
+  if (seen.has(payload)) return "[Circular]";
+  seen.add(payload);
+  const out = {};
+  try {
+    for (const [key, value] of Object.entries(payload)) {
+      const keyLower = key.toLowerCase();
+      if (keyLower === "stack") continue;
+      out[key] = scrubStackTraces(value, {
+        depth: depth + 1,
+        maxDepth,
+        seen,
+      });
+    }
+    return out;
+  } finally {
+    seen.delete(payload);
+  }
 }
 function normalizeJsonResponsePayload(payload) {
   return makeJsonSafe(scrubStackTraces(payload), { maxDepth: 12 });
@@ -12051,6 +14027,10 @@ function normalizeCanStartResult(result, { override = false } = {}) {
     blockingEpicIds,
     raw: makeJsonSafe(raw),
   };
+}
+
+export function _testNormalizeCanStartResult(result, options = {}) {
+  return normalizeCanStartResult(result, options);
 }
 
 function normalizeDependencyIds(task = {}) {
@@ -12448,7 +14428,7 @@ async function listAllTasksForApi(adapter = null) {
   const fallbackAdapter = adapter || getKanbanAdapter();
   if (typeof fallbackAdapter?.listTasks === "function") {
     try {
-      let projectId = activeProjectId.value || "";
+      let projectId = "";
       if (!projectId && typeof fallbackAdapter?.listProjects === "function") {
         const projects = await fallbackAdapter.listProjects();
         projectId = projects?.[0]?.id || projects?.[0]?.project_id || "";
@@ -13258,6 +15238,39 @@ function getHeaderString(value) {
   return String(value || "");
 }
 
+function getRequestAuthority(req, fallback = "localhost") {
+  const forwardedHost = getHeaderString(req?.headers?.["x-forwarded-host"]).trim();
+  if (forwardedHost) return forwardedHost;
+  const authority = getHeaderString(req?.headers?.host || req?.headers?.[":authority"]).trim();
+  return authority || fallback;
+}
+
+function getRequestProtocol(req, fallback = null) {
+  const forwardedProto = getHeaderString(req?.headers?.["x-forwarded-proto"]).trim().toLowerCase();
+  if (forwardedProto === "https" || forwardedProto === "http") return forwardedProto;
+  const directProto = getHeaderString(req?.headers?.[":scheme"]).trim().toLowerCase();
+  if (directProto === "https" || directProto === "http") return directProto;
+  return fallback || (uiServerTls ? "https" : "http");
+}
+
+function getRequestBaseUrl(req, fallbackAuthority = "localhost") {
+  return `${getRequestProtocol(req, "http")}://${getRequestAuthority(req, fallbackAuthority)}`;
+}
+
+function isUiHttp2Disabled() {
+  return ["1", "true", "yes"].includes(
+    String(process.env.BOSUN_UI_HTTP2_DISABLE || "").toLowerCase(),
+  );
+}
+
+function getUiHttp2MaxStreams() {
+  const parsed = Number.parseInt(String(process.env.BOSUN_UI_HTTP2_MAX_STREAMS || ""), 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.max(16, parsed);
+  }
+  return DEFAULT_UI_HTTP2_MAX_STREAMS;
+}
+
 function normalizeRemoteAddress(raw) {
   const value = String(raw || "").trim().toLowerCase();
   if (!value) return "";
@@ -13294,7 +15307,7 @@ function isSameMachineRequest(req) {
 }
 
 function shouldAllowLocalSessionBootstrap(req, url) {
-  if (!parseBooleanEnv(process.env.BOSUN_UI_LOCAL_BOOTSTRAP, false)) return false;
+  if (!parseBooleanEnv(process.env.BOSUN_UI_LOCAL_BOOTSTRAP, true)) return false;
   if (isAllowUnsafe()) return false;
   if (String(req?.method || "").toUpperCase() !== "GET") return false;
   if (!isSameMachineRequest(req)) return false;
@@ -13611,6 +15624,72 @@ function buildCurrentTuiMonitorStats() {
   });
 }
 
+function buildDurableRuntimeSurface(monitor = null) {
+  const runtimeStats = getRuntimeStats() || {};
+  const currentMonitor = monitor && typeof monitor === "object"
+    ? monitor
+    : buildCurrentTuiMonitorStats();
+  const monitorSessions = Array.isArray(currentMonitor?.sessions) ? currentMonitor.sessions : [];
+  const activeSessionCount = monitorSessions.filter((entry) => entry?.live === true).length;
+  const completedSessionCount = Number(runtimeStats?.sessionCount || 0);
+  const totalSessionCount = activeSessionCount + completedSessionCount;
+  const liveBuckets = {};
+
+  for (const session of monitorSessions) {
+    const state = String(
+      session?.runtimeHealth?.state
+      || session?.status
+      || session?.state
+      || "",
+    ).trim().toLowerCase();
+    if (!state) continue;
+    liveBuckets[state] = Number(liveBuckets[state] || 0) + 1;
+  }
+
+  const contextSummary = runtimeStats?.contextSummary && typeof runtimeStats.contextSummary === "object"
+    ? runtimeStats.contextSummary
+    : {};
+
+  return {
+    activeSessionCount,
+    completedSessionCount,
+    totalSessionCount,
+    sessionHealth: {
+      live: activeSessionCount,
+      completed: completedSessionCount,
+      total: totalSessionCount,
+      ...((runtimeStats?.healthBuckets && typeof runtimeStats.healthBuckets === "object")
+        ? runtimeStats.healthBuckets
+        : {}),
+      liveBuckets,
+    },
+    context: {
+      liveSessionCount: activeSessionCount,
+      completedSessionCount,
+      sessionsNearContextLimit: Number(contextSummary.sessionsNearLimit || 0),
+      sessionsHighContextPressure: Number(contextSummary.sessionsHighPressure || 0),
+      maxContextUsagePercent: Number.isFinite(Number(contextSummary.maxUsagePercent))
+        ? Number(contextSummary.maxUsagePercent)
+        : null,
+      avgContextUsagePercent: Number.isFinite(Number(contextSummary.avgUsagePercent))
+        ? Number(contextSummary.avgUsagePercent)
+        : null,
+    },
+    toolSummary: runtimeStats?.toolSummary && typeof runtimeStats.toolSummary === "object"
+      ? runtimeStats.toolSummary
+      : {
+          toolCalls: 0,
+          toolResults: 0,
+          errors: 0,
+          editOps: 0,
+          commitOps: 0,
+          sessionsWithEdits: 0,
+          sessionsWithCommits: 0,
+          topTools: [],
+        },
+  };
+}
+
 function isTerminalSharedAttemptStatus(status) {
   const normalized = String(status || "").trim().toLowerCase();
   return normalized === "complete"
@@ -13627,6 +15706,64 @@ function summarizeTaskStatusCounts(tasks = []) {
     counts[key] = (counts[key] || 0) + 1;
   }
   return counts;
+}
+
+function compactWorkflowRunForTaskList(run = {}) {
+  if (!run || typeof run !== "object") return null;
+  const compact = {};
+  for (const key of ["id", "runId", "workflowId", "workflowName", "status", "summary", "startedAt", "endedAt", "updatedAt", "taskId"]) {
+    if (run[key] !== undefined) compact[key] = run[key];
+  }
+  return Object.keys(compact).length > 0 ? compact : null;
+}
+
+function compactTaskMetaForList(meta = {}) {
+  if (!meta || typeof meta !== "object") return {};
+  const compact = {};
+  for (const key of ["runtimeSnapshot", "blockedContext", "lifetimeTotals", "prLinkage", "workspace", "repository", "repositories", "baseBranch", "branchName", "projectId"]) {
+    if (meta[key] !== undefined) compact[key] = meta[key];
+  }
+  return compact;
+}
+
+function compactTaskListEntry(task = {}) {
+  if (!task || typeof task !== "object") return task;
+  const compact = { ...task };
+  const timeline = Array.isArray(compact.timeline) ? compact.timeline : [];
+  const statusHistory = Array.isArray(compact.statusHistory) ? compact.statusHistory : [];
+  const workflowRuns = Array.isArray(compact.workflowRuns) ? compact.workflowRuns : [];
+  compact.timelineCount = timeline.length;
+  compact.statusHistoryCount = statusHistory.length;
+  compact.workflowRunCount = workflowRuns.length;
+  compact.timeline = timeline.slice(-3);
+  compact.statusHistory = statusHistory.slice(-6);
+  compact.workflowRuns = workflowRuns
+    .slice(-3)
+    .map((run) => compactWorkflowRunForTaskList(run))
+    .filter(Boolean);
+  compact.turns = Array.isArray(compact.turns)
+    ? compact.turns.slice(-6).map((turn) => ({ ...turn }))
+    : [];
+  if (compact.meta && typeof compact.meta === "object") {
+    if (compact.canStart == null && compact.meta.canStart !== undefined) {
+      compact.canStart = compact.meta.canStart;
+    }
+    if (compact.runtimeSnapshot == null && compact.meta.runtimeSnapshot !== undefined) {
+      compact.runtimeSnapshot = compact.meta.runtimeSnapshot;
+    }
+    if (compact.blockedContext == null && compact.meta.blockedContext !== undefined) {
+      compact.blockedContext = compact.meta.blockedContext;
+    }
+    if (compact.diagnostics == null && compact.meta.diagnostics !== undefined) {
+      compact.diagnostics = compact.meta.diagnostics;
+    }
+    if (compact.lifetimeTotals == null && compact.meta.lifetimeTotals !== undefined) {
+      compact.lifetimeTotals = compact.meta.lifetimeTotals;
+    }
+    compact.meta = compactTaskMetaForList(compact.meta);
+    if (Object.keys(compact.meta).length === 0) delete compact.meta;
+  }
+  return compact;
 }
 
 function summarizeExecutionJournalCoverage(tasks = [], options = {}) {
@@ -14006,13 +16143,17 @@ function buildTaskRunSummary(steps = [], fallback = "Run recorded.") {
 }
 
 async function buildReplayableTaskRuns(task, tracker = null, limit = 5) {
-  const sessionIds = collectTaskLinkedSessionIds(task, tracker);
   const { value: storedRunsRaw } = await callTaskStoreFunction(TASK_STORE_RUN_EXPORTS.list, [task?.id]);
   const storedRuns = storedRunsRaw;
   const runs = Array.isArray(storedRuns) ? storedRuns.map((run) => ({
     ...run,
     summary: run.summary || buildTaskRunSummary(run.steps, run.status === "failed" ? "Run failed." : "Run completed."),
   })) : [];
+  if (runs.length >= Math.max(1, Number(limit) || 5) && collectTaskDiffSessionIds(task).length === 0) {
+    return runs.slice(0, Math.max(1, Number(limit) || 5));
+  }
+
+  const sessionIds = collectTaskLinkedSessionIds(task, tracker, { includePersisted: false });
   const seenRunIds = new Set(runs.map((entry) => String(entry?.runId || "")).filter(Boolean));
   for (const sessionId of sessionIds) {
     const session = tracker?.getSession?.(sessionId);
@@ -14342,6 +16483,41 @@ function attachWorkflowEngineLiveBridge(engine) {
   workflowEngineListenerCleanup.set(engine, () => {
     for (const unsub of unsubs) unsub();
   });
+  workflowBoundEngines.add(engine);
+}
+
+function attachTaskWorkflowTraceHook(engine) {
+  if (!engine || typeof engine.registerTaskTraceHook !== "function" || workflowTaskTraceHookCleanup.has(engine)) {
+    return;
+  }
+  const cleanup = engine.registerTaskTraceHook((event) => {
+    handleTaskWorkflowTraceEvent(event);
+  });
+  workflowTaskTraceHookCleanup.set(engine, typeof cleanup === "function" ? cleanup : () => {});
+  workflowBoundEngines.add(engine);
+}
+
+function cleanupWorkflowEngineBindings(engine) {
+  if (!engine) return;
+  try {
+    workflowEngineListenerCleanup.get(engine)?.();
+  } catch {
+    // best effort
+  }
+  workflowEngineListenerCleanup.delete(engine);
+  try {
+    workflowTaskTraceHookCleanup.get(engine)?.();
+  } catch {
+    // best effort
+  }
+  workflowTaskTraceHookCleanup.delete(engine);
+  workflowBoundEngines.delete(engine);
+}
+
+function cleanupAllWorkflowEngineBindings() {
+  for (const engine of [...workflowBoundEngines]) {
+    cleanupWorkflowEngineBindings(engine);
+  }
 }
 
 function broadcastUiEvent(channels, type, payload = {}) {
@@ -15234,7 +17410,7 @@ async function handleGitHubOAuthCallback(req, res) {
     return;
   }
 
-  const urlObj = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const urlObj = new URL(req.url || "/", getRequestBaseUrl(req, "localhost"));
   const code = urlObj.searchParams.get("code") || "";
   const installationId = urlObj.searchParams.get("installation_id") || "";
   const setupAction = urlObj.searchParams.get("setup_action") || "";
@@ -16226,6 +18402,24 @@ function getEffectiveRepoRoot() {
 }
 
 async function readCompletedSessionEntries(maxLines = 100_000) {
+  const explicitTestCacheDir = normalizeCandidatePath(process.env.BOSUN_TEST_CACHE_DIR);
+  if (explicitTestCacheDir && !normalizeCandidatePath(process.env.REPO_ROOT)) {
+    const sessionLogPath = resolve(explicitTestCacheDir, "session-accumulator.jsonl");
+    const entries = await readJsonlTail(sessionLogPath, maxLines, 50_000_000);
+    return {
+      sessionLogPath,
+      entries: entries.filter((entry) => {
+        if (String(entry?.type || "completed_session") !== "completed_session") return false;
+        const dur = Number(entry?.durationMs || 0);
+        const tok = Number(entry?.tokenCount || 0);
+        if (tok <= 0 && dur <= 100) return false;
+        const taskId = String(entry?.taskId || "");
+        if (/^\{\{.*\}\}$/.test(taskId)) return false;
+        return true;
+      }),
+    };
+  }
+
   // Check multiple candidate paths — repoRoot may be the monorepo root
   // while data lives under the bosun subdirectory.
   // When REPO_ROOT is not explicitly set, OR when repoRoot resolves to a
@@ -16391,6 +18585,16 @@ function isEffectiveShreddingEvent(event) {
   const compressedChars = numberOrZero(event?.compressedChars);
   const savedChars = numberOrZero(event?.savedChars);
   return savedChars > 0 && originalChars > compressedChars;
+}
+
+function normalizeShreddingSessionTypeLabel(rawType) {
+  const normalized = String(rawType || "").trim().toLowerCase();
+  return normalized || "unspecified";
+}
+
+function normalizeShreddingDecisionLabel(rawDecision) {
+  const normalized = String(rawDecision || "").trim().toLowerCase();
+  return normalized || "unknown";
 }
 
 // ── Usage Analytics ─────────────────────────────────────────────────────────
@@ -16580,7 +18784,13 @@ async function buildUsageAnalytics(days) {
 function resolveAgentWorkLogDir() {
   const explicitTestCacheDir = normalizeCandidatePath(process.env.BOSUN_TEST_CACHE_DIR);
   if (explicitTestCacheDir && !normalizeCandidatePath(process.env.REPO_ROOT)) {
-    return resolve(explicitTestCacheDir, "agent-work-logs");
+    const explicitLogDir = resolve(explicitTestCacheDir, "agent-work-logs");
+    try {
+      mkdirSync(explicitLogDir, { recursive: true });
+    } catch {
+      // Best effort: tests should still prefer the sandbox path even if creation fails.
+    }
+    return explicitLogDir;
   }
   // When REPO_ROOT is not explicitly set, OR when repoRoot resolves to a
   // workspace clone (e.g. .bosun/workspaces/<ws>/bosun), the module-relative
@@ -17052,6 +19262,27 @@ async function resolveSessionWorktreePath(session) {
   }
 }
 
+async function revealPathInShell(targetPath) {
+  const normalized = normalizeCandidatePath(targetPath);
+  if (!normalized || !existsSync(normalized)) return false;
+  try {
+    const command =
+      process.platform === "win32"
+        ? "explorer.exe"
+        : process.platform === "darwin"
+          ? "open"
+          : "xdg-open";
+    const child = spawn(command, [normalized], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref?.();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function resolveTaskLinkedWorktreePath(task, tracker = null) {
   const directCandidates = [
     task?.worktreePath,
@@ -17066,6 +19297,16 @@ async function resolveTaskLinkedWorktreePath(task, tracker = null) {
 
   for (const candidate of directCandidates) {
     if (existsSync(candidate)) return candidate;
+  }
+
+  const sessionTracker = tracker || getSessionTracker();
+  for (const sessionId of collectTaskLinkedSessionIds(task, sessionTracker, { includePersisted: false })) {
+    const session =
+      sessionTracker?.getSessionById?.(sessionId) ||
+      sessionTracker?.getSessionMessages?.(sessionId) ||
+      sessionTracker?.getSession?.(sessionId);
+    const worktreePath = await resolveSessionWorktreePath(session);
+    if (worktreePath && existsSync(worktreePath)) return worktreePath;
   }
 
   try {
@@ -17084,16 +19325,6 @@ async function resolveTaskLinkedWorktreePath(task, tracker = null) {
     if (matchedPath && existsSync(matchedPath)) return matchedPath;
   } catch {
     /* best effort */
-  }
-
-  const sessionTracker = tracker || getSessionTracker();
-  for (const sessionId of collectTaskLinkedSessionIds(task, sessionTracker)) {
-    const session =
-      sessionTracker?.getSessionById?.(sessionId) ||
-      sessionTracker?.getSessionMessages?.(sessionId) ||
-      sessionTracker?.getSession?.(sessionId);
-    const worktreePath = await resolveSessionWorktreePath(session);
-    if (worktreePath && existsSync(worktreePath)) return worktreePath;
   }
 
   return null;
@@ -17201,6 +19432,16 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path === "/api/project-sync/metrics" && req.method === "GET") {
+    jsonResponse(res, 200, {
+      ok: true,
+      data: {
+        webhook: getProjectSyncWebhookMetrics(),
+      },
+    });
+    return;
+  }
+
   const authResult = await requireAuth(req);
   if (!authResult?.ok) {
     jsonResponse(res, 401, {
@@ -17260,26 +19501,34 @@ async function handleApi(req, res, url) {
     return;
   }
   if (path === "/api/status") {
-    const cached = getCachedApiResponse("status", 2000);
-    if (cached) { jsonResponse(res, 200, cached); return; }
-    const workspaceContext = resolveActiveWorkspaceExecutionContext();
-    const serverState = await readServerStateSnapshot({
-      repoRoot: workspaceContext?.workspaceDir || repoRoot,
-      details: false,
+    const payload = await getOrComputeCachedApiResponse("status", 15000, async () => {
+      const workspaceContext = resolveActiveWorkspaceExecutionContext();
+      const [serverState, rawData] = await Promise.all([
+        readServerStateSnapshot({
+          repoRoot: workspaceContext?.workspaceDir || repoRoot,
+          details: false,
+        }),
+        readStatusSnapshot(),
+      ]);
+      const monitor = buildCurrentTuiMonitorStats();
+      const durableRuntime = buildDurableRuntimeSurface(monitor);
+      const harness = durableRuntime?.harness && typeof durableRuntime.harness === "object"
+        ? durableRuntime.harness
+        : buildHarnessOverview();
+      const data = serverState?.enabled === true
+        ? {
+            ...(rawData && typeof rawData === "object" ? rawData : {}),
+            ...durableRuntime,
+            serverState,
+            harness,
+          }
+        : {
+            ...((rawData && typeof rawData === "object") ? rawData : {}),
+            ...durableRuntime,
+            harness,
+          };
+      return { ok: true, data };
     });
-    const rawData = await readStatusSnapshot();
-    const data = serverState?.enabled === true
-      ? {
-          ...(rawData && typeof rawData === "object" ? rawData : {}),
-          serverState,
-          harness: buildHarnessOverview(),
-        }
-      : {
-          ...((rawData && typeof rawData === "object") ? rawData : {}),
-          harness: buildHarnessOverview(),
-        };
-    const payload = { ok: true, data };
-    setCachedApiResponse("status", payload);
     jsonResponse(res, 200, payload);
     return;
   }
@@ -17364,40 +19613,53 @@ async function handleApi(req, res, url) {
     const execStatus = executor?.getStatus?.() || null;
     const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false })
       || resolveActiveWorkspaceExecutionContext();
-    /* Augment with active workflow run counts so Fleet Overview reflects
-       real system load even when no agent subprocess slots are occupied */
-    let activeWorkflowRuns = 0;
-    let workflowRunDetails = [];
-    try {
-      const wfCtx = await getWorkflowRequestContext(url, { bootstrapTemplates: false });
-      if (wfCtx?.ok && wfCtx.engine) {
-        const runs = await Promise.resolve(wfCtx.engine.list?.() || []).catch(() => []);
-        const active = (Array.isArray(runs) ? runs : []).filter(
-          (r) => String(r?.status || "").toLowerCase() === "running"
-        );
-        activeWorkflowRuns = active.length;
-        workflowRunDetails = active.slice(0, 20).map((r) => ({
-          runId: r.id || r.runId,
-          workflowId: r.workflowId,
-          workflowName: r.workflowName || r.workflowId,
-          startedAt: r.startedAt,
-          activeNodeCount: r.activeNodeCount || 0,
-        }));
+    const workspaceCacheKey = String(
+      workspaceContext?.workspaceDir
+      || workspaceContext?.workspaceId
+      || "default",
+    ).trim().toLowerCase();
+    const payload = await getOrComputeCachedApiResponse(`executor:${workspaceCacheKey}`, 3000, async () => {
+      const workflowRoots = Array.from(new Set([
+        normalizeCandidatePath(workspaceContext?.workspaceDir),
+        normalizeCandidatePath(workspaceContext?.workspaceRoot),
+      ].filter(Boolean)));
+      if (workflowRoots.length === 0) {
+        workflowRoots.push(repoRoot);
       }
-    } catch {
-      // best-effort: executor data is still returned without workflow augmentation
-    }
-    const workspaceSummary = execStatus
-      ? buildWorkspaceExecutorSummary(execStatus, workspaceContext)
-      : null;
-    jsonResponse(res, 200, {
-      ok: true,
-      data: execStatus
-        ? { ...execStatus, workspaceSummary, activeWorkflowRuns, workflowRunDetails }
-        : null,
-      mode,
-      paused: executor?.isPaused?.() || false,
+      let workflowRunDetails = [];
+      for (const workflowRoot of workflowRoots) {
+        const nextDetails = readActiveWorkflowRunIndexEntries(getWorkflowStoragePaths(workflowRoot).runsDir);
+        if (nextDetails.length > 0) {
+          workflowRunDetails = nextDetails;
+          break;
+        }
+      }
+      const mergedSlots = mergeExecutorSlotsWithWorkflowRuns(execStatus, workflowRunDetails);
+      const mergedActiveSlots = mergedSlots.filter((slot) => {
+        const status = String(slot?.status || "").trim().toLowerCase();
+        return status === "running" || status === "busy";
+      }).length;
+      const activeWorkflowRuns = buildWorkflowOwnedExecutorSlots(workflowRunDetails).length;
+      const workspaceSummary = execStatus
+        ? buildWorkspaceExecutorSummary(execStatus, workspaceContext, workflowRunDetails)
+        : null;
+      return {
+        ok: true,
+        data: execStatus
+          ? {
+              ...execStatus,
+              activeSlots: Math.max(Number(execStatus?.activeSlots || 0) || 0, mergedActiveSlots),
+              slots: mergedSlots,
+              workspaceSummary,
+              activeWorkflowRuns,
+              workflowRunDetails: workflowRunDetails.slice(0, 20),
+            }
+          : null,
+        mode,
+        paused: executor?.isPaused?.() || false,
+      };
     });
+    jsonResponse(res, 200, payload);
     return;
   }
 
@@ -17436,6 +19698,7 @@ async function handleApi(req, res, url) {
       return;
     }
     executor.pause();
+    invalidateApiCache("executor:");
     jsonResponse(res, 200, { ok: true, paused: true });
     broadcastUiEvent(["executor", "overview", "agents"], "invalidate", {
       reason: "executor-paused",
@@ -17453,6 +19716,7 @@ async function handleApi(req, res, url) {
       return;
     }
     executor.resume();
+    invalidateApiCache("executor:");
     jsonResponse(res, 200, { ok: true, paused: false });
     broadcastUiEvent(["executor", "overview", "agents"], "invalidate", {
       reason: "executor-resumed",
@@ -17501,6 +19765,77 @@ async function handleApi(req, res, url) {
       const adapter = getKanbanAdapter();
       const projects = await adapter.listProjects();
       jsonResponse(res, 200, { ok: true, data: projects });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/project-summary" && req.method === "GET") {
+    try {
+      const workspaceContext =
+        resolveWorkspaceContextFromRequest(url, { allowAll: false })
+        || resolveActiveWorkspaceExecutionContext();
+      const injectedTaskStore = resolveInjectedTaskStoreApi();
+      let allTasks = [];
+      if (typeof injectedTaskStore?.listTasks === "function") {
+        let projectId = "";
+        if (!projectId && typeof injectedTaskStore?.listProjects === "function") {
+          const projects = await injectedTaskStore.listProjects();
+          projectId = projects?.[0]?.id || projects?.[0]?.project_id || "";
+        }
+        const scopedTasks = await injectedTaskStore.listTasks(projectId, {});
+        if (Array.isArray(scopedTasks) && scopedTasks.length > 0) {
+          allTasks = scopedTasks;
+        } else if (projectId) {
+          const unscopedTasks = await injectedTaskStore.listTasks("", {});
+          allTasks = Array.isArray(unscopedTasks) ? unscopedTasks : [];
+        }
+      }
+      if (!Array.isArray(allTasks) || allTasks.length === 0) {
+        allTasks = await listAllTasksForApi(getKanbanAdapter());
+      }
+      const workspaceDirFilter = normalizeCandidatePath(workspaceContext?.workspaceDir);
+      let workspaceFilter = String(url.searchParams.get("workspace") || "").trim().toLowerCase();
+      if (!workspaceFilter || workspaceFilter === "active") {
+        workspaceFilter = String(
+          getActiveManagedWorkspace(resolveUiConfigDir())?.id || workspaceContext?.workspaceId || "",
+        ).trim().toLowerCase();
+      }
+      if (workspaceFilter === "*" || workspaceFilter === "all") {
+        workspaceFilter = "";
+      }
+      const scopedTasks = (Array.isArray(allTasks) ? allTasks : []).filter((task) => {
+        const taskWorkspaceRaw = String(task?.workspace || task?.meta?.workspace || "").trim();
+        const taskWorkspace = taskWorkspaceRaw.toLowerCase();
+        if (workspaceFilter && taskWorkspace !== workspaceFilter) {
+          if (!taskWorkspaceRaw) {
+            const primaryId = resolvePrimaryWorkspaceId();
+            return !primaryId || workspaceFilter === primaryId;
+          }
+          const taskWorkspacePath = normalizeCandidatePath(taskWorkspaceRaw);
+          const workspaceMatchByPath =
+            Boolean(taskWorkspacePath) &&
+            Boolean(workspaceDirFilter) &&
+            taskWorkspacePath === workspaceDirFilter;
+          if (!workspaceMatchByPath) {
+            return false;
+          }
+        }
+        return true;
+      });
+      const completedCount = scopedTasks.filter((task) => {
+        const status = normalizeTaskStatusKey(task?.status);
+        return status === "done" || status === "merged";
+      }).length;
+      jsonResponse(res, 200, {
+        ok: true,
+        data: {
+          taskCount: scopedTasks.length,
+          completedCount,
+          workspaceId: String(workspaceContext?.workspaceId || workspaceFilter || "").trim() || null,
+        },
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -17828,6 +20163,8 @@ async function handleApi(req, res, url) {
     const cached = getCachedApiResponse(cacheKey, 3000);
     if (cached) { jsonResponse(res, 200, cached); return; }
     const status = url.searchParams.get("status") || "";
+    const sortBy = String(url.searchParams.get("sort") || "updated").trim().toLowerCase() || "updated";
+    const wantsFullPayload = /^(1|true|yes)$/i.test(String(url.searchParams.get("full") || "").trim());
     const projectId = url.searchParams.get("project") || "";
     const workspaceQueryRaw = String(url.searchParams.get("workspace") || "").trim();
     let workspaceFilter = workspaceQueryRaw.toLowerCase();
@@ -17843,10 +20180,19 @@ async function handleApi(req, res, url) {
     const repositoryFilter = (url.searchParams.get("repository") || "").trim().toLowerCase();
     const page = Math.max(0, Number(url.searchParams.get("page") || "0"));
     const pageSize = Math.min(
-      200,
-      Math.max(5, Number(url.searchParams.get("pageSize") || "15")),
+      500,
+      Math.max(5, Number(url.searchParams.get("pageSize") || url.searchParams.get("limit") || "15")),
     );
+    const includeStartGuards =
+      wantsFullPayload || parseApiIncludeFlag(url.searchParams.get("includeStartGuards"), true);
+    const includeBlockedDiagnostics =
+      wantsFullPayload || parseApiIncludeFlag(url.searchParams.get("includeBlockedDiagnostics"), true);
+    const includeWorkflowRuns =
+      wantsFullPayload || parseApiIncludeFlag(url.searchParams.get("includeWorkflowRuns"), true);
+    const includeSupervisorDiagnostics =
+      wantsFullPayload || parseApiIncludeFlag(url.searchParams.get("includeSupervisorDiagnostics"), true);
     try {
+      const workflowContext = await getWorkflowRequestContext(url, { bootstrapTemplates: false }).catch(() => null);
       const adapter = getKanbanAdapter();
       const projects = await adapter.listProjects();
       const activeProject =
@@ -17908,7 +20254,8 @@ async function handleApi(req, res, url) {
           .toLowerCase();
         return hay.includes(search);
       });
-      const total = filtered.length;
+      const sorted = sortTasksForApi(filtered, sortBy);
+      const total = sorted.length;
       const statusCounts = {
         draft: 0,
         backlog: 0,
@@ -17917,17 +20264,29 @@ async function handleApi(req, res, url) {
         inReview: 0,
         done: 0,
       };
-      for (const task of filtered) {
+      for (const task of sorted) {
         const bucket = mapTaskStatusToBoardColumn(task?.status);
         statusCounts[bucket] = (statusCounts[bucket] || 0) + 1;
       }
       const start = page * pageSize;
-      const slice = filtered.slice(start, start + pageSize);
+      const slice = sorted.slice(start, start + pageSize);
       const enriched = await applySharedStateToTasks(slice);
-      const withRuntime = enriched.map((task) => withTaskRuntimeSnapshot(task));
+      const withRuntime = await enrichTaskListRuntimeContext(enriched, {
+        adapter,
+        reqUrl: url,
+        workflowEngine: workflowContext?.ok ? workflowContext.engine : null,
+        workspaceDir: workspaceContext?.workspaceDir || repoRoot,
+        includeStartGuards,
+        includeBlockedDiagnostics,
+        includeWorkflowRuns,
+        includeSupervisorDiagnostics,
+      });
+      const responseTasks = wantsFullPayload
+        ? withRuntime
+        : withRuntime.map((task) => compactTaskListEntry(task));
       const responsePayload = {
         ok: true,
-        data: withRuntime,
+        data: responseTasks,
         page,
         pageSize,
         total,
@@ -19354,7 +21713,7 @@ async function handleApi(req, res, url) {
         jsonResponse(res, 400, {
           ok: false,
           error:
-            "Internal executor not enabled. Set EXECUTOR_MODE=internal or hybrid.",
+            "Internal executor not enabled. Set EXECUTOR_MODE=internal.",
         });
         return;
       }
@@ -19470,6 +21829,89 @@ async function handleApi(req, res, url) {
           taskId,
         },
       );
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/tasks/retry" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const taskId = String(body?.taskId || body?.id || "").trim();
+      if (!taskId) {
+        jsonResponse(res, 400, { ok: false, error: "taskId required" });
+        return;
+      }
+      const executor = uiDeps.getInternalExecutor?.() || null;
+      if (!executor || typeof executor.executeTask !== "function") {
+        jsonResponse(res, 400, { ok: false, error: "Internal executor not enabled." });
+        return;
+      }
+      const adapter = resolveInjectedTaskStoreApi() || getKanbanAdapter();
+      const task = await getTaskByIdForApi(taskId, adapter).catch(() => null);
+      if (!task) {
+        jsonResponse(res, 404, { ok: false, error: "Task not found." });
+        return;
+      }
+      resetExecutorTaskThrottleState(taskId, {});
+      _resolveEventBus()?.clearRetryQueueTask?.(taskId, "manual-retry-now");
+      await executor.executeTask(task, { force: true });
+      jsonResponse(res, 200, { ok: true, taskId });
+      broadcastUiEvent(["tasks", "overview", "executor", "agents"], "invalidate", {
+        reason: "task-retried",
+        taskId,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/tasks/unblock" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const taskId = String(body?.taskId || body?.id || "").trim();
+      if (!taskId) {
+        jsonResponse(res, 400, { ok: false, error: "taskId required" });
+        return;
+      }
+      const updated =
+        unblockInternalTask(taskId, {
+          status: body?.status || body?.targetStatus || "todo",
+          source: "api.tasks.unblock",
+        })
+        || await (async () => {
+          const adapter = resolveInjectedTaskStoreApi() || getKanbanAdapter();
+          if (typeof adapter?.updateTask !== "function") return null;
+          const task = await getTaskByIdForApi(taskId, adapter).catch(() => null);
+          if (!task) return null;
+          const nextMeta = task?.meta && typeof task.meta === "object"
+            ? { ...task.meta }
+            : {};
+          delete nextMeta.autoRecovery;
+          delete nextMeta.worktreeFailure;
+          delete nextMeta.blockedReason;
+          return adapter.updateTask(taskId, {
+            status: body?.status || body?.targetStatus || "todo",
+            cooldownUntil: null,
+            blockedReason: null,
+            meta: nextMeta,
+          });
+        })();
+      if (!updated) {
+        jsonResponse(res, 404, { ok: false, error: "Task not found." });
+        return;
+      }
+      resetExecutorTaskThrottleState(taskId, {});
+      jsonResponse(res, 200, {
+        ok: true,
+        data: withTaskRuntimeSnapshot(withTaskMetadataTopLevel(updated)),
+      });
+      broadcastUiEvent(["tasks", "overview", "executor", "agents"], "invalidate", {
+        reason: "task-unblocked",
+        taskId,
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -19989,6 +22431,26 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path.startsWith("/api/tasks/") && req.method === "DELETE") {
+    try {
+      const taskId = decodeURIComponent(path.slice("/api/tasks/".length));
+      if (!taskId || taskId.includes("/")) {
+        jsonResponse(res, 400, { ok: false, error: "taskId required" });
+        return;
+      }
+      const adapter = getKanbanAdapter();
+      const deleted = await adapter.deleteTask(taskId);
+      jsonResponse(res, 200, { ok: true, taskId, deleted: Boolean(deleted) });
+      broadcastUiEvent(["tasks", "overview"], "invalidate", {
+        reason: "task-deleted",
+        taskId,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/tasks/subtasks" && req.method === "GET") {
     try {
       const taskId = String(url.searchParams.get("taskId") || url.searchParams.get("id") || url.searchParams.get("parentTaskId") || "").trim();
@@ -20159,9 +22621,9 @@ async function handleApi(req, res, url) {
         jsonResponse(res, 400, { ok: false, error: "title is required" });
         return;
       }
-      const exec = uiDeps.execPrimaryPrompt;
+      const exec = await resolveBackgroundPromptExecutor({ uiDeps, harnessAgentService });
       if (typeof exec !== "function") {
-        jsonResponse(res, 503, { ok: false, error: "Primary agent not available. Start bosun first." });
+        jsonResponse(res, 503, { ok: false, error: "Background prompt executor not available. Start bosun first." });
         return;
       }
       const prompt =
@@ -20981,7 +23443,10 @@ async function handleApi(req, res, url) {
     try {
       const tagsRaw = (url.searchParams.get("tags") || "").trim();
       const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()) : undefined;
-      const catalog = listCatalog({ tags });
+      const stabilityTier = (url.searchParams.get("stabilityTier") || "").trim() || undefined;
+      const includeExperimental = ["1", "true", "yes", "on"]
+        .includes((url.searchParams.get("includeExperimental") || "").trim().toLowerCase());
+      const catalog = listCatalog({ tags, stabilityTier, includeExperimental });
       jsonResponse(res, 200, { ok: true, data: catalog });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -21169,16 +23634,6 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (path === "/api/threads") {
-    try {
-      const threads = getActiveThreads();
-      jsonResponse(res, 200, { ok: true, data: threads });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
   // ── Workspace Management API ──────────────────────────────────────────────
   if (path === "/api/workspaces") {
     try {
@@ -21232,6 +23687,7 @@ async function handleApi(req, res, url) {
         setActiveManagedWorkspace(configDir, wsId);
         invalidateApiCache("workspaces:");
         invalidateApiCache("workflows:");
+        invalidateApiCache("executor:");
         const active = getActiveManagedWorkspace(configDir);
         jsonResponse(res, 200, {
           ok: true,
@@ -21706,6 +24162,14 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path === "/api/retry-queue" && req.method === "GET") {
+    jsonResponse(res, 200, {
+      ok: true,
+      ...getRetryQueueSurfaceSnapshot(),
+    });
+    return;
+  }
+
   if (path === "/api/agent-logs") {
     try {
       const file = normalizeAgentLogName(url.searchParams.get("file"));
@@ -21770,7 +24234,9 @@ async function handleApi(req, res, url) {
       const logDir = resolveAgentWorkLogDir();
       const metricsPath = resolve(logDir, "agent-metrics.jsonl");
       const metrics = await readJsonlTail(metricsPath, 100_000, 50_000_000);
-      const summary = summarizeTelemetry(metrics, days) || {};
+      const summary = summarizeTelemetry(metrics, days)
+        || summarizeTelemetry(metrics, Number.POSITIVE_INFINITY)
+        || {};
 
       const runtimeStats = getRuntimeStats();
       const lifetimeTotals = {
@@ -21801,6 +24267,7 @@ async function handleApi(req, res, url) {
       }
 
       summary.lifetimeTotals = lifetimeTotals;
+      Object.assign(summary, buildDurableRuntimeSurface());
       summary.repoAreaContention = summarizeRepoAreaLockContention(
         uiDeps.getInternalExecutor?.()?.getStatus?.()?.repoAreaLocks || null,
         { now: "2026-03-24T12:00:00.000Z" },
@@ -21893,15 +24360,20 @@ async function handleApi(req, res, url) {
       let excludedSynthetic = 0;
       let excludedNoop = 0;
       const events = [];
+      const coverageEvents = [];
       for (const entry of inWindow) {
         const normalizedEntry = {
           ...entry,
           agentType: normalizeShreddingAgentType(entry?.agentType),
+          sessionType: normalizeShreddingSessionTypeLabel(entry?.sessionType),
+          normalizedSessionType: normalizeShreddingSessionTypeLabel(entry?.normalizedSessionType || entry?.sessionType),
+          decision: normalizeShreddingDecisionLabel(entry?.decision),
         };
         if (!includeSynthetic && isLikelySyntheticShreddingEvent(normalizedEntry)) {
           excludedSynthetic++;
           continue;
         }
+        coverageEvents.push(normalizedEntry);
         if (!includeNoop && !isEffectiveShreddingEvent(normalizedEntry)) {
           excludedNoop++;
           continue;
@@ -21924,6 +24396,10 @@ async function handleApi(req, res, url) {
       const dailyCounts = {};
       const agentCounts = {};
       const stageCounts = {};
+      const sessionTypeCounts = {};
+      const normalizedSessionTypeCounts = {};
+      const decisionCounts = {};
+      const coverageBySessionType = {};
       const compactionFamilyCounts = {};
       const commandFamilyCounts = {};
       let unknownAttribution = 0;
@@ -21936,6 +24412,35 @@ async function handleApi(req, res, url) {
         completedSessions.filter((entry) => withinDays(entry, days)),
       );
       const blendedCostPerToken = sessionCostModel.blendedCostPerToken;
+
+      for (const e of coverageEvents) {
+        const sessionType = normalizeShreddingSessionTypeLabel(e.sessionType);
+        const normalizedSessionType = normalizeShreddingSessionTypeLabel(e.normalizedSessionType || e.sessionType);
+        const decision = normalizeShreddingDecisionLabel(e.decision);
+        sessionTypeCounts[sessionType] = (sessionTypeCounts[sessionType] || 0) + 1;
+        normalizedSessionTypeCounts[normalizedSessionType] = (normalizedSessionTypeCounts[normalizedSessionType] || 0) + 1;
+        decisionCounts[decision] = (decisionCounts[decision] || 0) + 1;
+        if (!coverageBySessionType[sessionType]) {
+          coverageBySessionType[sessionType] = {
+            name: sessionType,
+            normalizedSessionType,
+            total: 0,
+            effective: 0,
+            bypassed: 0,
+            liveCompaction: 0,
+            sessionTotal: 0,
+            decisions: {},
+          };
+        }
+        const bucket = coverageBySessionType[sessionType];
+        bucket.total += 1;
+        if (isEffectiveShreddingEvent(e)) bucket.effective += 1;
+        else bucket.bypassed += 1;
+        const stage = String(e.stage || "").trim().toLowerCase();
+        if (stage === "live_tool_compaction") bucket.liveCompaction += 1;
+        if (stage === "session_total") bucket.sessionTotal += 1;
+        bucket.decisions[decision] = (bucket.decisions[decision] || 0) + 1;
+      }
 
       for (const e of events) {
         const originalChars = numberOrZero(e.originalChars);
@@ -22003,6 +24508,19 @@ async function handleApi(req, res, url) {
         .sort((a, b) => b[1] - a[1])
         .slice(0, 8)
         .map(([name, count]) => ({ name, count }));
+      const topSessionTypes = Object.values(coverageBySessionType)
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 8)
+        .map((entry) => ({
+          name: entry.name,
+          normalizedSessionType: entry.normalizedSessionType,
+          total: entry.total,
+          effective: entry.effective,
+          bypassed: entry.bypassed,
+          liveCompaction: entry.liveCompaction,
+          sessionTotal: entry.sessionTotal,
+          decisions: entry.decisions,
+        }));
 
       const recentEvents = events.slice(-20).reverse().map((e) => ({
         timestamp: e.timestamp,
@@ -22017,6 +24535,9 @@ async function handleApi(req, res, url) {
         agentType: normalizeShreddingAgentType(e.agentType),
         attemptId: e.attemptId || null,
         stage: String(e.stage || "session_total").trim().toLowerCase() || "session_total",
+        sessionType: normalizeShreddingSessionTypeLabel(e.sessionType),
+        normalizedSessionType: normalizeShreddingSessionTypeLabel(e.normalizedSessionType || e.sessionType),
+        decision: normalizeShreddingDecisionLabel(e.decision),
         compactionFamily: String(e.compactionFamily || "").trim().toLowerCase() || null,
         commandFamily: String(e.commandFamily || "").trim().toLowerCase() || null,
       }));
@@ -22050,6 +24571,10 @@ async function handleApi(req, res, url) {
           dailyCounts,
           topAgents,
           stageCounts,
+          sessionTypeCounts,
+          normalizedSessionTypeCounts,
+          decisionCounts,
+          topSessionTypes,
           topCompactionFamilies,
           topCommandFamilies,
           totals: {
@@ -22089,6 +24614,126 @@ async function handleApi(req, res, url) {
     }
     return;
   }
+
+  const harnessRouteContext = {
+    req,
+    res,
+    path,
+    url,
+    deps: {
+      uiDeps,
+      repoRoot,
+      resolve,
+      extname,
+      basename,
+      relative,
+      existsSync,
+      randomBytes,
+      writeFileSync,
+      mkdirSync,
+      jsonResponse,
+      readJsonBody,
+      readMultipartForm,
+      parseBooleanLike,
+      getBosunSessionManager,
+      getSessionTracker,
+      buildResolvedSettingsState,
+      buildProviderInventory,
+      buildHarnessExecutorInventory,
+      getProviderModelCatalog,
+      readConfigDocument,
+      writeJsonFileAtomic,
+      emitConfigReload,
+      invalidateApiCache,
+      getPrimaryAgentName,
+      getPrimaryAgentSelection,
+      getAgentMode,
+      switchPrimaryAgent,
+      getPoolSdkName,
+      getAvailableSdks,
+      setPoolSdk,
+      resetPoolSdkCache,
+      resolveWorkspaceContextFromRequest,
+      resolveActiveWorkspaceExecutionContext,
+      resolveWorkspaceContextById,
+      listWorkspaceReposForSessionSurface,
+      listGitBranchesForRepo,
+      readCurrentBranchForRepo,
+      normalizeCandidatePath,
+      mergeTrackerAndLedgerSessions,
+      listDurableSessionsFromLedger,
+      shouldHideSessionFromDefaultList,
+      sessionMatchesWorkspaceContext,
+      broadcastUiEvent,
+      broadcastSessionsSnapshot,
+      sessionRunAbortControllers,
+      uiDeps,
+      harnessAgentService,
+      resolveSessionWorkspaceDir,
+      resolveInteractiveSessionExecutor,
+      sanitizePathSegment,
+      ATTACHMENTS_ROOT,
+      MIME_TYPES,
+      resolveAttachmentUrl,
+      getSessionActivityFromStateLedger,
+      normalizeLedgerSessionDocument,
+      resolveUiStateLedgerOptions,
+      mergeSessionRecords,
+      upsertSessionRecordToStateLedger,
+      invalidateDurableSessionListCache,
+      deleteSessionRecordFromStateLedger,
+      resolveSessionWorktreePath,
+      revealPathInShell,
+      collectDiffStats,
+      getCompactDiffSummary,
+      getRecentCommits,
+      getHarnessTelemetrySummary,
+      getHarnessLiveTelemetrySnapshot,
+      listHarnessTelemetryEvents,
+      getHarnessProviderUsageSummary,
+      exportHarnessTelemetryTrace,
+      getHarnessRuntimeConfig,
+      readActiveHarnessState,
+      readHarnessArtifact,
+      resolveUiConfigDir,
+      listActiveHarnessRunSnapshots,
+      hydrateHarnessRunListItems,
+      mergeHarnessRunSummaries,
+      listHarnessRuns,
+      getActiveHarnessRunSnapshot,
+      readHarnessRunRecordById,
+      listHarnessRunEvents,
+      buildPersistedHarnessRunSummary,
+      buildHarnessEventSummary,
+      executeHarnessRunRequest,
+      activeHarnessRuns,
+      invalidateHarnessApiCaches,
+      resolveHarnessCompileSource,
+      compileHarnessSourceToArtifact,
+      buildHarnessCompilePayload,
+      shouldEnforceHarnessValidation,
+      activateHarnessArtifact,
+      resolveHarnessApprovalRepoRoot,
+      recordActiveHarnessRunControlEvent,
+      buildHarnessApprovalWakePrompt,
+      buildHarnessActiveRunSnapshot,
+      getCurrentSessionSnapshot,
+      getRetryQueueSurfaceSnapshot,
+      getAgentSurfaceSnapshot,
+      buildCurrentTuiMonitorStats,
+      listWorkflowSurfaceApprovals,
+      listWorkflowSurfaceRuns,
+      getLatestLogTail,
+      getActiveThreads,
+      clearThreadRegistry,
+      invalidateThread,
+    },
+  };
+  if (await tryHandleHarnessProviderRoutes(harnessRouteContext)) return;
+  if (await tryHandleHarnessSessionRoutes(harnessRouteContext)) return;
+  if (await tryHandleHarnessApprovalRoutes(harnessRouteContext)) return;
+  if (await tryHandleHarnessSubagentRoutes(harnessRouteContext)) return;
+  if (await tryHandleHarnessEventRoutes(harnessRouteContext)) return;
 
   if (path === "/api/analytics/usage") {
     try {
@@ -22192,6 +24837,143 @@ if (path === "/api/agent-logs/context") {
     return;
   }
 
+  if (path === "/api/agents/available" && req.method === "GET") {
+    try {
+      const { configData } = readConfigDocument();
+      const { rawValues } = buildResolvedSettingsState();
+      const providerInventory = buildProviderInventory();
+      const executorFabric = buildHarnessExecutorInventory(configData, rawValues, providerInventory);
+      const agentRuntime = normalizeAgentRuntimeValue(
+        rawValues?.BOSUN_AGENT_RUNTIME || configData?.agentRuntime || "harness",
+      );
+      const providerInventoryById = new Map(
+        (providerInventory?.items || [])
+          .map((entry) => [String(entry?.providerId || "").trim(), entry])
+          .filter(([id]) => id),
+      );
+      const modelsByProviderId = new Map(
+        (providerInventory?.items || []).map((entry) => [
+          String(entry?.providerId || "").trim(),
+          Array.isArray(entry?.modelCatalog?.models)
+            ? entry.modelCatalog.models.map((model) => String(model?.id || "").trim()).filter(Boolean)
+            : [],
+        ]),
+      );
+      const providerAgents = getAvailableAgents().map((entry) => {
+        const providerId = String(entry?.providerId || entry?.id || entry?.provider || "").trim();
+        const providerEntry = providerInventoryById.get(providerId) || null;
+        const models = Array.isArray(entry?.models) && entry.models.length > 0
+          ? entry.models.map((model) => String(model || "").trim()).filter(Boolean)
+          : (modelsByProviderId.get(providerId) || []);
+        const capabilities = Array.isArray(entry?.capabilities)
+          ? entry.capabilities.slice()
+          : (entry?.capabilities && typeof entry.capabilities === "object"
+            ? Object.keys(entry.capabilities).filter((key) => entry.capabilities[key])
+            : []);
+        return {
+          ...entry,
+          providerId,
+          providerLabel: String(providerEntry?.label || entry?.providerLabel || entry?.provider || providerId).trim() || null,
+          apiStyle: entry?.apiStyle || null,
+          transportConfig: entry?.transportConfig || null,
+          source: entry?.source || null,
+          models,
+          capabilities,
+          subtitle: buildAgentSubtitle({
+            ...entry,
+            providerId,
+            models,
+            capabilities,
+          }, providerEntry),
+          runtimeKind: agentRuntime === "harness" ? "harness" : "sdk-cli",
+        };
+      });
+      const agents = agentRuntime === "harness"
+        ? buildHarnessVisibleAgentInventory(executorFabric, providerAgents, providerInventory)
+        : providerAgents;
+      let activeSelection = getPrimaryAgentSelection() || getPrimaryAgentName();
+      if (executorFabric.primaryExecutorId && agents.some((entry) => entry.id === executorFabric.primaryExecutorId)) {
+        // Only switch when the active selection differs from the configured primary.
+        // The original `!activeInInventory` branch unconditionally reset `initialized`
+        // in primary-agent and triggered a redundant second initCodexShell with stale env.
+        if (activeSelection !== executorFabric.primaryExecutorId) {
+          const switched = await switchPrimaryAgent(executorFabric.primaryExecutorId).catch(() => null);
+          activeSelection =
+            switched?.ok === false
+              ? executorFabric.primaryExecutorId
+              : (getPrimaryAgentSelection() || executorFabric.primaryExecutorId);
+        }
+      }
+      jsonResponse(res, 200, {
+        ok: true,
+        active: activeSelection,
+        mode: getAgentMode(),
+        agents,
+        manualAgents: [],
+        executorFabric: {
+          primaryExecutorId: executorFabric.primaryExecutorId || null,
+          routingMode: executorFabric.routingMode || null,
+          hasExplicitExecutors: executorFabric.hasExplicitExecutors === true,
+        },
+      });
+    } catch (err) {
+      jsonResponse(res, 200, {
+        ok: true,
+        active: getPrimaryAgentSelection() || getPrimaryAgentName(),
+        mode: getAgentMode(),
+        agents: [],
+        manualAgents: [],
+        error: err?.message || "",
+      });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/switch" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const requestedAgent = String(body?.agent || body?.id || "").trim();
+      if (!requestedAgent) {
+        jsonResponse(res, 400, { ok: false, error: "agent is required" });
+        return;
+      }
+      const result = await switchPrimaryAgent(requestedAgent);
+      jsonResponse(res, 200, {
+        ok: result?.ok !== false,
+        agent: String(
+          result?.selectionId
+          || result?.adapter
+          || getPrimaryAgentSelection()
+          || getPrimaryAgentName(),
+        ).trim(),
+        result: result && typeof result === "object" ? result : null,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/mode" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const requestedMode = String(body?.mode || "").trim();
+      if (!requestedMode) {
+        jsonResponse(res, 400, { ok: false, error: "mode is required" });
+        return;
+      }
+      const result = setAgentMode(requestedMode);
+      jsonResponse(res, result?.ok === false ? 400 : 200, {
+        ok: result?.ok !== false,
+        mode: result?.mode || getAgentMode(),
+        error: result?.error || null,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/agents") {
     try {
       const executor = uiDeps.getInternalExecutor?.();
@@ -22214,6 +24996,58 @@ if (path === "/api/agent-logs/context") {
       jsonResponse(res, 200, { ok: true, data: agents });
     } catch (err) {
       jsonResponse(res, 200, { ok: true, data: [] });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/events") {
+    try {
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || "25") || 25, 200));
+      const snapshot = getAgentSurfaceSnapshot(limit);
+      jsonResponse(res, 200, { ok: true, events: Array.isArray(snapshot?.events) ? snapshot.events : [] });
+    } catch (err) {
+      jsonResponse(res, 200, { ok: true, events: [], error: err?.message || "" });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/events/status") {
+    try {
+      const snapshot = getAgentSurfaceSnapshot(25);
+      jsonResponse(res, 200, { ok: true, ...(snapshot?.status || {}) });
+    } catch (err) {
+      jsonResponse(res, 200, { ok: true, started: false, source: "error", error: err?.message || "" });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/events/liveness") {
+    try {
+      const snapshot = getAgentSurfaceSnapshot(25);
+      jsonResponse(res, 200, { ok: true, agents: Array.isArray(snapshot?.liveness) ? snapshot.liveness : [] });
+    } catch (err) {
+      jsonResponse(res, 200, { ok: true, agents: [], error: err?.message || "" });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/events/errors") {
+    try {
+      const snapshot = getAgentSurfaceSnapshot(25);
+      const patterns = snapshot?.patterns;
+      jsonResponse(res, 200, {
+        ok: true,
+        patterns: Array.isArray(patterns)
+          ? patterns
+          : (patterns && typeof patterns === "object"
+            ? Object.entries(patterns).map(([pattern, detail]) => ({
+                pattern,
+                ...(detail && typeof detail === "object" ? detail : { count: Number(detail || 0) || 0 }),
+              }))
+            : []),
+      });
+    } catch (err) {
+      jsonResponse(res, 200, { ok: true, patterns: [], error: err?.message || "" });
     }
     return;
   }
@@ -23152,13 +25986,13 @@ if (path === "/api/agent-logs/context") {
         return;
       }
       const engine = wfCtx.engine;
-      if (typeof _wfTemplates?.reconcileInstalledTemplates === "function") {
+      if (typeof _wfTemplates?.reconcileInstalledTemplates === "function" && !engine?.isWorkflowEngineProxy) {
         _wfTemplates.reconcileInstalledTemplates(engine, {
           autoUpdateUnmodified: true,
         });
       }
-      const updates = engine
-        .list()
+      const workflows = await Promise.resolve(engine.list?.() || []);
+      const updates = workflows
         .map((wf) => {
           const state = wf.metadata?.templateState || null;
           if (!state?.templateId) return null;
@@ -23245,45 +26079,90 @@ if (path === "/api/agent-logs/context") {
 
   if (path === "/api/workflows/runs") {
     try {
-      const wfCtx = await getWorkflowRequestContext(url, { bootstrapTemplates: false });
-      if (!wfCtx.ok) {
-        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace. Set a valid workspace query value." });
         return;
       }
-      const engine = wfCtx.engine;
-      const rawOffset = Number(url.searchParams.get("offset"));
-      const rawLimit = Number(url.searchParams.get("limit"));
-      const offset = Number.isFinite(rawOffset) && rawOffset > 0
-        ? Math.max(0, Math.floor(rawOffset))
-        : 0;
-      const limit = Number.isFinite(rawLimit) && rawLimit > 0
-        ? Math.min(rawLimit, 5000)
-        : 20;
-      const page = typeof engine.getRunHistoryPage === "function"
-        ? await engine.getRunHistoryPage(null, { offset, limit })
-        : {
-            runs: engine.getRunHistory ? await engine.getRunHistory(null, limit) : [],
-            total: engine.getRunHistory ? (await engine.getRunHistory(null)).length : 0,
+      const workflowContext = await getWorkflowRequestContext(url, { bootstrapTemplates: false }).catch(() => null);
+      const workflowEngine = workflowContext?.ok ? workflowContext.engine : null;
+      const workspacePaths = getWorkflowStoragePaths(workspaceContext.workspaceDir);
+      const workspaceCacheKey = String(
+        workspacePaths.workspaceRoot
+        || workspaceContext?.workspaceId
+        || "default",
+      ).trim().toLowerCase();
+      const payload = await getOrComputeCachedApiResponse(`workflows:runs:all:${workspaceCacheKey}:${url.search}`, 8000, async () => {
+        const rawOffset = Number(url.searchParams.get("offset"));
+        const rawLimit = Number(url.searchParams.get("limit"));
+        const offset = Number.isFinite(rawOffset) && rawOffset > 0
+          ? Math.max(0, Math.floor(rawOffset))
+          : 0;
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0
+          ? Math.min(rawLimit, 500)
+          : 20;
+        const activeRuns = readActiveWorkflowRunIndexEntries(workspacePaths.runsDir)
+          .filter((entry) => {
+            const detail = getWorkflowRunDetailFromStateLedger(entry.runId, {
+              anchorPath: workspacePaths.runsDir,
+            });
+            const detailStatus = String(detail?.status || "").trim().toLowerCase();
+            return !detailStatus || detailStatus === "running";
+          })
+          .map((entry) => ({
+            runId: entry.runId,
+            workflowId: entry.workflowId || null,
+            workflowName: entry.workflowName || null,
+            startedAt: entry.startedAt || null,
+            updatedAt: entry.startedAt || null,
+            status: "running",
+            activeNodeCount: Number(entry.activeNodeCount || 0) || 0,
+          }));
+        const activeRunIds = new Set(activeRuns.map((entry) => String(entry.runId || "").trim()).filter(Boolean));
+        const persistedPage = typeof workflowEngine?.getRunHistoryPage === "function"
+          ? await workflowEngine.getRunHistoryPage(null, {
+              offset: 0,
+              limit: Math.max(limit + offset + activeRuns.length, 100),
+            })
+          : listWorkflowRunSummariesPageFromStateLedger({
+              anchorPath: workspacePaths.runsDir,
+              offset: 0,
+              limit: Math.max(limit + offset + activeRuns.length, 100),
+            });
+        const persistedRuns = Array.isArray(persistedPage?.runs)
+          ? persistedPage.runs.filter((run) => !activeRunIds.has(String(run?.runId || "").trim()))
+          : [];
+        const getRunSortTs = (run) => Date.parse(String(run?.startedAt || run?.updatedAt || "")) || 0;
+        const mergedRuns = [...activeRuns, ...persistedRuns].sort(
+          (left, right) => getRunSortTs(right) - getRunSortTs(left),
+        );
+        const runs = mergedRuns.slice(offset, offset + limit);
+        const total = Math.max(
+          mergedRuns.length,
+          (Number.isFinite(Number(persistedPage?.total)) ? Number(persistedPage.total) : persistedRuns.length)
+            + activeRuns.filter((run) => !persistedRuns.some((persisted) => persisted?.runId === run?.runId)).length,
+        );
+        const nextOffset = Number.isFinite(Number(persistedPage?.nextOffset))
+          ? Number(persistedPage.nextOffset)
+          : (offset + runs.length < total ? offset + runs.length : null);
+        return {
+          ok: true,
+          runs,
+          pagination: {
+            total,
             offset,
             limit,
-          };
-      const runs = Array.isArray(page?.runs) ? page.runs : [];
-      const total = Number.isFinite(Number(page?.total)) ? Number(page.total) : runs.length;
-      const nextOffset = Number.isFinite(Number(page?.nextOffset))
-        ? Number(page.nextOffset)
-        : (offset + runs.length < total ? offset + runs.length : null);
-      jsonResponse(res, 200, {
-        ok: true,
-        runs,
-        pagination: {
-          total,
-          offset,
-          limit,
-          count: runs.length,
-          hasMore: page?.hasMore === true || (nextOffset != null && nextOffset < total),
-          nextOffset,
-        },
+            count: runs.length,
+            hasMore: persistedPage?.hasMore === true || (nextOffset != null && nextOffset < total),
+            nextOffset,
+          },
+        };
       });
+      if (payload?.__error) {
+        jsonResponse(res, payload.status, payload.body);
+        return;
+      }
+      jsonResponse(res, 200, payload);
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -23292,40 +26171,98 @@ if (path === "/api/agent-logs/context") {
 
   if (path === "/api/workflows/approvals") {
     try {
-      const wfCtx = await getWorkflowRequestContext(url, { bootstrapTemplates: false });
-      if (!wfCtx.ok) {
-        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace. Set a valid workspace query value." });
         return;
       }
-      const { listApprovalRequests, upsertWorkflowRunApprovalRequest, isWorkflowRunApprovalPending } =
+      const workspacePaths = getWorkflowStoragePaths(workspaceContext.workspaceDir);
+      const workspaceCacheKey = String(
+        workspacePaths.workspaceRoot
+        || workspaceContext?.workspaceId
+        || "default",
+      ).trim().toLowerCase();
+      const {
+        listApprovalRequests,
+        reconcileWorkflowRunApprovalRequests,
+        reconcileHarnessRunApprovalRequests,
+        upsertWorkflowRunApprovalRequest,
+        isWorkflowRunApprovalPending,
+      } =
         await import("../workflow/approval-queue.mjs");
-      const engine = wfCtx.engine;
       const rawLimit = Number(url.searchParams.get("limit"));
       const limit = Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(Math.floor(rawLimit), 500)
         : 100;
       const statusFilter = String(url.searchParams.get("status") || "").trim().toLowerCase();
       const scopeTypeFilter = String(url.searchParams.get("scopeType") || "").trim().toLowerCase();
-      const repoRootForApprovals = wfCtx.workspaceContext?.workspaceDir || repoRoot;
-      const historyLimit = Math.max(limit, 200);
-      const history = typeof engine.getRunHistory === "function"
-        ? await engine.getRunHistory(null, historyLimit)
-        : [];
-      for (const run of Array.isArray(history) ? history : []) {
-        if (!isWorkflowRunApprovalPending(run)) continue;
-        upsertWorkflowRunApprovalRequest(run, { repoRoot: repoRootForApprovals });
-      }
-      const listing = listApprovalRequests({
-        repoRoot: repoRootForApprovals,
-        status: statusFilter,
-        scopeType: scopeTypeFilter,
-        limit,
-        includeResolved: statusFilter === "all",
+      const repoRootForApprovals = workspacePaths.workspaceRoot || repoRoot;
+      const payload = await getOrComputeCachedApiResponse(`workflows:approvals:${workspaceCacheKey}:${url.search}`, 5000, async () => {
+        if (
+          (!scopeTypeFilter || scopeTypeFilter === "workflow-run")
+          && (!statusFilter || statusFilter === "pending" || statusFilter === "all")
+        ) {
+          reconcileWorkflowRunApprovalRequests({ repoRoot: repoRootForApprovals });
+        }
+        if (
+          (!scopeTypeFilter || scopeTypeFilter === "harness-run")
+          && (!statusFilter || statusFilter === "pending" || statusFilter === "all")
+        ) {
+          reconcileHarnessRunApprovalRequests({
+            repoRoot: repoRootForApprovals,
+            activeRunIds: new Set(activeHarnessRuns.keys()),
+          });
+        }
+
+        let listing = listApprovalRequests({
+          repoRoot: repoRootForApprovals,
+          status: statusFilter,
+          scopeType: scopeTypeFilter,
+          limit,
+          includeResolved: statusFilter === "all",
+        });
+
+        const shouldRepairWorkflowRunApprovals =
+          (!scopeTypeFilter || scopeTypeFilter === "workflow-run")
+          && (!statusFilter || statusFilter === "pending" || statusFilter === "all")
+          && !listing.requests.some((entry) =>
+            String(entry?.scopeType || "").trim().toLowerCase() === "workflow-run",
+          );
+
+        if (shouldRepairWorkflowRunApprovals) {
+          const wfCtx = await getWorkflowRequestContext(url, { bootstrapTemplates: false });
+          if (wfCtx.ok) {
+            const engine = wfCtx.engine;
+            const historyLimit = Math.max(limit, 50);
+            const historyPage = typeof engine.getRunHistoryPage === "function"
+              ? await engine.getRunHistoryPage(null, { offset: 0, limit: historyLimit })
+              : {
+                  runs: typeof engine.getRunHistory === "function"
+                    ? await engine.getRunHistory(null, historyLimit)
+                    : [],
+                };
+            for (const run of Array.isArray(historyPage?.runs) ? historyPage.runs : []) {
+              if (!isWorkflowRunApprovalPending(run)) continue;
+              upsertWorkflowRunApprovalRequest(run, { repoRoot: repoRootForApprovals });
+            }
+            listing = listApprovalRequests({
+              repoRoot: repoRootForApprovals,
+              status: statusFilter,
+              scopeType: scopeTypeFilter,
+              limit,
+              includeResolved: statusFilter === "all",
+            });
+          }
+        }
+
+        return {
+          ok: true,
+          requests: listing.requests,
+          queuePath: listing.path,
+        };
       });
       jsonResponse(res, 200, {
-        ok: true,
-        requests: listing.requests,
-        queuePath: listing.path,
+        ...payload,
       });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err?.message || String(err) });
@@ -23380,12 +26317,17 @@ if (path === "/api/agent-logs/context") {
       let refreshedRun = null;
       if (runId && typeof wfCtx.engine?.getRunDetail === "function") {
         try {
-          refreshedRun = await Promise.resolve(wfCtx.engine.getRunDetail(runId));
+          refreshedRun = await Promise.resolve(
+            wfCtx.engine.getRunDetail(runId, { decorate: false }),
+          );
         } catch {
           refreshedRun = null;
         }
       }
       invalidateApiCache("server-state");
+      invalidateApiCache("workflows:approvals:");
+      invalidateApiCache("workflows:runs:");
+      invalidateApiCache("executor:");
       jsonResponse(res, 200, {
         ok: true,
         request: resolved.request,
@@ -23416,7 +26358,9 @@ if (path === "/api/agent-logs/context") {
       }
 
       if (action === "copilot-context" && (req.method === "GET" || req.method === "POST")) {
-        const run = typeof engine.getRunDetail === "function" ? await engine.getRunDetail(runId) : null;
+        const run = typeof engine.getRunDetail === "function"
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : null;
         if (!run) {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
@@ -23431,13 +26375,28 @@ if (path === "/api/agent-logs/context") {
         const workflow = typeof engine.get === "function"
           ? await engine.get(String(run?.workflowId || "").trim())
           : null;
-        const nodeForensics =
-          nodeId && typeof engine.getNodeForensics === "function"
-            ? await engine.getNodeForensics(runId, nodeId)
-            : null;
-        const runForensics = typeof engine.getRunForensics === "function"
-          ? await engine.getRunForensics(runId)
-          : null;
+        let nodeForensics = null;
+        if (nodeId && typeof engine.getNodeForensics === "function") {
+          try {
+            nodeForensics = await engine.getNodeForensics(runId, nodeId);
+          } catch (error) {
+            nodeForensics = {
+              available: false,
+              error: String(error?.message || error || "Failed to load node forensics"),
+            };
+          }
+        }
+        let runForensics = null;
+        if (typeof engine.getRunForensics === "function") {
+          try {
+            runForensics = await engine.getRunForensics(runId);
+          } catch (error) {
+            runForensics = {
+              available: false,
+              error: String(error?.message || error || "Failed to load run forensics"),
+            };
+          }
+        }
         const payload = buildRunCopilotContextPayload(run, {
           intent,
           nodeId,
@@ -23492,7 +26451,9 @@ if (path === "/api/agent-logs/context") {
           resolveApprovalRequest,
           upsertWorkflowRunApprovalRequest,
         } = await import("../workflow/approval-queue.mjs");
-        const run = typeof engine.getRunDetail === "function" ? await engine.getRunDetail(runId) : null;
+        const run = typeof engine.getRunDetail === "function"
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : null;
         if (!run) {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
@@ -23528,8 +26489,29 @@ if (path === "/api/agent-logs/context") {
           actorId,
           note,
         });
-        const refreshedRun = typeof engine.getRunDetail === "function" ? await engine.getRunDetail(runId) : run;
+        const refreshedRunFromEngine = typeof engine.getRunDetail === "function"
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : run;
+        const refreshedRun = resolved?.updateResult?.detail && typeof resolved.updateResult.detail === "object"
+          ? {
+              ...(refreshedRunFromEngine && typeof refreshedRunFromEngine === "object" ? refreshedRunFromEngine : run),
+              executionPolicy:
+                resolved.updateResult.executionPolicy
+                || resolved.updateResult.detail.executionPolicy
+                || refreshedRunFromEngine?.executionPolicy
+                || run.executionPolicy,
+              policyOutcome:
+                resolved.updateResult.policyOutcome
+                || resolved.updateResult.detail.policyOutcome
+                || refreshedRunFromEngine?.policyOutcome
+                || run.policyOutcome,
+              detail: resolved.updateResult.detail,
+            }
+          : refreshedRunFromEngine;
         invalidateApiCache("server-state");
+        invalidateApiCache("workflows:approvals:");
+        invalidateApiCache("workflows:runs:");
+        invalidateApiCache("executor:");
         jsonResponse(res, 200, {
           ok: true,
           request: resolved.request,
@@ -23544,7 +26526,9 @@ if (path === "/api/agent-logs/context") {
       // If mode is omitted, returns available retry options so the UI can
       // present a choice to the user.
       if (action === "retry" && req.method === "POST") {
-        const run = engine.getRunDetail ? await engine.getRunDetail(runId) : null;
+        const run = engine.getRunDetail
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : null;
         if (!run) {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
@@ -23554,6 +26538,14 @@ if (path === "/api/agent-logs/context") {
           ? await engine.getRetryOptions(runId)
           : null;
         const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
+        const supportsRetrySurface =
+          runStatus === "failed" ||
+          createTasksPendingGuard ||
+          (retryOptions && Array.isArray(retryOptions.options) && retryOptions.options.length > 0);
+        if (!supportsRetrySurface) {
+          jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
+          return;
+        }
         const body = await readJsonBody(req);
         const mode = body?.mode;
         if (!mode) {
@@ -23562,10 +26554,6 @@ if (path === "/api/agent-logs/context") {
               ok: true,
               ...retryOptions,
             });
-            return;
-          }
-          if (runStatus !== "failed") {
-            jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
             return;
           }
           jsonResponse(res, 200, {
@@ -23587,25 +26575,45 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
           return;
         }
+        const safeInterruptedResume =
+          mode === "from_failed" &&
+          retryOptions?.guardedState?.code === "create_tasks_pending" &&
+          retryOptions?.guardedState?.safeResume === true &&
+          retryOptions?.recommendedMode === "from_failed";
+        const safeInterruptedResumeResolution = safeInterruptedResume
+          ? {
+              mode,
+              operatorAction: "resume",
+              decisionReason: retryOptions?.recommendedReason || "create_tasks_pending.resume_only",
+              guardedState: retryOptions?.guardedState || null,
+            }
+          : null;
         const resolvedRetry =
           createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
             ? await engine.resolveOperatorRetry(runId, mode)
             : null;
-        if (resolvedRetry?.blocked) {
+        const effectiveRetryResolution = resolvedRetry || safeInterruptedResumeResolution;
+        if (effectiveRetryResolution?.blocked) {
           jsonResponse(res, 409, {
             ok: false,
-            error: resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.",
+            error: effectiveRetryResolution.blockedMessage || "Workflow retry is blocked for this run state.",
             runId,
             status: run.status,
-            mode: resolvedRetry.mode || mode,
-            operatorAction: resolvedRetry.operatorAction || null,
-            decisionReason: resolvedRetry.decisionReason || null,
-            guardedState: resolvedRetry.guardedState || retryOptions?.guardedState || null,
+            mode: effectiveRetryResolution.mode || mode,
+            operatorAction: effectiveRetryResolution.operatorAction || null,
+            decisionReason: effectiveRetryResolution.decisionReason || null,
+            guardedState: effectiveRetryResolution.guardedState || retryOptions?.guardedState || null,
             retryOptions,
           });
           return;
         }
-        const retryArgs = resolvedRetry?.retryArgs || { mode };
+        const retryArgs = effectiveRetryResolution?.retryArgs || { mode };
+        if (safeInterruptedResume) {
+          retryArgs._resumeInterrupted = true;
+          if (retryOptions?.recommendedReason) {
+            retryArgs._decisionReason = retryOptions.recommendedReason;
+          }
+        }
         const result = await engine.retryRun(runId, retryArgs);
         const retryStatus = result.ctx?.errors?.length > 0 ? "failed" : "completed";
         jsonResponse(res, 200, {
@@ -23615,9 +26623,9 @@ if (path === "/api/agent-logs/context") {
           mode: result.mode,
           status: retryStatus,
           operatorAction:
-            resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
-          decisionReason: resolvedRetry?.decisionReason || null,
-          guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
+            effectiveRetryResolution?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+          decisionReason: effectiveRetryResolution?.decisionReason || null,
+          guardedState: effectiveRetryResolution?.guardedState || retryOptions?.guardedState || null,
         });
         return;
       }
@@ -23655,7 +26663,9 @@ if (path === "/api/agent-logs/context") {
 
       // ── GET /api/workflows/runs/:id/evaluate — run evaluation ───────
       if (action === "evaluate" && req.method === "GET") {
-        const run = engine.getRunDetail ? await engine.getRunDetail(runId) : null;
+        const run = engine.getRunDetail
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : null;
         if (!run) {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
@@ -23684,7 +26694,9 @@ if (path === "/api/agent-logs/context") {
 
       // ── GET /api/workflows/runs/:id/snapshots — list snapshots ──────
       if (action === "snapshots" && req.method === "GET") {
-        const run = engine.getRunDetail ? await engine.getRunDetail(runId) : null;
+        const run = engine.getRunDetail
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : null;
         const workflowId = run?.workflowId || run?.detail?.data?._workflowId || null;
         const snapshots = typeof engine.listSnapshots === "function"
           ? await engine.listSnapshots(workflowId)
@@ -23714,7 +26726,9 @@ if (path === "/api/agent-logs/context") {
 
       // ── POST /api/workflows/runs/:id/remediate — apply fix actions ──
       if (action === "remediate" && req.method === "POST") {
-        const run = engine.getRunDetail ? await engine.getRunDetail(runId) : null;
+        const run = engine.getRunDetail
+          ? await engine.getRunDetail(runId, { decorate: false })
+          : null;
         if (!run) {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
@@ -23742,7 +26756,12 @@ if (path === "/api/agent-logs/context") {
       }
 
       // ── GET /api/workflows/runs/:id ─────────────────────────────────
-      const run = engine.getRunDetail ? await engine.getRunDetail(runId) : null;
+      const decorateRunDetail = ["1", "true", "yes", "on"].includes(
+        String(url.searchParams.get("decorate") || "").trim().toLowerCase(),
+      );
+      const run = engine.getRunDetail
+        ? await engine.getRunDetail(runId, { decorate: decorateRunDetail })
+        : null;
       if (!run) {
         jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
         return;
@@ -23966,7 +26985,7 @@ if (path === "/api/agent-logs/context") {
         if (!wf) { jsonResponse(res, 404, { ok: false, error: "Workflow not found" }); return; }
         try {
           const { generateExportBundle } = await import("../workflow/workflow-exporter.mjs");
-          const baseUrl = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host || "localhost:3077"}`;
+          const baseUrl = getRequestBaseUrl(req, "localhost:3077");
           const bundle = generateExportBundle(wf, { baseUrl });
           jsonResponse(res, 200, bundle);
         } catch (err) {
@@ -25059,6 +28078,117 @@ if (path === "/api/agent-logs/context") {
     return;
   }
 
+  if (path === "/api/command" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const command = String(body?.command || "").trim();
+      if (!command) {
+        jsonResponse(res, 400, { ok: false, error: "command is required" });
+        return;
+      }
+      const handler = uiDeps.handleUiCommand;
+      if (typeof handler !== "function") {
+        jsonResponse(res, 503, { ok: false, error: "UI command handler unavailable" });
+        return;
+      }
+      const baseCommand = command.split(/\s+/, 1)[0]?.toLowerCase() || "";
+      if (ASYNC_UI_COMMAND_BASES.has(baseCommand)) {
+        Promise.resolve()
+          .then(() => handler(command))
+          .catch((err) => {
+            console.warn(`[ui] queued command failed: ${err?.message || err}`);
+          });
+        jsonResponse(res, 202, {
+          ok: true,
+          queued: true,
+          command,
+        });
+        return;
+      }
+      const result = await handler(command);
+      jsonResponse(res, 200, {
+        ok: true,
+        queued: false,
+        command,
+        result: result ?? null,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/settings/update" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const changes = body?.changes && typeof body.changes === "object" ? body.changes : {};
+      if (Object.keys(changes).length === 0) {
+        jsonResponse(res, 400, { ok: false, error: "changes object required" });
+        return;
+      }
+
+      const fieldErrors = {};
+      for (const [key, value] of Object.entries(changes)) {
+        const def = SETTINGS_SCHEMA.find((entry) => entry.key === key);
+        if (!def) continue;
+        const verdict = validateSetting(def, value);
+        if (!verdict?.valid && !fieldErrors[key]) {
+          fieldErrors[key] = verdict.error || "Invalid value";
+        }
+      }
+      const schemaErrors = validateConfigSchemaChanges(changes);
+      for (const [key, value] of Object.entries(schemaErrors || {})) {
+        if (!fieldErrors[key]) fieldErrors[key] = value;
+      }
+      if (Object.keys(fieldErrors).length > 0) {
+        jsonResponse(res, 400, {
+          ok: false,
+          error: "Invalid settings update",
+          fieldErrors,
+        });
+        return;
+      }
+
+      const updateResult = updateConfigFile(changes);
+      for (const [key, value] of Object.entries(changes)) {
+        if (!SETTINGS_KNOWN_SET.has(key)) continue;
+        if (isUnsetValue(value)) {
+          delete process.env[key];
+        } else {
+          process.env[key] = String(value);
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "KANBAN_BACKEND")) {
+        try {
+          setKanbanBackend(String(changes.KANBAN_BACKEND || "").trim().toLowerCase());
+        } catch (err) {
+          console.warn(`[settings] failed to switch kanban backend: ${err.message}`);
+        }
+      }
+      emitConfigReload({
+        reason: "settings-update",
+        source: "ui-server",
+        keys: Object.keys(changes),
+      });
+      invalidateApiCache("status");
+      invalidateApiCache("server-state");
+      invalidateApiCache("infra");
+      broadcastUiEvent(["settings", "overview"], "invalidate", {
+        reason: "settings-updated",
+        keys: Object.keys(changes),
+      });
+      jsonResponse(res, 200, {
+        ok: true,
+        updatedConfig: updateResult.updated || [],
+        configPath: updateResult.path || resolveConfigPath(),
+        configDir: dirname(updateResult.path || resolveConfigPath()),
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/pr-automation" && req.method === "GET") {
     try {
       const { configData } = readConfigDocument();
@@ -25129,7 +28259,10 @@ if (path === "/api/agent-logs/context") {
 
   if (path === "/api/settings") {
     try {
-      const { data, sources } = buildSettingsResponseData();
+      const { configData } = readConfigDocument();
+      const { data, sources, rawValues } = buildResolvedSettingsState();
+      const providerInventory = buildProviderInventory(rawValues);
+      const harnessExecutors = buildHarnessExecutorInventory(configData, rawValues, providerInventory);
       const envPath = resolve(resolveUiConfigDir(), ".env");
       const configPath = resolveConfigPath();
       const configExists = existsSync(configPath);
@@ -25138,6 +28271,9 @@ if (path === "/api/agent-logs/context") {
         ok: true,
         data,
         sources,
+        providers: providerInventory,
+        harnessExecutors,
+        agentArchitecture: buildAgentConfigurationGuide(rawValues, providerInventory, harnessExecutors),
         meta: {
           envPath,
           configPath,
@@ -25241,2106 +28377,8 @@ if (path === "/api/agent-logs/context") {
     return;
   }
 
-  if (path === "/api/harness/active" && req.method === "GET") {
-    try {
-      const harnessConfig = getHarnessRuntimeConfig();
-      const activeState = readActiveHarnessState(resolveUiConfigDir());
-      let artifact = null;
-      if (activeState?.artifactPath) {
-        try {
-          artifact = readHarnessArtifact(activeState.artifactPath);
-        } catch {
-          artifact = null;
-        }
-      }
-      jsonResponse(res, 200, {
-        ok: true,
-        harnessConfig,
-        activeState,
-        artifact: artifact
-          ? {
-              artifactId: artifact.artifactId,
-              artifactPath: artifact.artifactPath,
-              isValid: artifact.isValid,
-              sourceOrigin: artifact.sourceOrigin,
-              sourcePath: artifact.sourcePath,
-              compiledProfile: artifact.compiledProfile,
-              validationReport: artifact.validationReport,
-            }
-          : null,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/harness/runs" && req.method === "GET") {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
-      const limit = Number(url.searchParams.get("limit") || 25);
-      const activeRuns = listActiveHarnessRunSnapshots();
-      const persistedRuns = hydrateHarnessRunListItems(
-        listHarnessRuns(resolveUiConfigDir(), { limit: Math.max(limit, 25) }),
-      );
-      let items = mergeHarnessRunSummaries(persistedRuns, activeRuns, Math.max(limit, 25));
-      const stateFilter = String(url.searchParams.get("state") || "").trim().toLowerCase();
-      const waitingForOperatorFilter = url.searchParams.get("waitingForOperator");
-      const staleFilter = url.searchParams.get("stale");
-      if (stateFilter) {
-        items = items.filter((item) => String(item?.health?.state || "").trim().toLowerCase() === stateFilter);
-      }
-      if (waitingForOperatorFilter != null && waitingForOperatorFilter !== "") {
-        const expected = parseBooleanLike(waitingForOperatorFilter, false);
-        items = items.filter((item) => Boolean(item?.health?.waitingForOperator) === expected);
-      }
-      if (staleFilter != null && staleFilter !== "") {
-        const expected = parseBooleanLike(staleFilter, false);
-        items = items.filter((item) => Boolean(item?.health?.isStale) === expected);
-      }
-      jsonResponse(res, 200, {
-        ok: true,
-        activeRunCount: activeRuns.length,
-        items: items.slice(0, Math.max(1, limit)),
-      });
-    } catch (err) {
-      jsonResponse(res, 400, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/harness/approvals" && req.method === "GET") {
-    try {
-      const {
-        listApprovalRequests,
-      } = await import("../workflow/approval-queue.mjs");
-      const approvalsRepoRoot = resolveHarnessApprovalRepoRoot();
-      const listed = listApprovalRequests({
-        repoRoot: approvalsRepoRoot,
-        scopeType: "harness-run",
-        status: url.searchParams.get("status") || "",
-        includeResolved: parseBooleanLike(url.searchParams.get("includeResolved"), false),
-        limit: Number(url.searchParams.get("limit") || 100),
-      });
-      jsonResponse(res, 200, {
-        ok: true,
-        path: listed.path,
-        requests: listed.requests,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err?.message || String(err) });
-    }
-    return;
-  }
-
-  if (path.startsWith("/api/harness/approvals/")) {
-    try {
-      const subPath = path.replace("/api/harness/approvals/", "");
-      const segments = subPath.split("/").map(decodeURIComponent);
-      const requestId = String(segments[0] || "").trim();
-      const action = String(segments[1] || "").trim();
-      if (!requestId) {
-        jsonResponse(res, 400, { ok: false, error: "requestId is required" });
-        return;
-      }
-      if (action !== "resolve" || req.method !== "POST") {
-        jsonResponse(res, 404, { ok: false, error: "Approval action not found" });
-        return;
-      }
-      const {
-        getApprovalRequestById,
-        resolveApprovalRequest,
-      } = await import("../workflow/approval-queue.mjs");
-      const approvalsRepoRoot = resolveHarnessApprovalRepoRoot();
-      const request = getApprovalRequestById(requestId, { repoRoot: approvalsRepoRoot });
-      if (!request || String(request?.scopeType || "").trim() !== "harness-run") {
-        jsonResponse(res, 404, { ok: false, error: "Harness approval request not found" });
-        return;
-      }
-      const body = await readJsonBody(req).catch(() => ({}));
-      const decision = String(body?.decision || "").trim().toLowerCase();
-      if (!["approved", "denied"].includes(decision)) {
-        jsonResponse(res, 400, { ok: false, error: "decision must be approved or denied" });
-        return;
-      }
-      const actorId = String(body?.actorId || body?.actor || "ui-operator").trim() || "ui-operator";
-      const note = String(body?.note || "").trim();
-      const resolved = resolveApprovalRequest(request.requestId, {
-        repoRoot: approvalsRepoRoot,
-        decision,
-        actorId,
-        note,
-      });
-      const runId = String(request?.runId || request?.scopeId || "").trim();
-      const activeState = runId ? activeHarnessRuns.get(runId) : null;
-      let wake = null;
-      if (activeState?.sessionHandle?.steer) {
-        recordActiveHarnessRunControlEvent(runId, {
-          type: "harness:approval-resolved",
-          runId,
-          taskKey: activeState.taskKey,
-          requestId: request.requestId,
-          stageId: String(request?.stageId || "").trim() || null,
-          stageType: String(request?.stageType || "").trim() || null,
-          decision,
-          actor: actorId,
-          note,
-          status: decision,
-          timestamp: new Date().toISOString(),
-        });
-        wake = activeState.sessionHandle.steer(buildHarnessApprovalWakePrompt(request, {
-          decision,
-          actorId,
-          note,
-        }), {
-          kind: "approval",
-          actor: actorId,
-          reason: decision,
-          decision,
-          note,
-          requestId: request.requestId,
-          requestedStageId: String(request?.stageId || "").trim() || null,
-        });
-        activeState.updatedAt = new Date().toISOString();
-        activeHarnessRuns.set(runId, activeState);
-        invalidateHarnessApiCaches();
-      }
-      jsonResponse(res, 200, {
-        ok: true,
-        request: resolved.request,
-        active: Boolean(activeState),
-        wake,
-        updateResult: resolved.updateResult || null,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err?.message || String(err) });
-    }
-    return;
-  }
-
-  const harnessRunEventsMatch = path.match(/^\/api\/harness\/runs\/([^/]+)\/events$/);
-  if (harnessRunEventsMatch && req.method === "GET") {
-    try {
-      const runId = decodeURIComponent(harnessRunEventsMatch[1]);
-      const run = getActiveHarnessRunSnapshot(runId) || readHarnessRunRecord(resolve(resolveUiConfigDir(), ".cache", "harness", "runs", `${runId}.json`));
-      const payload = listHarnessRunEvents(run, {
-        limit: Number(url.searchParams.get("limit")) || 120,
-        direction: url.searchParams.get("direction") || "asc",
-        type: url.searchParams.get("type") || "",
-        category: url.searchParams.get("category") || "",
-      });
-      jsonResponse(res, 200, {
-        ok: true,
-        runId,
-        summary: payload.summary,
-        events: payload.events,
-      });
-    } catch (err) {
-      jsonResponse(res, 404, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  const harnessRunMatch = path.match(/^\/api\/harness\/runs\/([^/]+)$/);
-  if (harnessRunMatch && req.method === "GET") {
-    try {
-      const runId = decodeURIComponent(harnessRunMatch[1]);
-      const activeRun = getActiveHarnessRunSnapshot(runId);
-      const run = activeRun || (() => {
-        const runPath = resolve(resolveUiConfigDir(), ".cache", "harness", "runs", `${runId}.json`);
-        const record = readHarnessRunRecord(runPath);
-        return {
-          ...record,
-          ...buildPersistedHarnessRunSummary(record, runPath),
-        };
-      })();
-      const eventSummary = buildHarnessEventSummary(run?.events);
-      jsonResponse(res, 200, {
-        ok: true,
-        run,
-        eventSummary: {
-          ...eventSummary,
-          normalizedEvents: undefined,
-        },
-        normalizedEvents: eventSummary.normalizedEvents,
-      });
-    } catch (err) {
-      jsonResponse(res, 404, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  const harnessReplayMatch = path.match(/^\/api\/harness\/runs\/([^/]+)\/replay$/);
-  if (harnessReplayMatch && req.method === "POST") {
-    try {
-      const sourceRunId = decodeURIComponent(harnessReplayMatch[1]);
-      const sourceRunPath = resolve(resolveUiConfigDir(), ".cache", "harness", "runs", `${sourceRunId}.json`);
-      const sourceRun = readHarnessRunRecord(sourceRunPath);
-      const body = await readJsonBody(req);
-      const replayPayload = await executeHarnessRunRequest({
-        ...(body && typeof body === "object" ? body : {}),
-        ...(String(body?.artifactPath || "").trim() ? {} : (sourceRun?.artifactPath ? { artifactPath: sourceRun.artifactPath } : {})),
-        ...(String(body?.sourcePath || "").trim() || String(body?.source || "").trim()
-          ? {}
-          : (sourceRun?.sourcePath ? { sourcePath: sourceRun.sourcePath } : {})),
-        ...(String(body?.taskId || "").trim() ? {} : (sourceRun?.taskId ? { taskId: sourceRun.taskId } : {})),
-        ...(String(body?.taskKey || "").trim() ? {} : (sourceRun?.taskKey ? { taskKey: sourceRun.taskKey } : {})),
-      }, {
-        harnessConfig: getHarnessRuntimeConfig(),
-        replayedFromRunId: sourceRunId,
-      });
-      jsonResponse(res, 200, replayPayload);
-    } catch (err) {
-      const statusCode = Number(err?.statusCode) || (String(err?.message || "").includes("not found") ? 404 : 400);
-      jsonResponse(res, statusCode, {
-        ok: false,
-        error: err.message,
-        ...(err?.payload && typeof err.payload === "object" ? err.payload : {}),
-      });
-    }
-    return;
-  }
-
-  const harnessNudgeMatch = path.match(/^\/api\/harness\/runs\/([^/]+)\/nudge$/);
-  if (harnessNudgeMatch && req.method === "POST") {
-    try {
-      const runId = decodeURIComponent(harnessNudgeMatch[1]);
-      const activeState = activeHarnessRuns.get(runId);
-      if (!activeState) {
-        jsonResponse(res, 404, { ok: false, error: `Active harness run not found: ${runId}` });
-        return;
-      }
-      const body = await readJsonBody(req);
-      const prompt = String(body?.prompt || body?.instruction || "").trim();
-      const mode = String(body?.mode || "steer").trim().toLowerCase() || "steer";
-      const actor = String(body?.actor || "operator").trim() || "operator";
-      const reason = String(body?.reason || "manual_intervention").trim() || "manual_intervention";
-      if (!prompt) {
-        jsonResponse(res, 400, { ok: false, error: "prompt is required" });
-        return;
-      }
-      const steerResult = activeState.sessionHandle?.steer?.(prompt, {
-        kind: mode,
-        actor,
-        reason,
-        requestedStageId: String(body?.stageId || "").trim() || null,
-      }) || {
-        ok: false,
-        delivered: false,
-        reason: "not_steerable",
-        interventionType: mode,
-        stageId: null,
-        targetTaskKey: null,
-      };
-      activeState.updatedAt = new Date().toISOString();
-      activeHarnessRuns.set(runId, activeState);
-      invalidateHarnessApiCaches();
-      jsonResponse(res, steerResult.ok ? 200 : 409, {
-        ok: steerResult.ok === true,
-        runId,
-        active: true,
-        mode,
-        actor,
-        delivered: steerResult.delivered === true,
-        reason: steerResult.reason || null,
-        stageId: steerResult.stageId || null,
-        targetTaskKey: steerResult.targetTaskKey || null,
-      });
-    } catch (err) {
-      jsonResponse(res, 400, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  const harnessApprovalMatch = path.match(/^\/api\/harness\/runs\/([^/]+)\/approval$/);
-  if (harnessApprovalMatch && (req.method === "GET" || req.method === "POST")) {
-    try {
-      const runId = decodeURIComponent(harnessApprovalMatch[1]);
-      const approvalsRepoRoot = resolveHarnessApprovalRepoRoot();
-      const {
-        getHarnessRunApprovalRequest,
-        resolveApprovalRequest,
-        upsertHarnessRunApprovalRequest,
-      } = await import("../workflow/approval-queue.mjs");
-      const activeState = activeHarnessRuns.get(runId);
-      let persistedRun = null;
-      if (!activeState) {
-        try {
-          persistedRun = readHarnessRunRecord(resolve(resolveUiConfigDir(), ".cache", "harness", "runs", `${runId}.json`));
-        } catch {
-          persistedRun = null;
-        }
-      }
-      let request = getHarnessRunApprovalRequest(runId, { repoRoot: approvalsRepoRoot });
-      if (req.method === "GET") {
-        jsonResponse(res, 200, {
-          ok: true,
-          request,
-          approvalPending: String(request?.status || "").trim() === "pending",
-          active: Boolean(activeState),
-          runId,
-        });
-        return;
-      }
-      const body = await readJsonBody(req);
-      const decision = String(body?.decision || "").trim().toLowerCase();
-      if (["approved", "denied"].includes(decision)) {
-        if (!request) {
-          jsonResponse(res, 409, { ok: false, error: "No pending harness approval request exists for this run." });
-          return;
-        }
-        const actor = String(body?.actorId || body?.actor || "operator").trim() || "operator";
-        const note = String(body?.note || "").trim();
-        const resolved = resolveApprovalRequest(request.requestId, {
-          repoRoot: approvalsRepoRoot,
-          decision,
-          actorId: actor,
-          note,
-        });
-        let wake = null;
-        if (activeState?.sessionHandle?.steer) {
-          recordActiveHarnessRunControlEvent(runId, {
-            type: "harness:approval-resolved",
-            runId,
-            taskKey: activeState.taskKey,
-            requestId: request.requestId,
-            stageId: resolved.request?.stageId || String(body?.stageId || "").trim() || null,
-            stageType: resolved.request?.stageType || null,
-            decision,
-            actor,
-            note,
-            status: decision,
-            timestamp: new Date().toISOString(),
-          });
-          wake = activeState.sessionHandle.steer(buildHarnessApprovalWakePrompt(resolved.request, {
-            decision,
-            actorId: actor,
-            note,
-          }), {
-            kind: "approval",
-            actor,
-            reason: decision,
-            decision,
-            note,
-            requestId: request.requestId,
-            requestedStageId: resolved.request?.stageId || String(body?.stageId || "").trim() || null,
-          });
-          activeState.updatedAt = new Date().toISOString();
-          activeHarnessRuns.set(runId, activeState);
-          invalidateHarnessApiCaches();
-        }
-        jsonResponse(res, 200, {
-          ok: true,
-          runId,
-          request: resolved.request,
-          active: Boolean(activeState),
-          wake,
-          updateResult: resolved.updateResult || null,
-        });
-        return;
-      }
-
-      const activeSnapshot = activeState ? buildHarnessActiveRunSnapshot(activeState) : null;
-      const stageId =
-        String(body?.stageId || "").trim()
-        || String(activeSnapshot?.latestStageId || persistedRun?.result?.currentStageId || "").trim()
-        || null;
-      const stageType =
-        String(body?.stageType || "").trim()
-        || String(activeSnapshot?.latestEvent?.stageType || "").trim()
-        || (Array.isArray(activeState?.compiledProfile?.stages)
-          ? String(activeState.compiledProfile.stages.find((entry) => String(entry?.id || "").trim() === stageId)?.type || "").trim()
-          : "")
-        || null;
-      const actor = String(body?.actor || body?.requestedBy || "operator").trim() || "operator";
-      const reason = String(body?.reason || "Harness run requires operator approval before continuation.").trim()
-        || "Harness run requires operator approval before continuation.";
-      const preview = String(body?.preview || activeSnapshot?.latestEvent?.summary || persistedRun?.result?.error || "").trim() || null;
-      const created = upsertHarnessRunApprovalRequest({
-        runId,
-        taskId: activeState?.taskId || persistedRun?.taskId || null,
-        taskTitle: String(body?.taskTitle || "").trim() || null,
-        taskKey: activeState?.taskKey || persistedRun?.taskKey || null,
-        stageId,
-        stageType,
-        agentId: activeState?.compiledProfile?.agentId || persistedRun?.compiledProfile?.agentId || null,
-        artifactId: activeState?.artifactId || persistedRun?.artifactId || null,
-        sourceOrigin: activeState?.sourceOrigin || persistedRun?.sourceOrigin || null,
-        sourcePath: activeState?.sourcePath || persistedRun?.sourcePath || null,
-        requestedBy: actor,
-        reason,
-        preview,
-        timeoutMs: body?.timeoutMs,
-        mode: String(body?.mode || "manual").trim() || "manual",
-      }, { repoRoot: approvalsRepoRoot });
-      request = created.request;
-      if (activeState && request) {
-        recordActiveHarnessRunControlEvent(runId, {
-          type: "harness:approval-requested",
-          runId,
-          taskKey: activeState.taskKey,
-          requestId: request.requestId,
-          stageId,
-          stageType,
-          actor,
-          reason,
-          status: "pending",
-          timestamp: new Date().toISOString(),
-        });
-        activeState.updatedAt = new Date().toISOString();
-        activeHarnessRuns.set(runId, activeState);
-        invalidateHarnessApiCaches();
-      }
-      jsonResponse(res, request ? 200 : 400, {
-        ok: Boolean(request),
-        runId,
-        request,
-        approvalPending: Boolean(request && String(request.status || "").trim() === "pending"),
-        active: Boolean(activeState),
-        created: created?.created === true,
-        reopened: created?.reopened === true,
-      });
-    } catch (err) {
-      jsonResponse(res, 400, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  const harnessStopMatch = path.match(/^\/api\/harness\/runs\/([^/]+)\/stop$/);
-  if (harnessStopMatch && req.method === "POST") {
-    try {
-      const runId = decodeURIComponent(harnessStopMatch[1]);
-      const activeState = activeHarnessRuns.get(runId);
-      if (!activeState) {
-        try {
-          readHarnessRunRecord(resolve(resolveUiConfigDir(), ".cache", "harness", "runs", `${runId}.json`));
-          jsonResponse(res, 200, { ok: true, runId, stopped: false, active: false, stopRequested: false });
-        } catch (error) {
-          jsonResponse(res, 404, { ok: false, error: error.message });
-        }
-        return;
-      }
-      if (activeState.stopRequested === true) {
-        jsonResponse(res, 200, {
-          ok: true,
-          runId,
-          stopped: false,
-          active: true,
-          stopRequested: true,
-          stopRequestedAt: activeState.stopRequestedAt || null,
-          reason: activeState.stopRequestedReason || null,
-        });
-        return;
-      }
-      const body = await readJsonBody(req);
-      const reason = String(body?.reason || "operator_stop").trim() || "operator_stop";
-      activeState.stopRequested = true;
-      activeState.stopRequestedAt = new Date().toISOString();
-      activeState.stopRequestedReason = reason;
-      activeHarnessRuns.set(runId, activeState);
-      invalidateHarnessApiCaches();
-      try {
-        activeState.abortController?.abort?.(reason);
-      } catch {
-        // best effort
-      }
-      try {
-        activeState.sessionHandle?.controller?.abort?.(reason);
-      } catch {
-        // best effort
-      }
-      jsonResponse(res, 200, {
-        ok: true,
-        runId,
-        stopped: true,
-        active: true,
-        stopRequested: true,
-        stopRequestedAt: activeState.stopRequestedAt,
-        reason,
-      });
-    } catch (err) {
-      jsonResponse(res, 400, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/harness/compile" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const harnessConfig = getHarnessRuntimeConfig();
-      const sourceInfo = resolveHarnessCompileSource(body || {}, harnessConfig);
-      const validationMode = String(body?.validationMode || harnessConfig.validationMode || "report")
-        .trim()
-        .toLowerCase() || "report";
-      const compiled = compileHarnessSourceToArtifact(sourceInfo.source, {
-        configDir: resolveUiConfigDir(),
-        repoRoot,
-        sourceOrigin: sourceInfo.sourceOrigin,
-        sourcePath: sourceInfo.sourcePath,
-        validationMode,
-      });
-      const payload = buildHarnessCompilePayload(compiled, harnessConfig);
-      jsonResponse(res, payload.ok ? 200 : 400, payload);
-    } catch (err) {
-      jsonResponse(res, 400, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/harness/activate" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const harnessConfig = getHarnessRuntimeConfig();
-      const validationMode = String(body?.validationMode || harnessConfig.validationMode || "report")
-        .trim()
-        .toLowerCase() || "report";
-      let artifact = null;
-      let compiled = null;
-      if (typeof body?.artifactPath === "string" && body.artifactPath.trim()) {
-        artifact = readHarnessArtifact(body.artifactPath);
-      } else {
-        const sourceInfo = resolveHarnessCompileSource(body || {}, harnessConfig);
-        compiled = compileHarnessSourceToArtifact(sourceInfo.source, {
-          configDir: resolveUiConfigDir(),
-          repoRoot,
-          sourceOrigin: sourceInfo.sourceOrigin,
-          sourcePath: sourceInfo.sourcePath,
-          validationMode,
-        });
-        artifact = compiled.artifact;
-      }
-
-      if (artifact?.isValid !== true && shouldEnforceHarnessValidation(validationMode)) {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "Harness validation failed in enforce mode",
-          validationReport: artifact?.validationReport || null,
-          artifactPath: artifact?.artifactPath || null,
-        });
-        return;
-      }
-
-      const activeState = activateHarnessArtifact(artifact.artifactPath, {
-        configDir: resolveUiConfigDir(),
-        actor: "api",
-      });
-      jsonResponse(res, 200, {
-        ok: true,
-        harnessConfig,
-        artifactPath: artifact.artifactPath,
-        artifactId: artifact.artifactId,
-        activeState,
-        compiledProfile: artifact.compiledProfile,
-        validationReport: artifact.validationReport,
-        compiledProfileJson: compiled?.compiledProfileJson || artifact.compiledProfileJson || null,
-      });
-    } catch (err) {
-      jsonResponse(res, 400, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/harness/run" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const payload = await executeHarnessRunRequest(body, {
-        harnessConfig: getHarnessRuntimeConfig(),
-      });
-      jsonResponse(res, 200, payload);
-    } catch (err) {
-      const statusCode = Number(err?.statusCode) || 400;
-      jsonResponse(res, statusCode, {
-        ok: false,
-        error: err.message,
-        ...(err?.payload && typeof err.payload === "object" ? err.payload : {}),
-      });
-    }
-    return;
-  }
-
-  if (path === "/api/settings/update") {
-    try {
-      const body = await readJsonBody(req);
-      const changes = body?.changes;
-      if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
-        jsonResponse(res, 400, { ok: false, error: "changes object is required" });
-        return;
-      }
-      // Rate limit: 2 seconds between settings updates
-      const now = Date.now();
-      if (now - _settingsLastUpdateTime < 2000) {
-        jsonResponse(res, 429, { ok: false, error: "Settings update rate limited. Wait 2 seconds." });
-        return;
-      }
-      const unknownKeys = Object.keys(changes).filter(k => !SETTINGS_KNOWN_SET.has(k));
-      if (unknownKeys.length > 0) {
-        jsonResponse(res, 400, { ok: false, error: `Unknown keys: ${unknownKeys.join(", ")}` });
-        return;
-      }
-      const fieldErrors = {};
-      for (const [key, value] of Object.entries(changes)) {
-        const def = SETTINGS_SCHEMA.find((s) => s.key === key);
-        if (!def) continue;
-        const result = validateSetting(def, String(value ?? ""));
-        if (!result.valid) {
-          fieldErrors[key] = result.error || "Invalid value";
-        }
-      }
-      const schemaFieldErrors = validateConfigSchemaChanges(changes);
-      for (const [key, error] of Object.entries(schemaFieldErrors)) {
-        if (!fieldErrors[key]) fieldErrors[key] = error;
-      }
-      if (Object.keys(fieldErrors).length > 0) {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "Validation failed",
-          fieldErrors,
-        });
-        return;
-      }
-      for (const [key, value] of Object.entries(changes)) {
-        const strVal = String(value);
-        if (strVal.length > 2000) {
-          jsonResponse(res, 400, { ok: false, error: `Value for ${key} exceeds 2000 chars` });
-          return;
-        }
-        if (strVal.includes('\0') || strVal.includes('\n') || strVal.includes('\r')) {
-          jsonResponse(res, 400, { ok: false, error: `Value for ${key} contains illegal characters (null bytes or newlines)` });
-          return;
-        }
-      }
-      // Apply to process.env
-      const strChanges = {};
-      for (const [key, value] of Object.entries(changes)) {
-        const strVal = String(value);
-        process.env[key] = strVal;
-        strChanges[key] = strVal;
-      }
-      if (Object.prototype.hasOwnProperty.call(strChanges, "KANBAN_BACKEND")) {
-        try {
-          setKanbanBackend(
-            String(strChanges.KANBAN_BACKEND).trim().toLowerCase(),
-          );
-        } catch (err) {
-          console.warn(`[settings] failed to switch kanban backend: ${err.message}`);
-        }
-      }
-      // Write to .env file
-      const updated = updateEnvFile(strChanges);
-      const configUpdate = updateConfigFile(changes);
-      const configDir = configUpdate.path ? dirname(configUpdate.path) : null;
-      try {
-        const actorId =
-          String(
-            req.headers["x-bosun-operator"]
-            || req.headers["x-forwarded-user"]
-            || req.headers["x-remote-user"]
-            || req.socket?.remoteAddress
-            || "operator",
-          ).trim() || "operator";
-        const ledgerScopeId =
-          String(configDir || repoRoot || process.cwd()).trim() || "settings";
-        for (const [key, value] of Object.entries(strChanges)) {
-          upsertStateLedgerKeyValue({
-            scope: "settings",
-            scopeId: ledgerScopeId,
-            key,
-            value,
-            source: "ui.settings.update",
-            metadata: {
-              configPath: configUpdate.path || null,
-              updatedConfig: configUpdate.updated || [],
-            },
-          }, { repoRoot });
-        }
-        appendOperatorActionToStateLedger({
-          actionType: "settings.update",
-          actorId,
-          actorType: "operator",
-          scope: "settings",
-          scopeId: ledgerScopeId,
-          targetId: Object.keys(strChanges).join(","),
-          status: "completed",
-          request: { changes: strChanges },
-          result: {
-            updated,
-            updatedConfig: configUpdate.updated || [],
-            configPath: configUpdate.path || null,
-          },
-          metadata: {
-            configDir,
-          },
-        }, { repoRoot });
-      } catch (ledgerErr) {
-        console.warn(`[settings] state ledger mirror failed: ${ledgerErr.message}`);
-      }
-      _settingsLastUpdateTime = now;
-      invalidateApiCache("server-state");
-      invalidateApiCache("status");
-      invalidateApiCache("infra");
-      broadcastUiEvent(["settings", "overview"], "invalidate", { reason: "settings-updated", keys: updated });
-      jsonResponse(res, 200, {
-        ok: true,
-        updated,
-        updatedConfig: configUpdate.updated || [],
-        configPath: configUpdate.path || null,
-        configDir,
-        tunnel: getTunnelStatus(),
-        fallbackAuth: getFallbackAuthStatus(),
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/project-summary") {
-    try {
-      const adapter = getKanbanAdapter();
-      const projects = await adapter.listProjects();
-      const project = projects?.[0] || null;
-      if (project) {
-        const tasks = await adapter.listTasks(project.id || project.name).catch(() => []);
-        const completedCount = tasks.filter(
-          (t) => t.status === "done" || t.status === "closed" || t.status === "completed",
-        ).length;
-        jsonResponse(res, 200, {
-          ok: true,
-          data: {
-            id: project.id || project.name,
-            name: project.name || project.title || project.id,
-            description: project.description || project.body || null,
-            taskCount: tasks.length,
-            completedCount,
-          },
-        });
-      } else {
-        jsonResponse(res, 200, { ok: true, data: null });
-      }
-    } catch (err) {
-      jsonResponse(res, 200, { ok: true, data: null });
-    }
-    return;
-  }
-
-  if (path === "/api/project-sync/metrics") {
-    try {
-      const syncEngine = uiDeps.getSyncEngine?.() || null;
-      jsonResponse(res, 200, {
-        ok: true,
-        data: {
-          webhook: getProjectSyncWebhookMetrics(),
-          syncEngine: syncEngine?.getStatus?.()?.metrics || null,
-        },
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/github/app/config") {
-    const appId = (process.env.BOSUN_GITHUB_APP_ID || "").trim();
-    const privateKeyPath = (process.env.BOSUN_GITHUB_PRIVATE_KEY_PATH || "").trim();
-    const clientId = (process.env.BOSUN_GITHUB_CLIENT_ID || "").trim();
-    const webhookSecretSet = Boolean(process.env.BOSUN_GITHUB_WEBHOOK_SECRET);
-    const appWebhookPath = getAppWebhookPath();
-
-    // Build public URLs from tunnel URL if available, else from request host.
-    let baseUrl = String(getTunnelUrl() || "").replace(/\/+$/, "");
-    if (!baseUrl) {
-      const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
-      const proto = uiServerTls || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-      baseUrl = `${proto}://${host}`;
-    }
-
-    jsonResponse(res, 200, {
-      ok: true,
-      data: {
-        appId: appId || null,
-        appSlug: "bosun-ve",
-        botUsername: "bosun-ve[bot]",
-        appUrl: "https://github.com/apps/bosun-ve",
-        configured: {
-          appId: Boolean(appId),
-          privateKey: Boolean(privateKeyPath),
-          oauthClient: Boolean(clientId),
-          webhookSecret: webhookSecretSet,
-        },
-        urls: {
-          webhookUrl: `${baseUrl}${appWebhookPath}`,
-          oauthCallbackUrl: `${baseUrl}/api/github/callback`,
-        },
-        paths: {
-          webhookPath: appWebhookPath,
-          oauthCallbackPath: "/api/github/callback",
-        },
-      },
-    });
-    return;
-  }
-
-  if (path === "/api/command") {
-    try {
-      const body = await readJsonBody(req);
-      const command = (body?.command || "").trim();
-      if (!command) {
-        jsonResponse(res, 400, { ok: false, error: "command is required" });
-        return;
-      }
-      const ALLOWED_CMD_PREFIXES = [
-        "/status",
-        "/health",
-        "/plan",
-        "/logs",
-        "/agentlogs",
-        "/menu",
-        "/tasks",
-        "/start",
-        "/stop",
-        "/pause",
-        "/resume",
-        "/sdk",
-        "/kanban",
-        "/region",
-        "/deploy",
-        "/agents",
-        "/executor",
-        "/help",
-        "/commands",
-        "/starttask",
-        "/stoptask",
-        "/retrytask",
-        "/parallelism",
-        "/sentinel",
-        "/hooks",
-        "/version",
-        "/ask",
-        "/compact",
-        "/context",
-        "/mcp",
-        "/helpfull",
-        "/background",
-        "/bg",
-        "/shell",
-        "/git",
-        "/diff",
-        "/branches",
-        "/threads",
-        "/worktrees",
-        "/model",
-        "/retry",
-        "/history",
-        "/clear",
-        "/anomalies",
-        "/workspace",
-        "/ws",
-      ];
-      const cmdBase = command.split(/\s/)[0].toLowerCase();
-      const privilegedCommandAccess = isPrivilegedAuthSource(authResult?.source);
-      if (!privilegedCommandAccess && !ALLOWED_CMD_PREFIXES.some(p => cmdBase === p || cmdBase.startsWith(p + " "))) {
-        jsonResponse(res, 400, { ok: false, error: `Command not allowed: ${cmdBase}` });
-        return;
-      }
-      const handler = uiDeps.handleUiCommand;
-      if (typeof handler === "function") {
-        if (ASYNC_UI_COMMAND_BASES.has(cmdBase)) {
-          setImmediate(() => {
-            let pending;
-            try {
-              pending = Promise.resolve(handler(command));
-            } catch (err) {
-              console.warn(`[ui] async command failed (${command}): ${err?.message || err}`);
-              broadcastUiEvent(["overview", "executor", "tasks"], "invalidate", {
-                reason: "command-failed",
-                command,
-              });
-              return;
-            }
-            pending
-              .then(() => {
-                broadcastUiEvent(["overview", "executor", "tasks"], "invalidate", {
-                  reason: "command-executed",
-                  command,
-                });
-              })
-              .catch((err) => {
-                console.warn(`[ui] async command failed (${command}): ${err?.message || err}`);
-                broadcastUiEvent(["overview", "executor", "tasks"], "invalidate", {
-                  reason: "command-failed",
-                  command,
-                });
-              });
-          });
-          jsonResponse(res, 202, {
-            ok: true,
-            queued: true,
-            command,
-            message: "Command accepted and running in background.",
-          });
-        } else {
-          const result = await handler(command);
-          jsonResponse(res, 200, { ok: true, data: result || null, command });
-        }
-      } else {
-        // No command handler wired — acknowledge and broadcast refresh
-        jsonResponse(res, 200, {
-          ok: true,
-          data: null,
-          command,
-          message: "Command queued. Check status for results.",
-        });
-      }
-      broadcastUiEvent(["overview", "executor", "tasks"], "invalidate", {
-        reason: ASYNC_UI_COMMAND_BASES.has(cmdBase) ? "command-queued" : "command-executed",
-        command,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/tasks/retry") {
-    try {
-      const body = await readJsonBody(req);
-      const taskId = body?.taskId || body?.id;
-      if (!taskId) {
-        jsonResponse(res, 400, { ok: false, error: "taskId is required" });
-        return;
-      }
-      const executor = uiDeps.getInternalExecutor?.();
-      if (!executor) {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "Internal executor not enabled.",
-        });
-        return;
-      }
-      const adapter = getKanbanAdapter();
-      const task = await adapter.getTask(taskId);
-      if (!task) {
-        jsonResponse(res, 404, { ok: false, error: "Task not found." });
-        return;
-      }
-      let nextTask = unblockInternalTask(taskId, {
-        status: "todo",
-        source: "manual-retry",
-      });
-      resetExecutorTaskThrottleState(taskId);
-      if (!nextTask) {
-        if (typeof adapter.updateTask === "function") {
-          await adapter.updateTask(taskId, {
-            status: "todo",
-            cooldownUntil: null,
-            blockedReason: null,
-            meta: task?.meta && typeof task.meta === "object"
-              ? Object.fromEntries(Object.entries(task.meta).filter(([key]) => key !== "autoRecovery"))
-              : task?.meta,
-          });
-        } else if (typeof adapter.updateTaskStatus === "function") {
-          await adapter.updateTaskStatus(taskId, "todo");
-        }
-        nextTask = await adapter.getTask(taskId);
-      }
-      traceHttpServerAction(req, {
-        route: path,
-        taskId,
-      }, () => executor.executeTask(nextTask || { ...task, status: "todo" })).catch((error) => {
-        console.warn(
-          `[telegram-ui] failed to retry task ${taskId}: ${error.message}`,
-        );
-      });
-      const bus = _resolveEventBus();
-      if (bus && typeof bus.clearRetryQueueTask === "function") {
-        try {
-          bus.clearRetryQueueTask(taskId, "manual-retry-now");
-        } catch {
-          /* best effort */
-        }
-      }
-      jsonResponse(res, 200, { ok: true, taskId });
-      broadcastUiEvent(
-        ["tasks", "overview", "executor", "agents"],
-        "invalidate",
-        { reason: "task-retried", taskId },
-      );
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/tasks/unblock") {
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "POST");
-      jsonResponse(res, 405, { ok: false, error: "Method Not Allowed" });
-      return;
-    }
-    try {
-      const body = await readJsonBody(req);
-      const taskId = body?.taskId || body?.id;
-      const targetStatus = String(body?.status || "todo").trim().toLowerCase() || "todo";
-      if (!taskId) {
-        jsonResponse(res, 400, { ok: false, error: "taskId is required" });
-        return;
-      }
-      const adapter = getKanbanAdapter();
-      const task = await adapter.getTask(taskId);
-      if (!task) {
-        jsonResponse(res, 404, { ok: false, error: "Task not found." });
-        return;
-      }
-      let updatedTask = unblockInternalTask(taskId, {
-        status: targetStatus,
-        source: "api.tasks.unblock",
-      });
-      resetExecutorTaskThrottleState(taskId);
-      if (!updatedTask) {
-        const nextMeta = task?.meta && typeof task.meta === "object"
-          ? Object.fromEntries(Object.entries(task.meta).filter(([key]) => key !== "autoRecovery"))
-          : task?.meta;
-        if (typeof adapter.updateTask === "function") {
-          await adapter.updateTask(taskId, {
-            status: targetStatus,
-            cooldownUntil: null,
-            blockedReason: null,
-            meta: nextMeta,
-          });
-        } else if (typeof adapter.updateTaskStatus === "function") {
-          await adapter.updateTaskStatus(taskId, targetStatus);
-        }
-        updatedTask = await adapter.getTask(taskId);
-      }
-      jsonResponse(res, 200, { ok: true, taskId, data: updatedTask || null });
-      broadcastUiEvent(
-        ["tasks", "overview", "executor", "agents"],
-        "invalidate",
-        { reason: "task-unblocked", taskId },
-      );
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  // ── GET /api/retry-queue ───────────────────────────────────────────
-  if (path === "/api/retry-queue" && req.method === "GET") {
-    try {
-      const bus = _resolveEventBus();
-      let retryQueue = null;
-      if (bus && typeof bus.getRetryQueue === "function") {
-        try {
-          const snapshot = bus.getRetryQueue();
-          if (snapshot && typeof snapshot === "object") {
-            retryQueue = snapshot;
-          }
-        } catch {
-          /* best effort */
-        }
-      }
-      if (!retryQueue) {
-        retryQueue = globalThis.__bosun_setRetryQueueData
-          ? _retryQueue
-          : {
-              count: 0,
-              items: [],
-              stats: { totalRetriesToday: 0, peakRetryDepth: 0, exhaustedTaskIds: [] },
-            };
-      }
-      jsonResponse(res, 200, {
-        ok: true,
-        count: retryQueue.count || 0,
-        items: retryQueue.items || [],
-        stats: retryQueue.stats || {
-          totalRetriesToday: 0,
-          peakRetryDepth: 0,
-          exhaustedTaskIds: [],
-        },
-      });
-    } catch (err) {
-      jsonResponse(res, 500, {
-        ok: false,
-        error: err.message,
-        count: 0,
-        items: [],
-        stats: { totalRetriesToday: 0, peakRetryDepth: 0, exhaustedTaskIds: [] },
-      });
-    }
-    return;
-  }
-
-  if (path === "/api/executor/dispatch") {
-    try {
-      const executor = uiDeps.getInternalExecutor?.();
-      if (!executor) {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "Internal executor not enabled.",
-        });
-        return;
-      }
-      const body = await readJsonBody(req);
-      const taskId = (body?.taskId || "").trim();
-      const prompt = (body?.prompt || "").trim();
-      if (!taskId && !prompt) {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "taskId or prompt is required",
-        });
-        return;
-      }
-      const status = executor.getStatus?.() || {};
-      if (taskId) {
-        const adapter = getKanbanAdapter();
-        const task = await adapter.getTask(taskId);
-        if (!task) {
-          jsonResponse(res, 404, { ok: false, error: "Task not found." });
-          return;
-        }
-        traceHttpServerAction(req, {
-          route: path,
-          taskId,
-        }, () => executor.executeTask(task, { force: true })).catch((error) => {
-          console.warn(
-            `[telegram-ui] dispatch failed for ${taskId}: ${error.message}`,
-          );
-        });
-        jsonResponse(res, 200, {
-          ok: true,
-          slotIndex: status.activeSlots || 0,
-          taskId,
-        });
-      } else {
-        // Ad-hoc prompt dispatch via command handler
-        const handler = uiDeps.handleUiCommand;
-        if (typeof handler === "function") {
-          const result = await handler(`/prompt ${prompt}`);
-          jsonResponse(res, 200, {
-            ok: true,
-            slotIndex: status.activeSlots || 0,
-            data: result || null,
-          });
-        } else {
-          jsonResponse(res, 400, {
-            ok: false,
-            error: "Prompt dispatch not available — no command handler.",
-          });
-          return;
-        }
-      }
-      broadcastUiEvent(
-        ["executor", "overview", "agents", "tasks"],
-        "invalidate",
-        { reason: "task-dispatched", taskId: taskId || "(ad-hoc)" },
-      );
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/executor/stop-slot") {
-    try {
-      const executor = uiDeps.getInternalExecutor?.();
-      if (!executor) {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "Internal executor not enabled.",
-        });
-        return;
-      }
-      const body = await readJsonBody(req);
-      const slot = Number(body?.slot ?? -1);
-      if (typeof executor.stopSlot === "function") {
-        await executor.stopSlot(slot);
-      } else if (typeof executor.cancelSlot === "function") {
-        await executor.cancelSlot(slot);
-      } else {
-        jsonResponse(res, 400, {
-          ok: false,
-          error: "Executor does not support stop-slot.",
-        });
-        return;
-      }
-      jsonResponse(res, 200, { ok: true, slot });
-      broadcastUiEvent(["executor", "overview", "agents"], "invalidate", {
-        reason: "slot-stopped",
-        slot,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  // ── Agent API endpoints ────────────────────────────────────────────────
-
-  if (path === "/api/agents/available" && req.method === "GET") {
-    try {
-      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false })
-        || { workspaceDir: repoRoot, workspaceRoot: repoRoot };
-      const agents = getAvailableAgents();
-      const active = getPrimaryAgentSelection();
-      const mode = getAgentMode();
-      const manualAgents = listManualAgentProfiles(workspaceContext);
-      jsonResponse(res, 200, { ok: true, agents, active, mode, manualAgents });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/switch" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const agent = (body?.agent || "").trim();
-      if (!agent) {
-        jsonResponse(res, 400, { ok: false, error: "agent is required" });
-        return;
-      }
-      const previousAgent = getPrimaryAgentSelection();
-      const result = await switchPrimaryAgent(agent);
-      if (!result.ok) {
-        jsonResponse(res, 400, { ok: false, error: result.reason || "Switch failed" });
-        return;
-      }
-      const newAgent = getPrimaryAgentSelection();
-      jsonResponse(res, 200, { ok: true, agent: newAgent, previousAgent });
-      broadcastUiEvent(["agents", "sessions", "overview"], "invalidate", {
-        reason: "agent-switched",
-        agent: newAgent,
-        previousAgent,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/mode" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const mode = (body?.mode || "").trim();
-      if (!mode) {
-        jsonResponse(res, 400, { ok: false, error: "mode is required" });
-        return;
-      }
-      const result = setAgentMode(mode);
-      if (!result.ok) {
-        jsonResponse(res, 400, { ok: false, error: result.error });
-        return;
-      }
-      jsonResponse(res, 200, { ok: true, mode: result.mode });
-      broadcastUiEvent(["agents", "sessions"], "invalidate", {
-        reason: "agent-mode-changed",
-        mode: result.mode,
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/mode" && req.method === "GET") {
-    jsonResponse(res, 200, { ok: true, mode: getAgentMode() });
-    return;
-  }
-
-  if (path === "/api/agent/modes" && req.method === "GET") {
-    const { listAvailableModes } = await import("../agent/primary-agent.mjs");
-    jsonResponse(res, 200, { modes: listAvailableModes() });
-    return;
-  }
-
-  if (path === "/api/agents/sdk-command" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const command = (body?.command || "").trim();
-      if (!command) {
-        jsonResponse(res, 400, { ok: false, error: "command is required" });
-        return;
-      }
-      const args = (body?.args || "").trim();
-      const adapter = (body?.adapter || "").trim() || undefined;
-      const requestedSessionId = String(body?.sessionId || "").trim();
-      const tracker = getSessionTracker();
-      const commandSession = requestedSessionId
-        ? tracker.getSessionById(requestedSessionId)
-        : null;
-      const commandCwd = resolveSessionWorkspaceDir(commandSession);
-      const runSdkCommand =
-        typeof uiDeps.execSdkCommand === "function"
-          ? uiDeps.execSdkCommand
-          : execSdkCommand;
-      const result = await runSdkCommand(command, args, adapter, {
-        cwd: commandCwd,
-        sessionId: requestedSessionId || undefined,
-      });
-      const parsed = typeof result === "string" ? result : JSON.stringify(result);
-      jsonResponse(res, 200, {
-        ok: true,
-        result: parsed,
-        command,
-        adapter: adapter || getPrimaryAgentName(),
-        sessionId: requestedSessionId || null,
-      });
-      broadcastUiEvent(["agents", "sessions"], "invalidate", {
-        reason: "sdk-command-executed",
-        command,
-      });
-    } catch (err) {
-      const status = err.message?.includes("not supported") ? 400 : 500;
-      jsonResponse(res, status, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/info" && req.method === "GET") {
-    try {
-      const info = getPrimaryAgentInfo();
-      const mode = getAgentMode();
-      const commands = getSdkCommands();
-      jsonResponse(res, 200, { ok: true, ...info, mode, sdkCommands: commands });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  // ── Agent Event Bus API ───────────────────────────────────────────────
-
-  if (path === "/api/agents/events" && req.method === "GET") {
-    try {
-      const bus = _resolveEventBus();
-      if (!bus) {
-        jsonResponse(res, 503, { ok: false, error: "Event bus not available" });
-        return;
-      }
-      const taskId = url.searchParams.get("taskId") || undefined;
-      const type = url.searchParams.get("type") || undefined;
-      const since = url.searchParams.get("since")
-        ? Number(url.searchParams.get("since"))
-        : undefined;
-      const limit = url.searchParams.get("limit")
-        ? Number(url.searchParams.get("limit"))
-        : 100;
-      const events = bus.getEventLog({ taskId, type, since, limit });
-      jsonResponse(res, 200, { ok: true, events });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/events/errors" && req.method === "GET") {
-    try {
-      const bus = _resolveEventBus();
-      if (!bus) {
-        jsonResponse(res, 503, { ok: false, error: "Event bus not available" });
-        return;
-      }
-      const taskId = url.searchParams.get("taskId");
-      if (taskId) {
-        const history = bus.getErrorHistory(taskId);
-        jsonResponse(res, 200, { ok: true, taskId, errors: history });
-      } else {
-        const summary = bus.getErrorPatternSummary();
-        jsonResponse(res, 200, { ok: true, patterns: summary });
-      }
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/events/liveness" && req.method === "GET") {
-    try {
-      const bus = _resolveEventBus();
-      if (!bus) {
-        jsonResponse(res, 503, { ok: false, error: "Event bus not available" });
-        return;
-      }
-      const liveness = bus.getAgentLiveness();
-      jsonResponse(res, 200, { ok: true, agents: liveness });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/agents/events/status" && req.method === "GET") {
-    try {
-      const bus = _resolveEventBus();
-      if (!bus) {
-        jsonResponse(res, 503, { ok: false, error: "Event bus not available" });
-        return;
-      }
-      const status = bus.getStatus();
-      jsonResponse(res, 200, { ok: true, ...status });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  // ── Supervisor API endpoint ──
-  if (path === "/api/supervisor/status" && req.method === "GET") {
-    try {
-      const supervisor = typeof uiDeps.getAgentSupervisor === "function"
-        ? uiDeps.getAgentSupervisor()
-        : null;
-      if (!supervisor) {
-        jsonResponse(res, 503, { ok: false, error: "Supervisor not available" });
-        return;
-      }
-      const systemHealth = supervisor.getSystemHealth();
-      const diagnostics = supervisor.getAllDiagnostics();
-      jsonResponse(res, 200, { ok: true, ...systemHealth, tasks: diagnostics });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path.startsWith("/api/supervisor/task/") && req.method === "GET") {
-    try {
-      const supervisor = typeof uiDeps.getAgentSupervisor === "function"
-        ? uiDeps.getAgentSupervisor()
-        : null;
-      if (!supervisor) {
-        jsonResponse(res, 503, { ok: false, error: "Supervisor not available" });
-        return;
-      }
-      const taskId = path.split("/api/supervisor/task/")[1];
-      if (!taskId) {
-        jsonResponse(res, 400, { ok: false, error: "Missing taskId" });
-        return;
-      }
-      const diag = supervisor.getTaskDiagnostics(taskId);
-      if (!diag) {
-        jsonResponse(res, 404, { ok: false, error: "Task not tracked" });
-        return;
-      }
-      jsonResponse(res, 200, { ok: true, ...diag });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  // ── Session API endpoints ──────────────────────────────────────────────
-
-  if (path === "/api/sessions" && req.method === "GET") {
-    try {
-      const tracker = getSessionTracker();
-      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: true });
-      if (!workspaceContext) {
-        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
-        return;
-      }
-      const includeHidden = /^(1|true|yes)$/i.test(String(url.searchParams.get("includeHidden") || "").trim());
-      const typeFilter = url.searchParams.get("type");
-      const statusFilter = url.searchParams.get("status");
-      const requestedWorkspace = String(url.searchParams.get("workspace") || "").trim().toLowerCase();
-      const allowLegacyWithoutWorkspace =
-        !typeFilter
-        && !statusFilter
-        && (!requestedWorkspace || requestedWorkspace === "active");
-      let sessions = mergeTrackerAndLedgerSessions(tracker.listAllSessions(), workspaceContext, {
-        allowLegacyWithoutWorkspace,
-      });
-      if (!includeHidden) {
-        sessions = sessions.filter((session) => !shouldHideSessionFromDefaultList(session));
-      }
-      if (typeFilter) sessions = sessions.filter((s) => s.type === typeFilter);
-      if (statusFilter) sessions = sessions.filter((s) => s.status === statusFilter);
-      sessions = sessions.filter((session) => sessionMatchesWorkspaceContext(session, workspaceContext, {
-        allowLegacyWithoutWorkspace,
-      }));
-      jsonResponse(res, 200, {
-        ok: true,
-        sessions,
-        loadMeta: {
-          stale: false,
-          lastSuccessAt: new Date().toISOString(),
-          lastFailureAt: null,
-          staleReason: null,
-          staleReasonCode: null,
-          staleReasonLabel: null,
-          staleReasonMeta: null,
-          retryAttempt: 0,
-          retryDelayMs: 0,
-          nextRetryAt: null,
-          retriesExhausted: false,
-        },
-      });
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  if (path === "/api/sessions/create" && req.method === "POST") {
-    try {
-      const body = await readJsonBody(req);
-      const type = body?.type || "manual";
-      const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const workspaceContext = resolveActiveWorkspaceExecutionContext();
-      const requestedWorkspaceId = String(body?.workspaceId || "").trim();
-      const requestedWorkspaceDir = normalizeCandidatePath(body?.workspaceDir);
-      const requestedWorkspaceRoot = normalizeCandidatePath(body?.workspaceRoot);
-      const resolvedWorkspaceId =
-        requestedWorkspaceId || workspaceContext.workspaceId;
-      const resolvedWorkspaceDir =
-        requestedWorkspaceDir || workspaceContext.workspaceDir || repoRoot;
-      const resolvedWorkspaceRoot =
-        requestedWorkspaceRoot
-        || workspaceContext.workspaceRoot
-        || resolvedWorkspaceDir;
-      const requestedAgentProfileId = String(body?.agentProfileId || "").trim();
-      const tracker = getSessionTracker();
-      const session = tracker.createSession({
-        id,
-        type,
-        metadata: {
-          prompt: body?.prompt,
-          agent: body?.agent || getPrimaryAgentName(),
-          mode: body?.mode || getAgentMode(),
-          model: body?.model || undefined,
-          ...(requestedAgentProfileId ? { agentProfileId: requestedAgentProfileId } : {}),
-          ...(resolvedWorkspaceId ? { workspaceId: resolvedWorkspaceId } : {}),
-          ...(resolvedWorkspaceDir ? { workspaceDir: resolvedWorkspaceDir } : {}),
-          ...(resolvedWorkspaceRoot ? { workspaceRoot: resolvedWorkspaceRoot } : {}),
-        },
-      });
-      jsonResponse(res, 200, { ok: true, session: { id: session.id, type: session.type, status: session.status, metadata: session.metadata } });
-      broadcastUiEvent(["sessions"], "invalidate", { reason: "session-created", sessionId: id });
-      broadcastSessionsSnapshot();
-    } catch (err) {
-      jsonResponse(res, 500, { ok: false, error: err.message });
-    }
-    return;
-  }
-
-  // Parameterized session routes: /api/sessions/:id[/action]
-  const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(?:\/(.+))?$/);
-  if (sessionMatch) {
-    const sessionId = decodeURIComponent(sessionMatch[1]);
-    const action = sessionMatch[2] || null;
-    // Session-specific routes should support workspace=all so the UI can open
-    // historical sessions while browsing cross-workspace lists.
-    const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: true });
-    if (!workspaceContext) {
-      jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
-      return;
-    }
-    const tracker = getSessionTracker();
-      const getScopedSession = () => {
-        const trackerSession = tracker.getSessionById(sessionId);
-        const ledgerSession = normalizeLedgerSessionDocument(
-          getSessionActivityFromStateLedger(sessionId, resolveUiStateLedgerOptions(workspaceContext)),
-        );
-        const session = mergeSessionRecords(trackerSession, ledgerSession);
-        if (!session) return null;
-        return sessionMatchesWorkspaceContext(session, workspaceContext) ? session : null;
-      };
-      const getScopedSessionRecord = ({ includeMessages = false } = {}) => {
-        const trackerSession = includeMessages
-          ? tracker.getSessionMessages(sessionId)
-          : (tracker.getSessionById(sessionId) || tracker.getSessionMessages(sessionId));
-        const ledgerSession = normalizeLedgerSessionDocument(
-          getSessionActivityFromStateLedger(sessionId, resolveUiStateLedgerOptions(workspaceContext)),
-        );
-        const durableSession = mergeSessionRecords(trackerSession, ledgerSession);
-        if (!durableSession) return null;
-        return sessionMatchesWorkspaceContext(durableSession, workspaceContext) ? durableSession : null;
-      };
-
-    if (!action && req.method === "GET") {
-      try {
-        const session = getScopedSessionRecord({ includeMessages: true });
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        // Support ?limit=N&offset=N for message pagination.
-        // Default to a bounded tail window so large sessions don't crash the UI.
-        const reqUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-        const limitParam = reqUrl.searchParams.get("limit");
-        const offsetParam = reqUrl.searchParams.get("offset");
-        const fullParam = String(reqUrl.searchParams.get("full") || "").toLowerCase();
-        const wantsFull =
-          fullParam === "1" || fullParam === "true" || fullParam === "yes";
-        if (wantsFull) {
-          jsonResponse(res, 200, { ok: true, session });
-        } else {
-          const parsedLimit = Number(limitParam);
-          const limit = Number.isFinite(parsedLimit) && parsedLimit > 0
-            ? Math.max(1, Math.min(Math.floor(parsedLimit), 200))
-            : 20;
-          const allMessages = session.messages || [];
-          const total = allMessages.length;
-          const offset = offsetParam != null
-            ? Math.max(0, Math.min(Number(offsetParam) || 0, total))
-            : Math.max(0, total - limit);
-          const sliced = allMessages.slice(offset, offset + limit);
-          jsonResponse(res, 200, {
-            ok: true,
-            session: { ...session, messages: sliced },
-            pagination: { total, offset, limit, hasMore: offset > 0 },
-          });
-        }
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "attachments" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        const { files } = await readMultipartForm(req);
-        if (!files.length) {
-          jsonResponse(res, 400, { ok: false, error: "file required" });
-          return;
-        }
-        const safeSession = sanitizePathSegment(sessionId);
-        const targetDir = resolve(ATTACHMENTS_ROOT, "sessions", safeSession);
-        mkdirSync(targetDir, { recursive: true });
-        const added = [];
-        for (const file of files) {
-          const originalName = file.filename || "attachment";
-          const ext = extname(originalName).toLowerCase();
-          const base = sanitizePathSegment(basename(originalName, ext)) || "attachment";
-          const unique = `${Date.now()}-${randomBytes(4).toString("hex")}`;
-          const storedName = `${base}-${unique}${ext}`;
-          const filePath = resolve(targetDir, storedName);
-          writeFileSync(filePath, file.data);
-          const relPath = relative(ATTACHMENTS_ROOT, filePath);
-          const contentType =
-            file.contentType || MIME_TYPES[ext] || "application/octet-stream";
-          const kind =
-            contentType.startsWith("image/") ||
-            [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(ext)
-              ? "image"
-              : "file";
-          added.push({
-            name: originalName,
-            filePath,
-            relativePath: relPath,
-            url: resolveAttachmentUrl(relPath),
-            size: file.data.length,
-            contentType,
-            kind,
-            source: "upload",
-            sourceType: "session",
-            createdAt: new Date().toISOString(),
-          });
-        }
-        jsonResponse(res, 200, { ok: true, attachments: added });
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "stop" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-
-        const abortController = sessionRunAbortControllers.get(sessionId);
-        const wasRunning = Boolean(abortController && !abortController.signal?.aborted);
-        if (wasRunning) {
-          try {
-            abortController.abort("user_stop");
-          } catch {
-            /* best effort */
-          }
-          tracker.recordEvent(sessionId, {
-            role: "system",
-            type: "system",
-            content: "Stop requested. Cancelling current agent turn...",
-            timestamp: new Date().toISOString(),
-          });
-        }
-
-        jsonResponse(res, 200, { ok: true, stopped: wasRunning });
-        broadcastUiEvent(["sessions", "agents"], "invalidate", {
-          reason: wasRunning ? "session-stop-requested" : "session-stop-noop",
-          sessionId,
-        });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "message" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        if (session.status === "paused" || session.status === "archived") {
-          jsonResponse(res, 400, { ok: false, error: `Session is ${session.status}` });
-          return;
-        }
-        // Re-activate completed/failed sessions when user sends a new message
-        if (session.status === "completed" || session.status === "failed") {
-          tracker.updateSessionStatus(sessionId, "active");
-        }
-        const body = await readJsonBody(req);
-        const content = body?.content;
-        const attachments = Array.isArray(body?.attachments) ? body.attachments : [];
-        const attachmentsAppended = body?.attachmentsAppended === true;
-        if (!content && attachments.length === 0) {
-          jsonResponse(res, 400, { ok: false, error: "content is required" });
-          return;
-        }
-        const messageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const messageContent = typeof content === "string" ? content : "";
-
-        // Per-message mode override (e.g. { "content": "...", "mode": "ask" })
-        const messageMode = body?.mode || undefined;
-        // Per-message model override (e.g. { "model": "o4-mini" })
-        const messageModel = body?.model || undefined;
-        const messageAgentProfileId = String(
-          body?.agentProfileId || session?.metadata?.agentProfileId || "",
-        ).trim() || undefined;
-
-        // Forward to primary agent if applicable (exec records user + assistant events)
-        let exec = session.type === "primary" ? uiDeps.execPrimaryPrompt : null;
-        // Fallback: resolve execPrimaryPrompt from primary-agent.mjs if not injected
-        if (!exec && session.type === "primary") {
-          exec = await resolveExecPrimaryPrompt();
-        }
-        if (exec) {
-          const sessionWorkspaceDir = resolveSessionWorkspaceDir(session);
-          // Don't record user event here — execPrimaryPrompt records it
-          // Respond immediately so the UI doesn't block on agent execution
-          jsonResponse(res, 200, { ok: true, messageId });
-          broadcastUiEvent(["sessions"], "invalidate", { reason: "session-message", sessionId });
-          broadcastSessionsSnapshot();
-
-          // Build an onEvent callback so intermediate SDK events (thinking,
-          // tool calls, code edits, etc.) are streamed to the UI in real-time
-          // via the existing session-tracker → WebSocket listener pipeline.
-          // Without this, chat/telegram dispatches only show the final
-          // user+assistant pair instead of the full thought stream that Flows
-          // clients see.
-          const streamOnEvent = (err, event) => {
-            // The adapters call onEvent(err, event) or onEvent(event).
-            // Normalise both calling conventions.
-            const ev = event || err;
-            if (!ev) return;
-            try {
-              if (typeof ev === "string") {
-                tracker.recordEvent(sessionId, {
-                  role: "system",
-                  type: "system",
-                  content: ev,
-                  timestamp: new Date().toISOString(),
-                });
-              } else {
-                tracker.recordEvent(sessionId, ev);
-              }
-            } catch {
-              /* best-effort — never crash the agent loop */
-            }
-          };
-
-          // Fire-and-forget: run agent asynchronously so the request handler
-          // doesn't block and the agent doesn't appear "busy" to subsequent
-          // messages from chat, telegram, portal, or any other source.
-          const abortController = new AbortController();
-          sessionRunAbortControllers.set(sessionId, abortController);
-          exec(messageContent, {
-            sessionId,
-            sessionType: "primary",
-            mode: messageMode,
-            model: messageModel,
-            agentProfileId: messageAgentProfileId,
-            cwd: sessionWorkspaceDir,
-            persistent: true,
-            sendRawEvents: true,
-            attachments,
-            attachmentsAppended,
-            onEvent: streamOnEvent,
-            abortController,
-          }).then(() => {
-            // Mark session as completed once the agent finishes — prevents
-            // sessions from staying "active" forever and causing session bloat.
-            tracker.updateSessionStatus(sessionId, "completed");
-            broadcastUiEvent(["sessions"], "invalidate", { reason: "agent-response", sessionId });
-            broadcastSessionsSnapshot();
-          }).catch((execErr) => {
-            const wasAborted =
-              abortController.signal.aborted ||
-              execErr?.name === "AbortError" ||
-              /abort|cancel|stop/i.test(String(execErr?.message || ""));
-            if (wasAborted) {
-              tracker.recordEvent(sessionId, {
-                role: "system",
-                type: "system",
-                content: "Agent turn stopped.",
-                timestamp: new Date().toISOString(),
-              });
-              tracker.updateSessionStatus(sessionId, "completed");
-              broadcastUiEvent(["sessions"], "invalidate", {
-                reason: "agent-stopped",
-                sessionId,
-              });
-              broadcastSessionsSnapshot();
-              return;
-            }
-            // Record error as system message so user sees feedback
-            tracker.recordEvent(sessionId, {
-              role: "system",
-              type: "error",
-              content: `Agent error: ${execErr.message || "Unknown error"}`,
-              timestamp: new Date().toISOString(),
-            });
-            tracker.updateSessionStatus(sessionId, "failed");
-            broadcastUiEvent(["sessions"], "invalidate", { reason: "agent-error", sessionId });
-            broadcastSessionsSnapshot();
-          }).finally(() => {
-            // Clear only if this turn still owns the session abort controller.
-            if (sessionRunAbortControllers.get(sessionId) === abortController) {
-              sessionRunAbortControllers.delete(sessionId);
-            }
-            broadcastUiEvent(["agents"], "invalidate", {
-              reason: "session-turn-finished",
-              sessionId,
-            });
-          });
-        } else {
-          // No agent available — record user event and notify user
-          tracker.recordEvent(sessionId, {
-            role: "user",
-            content: messageContent,
-            attachments,
-            timestamp: new Date().toISOString(),
-          });
-          tracker.recordEvent(sessionId, {
-            role: "system",
-            type: "error",
-            content: ":alert: No agent is available to process this message. The primary agent may not be initialized — try restarting bosun or check the Logs tab for details.",
-            timestamp: new Date().toISOString(),
-          });
-          jsonResponse(res, 200, { ok: true, messageId, warning: "no_agent_available" });
-          broadcastUiEvent(["sessions"], "invalidate", { reason: "session-message", sessionId });
-          broadcastSessionsSnapshot();
-        }
-      } catch (err) {
-        console.error("[ui-server] session message failed for %s: %s", String(sessionId), String(err?.message || err || "unknown"));
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "message/edit" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        const body = await readJsonBody(req);
-        const content = String(body?.content || "").trim();
-        if (!content) {
-          jsonResponse(res, 400, { ok: false, error: "content is required" });
-          return;
-        }
-
-        const edited = tracker.editUserMessage(sessionId, {
-          messageId: body?.messageId,
-          timestamp: body?.timestamp,
-          previousContent: body?.previousContent,
-          content,
-        });
-        if (!edited?.ok) {
-          const status = edited?.error === "Message not found" ? 404 : 400;
-          jsonResponse(res, status, { ok: false, error: edited?.error || "edit failed" });
-          return;
-        }
-
-        jsonResponse(res, 200, { ok: true, message: edited.message });
-        broadcastUiEvent(["sessions"], "invalidate", {
-          reason: "session-message-edited",
-          sessionId,
-        });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "archive" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        tracker.updateSessionStatus(sessionId, "archived");
-        jsonResponse(res, 200, { ok: true });
-        broadcastUiEvent(["sessions"], "invalidate", {
-          reason: "session-archived",
-          sessionId,
-        });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "pause" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        tracker.updateSessionStatus(sessionId, "paused");
-        jsonResponse(res, 200, { ok: true });
-        broadcastUiEvent(["sessions"], "invalidate", { reason: "session-paused", sessionId });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "resume" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        tracker.updateSessionStatus(sessionId, "active");
-        jsonResponse(res, 200, { ok: true });
-        broadcastUiEvent(["sessions"], "invalidate", { reason: "session-resumed", sessionId });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "delete" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        tracker.removeSession(sessionId);
-        jsonResponse(res, 200, { ok: true });
-        broadcastUiEvent(["sessions"], "invalidate", {
-          reason: "session-deleted",
-          sessionId,
-        });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "rename" && req.method === "POST") {
-      try {
-        const session = getScopedSession();
-        if (!session) {
-          jsonResponse(res, 404, { ok: false, error: "Session not found" });
-          return;
-        }
-        const body = await readJsonBody(req);
-        const title = (body?.title || "").trim();
-        if (!title) {
-          jsonResponse(res, 400, { ok: false, error: "title is required" });
-          return;
-        }
-        tracker.renameSession(sessionId, title);
-        jsonResponse(res, 200, { ok: true });
-        broadcastUiEvent(["sessions"], "invalidate", { reason: "session-renamed", sessionId });
-        broadcastSessionsSnapshot();
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-
-    if (action === "diff" && req.method === "GET") {
-      try {
-        const session = getScopedSessionRecord({ includeMessages: true });
-        if (!session) {
-          jsonResponse(res, 200, {
-            ok: true,
-            diff: {
-              files: [],
-              totalFiles: 0,
-              totalAdditions: 0,
-              totalDeletions: 0,
-              formatted: "(session not found)",
-            },
-            summary: "(session not found)",
-            commits: [],
-          });
-          return;
-        }
-        const worktreePath = await resolveSessionWorktreePath(session);
-        if (!worktreePath || !existsSync(worktreePath)) {
-          jsonResponse(res, 200, { ok: true, diff: { files: [], totalFiles: 0, totalAdditions: 0, totalDeletions: 0, formatted: "(no worktree)" }, summary: "(no worktree)", commits: [] });
-          return;
-        }
-        let stats = collectDiffStats(worktreePath, {
-          range: "HEAD",
-          includePatch: true,
-        });
-        if (
-          Number(stats?.totalFiles || 0) === 0
-          && existsSync(resolve(worktreePath, ".git"))
-        ) {
-          await new Promise((resolveRetry) => setTimeout(resolveRetry, 25));
-          stats = collectDiffStats(worktreePath, {
-            range: "HEAD",
-            includePatch: true,
-          });
-        }
-        const summary = stats.formatted || getCompactDiffSummary(worktreePath);
-        const commits = getRecentCommits(worktreePath);
-        jsonResponse(res, 200, {
-          ok: true,
-          diff: stats,
-          summary,
-          commits,
-          source: {
-            kind: "session",
-            label: stats.sourceRange || "origin/main...HEAD",
-            detail: worktreePath,
-          },
-        });
-      } catch (err) {
-        jsonResponse(res, 500, { ok: false, error: err.message });
-      }
-      return;
-    }
-  }
-
+  // Harness surface APIs are delegated to server/routes/harness-*.mjs so this
+  // file stays a composition shell instead of a second API control plane.
   // ── Voice API Routes ──────────────────────────────────────────────────────
 
   // GET /api/voice/providers — read voice.providers from bosun.config.json
@@ -27465,12 +28503,8 @@ if (path === "/api/agent-logs/context") {
           testUrl = "https://api.openai.com/v1/models";
           if (apiKey && !useOAuth) headers["Authorization"] = `Bearer ${apiKey}`;
           else {
-            // Try OAuth token if no API key
-            try {
-              const { getOpenAILoginStatus } = await import("../voice/voice-auth-manager.mjs");
-              const st = getOpenAILoginStatus();
-              if (st.hasToken && st.accessToken) headers["Authorization"] = `Bearer ${st.accessToken}`;
-            } catch (_) { /* no oauth available */ }
+            const shared = resolveSharedOAuthToken("openai", true);
+            if (shared?.token) headers["Authorization"] = `Bearer ${shared.token}`;
           }
           if (!headers["Authorization"]) {
             jsonResponse(res, 400, { ok: false, error: "No API key or OAuth token available" });
@@ -27517,11 +28551,8 @@ if (path === "/api/agent-logs/context") {
           headers["anthropic-version"] = "2023-06-01";
           if (apiKey && !useOAuth) headers["x-api-key"] = apiKey;
           else {
-            try {
-              const { getClaudeLoginStatus } = await import("../voice/voice-auth-manager.mjs");
-              const st = getClaudeLoginStatus();
-              if (st.hasToken && st.accessToken) headers["x-api-key"] = st.accessToken;
-            } catch (_) { /* no oauth available */ }
+            const shared = resolveSharedOAuthToken("claude", true);
+            if (shared?.token) headers["x-api-key"] = shared.token;
           }
           if (!headers["x-api-key"]) {
             jsonResponse(res, 400, { ok: false, error: "No API key or OAuth token available" });
@@ -27530,11 +28561,8 @@ if (path === "/api/agent-logs/context") {
         } else if (provider === "gemini") {
           let k = (apiKey && !useOAuth) ? apiKey : null;
           if (!k) {
-            try {
-              const { getGeminiLoginStatus } = await import("../voice/voice-auth-manager.mjs");
-              const st = getGeminiLoginStatus();
-              if (st.hasToken && st.accessToken) k = st.accessToken;
-            } catch (_) { /* no oauth available */ }
+            const shared = resolveSharedOAuthToken("gemini", true);
+            if (shared?.token) k = shared.token;
           }
           if (!k) {
             jsonResponse(res, 400, { ok: false, error: "No API key or OAuth token available" });
@@ -28061,6 +29089,40 @@ if (path === "/api/agent-logs/context") {
       const { generateOpenAIAudioResponse } = await import("../voice/voice-relay.mjs");
       const result = await generateOpenAIAudioResponse(inputText, context, options);
       jsonResponse(res, 200, { ok: true, ...result });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/agents/sdk-command" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const command = String(body?.command || "").trim();
+      if (!command) {
+        jsonResponse(res, 400, { ok: false, error: "command required" });
+        return;
+      }
+      const sessionId = String(body?.sessionId || "").trim() || undefined;
+      const session = sessionId ? findTrackedSessionById(sessionId) : null;
+      const cwd = resolveSessionWorkspaceDir(session);
+      const runner = typeof uiDeps.execSdkCommand === "function"
+        ? uiDeps.execSdkCommand
+        : execSdkCommand;
+      const result = await runner(
+        command,
+        String(body?.args || ""),
+        body?.sdk,
+        {
+          cwd,
+          sessionId,
+          authSource: String(authResult?.source || "").trim() || undefined,
+        },
+      );
+      jsonResponse(res, 200, {
+        ok: true,
+        result,
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -28932,6 +29994,18 @@ async function handleStatic(req, res, url) {
 }
 
 export async function startTelegramUiServer(options = {}) {
+  _apiCache.clear();
+  _apiInflight.clear();
+  activeHarnessRuns.clear();
+  fallbackAuthRateLimitByIp.clear();
+  fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
+  _rateLimitMap.clear();
+  invalidateDurableSessionListCache();
+  cleanupAllWorkflowEngineBindings();
+  _wfRecommendedInstalledByWorkspace.clear();
+  _wfEngineByWorkspace.clear();
+  _wfEngineInitByWorkspace.clear();
+  _wfTaskTraceHookRegistered = false;
   if (uiServer) return uiServer;
 
   injectUiDependencies(options.dependencies || {});
@@ -29048,7 +30122,7 @@ export async function startTelegramUiServer(options = {}) {
   const requestHandler = async (req, res) => {
     const url = new URL(
       req.url || "/",
-      `http://${req.headers.host || "localhost"}`,
+      getRequestBaseUrl(req, "localhost"),
     );
     res.__bosunRequestContext = {
       diagnosticId: ensureResponseDiagnosticId(res),
@@ -29252,11 +30326,24 @@ export async function startTelegramUiServer(options = {}) {
 
   try {
     if (tlsOpts) {
-      uiServer = createHttpsServer(tlsOpts, requestHandler);
+      if (isUiHttp2Disabled()) {
+        uiServer = createHttpsServer(tlsOpts, requestHandler);
+        uiServerHttp2 = false;
+      } else {
+        uiServer = createHttp2SecureServer({
+          ...tlsOpts,
+          allowHTTP1: true,
+          settings: {
+            maxConcurrentStreams: getUiHttp2MaxStreams(),
+          },
+        }, requestHandler);
+        uiServerHttp2 = true;
+      }
       uiServerTls = true;
     } else {
       uiServer = createServer(requestHandler);
       uiServerTls = false;
+      uiServerHttp2 = false;
     }
 
     wsServer = new WebSocketServer({ noServer: true });
@@ -29269,6 +30356,7 @@ export async function startTelegramUiServer(options = {}) {
     if (!sessionStateListenerAttached) {
       sessionStateListenerAttached = true;
       removeSessionStateListener = addSessionStateListener((payload) => {
+        invalidateDurableSessionListCache();
         broadcastTuiSessionsSnapshot(payload?.reason || payload?.event?.reason || "updated", payload || {});
       });
     }
@@ -29646,7 +30734,7 @@ export async function startTelegramUiServer(options = {}) {
     uiServer.on("upgrade", (req, socket, head) => {
       const url = new URL(
         req.url || "/",
-        `http://${req.headers.host || "localhost"}`,
+        getRequestBaseUrl(req, "localhost"),
       );
       if (url.pathname !== "/ws") {
         socket.destroy();
@@ -29773,7 +30861,13 @@ export async function startTelegramUiServer(options = {}) {
   setComponentStatus("server", "running");
   console.log(`[telegram-ui] server listening on ${uiServerUrl}`);
   if (uiServerTls) {
-    console.log(`[telegram-ui] TLS enabled (self-signed) — Telegram WebApp buttons will use HTTPS`);
+    if (uiServerHttp2) {
+      console.log(
+        `[telegram-ui] TLS enabled with HTTP/2 (ALPN) and HTTP/1.1 fallback for WebSocket upgrades; max streams=${getUiHttp2MaxStreams()}`,
+      );
+    } else {
+      console.log(`[telegram-ui] TLS enabled (self-signed) — Telegram WebApp buttons will use HTTPS`);
+    }
   }
 
   // ── SECURITY: Warn loudly when auth is disabled ──────────────────────
@@ -29917,9 +31011,20 @@ export function stopTelegramUiServer() {
   stopWsHeartbeat();
   _activeSessions = [];
   _apiCache.clear();
-  // Clear injected configDir so it does not leak between server lifecycles
-  // (tests start/stop servers repeatedly with different config directories).
-  delete uiDeps.configDir;
+  _apiInflight.clear();
+  activeHarnessRuns.clear();
+  fallbackAuthRateLimitByIp.clear();
+  fallbackAuthGlobalWindow = { windowStart: 0, count: 0 };
+  _rateLimitMap.clear();
+  invalidateDurableSessionListCache();
+  cleanupAllWorkflowEngineBindings();
+  _wfRecommendedInstalledByWorkspace.clear();
+  _wfEngineByWorkspace.clear();
+  _wfEngineInitByWorkspace.clear();
+  _wfTaskTraceHookRegistered = false;
+  // Clear injected dependencies so restart cycles do not inherit stale mocks,
+  // caches, or runtime handles from an earlier server instance.
+  uiDeps = {};
   tuiStatsEmitter?.stop?.();
   tuiStatsEmitter = null;
   removeSessionEventListener?.();
@@ -29972,6 +31077,7 @@ export function stopTelegramUiServer() {
   uiServer = null;
   uiServerUrl = null;
   uiServerTls = false;
+  uiServerHttp2 = false;
   resetProjectSyncWebhookMetrics();
   releaseUiInstanceLock();
 }

@@ -9,6 +9,7 @@ import {
   SequentialPipeline,
   toMinimalDescriptor,
 } from "../task/pipeline.mjs";
+import { createHarnessAgentService } from "../agent/harness-agent-service.mjs";
 
 const VALID_PIPELINE_TYPES = new Set(["sequential", "fanout", "race"]);
 
@@ -181,6 +182,14 @@ function summarizeOutputText(value) {
   return String(text || "").trim().replace(/\s+/g, " ").slice(0, 400);
 }
 
+function normalizePipelineWorkflowSessionSegment(value, fallback = "session") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-");
+  return normalized || fallback;
+}
+
 function buildResultDescriptor(input, result, stage) {
   const inherited = toMinimalDescriptor(input);
   const outputText = summarizeOutputText(result?.output ?? result);
@@ -201,14 +210,47 @@ async function runBosunStage(workflow, stage, input, context, options = {}) {
     return options.runStage(stage, input, context, workflow);
   }
 
-  const { launchOrResumeThread } = await import("../agent/agent-pool.mjs");
+  const harnessAgentService = createHarnessAgentService();
   const prompt = buildStagePrompt(workflow, stage, input, context);
   const cwd = String(stage.cwd || input?.repoRoot || input?.cwd || options.repoRoot || process.cwd());
   const timeoutMs = Number(stage.timeoutMs || options.timeoutMs || 60 * 60 * 1000);
-  const result = await launchOrResumeThread(prompt, cwd, timeoutMs, {
+  const taskId = String(input?.taskId || input?.id || input?.task?.taskId || input?.task?.id || "").trim() || null;
+  const pipelineRunId = String(context?.pipeline?.runId || "").trim() || null;
+  const workflowSessionId = [
+    taskId || workflow.name,
+    "pipeline-stage",
+    normalizePipelineWorkflowSessionSegment(stage.id || stage.name, "stage"),
+    normalizePipelineWorkflowSessionSegment(pipelineRunId || workflow.name, "run"),
+  ].join(":");
+  const parentSessionId = String(
+    input?.sessionId ||
+    input?.parentSessionId ||
+    input?.rootSessionId ||
+    taskId ||
+    "",
+  ).trim() || null;
+  const result = await harnessAgentService.runTask(prompt, {
+    autoRecover: false,
+    taskKey: workflowSessionId,
+    cwd,
+    timeoutMs,
     sdk: String(stage.sdk || options.sdk || "auto"),
     model: String(stage.model || options.model || "auto"),
     sessionType: "pipeline-stage",
+    sessionId: workflowSessionId,
+    sessionScope: taskId ? "pipeline-workflow-task" : "pipeline-workflow-flow",
+    parentSessionId,
+    rootSessionId: String(input?.rootSessionId || parentSessionId || taskId || "").trim() || null,
+    metadata: {
+      source: "pipeline-workflow-stage",
+      workflowName: workflow.name,
+      workflowType: workflow.type,
+      stageId: String(stage.id || stage.name || "").trim() || null,
+      stageName: String(stage.name || stage.id || "").trim() || null,
+      pipelineRunId,
+      taskId,
+      taskTitle: String(input?.title || input?.taskTitle || input?.task?.title || "").trim() || null,
+    },
   });
   return {
     ...result,

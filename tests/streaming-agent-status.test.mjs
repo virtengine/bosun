@@ -44,4 +44,43 @@ describe("streaming agent status session identity", () => {
     expect(agentStatus.value.state).toBe("idle");
     expect(agentStatus.value.sessionId).toBe("");
   });
+
+  it("clears thinking state on explicit stop/finish signals and direct failure resets", async () => {
+    const {
+      startAgentStatusTracking,
+      agentStatus,
+      markUserMessageSent,
+      clearAgentStatus,
+    } = await import("../ui/modules/streaming.js");
+
+    startAgentStatusTracking();
+    expect(typeof wsHandler).toBe("function");
+
+    markUserMessageSent("primary", "session-stuck");
+    expect(agentStatus.value.state).toBe("thinking");
+    expect(agentStatus.value.sessionId).toBe("session-stuck");
+
+    clearAgentStatus("different-session");
+    expect(agentStatus.value.state).toBe("thinking");
+
+    wsHandler({
+      type: "invalidate",
+      payload: { reason: "agent-stopped", sessionId: "session-stuck" },
+    });
+    expect(agentStatus.value.state).toBe("idle");
+    expect(agentStatus.value.sessionId).toBe("");
+
+    markUserMessageSent("primary", "session-finished");
+    wsHandler({
+      type: "invalidate",
+      payload: { reason: "session-turn-finished", sessionId: "session-finished" },
+    });
+    expect(agentStatus.value.state).toBe("idle");
+    expect(agentStatus.value.sessionId).toBe("");
+
+    markUserMessageSent("primary", "session-direct-clear");
+    clearAgentStatus("session-direct-clear");
+    expect(agentStatus.value.state).toBe("idle");
+    expect(agentStatus.value.sessionId).toBe("");
+  });
 });

@@ -229,6 +229,41 @@ describe("listWorkspaces", () => {
     expect(repo.exists).toBe(true);
     expect(repo.path).toBe(localBosunPath);
   });
+
+  it("preserves explicit workspace and repo paths from config", () => {
+    const configDir = createConfigDir();
+    const externalWorkspacePath = join(configDir, "external-workspace");
+    const externalRepoPath = join(configDir, "external-repo");
+    mkdirSync(join(externalRepoPath, ".git"), { recursive: true });
+
+    writeBosunConfig(configDir, {
+      workspaces: [
+        {
+          id: "primary",
+          name: "Primary",
+          path: externalWorkspacePath,
+          repos: [
+            {
+              name: "repo",
+              path: externalRepoPath,
+              primary: true,
+            },
+          ],
+          activeRepo: "repo",
+        },
+      ],
+      activeWorkspace: "primary",
+    });
+
+    const [workspace] = listWorkspaces(configDir);
+    const [repo] = workspace.repos;
+
+    expect(workspace.path).toBe(externalWorkspacePath);
+    expect(repo.path).toBe(externalRepoPath);
+    expect(workspace.exists).toBe(true);
+    expect(repo.exists).toBe(true);
+  });
+
   it("normalizes slug-only workspace repos so listing never crashes", () => {
     const configDir = createConfigDir();
 

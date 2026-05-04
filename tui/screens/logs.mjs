@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import htm from "htm";
-import { Box, Text, useInput, useStdout } from "ink";
+import * as ink from "ink";
+
+const Box = ink.Box ?? ink.default?.Box;
+const Text = ink.Text ?? ink.default?.Text;
+const useInput = ink.useInput ?? ink.default?.useInput;
+const useStdout = ink.useStdout ?? ink.default?.useStdout;
 
 import {
   LOG_LEVEL_FILTERS,

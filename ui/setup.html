@@ -1058,6 +1058,11 @@
               value,
               label: String(entry.label || value),
               recommended: Boolean(entry.recommended),
+              toolCalling: entry.toolCalling === true,
+              vision: entry.vision === true || entry.supportsAttachments === true,
+              reasoning: entry.reasoning === true || Boolean(entry.reasoningEffort),
+              contextWindow: Number.isFinite(Number(entry.contextWindow || entry.contextLength)) ? Number(entry.contextWindow || entry.contextLength) : null,
+              catalogSource: String(entry.catalogSource || "").trim(),
             };
           })
           .filter(Boolean)
@@ -1125,7 +1130,14 @@
               onchange=${(e) => toggleModel(entry.value, e.target.checked)}
               style="width:auto;padding:0;margin:0;accent-color:var(--accent)"
             />
-            <span>${entry.label}${entry.recommended ? " (recommended)" : ""}</span>
+            <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span>${entry.label}${entry.recommended ? " (recommended)" : ""}</span>
+              ${entry.toolCalling && html`<span class="pill">tools</span>`}
+              ${entry.vision && html`<span class="pill">vision</span>`}
+              ${entry.reasoning && html`<span class="pill">reasoning</span>`}
+              ${entry.contextWindow && html`<span class="pill">${Math.round(entry.contextWindow / 1000)}k ctx</span>`}
+              ${entry.catalogSource && html`<span class="pill">${entry.catalogSource}</span>`}
+            </span>
           </label>
         `)}
         ${normalizedOptions.length === 0 && html`
@@ -1215,6 +1227,40 @@
   `;
     }
 
+    function ArchitectureGuideCard({ architecture }) {
+      const sections = [
+        architecture?.shellRuntime,
+        architecture?.taskRunner,
+        architecture?.routingPool,
+        architecture?.providerLayer,
+      ].filter(Boolean);
+      if (sections.length === 0) return null;
+      return html`
+        <div style="background:rgba(15,23,42,.58);border:1px solid rgba(148,163,184,.18);border-radius:16px;padding:16px 18px;margin-bottom:18px">
+          <div style="font-size:0.92rem;font-weight:700;color:var(--text-primary);margin-bottom:8px">How Bosun Agent Wiring Works</div>
+          <div style="font-size:0.82rem;color:var(--text-secondary);line-height:1.6;margin-bottom:12px">
+            Bosun has separate layers for interactive shell sessions, queued task execution, weighted routing, and internal harness providers.
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px">
+            ${sections.map((section) => html`
+              <div style="padding:12px;border-radius:12px;background:rgba(255,255,255,.03);border:1px solid rgba(148,163,184,.12)">
+                <div style="font-size:0.84rem;font-weight:700;color:var(--text-primary);margin-bottom:6px">${section.title}</div>
+                ${section.current && html`
+                  <div style="font-size:0.76rem;color:var(--accent-light);margin-bottom:8px">
+                    Current: <code style="font-family:var(--font-mono)">${section.current}</code>
+                  </div>
+                `}
+                <div style="font-size:0.76rem;color:var(--text-secondary);line-height:1.55">${section.summary}</div>
+                ${section.note && html`
+                  <div style="font-size:0.74rem;color:var(--text-dim);line-height:1.55;margin-top:8px">${section.note}</div>
+                `}
+              </div>
+            `)}
+          </div>
+        </div>
+      `;
+    }
+
     // ── Main App ─────────────────────────────────────────────────────────────────
 
     function App() {
@@ -1233,6 +1279,7 @@
       const [status, setStatus] = useState(null);
       const [workflowTemplates, setWorkflowTemplates] = useState([]);
       const [workflowProfiles, setWorkflowProfiles] = useState([]);
+      const [agentArchitecture, setAgentArchitecture] = useState(null);
 
       // Config state
       const [profile, setProfile] = useState("standard");
@@ -1412,6 +1459,7 @@
         claude: { status: "idle", hasToken: false, loading: false },
         gemini: { status: "idle", hasToken: false, loading: false },
       });
+      const [harnessProviderSetup, setHarnessProviderSetup] = useState(null);
 
       const fetchOAuthStatus = async (provider) => {
         try {
@@ -1843,6 +1891,7 @@
         ]).then(([prereqData, defaultsData, modelsData, execData, workflowData, statusData]) => {
           setPrereqs(prereqData.prerequisites);
           setDefaults(defaultsData.defaults);
+          setAgentArchitecture(defaultsData.agentArchitecture || null);
           setModels(modelsData.models || {});
           setExecutorTypes(execData.executors || []);
           setKanbanBackends(execData.kanbanBackends || []);
@@ -2669,6 +2718,27 @@
           // ── Pre-fill startup/shortcut status ──────────────────────────────────
           if (statusData.startupStatus?.installed) { setAutoStartEnabled(true); }
           if (statusData.desktopShortcutStatus?.installed) { setDesktopShortcutEnabled(true); }
+
+          if (statusData.sharedConnectedAccounts && typeof statusData.sharedConnectedAccounts === "object") {
+            setOauthAccounts((prev) => ({
+              ...prev,
+              openai: {
+                ...prev.openai,
+                ...(statusData.sharedConnectedAccounts.openai || {}),
+              },
+              claude: {
+                ...prev.claude,
+                ...(statusData.sharedConnectedAccounts.claude || {}),
+              },
+              gemini: {
+                ...prev.gemini,
+                ...(statusData.sharedConnectedAccounts.gemini || {}),
+              },
+            }));
+          }
+          if (statusData.harnessProviderSetup && typeof statusData.harnessProviderSetup === "object") {
+            setHarnessProviderSetup(statusData.harnessProviderSetup);
+          }
 
           // ── Fetch OAuth connected accounts status ─────────────────────────────
           fetchAllOAuthStatus();
@@ -3551,7 +3621,9 @@
 
       const StepExecutors = () => html`
     <h2>AI Executors</h2>
-    <p class="step-desc">Configure which AI coding agents bosun will use. You can add multiple executors with weighted distribution.</p>
+    <p class="step-desc">Configure the interactive shell runtime, the internal task runner, and the optional weighted routing pool without mixing them up.</p>
+
+    <${ArchitectureGuideCard} architecture=${agentArchitecture} />
 
     <div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px;font-size:0.8rem;line-height:1.6">
       <strong>${iconText(":lock: No API key required in most cases.")}</strong>
@@ -3649,6 +3721,11 @@
             ? "Bosun will use your existing login session. No API key stored."
             : "Your API key will be saved to .env in BOSUN_HOME (never committed to git)."}
             </div>
+            ${ex.executor === "CLAUDE_CODE" && authMode === "oauth" && html`
+              <div class="hint" style="color:var(--warning);margin-top:6px">
+                Warning: Claude OAuth is intended for Anthropic first-party clients. Using Claude OAuth with Bosun or other third-party tools may violate Anthropic terms. Switch Claude Code to API key mode if you want to remove this warning.
+              </div>
+            `}
           </div>
           ${(ex.executor === "CODEX" || ex.executor === "OPENAI") && html`
             <div class="form-group">
@@ -4858,8 +4935,8 @@
         </div>
         ${voiceEnabled && html`
           <div class="form-group" style="margin-bottom:16px">
-            <label style="font-weight:600;display:block;margin-bottom:4px">Connected Accounts</label>
-            <div class="hint" style="margin-bottom:8px">Sign in with your OpenAI, Claude, or Gemini account to use OAuth tokens. Endpoints without an explicit API key will automatically use the connected account.</div>
+            <label style="font-weight:600;display:block;margin-bottom:4px">Shared Provider Accounts</label>
+            <div class="hint" style="margin-bottom:8px">These OAuth sessions are shared across Bosun Voice and the Bosun-native Harness. Endpoints without an explicit API key automatically reuse the matching connected account, and setup also auto-detects local Codex/Copilot auth for harness providers.</div>
             <div style="display:flex;gap:10px;flex-wrap:wrap">
               ${["openai", "claude", "gemini"].map((prov) => {
               const acct = oauthAccounts[prov] || {};
@@ -4876,6 +4953,11 @@
                       <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor}"></span>
                     </div>
                     <div style="font-size:0.82em;color:${statusColor};margin-bottom:4px">${statusText}</div>
+                    ${prov === "claude" && html`
+                      <div style="font-size:0.76em;color:var(--warning);margin-bottom:6px;line-height:1.5">
+                        OAuth warning: Anthropic may treat third-party Claude OAuth usage as unsupported. Prefer API keys for Bosun if you need a terms-safe path.
+                      </div>
+                    `}
                     ${errored && acct.result?.error && html`
                       <div style="font-size:0.78em;color:#ef4444;margin-bottom:6px;word-break:break-word">${acct.result.error}</div>
                     `}
@@ -4906,6 +4988,89 @@
             })}
             </div>
           </div>
+
+          ${Array.isArray(harnessProviderSetup?.providers) && harnessProviderSetup.providers.length > 0 && html`
+            <div class="form-group" style="margin-bottom:18px">
+              <label style="font-weight:600;display:block;margin-bottom:4px">Harness Auth Detection</label>
+              <div class="hint" style="margin-bottom:8px">
+                Setup inspects existing local auth and credential env vars, then pre-wires the Bosun Harness to use them. Recommended default:
+                <strong>${({
+                  "openai-codex-subscription": "ChatGPT Codex Subscription",
+                  "openai-responses": "OpenAI Responses API",
+                  "azure-openai-responses": "Azure OpenAI Responses",
+                  "anthropic-messages": "Anthropic Messages API",
+                  "claude-subscription-shim": "Claude Subscription Shim",
+                  "copilot-oauth": "GitHub Copilot OAuth",
+                  openrouter: "OpenRouter",
+                  perplexity: "Perplexity",
+                  deepinfra: "DeepInfra",
+                  groq: "Groq",
+                  together: "Together",
+                  xai: "xAI",
+                  fireworks: "Fireworks AI",
+                  cerebras: "Cerebras",
+                  sambanova: "SambaNova",
+                  nebius: "Nebius",
+                  "gemini-generate-content": "Gemini Generate Content",
+                })[harnessProviderSetup.recommendedDefaultProviderId] || harnessProviderSetup.recommendedDefaultProviderId || "OpenAI Responses API"}</strong>.
+              </div>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                ${harnessProviderSetup.providers.map((entry) => {
+                const label = ({
+                  "openai-codex-subscription": "ChatGPT Codex Subscription",
+                  "openai-responses": "OpenAI Responses API",
+                  "azure-openai-responses": "Azure OpenAI Responses",
+                  "anthropic-messages": "Anthropic Messages API",
+                  "claude-subscription-shim": "Claude Subscription Shim",
+                  "copilot-oauth": "GitHub Copilot OAuth",
+                  openrouter: "OpenRouter",
+                  perplexity: "Perplexity",
+                  deepinfra: "DeepInfra",
+                  groq: "Groq",
+                  together: "Together",
+                  xai: "xAI",
+                  fireworks: "Fireworks AI",
+                  cerebras: "Cerebras",
+                  sambanova: "SambaNova",
+                  nebius: "Nebius",
+                  "gemini-generate-content": "Gemini Generate Content",
+                })[entry.providerId] || entry.providerId;
+                const activeMethod = (entry.methods || []).find((method) => method.authenticated)
+                  || (entry.methods || []).find((method) => method.configured)
+                  || null;
+                const connected = entry.authenticated === true || entry.canRun === true;
+                const configured = connected || (entry.methods || []).some((method) => method.configured);
+                const statusColor = connected ? "#22c55e" : configured ? "#f59e0b" : (entry.enabled === false ? "var(--text-dim)" : "var(--text-secondary)");
+                const statusText = entry.enabled === false
+                  ? "Disabled"
+                  : connected
+                    ? "Ready"
+                    : configured
+                      ? "Configured"
+                      : "Needs auth";
+                const sourceLabel = entry.connection?.authSource || activeMethod?.source || activeMethod?.credentialKey || "";
+                return html`
+                    <div style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;min-width:190px;flex:1;max-width:280px">
+                      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                        <span style="font-weight:600;font-size:0.92em">${label}</span>
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor}"></span>
+                      </div>
+                      <div style="font-size:0.82em;color:${statusColor};margin-bottom:4px">${statusText}${entry.preferredMode ? ` · ${entry.preferredMode}` : ""}</div>
+                      ${sourceLabel && html`
+                        <div style="font-size:0.76em;color:var(--text-secondary);margin-bottom:4px;word-break:break-word">Detected from: ${sourceLabel}</div>
+                      `}
+                      ${entry.connection?.authPath && html`
+                        <div style="font-size:0.76em;color:var(--text-dim);margin-bottom:4px;word-break:break-word">${entry.connection.authPath}</div>
+                      `}
+                      ${Array.isArray(entry.warnings) && entry.warnings.map((warning) => html`
+                        <div style="font-size:0.76em;color:var(--warning);margin-top:4px;line-height:1.45">${warning.message}</div>
+                      `)}
+                    </div>
+                  `;
+              })}
+              </div>
+            </div>
+          `}
 
           <div class="form-group">
             ${labelWithHelp("Voice Providers (priority order)", HELP_TEXT.voiceProviders)}
@@ -5186,7 +5351,10 @@
                         <div class="hint" style="color:var(--success,#22c55e)">✓ Connected — will use your ${ep.provider === "openai" ? "OpenAI" : ep.provider === "claude" ? "Claude" : "Gemini"} account.</div>
                       `}
                       ${ep.authSource === "oauth" && !(oauthAccounts[ep.provider]?.status === "connected" || oauthAccounts[ep.provider]?.status === "complete" || oauthAccounts[ep.provider]?.hasToken) && html`
-                        <div class="hint" style="color:var(--warning,#f59e0b)">⚠ Not connected. Sign in via "Connected Accounts" above to use OAuth.</div>
+                        <div class="hint" style="color:var(--warning,#f59e0b)">⚠ Not connected. Sign in via "Shared Provider Accounts" above to use OAuth.</div>
+                      `}
+                      ${ep.provider === "claude" && ep.authSource === "oauth" && html`
+                        <div class="hint" style="color:var(--warning);margin-top:4px">Claude OAuth with Bosun may violate Anthropic terms. Switch this endpoint to API key mode if you need the warning gone.</div>
                       `}
                     </div>
                   `}

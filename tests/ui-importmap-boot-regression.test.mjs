@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const indexSource = readFileSync(resolve(process.cwd(), "ui", "index.html"), "utf8");
-const appSource = readFileSync(resolve(process.cwd(), "ui", "app.js"), "utf8");
-const siteAppSource = readFileSync(resolve(process.cwd(), "site", "ui", "app.js"), "utf8");
-
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const indexSource = readFileSync(resolve(repoRoot, "ui", "index.html"), "utf8");
+const appSource = readFileSync(resolve(repoRoot, "ui", "app.js"), "utf8");
+const siteAppSource = readFileSync(resolve(repoRoot, "site", "ui", "app.js"), "utf8");
 describe("ui index module boot", () => {
   it("registers the import map before booting app.js", () => {
     const importMapIndex = indexSource.indexOf('<script type="importmap">');
@@ -13,7 +14,10 @@ describe("ui index module boot", () => {
 
     expect(importMapIndex).toBeGreaterThanOrEqual(0);
     expect(moduleBootIndex).toBeGreaterThan(importMapIndex);
-    expect(indexSource).toContain('import "/app.js";');
+    expect(
+      indexSource.includes('import("/app.js")')
+      || indexSource.includes('import(new URL("/app.js", window.location.origin).href)'),
+    ).toBe(true);
   });
 
   it("does not preload or dynamically import the app entry before import maps exist", () => {
@@ -28,7 +32,9 @@ describe("ui index module boot", () => {
       expect(source).not.toContain('Function("u", "return import(u)")');
       expect(source).toContain('window.importShim(tabPath)');
       expect(source).toContain('nativeLoader()');
+      expect(source).toContain('lazyTab("./tabs/tasks.js", "TasksTab"');
       expect(source).toContain('() => import("./tabs/tasks.js")');
+      expect(source).toContain('lazyTab("./tabs/agents.js", "AgentsTab"');
       expect(source).toContain('() => import("./tabs/agents.js")');
       expect(source).toContain('resolveLazyTabComponent');
       expect(source).toContain('loader.key = `${tabPath}::${exportName || "default"}`');

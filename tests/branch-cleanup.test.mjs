@@ -10,7 +10,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-const { cleanupStaleBranches } = await import("../infra/maintenance.mjs");
+let cleanupStaleBranches;
 
 let TEST_DIR = "";
 let now = 0;
@@ -40,6 +40,7 @@ function branchExists(name) {
 
 describe("cleanupStaleBranches", () => {
   beforeEach(() => {
+    vi.resetModules();
     initTestRepo();
     spawnSyncMock.mockImplementation((_cmd, args) => {
       const [command, ...rest] = args;
@@ -97,6 +98,10 @@ describe("cleanupStaleBranches", () => {
       }
       return { status: 0, stdout: "" };
     });
+  });
+
+  beforeEach(async () => {
+    ({ cleanupStaleBranches } = await import("../infra/maintenance.mjs"));
   });
 
   function createBranch(name, { backdateMs, merged = false, remote = false, ahead = 0 } = {}) {

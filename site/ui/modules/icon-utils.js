@@ -6,7 +6,7 @@
 
 import { h as _h } from "preact";
 import htm from "htm";
-import { ICONS } from "../../../ui/modules/icons.js";
+import { ICONS } from "./icons.js";
 
 /* Guard: recover forwardRef objects that leak as element type */
 function h(type, ...args) {

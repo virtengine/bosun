@@ -30,6 +30,7 @@ const ROUTE_TABS = new Set([
   "marketplace",
   "telemetry",
   "settings",
+  "guardrails",
 ]);
 
 function getParentTab(tabId) {
@@ -263,6 +264,7 @@ export const TAB_CONFIG = [
   { id: "manual-flows", label: "Run Flows", icon: "zap" },
   { id: "telemetry", label: "Telemetry", icon: "chart" },
   { id: "benchmarks", label: "Bench", icon: "chart" },
+  { id: "guardrails", label: "Guardrails", icon: "shield" },
   { id: "settings", label: "Settings", icon: "settings" },
 ];
 

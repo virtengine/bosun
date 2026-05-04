@@ -63,7 +63,7 @@ globalThis.addEventListener?.("unhandledrejection", (e) => {
 });
 
 import { h as _h, render as preactRender, Component, options as _preactOptions, Fragment as _PreactFragment } from "preact";
-import { useState, useEffect, useCallback, useRef } from "preact/hooks";
+import { useState, useEffect, useCallback, useRef, useMemo } from "preact/hooks";
 import { signal } from "@preact/signals";
 import htm from "htm";
 
@@ -79,8 +79,7 @@ function normalizeRenderableType(type) {
 
 function h(type, props, ...rest) {
   if (Array.isArray(type)) {
-    console.warn("[h-guard] Array passed as element type — rendering as Fragment", type.length, "items");
-    return _h(_PreactFragment, null, ...type);
+    return _h(_PreactFragment, props, ...type, ...rest);
   }
   const normalizedType = normalizeRenderableType(type);
   if (normalizedType == null) {
@@ -129,6 +128,44 @@ function visibilityInterval(fn, activeMs, opts = {}) {
   return () => { clearTimeout(id); unsub(); };
 }
 globalThis.__bosunVisibilityInterval = visibilityInterval;
+
+// ── Lazy mount helper ──
+// Mounts children only after the placeholder enters the viewport (or
+// immediately if IntersectionObserver isn't available). Used to defer
+// expensive subtrees like the DiffViewer when they're scrolled off-screen.
+function LazyMount({ children, rootMargin = "120px", placeholderHeight = 40 }) {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    if (visible) return;
+    const node = ref.current;
+    if (!node) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setVisible(true);
+            obs.disconnect();
+            return;
+          }
+        }
+      },
+      { rootMargin },
+    );
+    obs.observe(node);
+    return () => obs.disconnect();
+  }, [visible, rootMargin]);
+  if (visible) return children;
+  return _h("div", {
+    ref,
+    "aria-hidden": "true",
+    style: { minHeight: `${placeholderHeight}px` },
+  });
+}
 
 // Backend health tracking
 const backendDown = signal(false);
@@ -382,6 +419,7 @@ import {
   wsStatus,
   wsLastReconnectAt,
   loadingCount,
+  onWsMessage,
 } from "./modules/api.js";
 import {
   connected,
@@ -411,7 +449,7 @@ import {
   getSessionRuntimeState,
   resolveSessionWorkspaceHint,
 } from "./modules/session-api.js";
-import { buildSessionInsights, formatCompactCount } from "./modules/session-insights.js";
+import { buildSessionInsights, computeSessionInsights, formatCompactCount } from "./modules/session-insights.js";
 import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Avatar, Stack, Paper, CircularProgress, Button, Divider, Menu, MenuItem, Fab, Snackbar, Alert } from "./modules/mui.js";
 
 /* ── Component imports ── */
@@ -524,6 +562,7 @@ const WorkflowsTab = lazyTab("./tabs/workflows.js", "WorkflowsTab", () => import
 const LibraryTab = lazyTab("./tabs/library.js", "LibraryTab", () => import("./tabs/library.js"));
 const LibraryMarketplaceTab = lazyTab("./tabs/library.js", "LibraryMarketplaceTab", () => import("./tabs/library.js"));
 const ManualFlowsTab = lazyTab("./tabs/manual-flows.js", "ManualFlowsTab", () => import("./tabs/manual-flows.js"));
+const ContextCompressionLabTab = lazyTab("./tabs/context-compression-lab.js", "ContextCompressionLabTab", () => import("./tabs/context-compression-lab.js"));
 
 /* ── Shared components ── */
 
@@ -811,10 +850,15 @@ const TAB_COMPONENTS = {
   telemetry: TelemetryTab,
   workflows: WorkflowsTab,
   "manual-flows": ManualFlowsTab,
+  "context-compression-lab": ContextCompressionLabTab,
   library: LibraryTab,
   marketplace: LibraryMarketplaceTab,
   settings: SettingsTab,
   integrations: IntegrationsTab,
+};
+
+const HIDDEN_TAB_CONFIG = {
+  "context-compression-lab": { id: "context-compression-lab", label: "Compression Lab" },
 };
 
 function getMaxFreshnessMs(rawFreshness) {
@@ -883,7 +927,11 @@ function Header() {
   const latency = wsLatency.value;
   const reconnect = wsReconnectIn.value;
   const freshness = getMaxFreshnessMs(dataFreshness.value);
-  const activeConfig = TAB_CONFIG.find((tab) => tab.id === activeTab.value) || TAB_CONFIG[0] || { id: "dashboard", label: "Dashboard" };
+  const activeConfig =
+    TAB_CONFIG.find((tab) => tab.id === activeTab.value)
+    || HIDDEN_TAB_CONFIG[activeTab.value]
+    || TAB_CONFIG[0]
+    || { id: "dashboard", label: "Dashboard" };
   const sessionId = selectedSessionId.value;
   const activeSession = (sessionsData.value || []).find((session) => session?.id === sessionId);
   const breadcrumbParts = [activeConfig.label];
@@ -1236,9 +1284,26 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
     : "No messages yet.";
   const [smartLogs, setSmartLogs] = useState([]);
   const [logState, setLogState] = useState("idle");
+  // NOTE: `insights` is intentionally never reset to null on session switch.
+  // The rail shows the previous payload while a fresh fetch is in flight so
+  // the panel never blanks. `insightState` carries "loading" for the badge.
   const [insights, setInsights] = useState(null);
   const [insightState, setInsightState] = useState("idle");
-  const workspaceHint = resolveSessionWorkspaceHint(session, "active");
+  // In-flight + abort tracking so we never run two parallel fetches and so we
+  // can cancel work as soon as the user switches sessions.
+  const insightInFlightRef = useRef(false);
+  const insightLastSigRef = useRef("");
+  const logInFlightRef = useRef(false);
+  const sessionWorkspaceFallback =
+    activeTab.value === "chat"
+      ? "active"
+      : "all";
+  const workspaceHint = resolveSessionWorkspaceHint(session, sessionWorkspaceFallback);
+  // Inactive sessions don't need fast polling — they only change on user
+  // interaction or new ws invalidations. ws push will still trigger refresh.
+  const inactiveSession = !lifecycle.isActive;
+  const insightPollMs = inactiveSession ? 60000 : 30000;
+  const logPollMs = inactiveSession ? 60000 : 20000;
   const lastActiveLabel = lastActive ? formatRelative(lastActive) : "—";
   const apiStatusLabel = inferUiConnected() ? "Connected" : "Offline";
   const wsStatusLabel = wsConnected.value ? "Live" : "Closed";
@@ -1249,10 +1314,20 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
   useEffect(() => {
     if (!isSessionTab) return;
     let active = true;
+    let debounceId = null;
+    let abortCtl = null;
     const fetchLogs = async () => {
+      if (!active) return;
+      // In-flight skip: never fire a second request while one is pending.
+      if (logInFlightRef.current) return;
+      logInFlightRef.current = true;
+      abortCtl = typeof AbortController !== "undefined" ? new AbortController() : null;
       try {
         setLogState("loading");
-        const res = await apiFetch("/api/logs?lines=120", { _silent: true });
+        const res = await apiFetch("/api/logs?lines=120", {
+          _silent: true,
+          signal: abortCtl?.signal,
+        });
         if (!active) return;
         const lines = res?.data?.lines || res?.lines || [];
         const allLines = Array.isArray(lines) ? lines : [];
@@ -1294,94 +1369,184 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
         }));
         setSmartLogs(pruned);
         setLogState("ready");
-      } catch {
-        if (active) setLogState("error");
+      } catch (err) {
+        if (active && err?.name !== "AbortError") setLogState("error");
+      } finally {
+        logInFlightRef.current = false;
       }
     };
 
-    fetchLogs();
-    const stop = visibilityInterval(fetchLogs, 12000);
+    // Debounce the initial fetch so rapid session-switching doesn't fan out
+    // a request per keystroke / tab change.
+    debounceId = setTimeout(fetchLogs, 150);
+    const stop = visibilityInterval(fetchLogs, logPollMs);
     return () => {
       active = false;
+      if (debounceId) clearTimeout(debounceId);
+      if (abortCtl) {
+        try { abortCtl.abort(); } catch { /* noop */ }
+      }
       stop();
     };
-  }, [isSessionTab, sessionId, session?.taskId, session?.branch, lifecycle.isActive]);
+  }, [isSessionTab, sessionId, session?.taskId, session?.branch, lifecycle.isActive, logPollMs]);
 
   useEffect(() => {
-    if (!isSessionTab || !sessionId) {
-      setInsights(null);
+    if (!isSessionTab || !sessionId || !session) {
+      // Don't blank `insights` here either — leave the previous payload visible
+      // until a new session has its own data to show. The Focus header makes
+      // it clear which session is selected, so stale numbers won't mislead.
       setInsightState("idle");
       return;
     }
     let active = true;
-    const fetchInsights = async () => {
-      try {
-        setInsightState("loading");
-        const fullSessionPath = buildSessionApiPath(sessionId, "", {
-          workspace: workspaceHint,
-          query: { full: "1" },
-        });
-        const fallbackSessionPath = buildSessionApiPath(sessionId, "", {
-          workspace: "all",
-          query: { full: "1" },
-        });
-        if (!fullSessionPath) {
-          if (active) {
-            setInsights(null);
-            setInsightState("error");
-          }
+    let debounceId = null;
+    let abortCtl = null;
+    let wsUnsub = null;
+
+    const fetchInsights = async ({ skipDigestCheck = false } = {}) => {
+      if (!active) return;
+      if (insightInFlightRef.current) return;
+      const fullSessionPath = buildSessionApiPath(sessionId, "", {
+        workspace: workspaceHint,
+        query: { full: "1" },
+      });
+      const fallbackSessionPath = buildSessionApiPath(sessionId, "", {
+        workspace: "all",
+        query: { full: "1" },
+      });
+      if (!fullSessionPath) {
+        setInsightState("error");
+        return;
+      }
+      // Cheap digest pre-check: skip the full payload fetch entirely if the
+      // session's lastActivityAt + turnCount haven't moved since the last
+      // computed insights. Saves an enormous full-session payload on every
+      // poll for idle sessions.
+      if (!skipDigestCheck) {
+        const sigParts = [
+          sessionId,
+          session?.lastActivityAt || session?.updatedAt || "",
+          session?.turnCount ?? session?.messageCount ?? "",
+        ];
+        const signature = sigParts.join("|");
+        if (signature && signature === insightLastSigRef.current && insights) {
+          // No change since last successful compute — leave existing insights
+          // untouched and clear the loading badge if any.
+          setInsightState("ready");
           return;
         }
+      }
+
+      insightInFlightRef.current = true;
+      abortCtl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      try {
+        setInsightState("loading");
         let res;
         try {
-          res = await apiFetch(fullSessionPath, { _silent: true });
+          res = await apiFetch(fullSessionPath, { _silent: true, signal: abortCtl?.signal });
         } catch (err) {
+          if (err?.name === "AbortError") return;
           const shouldRetryAll = shouldFallbackToAllSessions(
             err,
             fullSessionPath,
             fallbackSessionPath,
           );
           if (!shouldRetryAll) throw err;
-          res = await apiFetch(fallbackSessionPath, { _silent: true });
+          res = await apiFetch(fallbackSessionPath, { _silent: true, signal: abortCtl?.signal });
         }
         if (!active) return;
-        const nextInsights = buildSessionInsights(res?.session || null);
+        const sessionPayload = res?.session || null;
+        // Off-main-thread compute: never blocks chat keystrokes even on huge
+        // sessions. Falls back to requestIdleCallback when Worker fails.
+        const nextInsights = await computeSessionInsights(sessionPayload, {
+          signal: abortCtl?.signal,
+        });
+        if (!active) return;
         setInsights(nextInsights);
         setInsightState("ready");
-      } catch {
-        if (active) {
-          setInsights(null);
-          setInsightState("error");
-        }
+        insightLastSigRef.current = [
+          sessionId,
+          sessionPayload?.lastActivityAt || sessionPayload?.updatedAt || session?.lastActivityAt || "",
+          sessionPayload?.turnCount ?? sessionPayload?.messageCount ?? session?.turnCount ?? "",
+        ].join("|");
+      } catch (err) {
+        if (active && err?.name !== "AbortError") setInsightState("error");
+      } finally {
+        insightInFlightRef.current = false;
       }
     };
 
-    fetchInsights();
-    const stop = visibilityInterval(fetchInsights, 10000);
+    debounceId = setTimeout(() => fetchInsights(), 150);
+    const stop = visibilityInterval(fetchInsights, insightPollMs);
+    // WS-driven invalidation: refresh immediately when the backend says
+    // session/agent/task state changed. Cheap because the digest check
+    // above will skip the heavy fetch if nothing actually moved.
+    if (typeof onWsMessage === "function") {
+      const interestedChannels = new Set(["agents", "tasks", "executor", "*"]);
+      wsUnsub = onWsMessage((msg) => {
+        if (!active) return;
+        if (msg?.type !== "invalidate") return;
+        const channels = Array.isArray(msg.channels) ? msg.channels : [];
+        if (!channels.some((c) => interestedChannels.has(c))) return;
+        // Force a fetch (ignore digest cache) — the ws push is itself the
+        // signal that something changed.
+        fetchInsights({ skipDigestCheck: true });
+      });
+    }
     return () => {
       active = false;
+      if (debounceId) clearTimeout(debounceId);
+      if (abortCtl) {
+        try { abortCtl.abort(); } catch { /* noop */ }
+      }
+      if (wsUnsub) {
+        try { wsUnsub(); } catch { /* noop */ }
+      }
       stop();
     };
-  }, [isSessionTab, sessionId, workspaceHint]);
+  }, [isSessionTab, session?.id, sessionId, workspaceHint, insightPollMs, session?.lastActivityAt, session?.turnCount]);
 
   const insightsTotals = insights?.totals || null;
   const insightsFileCounts = insights?.fileCounts || null;
   const insightsTopTools = Array.isArray(insights?.topTools) ? insights.topTools : [];
+  const surfaceContextBreakdown = Array.isArray(session?.surface?.contextBreakdown)
+    ? session.surface.contextBreakdown
+    : [];
   const insightsContextBreakdown = Array.isArray(insights?.contextBreakdown)
     ? insights.contextBreakdown
     : [];
-  const contextWindow = insights?.contextWindow || null;
-  const tokenUsage = insights?.tokenUsage || null;
+  const contextBreakdown = surfaceContextBreakdown.length > 0
+    ? surfaceContextBreakdown
+    : insightsContextBreakdown;
+  const contextWindow = session?.surface?.contextWindow || insights?.contextWindow || null;
+  const tokenUsage = session?.surface?.tokenUsage || insights?.tokenUsage || null;
+  const compaction = session?.surface?.compaction || null;
   const recentActions = Array.isArray(insights?.recentActions) ? insights.recentActions : [];
 
-  // Context window breakdown grouping
+  // Context window breakdown grouping — memoized to avoid recomputing
+  // on every parent re-render (chat keystrokes can trigger many of those).
   const _SYSTEM_CTX = new Set(["system instructions", "tool definitions", "system"]);
   const _USER_CTX = new Set(["messages", "files", "tool results", "user context"]);
   const ctxRefTokens = contextWindow?.totalTokens || tokenUsage?.totalTokens || 0;
-  const ctxSystemRows = insightsContextBreakdown.filter((r) => _SYSTEM_CTX.has(String(r.label || "").toLowerCase()));
-  const ctxUserRows = insightsContextBreakdown.filter((r) => _USER_CTX.has(String(r.label || "").toLowerCase()));
-  const ctxOtherRows = insightsContextBreakdown.filter(
-    (r) => !_SYSTEM_CTX.has(String(r.label || "").toLowerCase()) && !_USER_CTX.has(String(r.label || "").toLowerCase()),
+  const ctxSystemRows = useMemo(
+    () => contextBreakdown.filter((r) => _SYSTEM_CTX.has(String(r.label || "").toLowerCase())),
+    [contextBreakdown],
+  );
+  const ctxUserRows = useMemo(
+    () => contextBreakdown.filter((r) => _USER_CTX.has(String(r.label || "").toLowerCase())),
+    [contextBreakdown],
+  );
+  const ctxOtherRows = useMemo(
+    () => contextBreakdown.filter(
+      (r) => !_SYSTEM_CTX.has(String(r.label || "").toLowerCase()) && !_USER_CTX.has(String(r.label || "").toLowerCase()),
+    ),
+    [contextBreakdown],
+  );
+  // recentActions is already capped to 6 by buildSessionInsights, but keep
+  // the slice + memo in case a persisted backend payload sends more.
+  const recentActionsView = useMemo(
+    () => recentActions.slice(0, 6),
+    [recentActions],
   );
   const renderCtxRow = (row, idx) => {
     const approxTokens = ctxRefTokens > 0 ? Math.round((row.percent / 100) * ctxRefTokens) : null;
@@ -1411,10 +1576,10 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
       )}
     </div>
   `;
-  if (smartLogs.length === 0 && recentActions.length) {
+  if (smartLogs.length === 0 && recentActionsView.length) {
     smartLogsContent = html`
       <div class="inspector-scroll">
-        ${recentActions.slice(0, 6).map(
+        ${recentActionsView.map(
           (entry, idx) => html`
             <div key=${idx} class="inspector-log-line ${entry.level || "info"}">
               <span class="inspector-log-level">
@@ -1430,11 +1595,11 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
     `;
   }
   if (logState === "error") {
-    smartLogsContent = recentActions.length
+    smartLogsContent = recentActionsView.length
       ? smartLogsContent
       : html`<div class="inspector-empty">Log stream unavailable.</div>`;
   } else if (smartLogs.length === 0) {
-    smartLogsContent = recentActions.length
+    smartLogsContent = recentActionsView.length
       ? smartLogsContent
       : html`<div class="inspector-empty">No warning/error lines in the latest logs.</div>`;
   }
@@ -1467,14 +1632,21 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
         ? html`
             <div class="inspector-section inspector-scroll">
               <div class="inspector-title">Latest Diff</div>
-              <${DiffViewer}
-                sessionId=${sessionId}
-                workspace=${workspaceHint}
-                activitySummary=${insights?.activityDiff || null}
-              />
+              <${LazyMount} rootMargin="200px" placeholderHeight=${220}>
+                <${DiffViewer}
+                  sessionId=${sessionId}
+                  workspace=${workspaceHint}
+                  activitySummary=${insights?.activityDiff || null}
+                />
+              <//>
             </div>
             <div class="inspector-section">
-              <div class="inspector-title">Smart Logs</div>
+              <div class="inspector-title">
+                Smart Logs
+                ${insightState === "loading"
+                  ? html`<span class="inspector-refresh-badge" aria-live="polite">Refreshing…</span>`
+                  : null}
+              </div>
               <div class="inspector-subtitle">Session Activity</div>
               ${insightState === "error"
                 ? html`<div class="inspector-empty">Session activity tracking is unavailable.</div>`
@@ -1488,7 +1660,7 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
                         <div class="inspector-metric"><span class="label">Messages</span><strong>${formatCompactCount(insightsTotals.messages)}</strong></div>
                         <div class="inspector-metric"><span class="label">Errors</span><strong>${formatCompactCount(insightsTotals.errors)}</strong></div>
                       </div>
-                      ${(contextWindow || tokenUsage || insightsContextBreakdown.length > 0 || insightsTopTools.length > 0) &&
+                      ${(contextWindow || tokenUsage || contextBreakdown.length > 0 || insightsTopTools.length > 0 || compaction) &&
                         html`
                           <div class="inspector-context">
                             <div class="inspector-ctx-header">
@@ -1504,6 +1676,25 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
                             ${contextWindow?.usedTokens != null &&
                               html`<div class="inspector-ctx-summary">
                                 ${formatCompactCount(contextWindow.usedTokens)}${contextWindow.totalTokens != null ? ` / ${formatCompactCount(contextWindow.totalTokens)} tokens` : " tokens"}
+                              </div>`}
+                            ${(contextWindow?.remainingTokens != null || contextWindow?.reservedForResponseTokens != null || compaction) &&
+                              html`<div class="inspector-ctx-group">
+                                <div class="inspector-ctx-group-label">Headroom</div>
+                                ${contextWindow?.remainingTokens != null &&
+                                  html`<div class="inspector-ctx-row">
+                                    <span>Remaining</span>
+                                    <span class="inspector-ctx-row-right"><span class="inspector-ctx-tokens">${formatCompactCount(contextWindow.remainingTokens)}</span></span>
+                                  </div>`}
+                                ${contextWindow?.reservedForResponseTokens != null &&
+                                  html`<div class="inspector-ctx-row">
+                                    <span>Reserved for Response</span>
+                                    <span class="inspector-ctx-row-right"><span class="inspector-ctx-tokens">${formatCompactCount(contextWindow.reservedForResponseTokens)}</span></span>
+                                  </div>`}
+                                ${compaction &&
+                                  html`<div class="inspector-ctx-row">
+                                    <span>Compaction</span>
+                                    <span class="inspector-ctx-row-right"><span class="inspector-ctx-tokens">${formatCompactCount(compaction.compactEvents || 0)}</span><span class="inspector-ctx-pct">${String(compaction.state || compaction.mode || "normal").replaceAll("_", " ")}</span></span>
+                                  </div>`}
                               </div>`}
                             ${ctxSystemRows.length > 0 &&
                               html`<div class="inspector-ctx-group">
@@ -1527,6 +1718,11 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer, collapsed =
                                   <span>Output</span>
                                   <span class="inspector-ctx-row-right"><span class="inspector-ctx-tokens">${formatCompactCount(tokenUsage.outputTokens)}</span></span>
                                 </div>
+                                ${Number(tokenUsage.cacheInputTokens || 0) > 0 &&
+                                  html`<div class="inspector-ctx-row">
+                                    <span>Cache In</span>
+                                    <span class="inspector-ctx-row-right"><span class="inspector-ctx-tokens">${formatCompactCount(tokenUsage.cacheInputTokens)}</span></span>
+                                  </div>`}
                               </div>`}
                             ${insightsTopTools.length > 0 &&
                               html`<div class="inspector-ctx-group">

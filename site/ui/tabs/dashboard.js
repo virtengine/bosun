@@ -13,8 +13,8 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
+import { haptic, showConfirm, showAlert } from "../modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../modules/api.js";
 import {
   statusData,
   executorData,
@@ -36,17 +36,17 @@ import {
   clearPendingChange,
   retryQueueData,
   KANBAN_PAGE_SIZE,
-} from "../../../ui/modules/state.js";
-import { navigateTo } from "../../../ui/modules/router.js";
-import { ICONS } from "../../../ui/modules/icons.js";
+} from "../modules/state.js";
+import { navigateTo } from "../modules/router.js";
+import { ICONS } from "../modules/icons.js";
 import {
   cloneValue,
   formatRelative,
   truncate,
   countChangedFields,
-} from "../../../ui/modules/utils.js";
-import { buildWorktreeRecoveryViewModel } from "../../../ui/modules/worktree-recovery.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
+} from "../modules/utils.js";
+import { buildWorktreeRecoveryViewModel } from "../modules/worktree-recovery.js";
+import { iconText, resolveIcon } from "../modules/icon-utils.js";
 import {
   Card,
   Badge,
@@ -54,15 +54,15 @@ import {
   Modal,
   EmptyState,
   SaveDiscardBar,
-} from "../../../ui/components/shared.js";
-import { DonutChart, ProgressBar, MiniSparkline } from "../../../ui/components/charts.js";
+} from "../components/shared.js";
+import { DonutChart, ProgressBar, MiniSparkline } from "../components/charts.js";
 import {
   SegmentedControl,
   PullToRefresh,
   SliderControl,
-} from "../../../ui/components/forms.js";
-import { StartTaskModal } from "../../../ui/tabs/tasks.js";
-import { CommitGraph } from "../../../ui/components/commit-graph.js";
+} from "../components/forms.js";
+import { StartTaskModal } from "./tasks.js";
+import { CommitGraph } from "../components/commit-graph.js";
 import {
   Button, TextField, Typography, Box, Stack, Chip, Paper,
   IconButton, Tooltip, CircularProgress, Alert, Skeleton,

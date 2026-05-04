@@ -5,9 +5,15 @@ import { join } from "node:path";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import SettingsScreen from "../ui/tui/SettingsScreen.js";
-import { renderInk } from "./tui/render-ink.mjs";
 import { waitFor } from "./tui/render-helpers.mjs";
+
+async function loadSettingsScreenModules() {
+  const [{ default: SettingsScreen }, { renderInk }] = await Promise.all([
+    import("../ui/tui/SettingsScreen.js"),
+    import("./tui/render-ink.mjs"),
+  ]);
+  return { SettingsScreen, renderInk };
+}
 
 function createConfigDir(config) {
   const dir = mkdtempSync(join(tmpdir(), "bosun-settings-"));
@@ -37,6 +43,7 @@ describe.skip("tui settings screen (consolidated into tests/tui/settings-screen.
 
   it("renders grouped config fields with masked secrets and source labels", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "env-token";
+    const { SettingsScreen, renderInk } = await loadSettingsScreenModules();
 
     const { dir } = createConfigDir({
       kanban: { backend: "github" },
@@ -68,6 +75,7 @@ describe.skip("tui settings screen (consolidated into tests/tui/settings-screen.
   });
 
   it("saves an edited enum field atomically and emits config reload", async () => {
+    const { SettingsScreen, renderInk } = await loadSettingsScreenModules();
     const { dir, path } = createConfigDir({
       kanban: { backend: "internal" },
     });
@@ -95,6 +103,7 @@ describe.skip("tui settings screen (consolidated into tests/tui/settings-screen.
   });
 
   it("blocks invalid numeric edits and keeps the file unchanged", async () => {
+    const { SettingsScreen, renderInk } = await loadSettingsScreenModules();
     const { dir, path } = createConfigDir({
       telegram: { uiPort: 3080 },
     });

@@ -382,3 +382,46 @@ test("catches Tasks DAG subview failures after the route boots", { timeout: 6000
     }
   });
 });
+
+test("exposes isolated browser-worker and multimodal fallback APIs for Playwright validation", { timeout: 30000 }, async () => {
+  await withPortalServer(async ({ baseUrl }) => {
+    const createResponse = await fetch(`${baseUrl}/api/playwright/browser-workers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "playwright-browser-session",
+        parentSessionId: "playwright-parent-session",
+        rootSessionId: "playwright-root-session",
+        requestedCapabilities: ["playwright.navigate", "playwright.screenshot"],
+        fallback: {
+          summary: "Settings page shows an integrations panel with a missing icon.",
+          source: "playwright-ui",
+          width: 1280,
+          height: 720,
+        },
+      }),
+    });
+    assert.equal(createResponse.ok, true);
+    const created = await createResponse.json();
+    assert.equal(created.ok, true);
+    assert.equal(created.worker.sessionId, "playwright-browser-session");
+    assert.equal(created.worker.parentSessionId, "playwright-parent-session");
+    assert.match(created.worker.profileDir, /\.bosun[\\/]\.cache[\\/]browser-workers[\\/]/);
+    assert.match(created.fallback.summary, /missing icon/i);
+
+    const listResponse = await fetch(`${baseUrl}/api/playwright/browser-workers?sessionId=playwright-browser-session`);
+    assert.equal(listResponse.ok, true);
+    const listed = await listResponse.json();
+    assert.equal(listed.total, 1);
+    assert.equal(listed.workers[0].workerId, created.worker.workerId);
+
+    const releaseResponse = await fetch(`${baseUrl}/api/playwright/browser-workers/playwright-browser-session`, {
+      method: "DELETE",
+    });
+    assert.equal(releaseResponse.ok, true);
+    const released = await releaseResponse.json();
+    assert.equal(released.ok, true);
+    assert.equal(released.released, true);
+    assert.equal(released.worker.status, "released");
+  });
+});

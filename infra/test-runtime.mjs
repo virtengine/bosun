@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 const TEST_RUNTIME_ENV_KEYS = [
   "VITEST",
@@ -108,7 +108,7 @@ function buildSandboxContext(rootDir) {
 }
 
 function ensureDir(path) {
-  mkdirSync(path, { recursive: true });
+  fs.mkdirSync(path, { recursive: true });
 }
 
 function ensureSandboxFiles(context) {
@@ -121,9 +121,9 @@ function ensureSandboxFiles(context) {
   ensureDir(context.workflowDir);
   ensureDir(context.runsDir);
   ensureDir(context.cacheDir);
-  if (!existsSync(context.gitGlobalConfigPath)) {
+  if (!fs.existsSync(context.gitGlobalConfigPath)) {
     ensureDir(dirname(context.gitGlobalConfigPath));
-    writeFileSync(context.gitGlobalConfigPath, "", "utf8");
+    fs.writeFileSync(context.gitGlobalConfigPath, "", "utf8");
   }
 }
 
@@ -151,6 +151,7 @@ function isPathInside(parentPath, childPath) {
   const child = resolve(String(childPath || ""));
   const rel = relative(parent, child);
   if (!rel) return true;
+  if (isAbsolute(rel)) return false;
   return !rel.startsWith("..") && rel !== "..";
 }
 

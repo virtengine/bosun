@@ -37,6 +37,41 @@ describe("error-detector enhanced methods", () => {
       expect(result.details.tool_loop).toBeDefined();
     });
 
+    it("detects near-identical tool_loop pattern when tool args drift only in volatile values", () => {
+      const detector = createErrorDetector();
+      const messages = [
+        {
+          type: "tool_call",
+          content: "npm test -- --shard 101 --tmp C:/tmp/run-555111000",
+          meta: { toolName: "run_in_terminal" },
+        },
+        {
+          type: "tool_call",
+          content: "npm test -- --shard 102 --tmp C:/tmp/run-555111001",
+          meta: { toolName: "run_in_terminal" },
+        },
+        {
+          type: "tool_call",
+          content: "npm test -- --shard 103 --tmp C:/tmp/run-555111002",
+          meta: { toolName: "run_in_terminal" },
+        },
+        {
+          type: "tool_call",
+          content: "npm test -- --shard 104 --tmp C:/tmp/run-555111003",
+          meta: { toolName: "run_in_terminal" },
+        },
+        {
+          type: "tool_call",
+          content: "npm test -- --shard 105 --tmp C:/tmp/run-555111004",
+          meta: { toolName: "run_in_terminal" },
+        },
+      ];
+
+      const result = detector.analyzeMessageSequence(messages);
+      expect(result.patterns).toContain("tool_loop");
+      expect(result.details.tool_loop).toContain("Near-identical");
+    });
+
     it("detects analysis_paralysis (all reads, no writes)", () => {
       const detector = createErrorDetector();
       const messages = [];
@@ -149,6 +184,29 @@ describe("error-detector enhanced methods", () => {
       expect(result.patterns).toContain("rate_limited");
     });
 
+    it("detects doom_loop from near-identical assistant messages without edits", () => {
+      const detector = createErrorDetector();
+      const messages = [
+        {
+          type: "agent_message",
+          content: "Retrying build verification for shard 101 in temp run 555111000",
+        },
+        {
+          type: "agent_message",
+          content: "Retrying build verification for shard 102 in temp run 555111001",
+        },
+        {
+          type: "agent_message",
+          content: "Retrying build verification for shard 103 in temp run 555111002",
+        },
+      ];
+
+      const result = detector.analyzeMessageSequence(messages);
+      expect(result.patterns).toContain("doom_loop");
+      expect(result.primary).toBe("doom_loop");
+      expect(result.details.doom_loop).toContain("Near-identical assistant outputs");
+    });
+
     it("returns primary pattern by priority", () => {
       const detector = createErrorDetector();
       const messages = [
@@ -197,6 +255,17 @@ describe("error-detector enhanced methods", () => {
       });
 
       expect(prompt).toContain("BREAK THE LOOP");
+    });
+
+    it("returns doom_loop recovery prompt", () => {
+      const detector = createErrorDetector();
+      const prompt = detector.getRecoveryPromptForAnalysis("Build feature", {
+        primary: "doom_loop",
+        details: { doom_loop: "Near-identical assistant outputs repeated 3x without edits" },
+      });
+
+      expect(prompt).toContain("BREAK THE DOOM LOOP");
+      expect(prompt).toContain("changes state");
     });
 
     it("returns analysis_paralysis recovery prompt", () => {
@@ -460,7 +529,7 @@ describe("error-detector enhanced methods", () => {
       // commits_no_push has higher priority than no_progress
       if (result.patterns.includes("commits_no_push")) {
         const priority = [
-          "rate_limited", "plan_stuck", "false_completion",
+          "rate_limited", "doom_loop", "plan_stuck", "false_completion",
           "commits_no_push", "permission_wait", "error_loop",
           "needs_clarification", "tool_loop", "analysis_paralysis", "no_progress",
         ];

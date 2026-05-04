@@ -30,9 +30,14 @@ describe("git author env isolation regression", () => {
     const gitSafety = read("git/git-safety.mjs");
     const worktreeManager = read("workspace/worktree-manager.mjs");
     const taskExecutor = read("task/task-executor.mjs");
+    const workflowDefinitions = read("workflow/workflow-nodes/definitions.mjs");
 
     expect(gitSafety).toContain("export function sanitizeGitEnv");
     expect(worktreeManager).toContain("return sanitizeGitEnv(process.env, GIT_ENV);");
     expect(taskExecutor).toContain('env: sanitizeGitEnv()');
+    expect(workflowDefinitions).toContain('GIT_PAGER: "cat"');
+    expect(workflowDefinitions).toContain('PAGER: "cat"');
+    expect(workflowDefinitions).toContain('GH_PAGER: "cat"');
+    expect(workflowDefinitions).toContain('SYSTEMD_PAGER: "cat"');
   });
 });

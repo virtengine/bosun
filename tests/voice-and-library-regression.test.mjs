@@ -18,11 +18,16 @@ vi.mock("../config/config.mjs", () => ({
   })),
 }));
 
-vi.mock("../agent/primary-agent.mjs", () => ({
-  execPrimaryPrompt: vi.fn(async () => "mock response"),
-  getPrimaryAgentName: vi.fn(() => "codex-sdk"),
-  setPrimaryAgent: vi.fn(),
-}));
+vi.mock("../agent/primary-agent.mjs", () => {
+  let mode = "agent";
+  return {
+    execPrimaryPrompt: vi.fn(async (msg) => `Agent response to: ${msg}`),
+    getPrimaryAgentName: vi.fn(() => "codex-sdk"),
+    setPrimaryAgent: vi.fn(),
+    getAgentMode: vi.fn(() => mode),
+    setAgentMode: vi.fn((next) => { mode = next; }),
+  };
+});
 
 vi.mock("../voice/voice-tools.mjs", () => ({
   executeToolCall: vi.fn(async (name) => ({ result: `mock result for ${name}` })),
@@ -32,13 +37,14 @@ vi.mock("../voice/voice-tools.mjs", () => ({
   ]),
 }));
 
-vi.mock("../voice/voice-auth-manager.mjs", () => ({
-  resolveVoiceOAuthToken: vi.fn(() => null),
-  saveVoiceOAuthToken: vi.fn(),
-  getOpenAILoginStatus: vi.fn(() => ({ status: "idle", hasToken: false })),
-  getClaudeLoginStatus: vi.fn(() => ({ status: "idle", hasToken: false })),
-  getGeminiLoginStatus: vi.fn(() => ({ status: "idle", hasToken: false })),
-}));
+vi.mock("../agent/provider-auth-state.mjs", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    resolveSharedOAuthToken: vi.fn(() => null),
+    saveSharedOAuthToken: vi.fn(),
+  };
+});
 
 vi.mock("../infra/session-tracker.mjs", () => ({
   getSessionById: vi.fn(() => null),
@@ -50,8 +56,10 @@ vi.mock("../infra/session-tracker.mjs", () => ({
 // ── Global fetch mock ────────────────────────────────────────────────────────
 
 const _origFetch = globalThis.fetch;
+const _origVoiceTurnDetection = process.env.VOICE_TURN_DETECTION;
 
 beforeEach(() => {
+  delete process.env.VOICE_TURN_DETECTION;
   globalThis.fetch = vi.fn(async () => ({
     ok: true,
     json: async () => ({
@@ -62,16 +70,28 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = _origFetch;
+  if (_origVoiceTurnDetection == null) {
+    delete process.env.VOICE_TURN_DETECTION;
+  } else {
+    process.env.VOICE_TURN_DETECTION = _origVoiceTurnDetection;
+  }
   vi.restoreAllMocks();
 });
 
-// ── Lazy imports (after mocks are wired) ─────────────────────────────────────
+// ── Fresh imports per test (avoid cross-file module cache leaks) ────────────
 
-const { loadConfig } = await import("../config/config.mjs");
-const {
-  getVoiceConfig,
-  createEphemeralToken,
-} = await import("../voice/voice-relay.mjs");
+let loadConfig;
+let getVoiceConfig;
+let createEphemeralToken;
+
+beforeEach(async () => {
+  vi.resetModules();
+  ({ loadConfig } = await import("../config/config.mjs"));
+  ({
+    getVoiceConfig,
+    createEphemeralToken,
+  } = await import("../voice/voice-relay.mjs"));
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  1. Voice identity / instructions injection
@@ -511,21 +531,16 @@ describe("validation.lint empty command handling", () => {
     const { readFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");
     const src = readFileSync(
-      resolve(process.cwd(), "workflow/workflow-nodes.mjs"),
+      resolve(process.cwd(), "workflow/workflow-nodes/validation.mjs"),
       "utf8",
     );
 
-    // Find validation.lint registration
-    const lintStart = src.indexOf('"validation.lint"');
-    expect(lintStart).toBeGreaterThan(-1);
-
-    const lintChunk = src.slice(lintStart, lintStart + 600);
-
     // Must check for empty command
-    expect(lintChunk).toMatch(/!command|command\.trim\(\)/);
+    expect(src).toMatch(/String\(command \|\| ""\)\.trim\(\)/);
 
     // Must return passed: true when command is empty (skip, not fail)
-    expect(lintChunk).toContain("passed: true");
-    expect(lintChunk).toContain("skipped");
+    expect(src).toContain("passed: true");
+    expect(src).toContain('reason: "skipped"');
+    expect(src).toContain("Validation skipped: no command configured.");
   });
 });

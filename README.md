@@ -65,7 +65,7 @@ Open `https://localhost:3080` to start the setup wizard.
 
 Requires:
 
-- Node.js 18+
+- Node.js 22.13+
 - Git
 - Bash (for `.sh` wrappers) or PowerShell 7+ (for `.ps1` wrappers)
 - GitHub CLI (`gh`) recommended

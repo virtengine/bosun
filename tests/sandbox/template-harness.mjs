@@ -17,13 +17,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
-import { vi } from "vitest";
 
 import {
   WorkflowEngine,
   registerNodeType,
   getNodeType,
 } from "../../workflow/workflow-engine.mjs";
+import { _resetSingleton as resetSessionTracker } from "../../infra/session-tracker.mjs";
+import { _resetRuntimeAccumulatorForTests } from "../../infra/runtime-accumulator.mjs";
 import { installTemplate, installTemplateSet, WORKFLOW_TEMPLATES } from "../../workflow/workflow-templates.mjs";
 import { createExecSandbox } from "./exec-sandbox.mjs";
 
@@ -67,6 +68,14 @@ function createFixtureServices(scenario) {
   const { prs = [], issues = [], releases = [] } = scenario;
   const calls = [];
   const rec = (svc, method, args) => calls.push({ svc, method, args, ts: Date.now() });
+  const makeSync = (svc, method, impl) => (...args) => {
+    rec(svc, method, args);
+    return impl(...args);
+  };
+  const makeAsync = (svc, method, impl) => async (...args) => {
+    rec(svc, method, args);
+    return impl(...args);
+  };
 
   const firstPR    = prs[0]    ?? { number: 42, title: "PR #42", state: "open" };
   const firstIssue = issues[0] ?? { id: "TASK-1", title: "Issue #1", state: "open" };
@@ -78,97 +87,82 @@ function createFixtureServices(scenario) {
     },
 
     kanban: {
-      listTasks: vi.fn(async () => { rec("kanban","listTasks",[]); return [
+      listTasks: makeAsync("kanban", "listTasks", async () => [
         { id: "TASK-1", title: "Fix login bug",  status: "todo",       priority: "high"   },
         { id: "TASK-2", title: "Add dark mode",  status: "inprogress", priority: "medium" },
         { id: "TASK-3", title: "Write docs",     status: "todo",       priority: "low"    },
-      ]; }),
-      updateTask: vi.fn(async (id, u) => { rec("kanban","updateTask",[id,u]); return { id, ...u, updated: true }; }),
-      getTask:    vi.fn(async (id)    => { rec("kanban","getTask",[id]);       return { id, title: `Task ${id}`, status: "todo", priority: "medium" }; }),
-      createTask: vi.fn(async (t)     => { rec("kanban","createTask",[t]);     return { id: `TASK-NEW-${Date.now()}`, ...t }; }),
-      archiveTask:vi.fn(async (id)    => { rec("kanban","archiveTask",[id]);   return { id, archived: true }; }),
+      ]),
+      updateTask: makeAsync("kanban", "updateTask", async (id, u) => ({ id, ...u, updated: true })),
+      getTask: makeAsync("kanban", "getTask", async (id) => ({ id, title: `Task ${id}`, status: "todo", priority: "medium" })),
+      createTask: makeAsync("kanban", "createTask", async (task) => ({ id: `TASK-NEW-${Date.now()}`, ...task })),
+      archiveTask: makeAsync("kanban", "archiveTask", async (id) => ({ id, archived: true })),
     },
 
     git: {
-      getCurrentBranch:  vi.fn(() => { rec("git","getCurrentBranch",[]);     return "feat/test-branch"; }),
-      hasPendingChanges: vi.fn(() => { rec("git","hasPendingChanges",[]);    return false; }),
-      push:         vi.fn(async (b)    => { rec("git","push",[b]);           return { success: true, branch: b }; }),
-      checkout:     vi.fn(async (b)    => { rec("git","checkout",[b]);       return { success: true }; }),
-      createBranch: vi.fn(async (n)    => { rec("git","createBranch",[n]);   return { success: true, branch: n }; }),
+      getCurrentBranch: makeSync("git", "getCurrentBranch", () => "feat/test-branch"),
+      hasPendingChanges: makeSync("git", "hasPendingChanges", () => false),
+      push: makeAsync("git", "push", async (branch) => ({ success: true, branch })),
+      checkout: makeAsync("git", "checkout", async () => ({ success: true })),
+      createBranch: makeAsync("git", "createBranch", async (name) => ({ success: true, branch: name })),
     },
 
     agentPool: {
-      getAvailableSlots: vi.fn(() => { rec("agentPool","getAvailableSlots",[]); return 3; }),
-      allocateSlot: vi.fn(async (id) => { rec("agentPool","allocateSlot",[id]); return { slotId: `slot-${id}`, allocated: true }; }),
-      releaseSlot:  vi.fn(async (id) => { rec("agentPool","releaseSlot",[id]);  return { released: true }; }),
-      listAgents:   vi.fn(() => { rec("agentPool","listAgents",[]);             return [{ id: "agent-1", type: "codex", status: "idle" }]; }),
-      launchEphemeralThread: vi.fn(async (prompt, cwd, timeout) => {
-        rec("agentPool","launchEphemeralThread",[prompt,cwd,timeout]);
-        return { success: true, output: JSON.stringify({ tasks: [
+      getAvailableSlots: makeSync("agentPool", "getAvailableSlots", () => 3),
+      allocateSlot: makeAsync("agentPool", "allocateSlot", async (id) => ({ slotId: `slot-${id}`, allocated: true })),
+      releaseSlot: makeAsync("agentPool", "releaseSlot", async () => ({ released: true })),
+      listAgents: makeSync("agentPool", "listAgents", () => [{ id: "agent-1", type: "codex", status: "idle" }]),
+      launchEphemeralThread: makeAsync("agentPool", "launchEphemeralThread", async () => ({ success: true, output: JSON.stringify({ tasks: [
           { title: "Mock task: implement feature", description: "Auto", acceptance_criteria: ["Feature behavior is validated"], verification: ["npm test -- feature"], repo_areas: ["workflow"], impact: 0.8, confidence: 0.8, risk: 0.3 },
           { title: "Mock task: write tests",       description: "Auto", acceptance_criteria: ["Coverage improved"], verification: ["npm test -- tests"], repo_areas: ["tests"], impact: 0.7, confidence: 0.85, risk: 0.2 },
-        ]}), sdk: "mock", threadId: `thread-${Date.now()}` };
-      }),
-      execWithRetry: vi.fn(async (prompt, opts) => {
-        rec("agentPool","execWithRetry",[prompt,opts]);
-        return { success: true, output: JSON.stringify({ tasks: [
+        ]}), sdk: "mock", threadId: `thread-${Date.now()}` })),
+      execWithRetry: makeAsync("agentPool", "execWithRetry", async () => ({ success: true, output: JSON.stringify({ tasks: [
           { title: "Mock task: implement feature", description: "Auto", acceptance_criteria: ["Feature behavior is validated"], verification: ["npm test -- feature"], repo_areas: ["workflow"], impact: 0.8, confidence: 0.8, risk: 0.3 },
           { title: "Mock task: write tests",       description: "Auto", acceptance_criteria: ["Coverage improved"], verification: ["npm test -- tests"], repo_areas: ["tests"], impact: 0.7, confidence: 0.85, risk: 0.2 },
-        ]}), sdk: "mock", threadId: `thread-${Date.now()}`, attempts: 1, continues: 0 };
-      }),
-      launchOrResumeThread: vi.fn(async (prompt, cwd, timeout, opts) => {
-        rec("agentPool","launchOrResumeThread",[prompt,cwd,timeout]);
-        return { success: true, output: "mock agent resumed", sdk: "mock", threadId: `thread-${Date.now()}` };
-      }),
-      continueSession: vi.fn(async (sessionId, prompt, opts) => {
-        rec("agentPool","continueSession",[sessionId,prompt]);
-        return { success: true, output: "mock continued", sdk: "mock" };
-      }),
+        ]}), sdk: "mock", threadId: `thread-${Date.now()}`, attempts: 1, continues: 0 })),
+      launchOrResumeThread: makeAsync("agentPool", "launchOrResumeThread", async () => ({ success: true, output: "mock agent resumed", sdk: "mock", threadId: `thread-${Date.now()}` })),
+      continueSession: makeAsync("agentPool", "continueSession", async () => ({ success: true, output: "mock continued", sdk: "mock" })),
     },
 
     worktree: {
-      acquire: vi.fn(async (b)   => { rec("worktree","acquire",[b]);  return { path: `/tmp/worktree/${b}`, branch: b, acquired: true }; }),
-      release: vi.fn(async (p)   => { rec("worktree","release",[p]);  return { released: true }; }),
-      list:    vi.fn(()           => { rec("worktree","list",[]);      return [{ path: "/tmp/worktree/feat/test", branch: "feat/test", active: true }]; }),
+      acquire: makeAsync("worktree", "acquire", async (branch) => ({ path: `/tmp/worktree/${branch}`, branch, acquired: true })),
+      release: makeAsync("worktree", "release", async () => ({ released: true })),
+      list: makeSync("worktree", "list", () => [{ path: "/tmp/worktree/feat/test", branch: "feat/test", active: true }]),
     },
 
     claims: {
-      claim:     vi.fn(async (tid, aid) => { rec("claims","claim",[tid,aid]); return { taskId: tid, agentId: aid, claimed: true, ts: Date.now() }; }),
-      release:   vi.fn(async (tid)      => { rec("claims","release",[tid]);   return { released: true }; }),
-      isClaimed: vi.fn((tid)            => { rec("claims","isClaimed",[tid]); return false; }),
+      claim: makeAsync("claims", "claim", async (taskId, agentId) => ({ taskId, agentId, claimed: true, ts: Date.now() })),
+      release: makeAsync("claims", "release", async () => ({ released: true })),
+      isClaimed: makeSync("claims", "isClaimed", () => false),
     },
 
     presence: {
-      heartbeat: vi.fn(async (id) => { rec("presence","heartbeat",[id]); return { alive: true }; }),
-      isAlive:   vi.fn((id)       => { rec("presence","isAlive",[id]);   return true; }),
-      getStatus: vi.fn(()         => { rec("presence","getStatus",[]);   return { agents: 2, active: 1 }; }),
+      heartbeat: makeAsync("presence", "heartbeat", async () => ({ alive: true })),
+      isAlive: makeSync("presence", "isAlive", () => true),
+      getStatus: makeSync("presence", "getStatus", () => ({ agents: 2, active: 1 })),
     },
 
     config: {
-      get: vi.fn((key, fallback) => {
-        rec("config","get",[key,fallback]);
-        return ({
+      get: makeSync("config", "get", (key, fallback) => ({
           maxSlots: 3, executor: "codex", baseBranch: "main",
           telegramChatId: "12345", repoOwner: "virtengine",
           repoName: "bosun", prMergeMethod: "squash", autoMerge: true,
           stalePrDays: 14, maxRetries: 3,
-        })[key] ?? fallback;
-      }),
+        })[key] ?? fallback),
     },
 
     telegram: {
-      send:        vi.fn(async (msg)            => { rec("telegram","send",[msg]);          return { sent: true, messageId: Date.now() }; }),
-      sendMessage: vi.fn(async (chatId, msg, o) => { rec("telegram","sendMessage",[chatId,msg]); return { sent: true, messageId: Date.now() }; }),
+      send: makeAsync("telegram", "send", async () => ({ sent: true, messageId: Date.now() })),
+      sendMessage: makeAsync("telegram", "sendMessage", async () => ({ sent: true, messageId: Date.now() })),
     },
 
     meeting: {
-      getSession:           vi.fn(async (id)      => { rec("meeting","getSession",[id]);      return { id: id ?? "session-1", active: true, title: "Sprint Sync" }; }),
-      createSession:        vi.fn(async (opts)    => { rec("meeting","createSession",[opts]); return { id: `session-${Date.now()}`, ...opts, active: true }; }),
-      startMeeting:         vi.fn(async (opts)    => { rec("meeting","startMeeting",[opts]);  return { sessionId: opts?.sessionId ?? `meeting-${Date.now()}`, created: true, session: { active: true } }; }),
-      sendMeetingMessage:   vi.fn(async (sid, m)  => { rec("meeting","sendMeetingMessage",[sid,m]); return { sent: true, sessionId: sid }; }),
-      fetchMeetingTranscript: vi.fn(async (sid)   => { rec("meeting","fetchMeetingTranscript",[sid]); return { messages: [{ role: "system", content: "Mock transcript" }], page: 1, pageSize: 200, totalMessages: 1, totalPages: 1 }; }),
-      stopMeeting:          vi.fn(async (sid, o)  => { rec("meeting","stopMeeting",[sid]);    return { ok: true, sessionId: sid, status: o?.status ?? "completed" }; }),
-      analyzeMeetingFrame:  vi.fn(async (sid)     => { rec("meeting","analyzeMeetingFrame",[sid]); return { ok: true, analyzed: true, summary: "Mock vision analysis", sessionId: sid }; }),
+      getSession: makeAsync("meeting", "getSession", async (id) => ({ id: id ?? "session-1", active: true, title: "Sprint Sync" })),
+      createSession: makeAsync("meeting", "createSession", async (opts) => ({ id: `session-${Date.now()}`, ...opts, active: true })),
+      startMeeting: makeAsync("meeting", "startMeeting", async (opts) => ({ sessionId: opts?.sessionId ?? `meeting-${Date.now()}`, created: true, session: { active: true } })),
+      sendMeetingMessage: makeAsync("meeting", "sendMeetingMessage", async (sessionId) => ({ sent: true, sessionId })),
+      fetchMeetingTranscript: makeAsync("meeting", "fetchMeetingTranscript", async () => ({ messages: [{ role: "system", content: "Mock transcript" }], page: 1, pageSize: 200, totalMessages: 1, totalPages: 1 })),
+      stopMeeting: makeAsync("meeting", "stopMeeting", async (sessionId, options) => ({ ok: true, sessionId, status: options?.status ?? "completed" })),
+      analyzeMeetingFrame: makeAsync("meeting", "analyzeMeetingFrame", async (sessionId) => ({ ok: true, analyzed: true, summary: "Mock vision analysis", sessionId })),
     },
 
     prompts: {
@@ -193,6 +187,13 @@ export function createTemplateHarness(templateId, scenario = {}, varOverrides = 
   const tmpDir = mkdtempSync(join(tmpdir(), `wf-sandbox-${templateId.slice(0, 20)}-`));
   const execSandbox = createExecSandbox(scenario);
   const services    = createFixtureServices(scenario);
+  const debugCleanup = process.env.BOSUN_TEST_HARNESS_DEBUG_CLEANUP === "1";
+  const logCleanupStep = (label, startedAt) => {
+    if (!debugCleanup) return Date.now();
+    const now = Date.now();
+    console.error(`[template-harness] ${templateId} cleanup ${label} +${now - startedAt}ms`);
+    return now;
+  };
 
   const engine = new WorkflowEngine({
     workflowDir: join(tmpDir, "workflows"),
@@ -236,6 +237,16 @@ export function createTemplateHarness(templateId, scenario = {}, varOverrides = 
       // can execute these sub-workflow chains without production errors.
       for (const [, wf] of engine._workflows) {
         for (const node of wf.nodes ?? []) {
+          if (node.config?.mode === "dispatch") {
+            // Tests need deterministic teardown. Dispatch mode leaves child
+            // workflows running after the parent test completes.
+            node.config.mode = "sync";
+            if ("timeoutMs" in (node.config || {}) || "timeout" in (node.config || {})) {
+              const timeoutKey = "timeoutMs" in node.config ? "timeoutMs" : "timeout";
+              node.config[timeoutKey] = Math.min(Number(node.config[timeoutKey] || 5000), 5000);
+            }
+          }
+
           if (
             node.type === "action.execute_workflow" &&
             typeof node.config?.input === "string" &&
@@ -277,7 +288,36 @@ export function createTemplateHarness(templateId, scenario = {}, varOverrides = 
     get services()    { return services; },
 
     cleanup() {
+      let cleanupTick = Date.now();
+      try {
+        for (const timer of engine._checkpointTimers?.values?.() || []) {
+          clearTimeout(timer);
+        }
+        engine._checkpointTimers?.clear?.();
+        engine._activeRuns?.clear?.();
+        engine._triggerSubscriptions?.clear?.();
+        engine._taskTraceHooks?.clear?.();
+        engine.removeAllListeners?.();
+      } catch {
+        // best-effort engine teardown for test isolation
+      }
+      cleanupTick = logCleanupStep("engine", cleanupTick);
+      try {
+        resetSessionTracker({ persistDir: null });
+      } catch {
+        // best-effort singleton reset for workflow-heavy tests
+      }
+      cleanupTick = logCleanupStep("session-tracker", cleanupTick);
+      try {
+        _resetRuntimeAccumulatorForTests({ cacheDir: process.env.BOSUN_TEST_CACHE_DIR || null });
+      } catch {
+        // best-effort accumulator reset for workflow-heavy tests
+      }
+      cleanupTick = logCleanupStep("runtime-accumulator", cleanupTick);
+      installed = null;
+      allInstalled = false;
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
+      logCleanupStep("rmSync", cleanupTick);
     },
 
     /** Assertion helpers */

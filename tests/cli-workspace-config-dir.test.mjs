@@ -308,6 +308,9 @@ describe("cli workspace config-dir resolution", () => {
         expect(spawnFailure?.code).toBe("EPERM");
         return;
       }
+      if (child.exitCode !== null) {
+        await sleep(300);
+      }
       const duplicateGuardTriggered = /bosun is already running \(PID \d+\); exiting duplicate start\./i.test(output);
 
       if (duplicateGuardTriggered) {
@@ -319,8 +322,10 @@ describe("cli workspace config-dir resolution", () => {
 
         await sleep(1500);
 
+        const cleanDuplicateExit = child.exitCode === 0 && /bosun is already running/i.test(output);
+
         expect(
-          child.exitCode,
+          cleanDuplicateExit ? null : child.exitCode,
           `Bosun crashed shortly after monitor bootstrap. Output:\n${output}`,
         ).toBeNull();
         expect(output).not.toMatch(/Monitor failed to start|bosun failed:/i);

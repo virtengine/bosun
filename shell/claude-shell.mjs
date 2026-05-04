@@ -17,6 +17,7 @@ import {
   MAX_STREAM_RETRIES,
 } from "../infra/stream-resilience.mjs";
 import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
+import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 
@@ -34,6 +35,10 @@ let activeQueue = null;
 let activeTurn = false;
 let activeSessionId = null;
 let turnCount = 0;
+const claudeSessionCompat = createShellSessionCompat({
+  adapterName: "claude",
+  providerSelection: "claude",
+});
 
 // Track tool use IDs for mapping tool results to start events.
 const toolUseById = new Map();
@@ -409,9 +414,17 @@ async function loadState() {
     console.log(
       `[claude-shell] loaded state: sessionId=${activeSessionId}, turns=${turnCount}`,
     );
+    claudeSessionCompat.hydrate({
+      sessionId: activeSessionId,
+      status: activeSessionId ? "idle" : "inactive",
+      metadata: {
+        turnCount,
+      },
+    });
   } catch {
     activeSessionId = null;
     turnCount = 0;
+    claudeSessionCompat.reset({ keepManagedRecord: false });
   }
 }
 
@@ -571,6 +584,23 @@ export async function execClaudePrompt(userMessage, options = {}) {
 
   let finalResponse = "";
   const allItems = [];
+  const logicalSessionId =
+    toTrimmedString(options.sessionId || activeSessionId || "")
+    || "primary-claude";
+  const providerRuntime = claudeSessionCompat.resolveProvider({
+    providerSelection: options.providerSelection || "claude",
+    model: process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+  });
+  claudeSessionCompat.beginTurn(logicalSessionId, {
+    activate: Boolean(options.sessionId || activeSessionId),
+    status: "running",
+    providerSelection: providerRuntime.providerId || "claude",
+    model: providerRuntime.providerConfig?.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+    metadata: {
+      turnCount,
+      mode: mode || null,
+    },
+  });
 
   try {
     const queue = createMessageQueue();
@@ -585,10 +615,25 @@ export async function execClaudePrompt(userMessage, options = {}) {
     });
 
     for await (const message of activeQuery) {
+      claudeSessionCompat.recordStreamEvent(activeSessionId || logicalSessionId, message, {
+        activate: Boolean(options.sessionId || activeSessionId),
+        providerSelection: providerRuntime.providerId || "claude",
+        model: providerRuntime.providerConfig?.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+      });
       const sessionId = message?.session_id || message?.sessionId;
       if (sessionId && sessionId !== activeSessionId) {
         activeSessionId = sessionId;
         await saveState();
+        claudeSessionCompat.beginTurn(sessionId, {
+          activate: true,
+          status: "running",
+          providerSelection: providerRuntime.providerId || "claude",
+          model: providerRuntime.providerConfig?.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+          metadata: {
+            turnCount,
+            mode: mode || null,
+          },
+        });
       }
 
       const contentBlocks = message?.message?.content || message?.content || [];
@@ -664,6 +709,16 @@ export async function execClaudePrompt(userMessage, options = {}) {
     clearTimeout(timer);
     turnCount += 1;
     await saveState();
+    claudeSessionCompat.completeTurn(activeSessionId || logicalSessionId, {
+      activate: Boolean(activeSessionId || options.sessionId),
+      status: "completed",
+      providerSelection: providerRuntime.providerId || "claude",
+      model: providerRuntime.providerConfig?.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+      metadata: {
+        turnCount,
+        mode: mode || null,
+      },
+    });
 
     // Apply context shredding to collected items (SDK session path)
     const compressedItems = await maybeCompressSessionItems(allItems, {
@@ -685,6 +740,17 @@ export async function execClaudePrompt(userMessage, options = {}) {
         reason === "user_stop"
           ? ":close: Agent stopped by user."
           : `:clock: Agent timed out after ${timeoutMs / 1000}s`;
+      claudeSessionCompat.abortTurn(activeSessionId || logicalSessionId, {
+        activate: Boolean(activeSessionId || options.sessionId),
+        status: reason === "user_stop" ? "aborted" : "timeout",
+        error: msg,
+        providerSelection: providerRuntime.providerId || "claude",
+        model: providerRuntime.providerConfig?.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+        metadata: {
+          turnCount,
+          mode: mode || null,
+        },
+      });
       return { finalResponse: msg, items: [], usage: null };
     }
     // ── Transient stream retry ──────────────────────────────────────────────────
@@ -715,6 +781,17 @@ export async function execClaudePrompt(userMessage, options = {}) {
       );
     }
     const message = err?.message || String(err || "unknown error");
+    claudeSessionCompat.failTurn(activeSessionId || logicalSessionId, {
+      activate: Boolean(activeSessionId || options.sessionId),
+      status: "failed",
+      error: message,
+      providerSelection: providerRuntime.providerId || "claude",
+      model: providerRuntime.providerConfig?.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || null,
+      metadata: {
+        turnCount,
+        mode: mode || null,
+      },
+    });
     return {
       finalResponse: `:close: Claude agent failed: ${message}`,
       items: [],
@@ -757,12 +834,12 @@ export function isClaudeBusy() {
  * Get session info for display.
  */
 export function getSessionInfo() {
-  return {
+  return claudeSessionCompat.getSessionInfo({
     sessionId: activeSessionId,
     turnCount,
     isActive: !!activeQuery,
     isBusy: !!activeTurn,
-  };
+  });
 }
 
 /**
@@ -774,6 +851,12 @@ export async function resetClaudeSession() {
   activeSessionId = null;
   turnCount = 0;
   activeTurn = false;
+  claudeSessionCompat.reset({
+    status: "idle",
+    metadata: {
+      turnCount: 0,
+    },
+  });
   await saveState();
   console.log("[claude-shell] session reset");
 }

@@ -12,9 +12,11 @@ import htm from "htm";
 import { apiFetch } from "../modules/api.js";
 import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../modules/session-api.js";
 import { buildTraceTimelineBlocks } from "../modules/stream-timeline.js";
+import { buildChatTurnGroups } from "../modules/chat-turn-groups.js";
 import { showToast } from "../modules/state.js";
 import { formatRelative, truncate, formatBytes } from "../modules/utils.js";
 import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { DiffViewer } from "./diff-viewer.js";
 import {
   Paper, Typography, Box, Stack, IconButton, TextField,
   InputAdornment, Chip, CircularProgress, Skeleton, Tooltip,
@@ -70,6 +72,11 @@ const TIMELINE_PHASE_META = {
   patch_result: { label: "Patch Result", color: "success", accent: "#059669" },
   error: { label: "Error", color: "error", accent: "#dc2626" },
 };
+
+function renderTimelineLabel(text, fallback = "") {
+  const rendered = iconText(text);
+  return rendered == null ? (fallback || "") : rendered;
+}
 
 function formatAutoAction(event) {
   if (!event) return null;
@@ -409,6 +416,303 @@ function AttachmentList({ attachments }) {
   `;
 }
 
+const CONTEXT_BREAKDOWN_LABEL_ORDER = [
+  "system instructions",
+  "tool definitions",
+  "messages",
+  "tool results",
+  "other",
+];
+
+function formatContextMetric(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0";
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(numeric >= 10_000_000 ? 0 : 1).replace(/\.0$/, "")}M`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(numeric >= 100_000 ? 0 : 1).replace(/\.0$/, "")}k`;
+  return String(Math.round(numeric));
+}
+
+function normalizeContextUsagePercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+function contextUsageTone(percent) {
+  if (!Number.isFinite(Number(percent))) return "default";
+  const value = Number(percent);
+  if (value >= 95) return "error";
+  if (value >= 85) return "warning";
+  if (value >= 70) return "info";
+  return "success";
+}
+
+function normalizeContextUsageSummary(contextWindow = null) {
+  const usedTokens = Number(contextWindow?.usedTokens || 0) || 0;
+  const totalTokens = Number.isFinite(Number(contextWindow?.totalTokens))
+    ? Math.max(0, Number(contextWindow.totalTokens))
+    : null;
+  const percent = normalizeContextUsagePercent(contextWindow?.percent);
+  return {
+    usedTokens,
+    totalTokens,
+    percent,
+    percentLabel: percent != null ? `${percent}%` : "Tracked",
+    usageLabel: totalTokens != null
+      ? `${formatContextMetric(usedTokens)} / ${formatContextMetric(totalTokens)}`
+      : `${formatContextMetric(usedTokens)} tokens`,
+  };
+}
+
+function normalizeContextBreakdownEntries(rows = [], totalTokens = 0) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === "object")
+    .map((row) => {
+      const label = String(row.label || "Other").trim() || "Other";
+      const percent = normalizeContextUsagePercent(row.percent) ?? 0;
+      return {
+        label,
+        percent,
+        sortIndex: CONTEXT_BREAKDOWN_LABEL_ORDER.indexOf(label.toLowerCase()),
+        approxTokens: totalTokens > 0 ? Math.round((percent / 100) * totalTokens) : null,
+      };
+    })
+    .sort((left, right) => {
+      const leftIndex = left.sortIndex === -1 ? Number.MAX_SAFE_INTEGER : left.sortIndex;
+      const rightIndex = right.sortIndex === -1 ? Number.MAX_SAFE_INTEGER : right.sortIndex;
+      if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+      return right.percent - left.percent;
+    });
+}
+
+function ContextTrackerSummary({
+  contextWindow = null,
+  tokenUsage = null,
+  compaction = null,
+  contextBreakdown = [],
+  expanded = false,
+  onToggle = null,
+}) {
+  const summary = normalizeContextUsageSummary(contextWindow);
+  const tone = contextUsageTone(summary.percent);
+  const breakdownRows = normalizeContextBreakdownEntries(contextBreakdown, summary.totalTokens || 0);
+  const remainingTokens = Number.isFinite(Number(contextWindow?.remainingTokens))
+    ? Math.max(0, Number(contextWindow.remainingTokens))
+    : (summary.totalTokens != null ? Math.max(0, summary.totalTokens - summary.usedTokens) : null);
+  const reservedForResponseTokens = Number.isFinite(Number(contextWindow?.reservedForResponseTokens))
+    ? Math.max(0, Number(contextWindow.reservedForResponseTokens))
+    : null;
+  const compactEvents = Math.max(0, Number(compaction?.compactEvents || 0) || 0);
+  const compactionState = String(compaction?.state || "").trim() || (compaction?.canCompact ? "available" : "disabled");
+
+  return html`
+    <${Box}>
+      <${Chip}
+        label=${`Context ${summary.percentLabel} · ${summary.usageLabel}${summary.totalTokens != null ? " tokens" : ""}`}
+        size="small"
+        color=${tone === "default" ? "default" : tone}
+        variant=${expanded ? "filled" : "outlined"}
+        onClick=${onToggle}
+        sx=${{ height: 24, fontWeight: 700, cursor: "pointer" }}
+      />
+      <${Collapse} in=${expanded} unmountOnExit>
+        <${Paper}
+          variant="outlined"
+          sx=${{
+            mt: 0.75,
+            p: 1.1,
+            borderRadius: 2,
+            bgcolor: "rgba(15,23,42,0.03)",
+          }}
+        >
+          <${Stack} spacing=${0.9}>
+            <${Stack} direction="row" spacing=${0.5} sx=${{ flexWrap: "wrap" }}>
+              ${remainingTokens != null
+                ? html`<${Chip} size="small" variant="outlined" label=${`${formatContextMetric(remainingTokens)} headroom`} />`
+                : null}
+              ${reservedForResponseTokens != null
+                ? html`<${Chip} size="small" variant="outlined" label=${`${formatContextMetric(reservedForResponseTokens)} reserved`} />`
+                : null}
+              ${compactEvents > 0
+                ? html`<${Chip} size="small" color="warning" variant="outlined" label=${`${compactEvents} compact`} />`
+                : null}
+              <${Chip}
+                size="small"
+                variant="outlined"
+                color=${compactionState === "disabled" ? "default" : compactEvents > 0 ? "warning" : "success"}
+                label=${compactionState === "disabled" ? "Compaction off" : compactionState === "compacted" ? "Compacted" : "Compactable"}
+              />
+            </${Stack}>
+            ${breakdownRows.length > 0
+              ? html`
+                  <${Stack} spacing=${0.65}>
+                    ${breakdownRows.map((row) => html`
+                      <${Box} key=${row.label} sx=${{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
+                        <${Typography} variant="caption" color="text.secondary">${row.label}<//>
+                        <${Stack} direction="row" spacing=${0.75} alignItems="center">
+                          ${row.approxTokens != null
+                            ? html`<${Typography} variant="caption" color="text.secondary">${formatContextMetric(row.approxTokens)} tok<//>`
+                            : null}
+                          <${Chip} size="small" variant="outlined" label=${`${row.percent}%`} sx=${{ height: 19 }} />
+                        </${Stack}>
+                      </${Box}>
+                    `)}
+                  </${Stack}>
+                `
+              : html`<${Typography} variant="caption" color="text.secondary">Context breakdown unavailable.<//>`}
+            <${Stack} direction="row" spacing=${1.25} sx=${{ flexWrap: "wrap" }}>
+              <${Typography} variant="caption" color="text.secondary">Input ${formatContextMetric(tokenUsage?.inputTokens || 0)}<//>
+              <${Typography} variant="caption" color="text.secondary">Output ${formatContextMetric(tokenUsage?.outputTokens || 0)}<//>
+              ${Number(tokenUsage?.cacheInputTokens || 0) > 0
+                ? html`<${Typography} variant="caption" color="text.secondary">Cache ${formatContextMetric(tokenUsage.cacheInputTokens)}<//>`
+                : null}
+            </${Stack}>
+          </${Stack}>
+        </${Paper}>
+      </${Collapse}>
+    </${Box}>
+  `;
+}
+
+function summarizeTurnFileChanges(fileChanges = null) {
+  if (!fileChanges || typeof fileChanges !== "object") return null;
+  const files = Array.isArray(fileChanges.files)
+    ? fileChanges.files.filter(Boolean).map((file = {}) => ({
+        filename: String(file.filename || file.file || "unknown").trim() || "unknown",
+        status: String(file.status || "modified").trim() || "modified",
+        additions: Math.max(0, Number(file.additions || 0) || 0),
+        deletions: Math.max(0, Number(file.deletions || 0) || 0),
+        hasPatch: Boolean(file.hasPatch),
+      }))
+    : [];
+  const totalFiles = Math.max(0, Number(fileChanges.totalFiles || files.length || 0) || 0);
+  if (totalFiles <= 0) return null;
+  return {
+    ...fileChanges,
+    totalFiles,
+    totalAdditions: Math.max(0, Number(fileChanges.totalAdditions || 0) || 0),
+    totalDeletions: Math.max(0, Number(fileChanges.totalDeletions || 0) || 0),
+    files,
+  };
+}
+
+function TurnFilesChangedCard({
+  sessionId = "",
+  workspace = "active",
+  turn = null,
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const fileChanges = summarizeTurnFileChanges(turn?.fileChanges);
+  const turnDiffRef = turn?.diffRef && typeof turn.diffRef === "object" ? turn.diffRef : {};
+  if (!fileChanges || !sessionId) return null;
+  const previewFiles = fileChanges.files.slice(0, 4);
+  const remainingFiles = Math.max(0, fileChanges.files.length - previewFiles.length);
+  const turnLabel = Number.isFinite(Number(turn?.turnIndex)) ? `Turn ${Number(turn.turnIndex) + 1}` : "Turn";
+  return html`
+    <${Paper}
+      variant="outlined"
+      sx=${{
+        mb: 1.25,
+        ml: 0,
+        borderRadius: 2,
+        borderColor: "rgba(59, 130, 246, 0.22)",
+        background: "linear-gradient(180deg, rgba(30,41,59,0.7) 0%, rgba(15,23,42,0.58) 100%)",
+        overflow: "hidden",
+      }}
+    >
+      <${Box} sx=${{ px: 1.5, py: 1.25 }}>
+        <${Stack} direction="row" spacing=${1} alignItems="center" useFlexGap flexWrap="wrap">
+          <${Chip}
+            label="Files Changed"
+            size="small"
+            color="primary"
+            variant="filled"
+            sx=${{ height: 22, fontSize: "0.6875rem", fontWeight: 700 }}
+          />
+          <${Typography} variant="body2" sx=${{ fontWeight: 600 }}>
+            ${fileChanges.totalFiles} file${fileChanges.totalFiles === 1 ? "" : "s"} changed
+          <//>
+          <${Chip} label=${turnLabel} size="small" variant="outlined" sx=${{ height: 20, fontSize: "0.625rem" }} />
+          ${fileChanges.totalAdditions > 0
+            ? html`<${Chip} label=${`+${fileChanges.totalAdditions}`} size="small" color="success" variant="outlined" sx=${{ height: 20, fontSize: "0.625rem" }} />`
+            : null}
+          ${fileChanges.totalDeletions > 0
+            ? html`<${Chip} label=${`-${fileChanges.totalDeletions}`} size="small" color="error" variant="outlined" sx=${{ height: 20, fontSize: "0.625rem" }} />`
+            : null}
+          <${Button}
+            size="small"
+            variant=${expanded ? "contained" : "outlined"}
+            onClick=${() => setExpanded((prev) => !prev)}
+            sx=${{ ml: "auto", textTransform: "none" }}
+          >
+            ${expanded ? "Hide diff" : "View diff"}
+          </${Button}>
+        </${Stack}>
+        <${Stack} spacing=${0.75} sx=${{ mt: 1.25 }}>
+          ${previewFiles.map((file) => html`
+            <${Box}
+              key=${file.filename}
+              sx=${{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto",
+                gap: 1,
+                alignItems: "center",
+                px: 1,
+                py: 0.75,
+                borderRadius: 1.5,
+                bgcolor: "rgba(15, 23, 42, 0.42)",
+              }}
+            >
+              <${Box} sx=${{ minWidth: 0 }}>
+                <${Typography}
+                  variant="caption"
+                  sx=${{
+                    display: "block",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                    fontWeight: 600,
+                    color: "text.primary",
+                  }}
+                >
+                  ${file.filename}
+                <//>
+                <${Typography} variant="caption" color="text.secondary">
+                  ${file.status}${file.hasPatch ? " · diff ready" : ""}
+                <//>
+              </${Box}>
+              <${Stack} direction="row" spacing=${0.5}>
+                ${file.additions > 0
+                  ? html`<${Chip} label=${`+${file.additions}`} size="small" color="success" variant="outlined" sx=${{ height: 18, fontSize: "0.5625rem" }} />`
+                  : null}
+                ${file.deletions > 0
+                  ? html`<${Chip} label=${`-${file.deletions}`} size="small" color="error" variant="outlined" sx=${{ height: 18, fontSize: "0.5625rem" }} />`
+                  : null}
+              </${Stack}>
+            </${Box}>
+          `)}
+          ${remainingFiles > 0
+            ? html`<${Typography} variant="caption" color="text.secondary" sx=${{ px: 0.5 }}>
+                ${remainingFiles} more file${remainingFiles === 1 ? "" : "s"} in this turn
+              <//>`
+            : null}
+        </${Stack}>
+      </${Box}>
+      <${Collapse} in=${expanded} unmountOnExit>
+        <${Box} sx=${{ px: 1.25, pb: 1.25 }}>
+          <${DiffViewer}
+            sessionId=${sessionId}
+            workspace=${workspace}
+            turnId=${turnDiffRef.turnId || turn?.id || ""}
+            turnIndex=${turnDiffRef.turnIndex ?? turn?.turnIndex ?? null}
+            embedded=${true}
+            hideSummary=${true}
+            defaultExpandedFiles=${0}
+          />
+        </${Box}>
+      </${Collapse}>
+    </${Paper}>
+  `;
+}
+
 /* ─── Memoized ChatBubble — only re-renders if msg identity changes ─── */
 const ChatBubble = memo(function ChatBubble({
   msg,
@@ -579,14 +883,14 @@ const TraceTimelineEntry = memo(function TraceTimelineEntry({ entry, verbosity =
       <${Stack} spacing=${0.5}>
         <${Stack} direction="row" spacing=${0.75} alignItems="center" sx=${{ flexWrap: 'wrap' }}>
           <${Chip}
-            label=${phaseMeta.label}
+            label=${renderTimelineLabel(phaseMeta.label, phaseMeta.label)}
             size="small"
             color=${phaseMeta.color}
             variant="outlined"
             sx=${{ height: 20, fontSize: '0.625rem' }}
           />
           <${Typography} variant="caption" sx=${{ fontWeight: 600, fontSize: '0.75rem' }}>
-            ${entry?.title || phaseMeta.label}
+            ${renderTimelineLabel(entry?.title || phaseMeta.label, entry?.title || phaseMeta.label)}
           </${Typography}>
           ${entry?.timestamp
             ? html`<${Typography} variant="caption" color="text.secondary" sx=${{ ml: 'auto', fontSize: '0.6875rem' }}>
@@ -600,7 +904,7 @@ const TraceTimelineEntry = memo(function TraceTimelineEntry({ entry, verbosity =
                 ${entry.chips.map((chip) => html`
                   <${Chip}
                     key=${`${entry.id}-${chip}`}
-                    label=${chip}
+                    label=${renderTimelineLabel(chip, chip)}
                     size="small"
                     variant="filled"
                     sx=${{
@@ -668,14 +972,14 @@ const TraceTimelineBlock = memo(function TraceTimelineBlock({ block, verbosity =
         <${Stack} spacing=${0.75}>
           <${Stack} direction="row" spacing=${0.75} alignItems="center" sx=${{ flexWrap: 'wrap' }}>
             <${Chip}
-              label=${phaseMeta.label}
+              label=${renderTimelineLabel(phaseMeta.label, phaseMeta.label)}
               size="small"
               color=${block?.hasError ? "error" : phaseMeta.color}
               variant=${forceExpand || verbosity === "full" ? "filled" : "outlined"}
               sx=${{ height: 22, fontSize: '0.6875rem' }}
             />
             <${Typography} variant="body2" sx=${{ flex: 1, fontWeight: 600 }}>
-              ${block?.summary || block?.title || phaseMeta.label}
+              ${renderTimelineLabel(block?.summary || block?.title || phaseMeta.label, block?.summary || block?.title || phaseMeta.label)}
             </${Typography}>
             <${Typography} variant="caption" color="text.secondary">
               ${expanded ? "▾" : "▸"}
@@ -687,7 +991,7 @@ const TraceTimelineBlock = memo(function TraceTimelineBlock({ block, verbosity =
                   ${block.chips.map((chip) => html`
                     <${Chip}
                       key=${`${block.key}-${chip}`}
-                      label=${chip}
+                      label=${renderTimelineLabel(chip, chip)}
                       size="small"
                       variant="outlined"
                       sx=${{ height: 20, fontSize: '0.625rem' }}
@@ -825,6 +1129,7 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [visibleCount, setVisibleCount] = useState(CHAT_PAGE_SIZE);
   const [showStreamMeta, setShowStreamMeta] = useState(false);
+  const [showContextTracker, setShowContextTracker] = useState(false);
   const [traceVerbosity, setTraceVerbosity] = useState(() => {
     try {
       return globalThis.localStorage?.getItem(TRACE_VERBOSITY_STORAGE_KEY) === "full" ? "full" : "compact";
@@ -843,6 +1148,7 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
   });
   const [editingMsgRef, setEditingMsgRef] = useState(null);
   const [editingText, setEditingText] = useState("");
+  const [expandedTurnKeys, setExpandedTurnKeys] = useState({});
   const messagesRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -883,29 +1189,42 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
      module load race or a WebSocket push that corrupted state), we default to
      safe empty values so the component renders instead of crashing.
      
-     Use .peek() for signals whose changes should NOT trigger a re-render of
-     this component. sessionsData changes frequently (sidebar metadata), but
-     we only need the session status for the header — not worth re-rendering
-     the entire message list. */
+     This view now renders turn-scoped file-change cards from structured
+     session metadata, so it must react when the session surface updates after a
+     turn settles. */
   let session = null;
+  let trackedSessions = [];
   try {
-    session = (sessionsData.peek() || []).find((s) => s.id === sessionId) || null;
+    trackedSessions = sessionsData.value || [];
+    session = trackedSessions.find((s) => s.id === sessionId) || null;
   } catch (err) {
     console.warn("[ChatView] Failed to read sessionsData:", err);
   }
   const isActive =
     session?.status === "active" || session?.status === "running";
+  const contextSurface = session?.surface || null;
+  const sessionContextWindow = contextSurface?.contextWindow || session?.insights?.contextWindow || null;
+  const sessionTokenUsage = contextSurface?.tokenUsage || session?.insights?.tokenUsage || null;
+  const sessionCompaction = contextSurface?.compaction || null;
+  const sessionContextBreakdown = Array.isArray(contextSurface?.contextBreakdown)
+    ? contextSurface.contextBreakdown
+    : Array.isArray(session?.insights?.contextBreakdown)
+      ? session.insights.contextBreakdown
+      : [];
+  const canShowContextTracker = Boolean(
+    sessionContextWindow || sessionTokenUsage || sessionCompaction || sessionContextBreakdown.length > 0,
+  );
   const resumeLabel =
     session?.status === "archived" ? "Unarchive" : "Resume Session";
   const sessionPath = useCallback(
     (action = "") => {
       const currentSession =
-        (sessionsData.peek() || []).find((entry) => entry?.id === sessionId) || session;
+        trackedSessions.find((entry) => entry?.id === sessionId) || session;
       return buildSessionApiPath(sessionId, action, {
         workspace: resolveSessionWorkspaceHint(currentSession, "active"),
       });
     },
-    [sessionId, session],
+    [trackedSessions, sessionId, session],
   );
 
   /* Memoize the filter key list so filteredMessages memoization works properly.
@@ -1020,17 +1339,17 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
     statusText = paused ? "Stream paused" : "Ready";
   }
 
-  const renderItems = useMemo(() => {
+  const buildLinearRenderItems = useCallback((messageList = []) => {
     const items = [];
     let i = 0;
-    while (i < visibleMessages.length) {
-      const msg = visibleMessages[i];
+    while (i < messageList.length) {
+      const msg = messageList[i];
       if (isTraceEventMessage(msg)) {
         // Collect consecutive trace events; discard completely empty ones.
         const group = [];
         let groupKey = null;
-        while (i < visibleMessages.length && isTraceEventMessage(visibleMessages[i])) {
-          const m = visibleMessages[i];
+        while (i < messageList.length && isTraceEventMessage(messageList[i])) {
+          const m = messageList[i];
           if (messageText(m).trim()) {
             group.push(m);
             if (!groupKey) groupKey = m.id || m.timestamp || `trace-${i}`;
@@ -1059,7 +1378,29 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
       }
     }
     return items;
-  }, [visibleMessages]);
+  }, []);
+
+  const renderItems = useMemo(
+    () => buildLinearRenderItems(visibleMessages),
+    [visibleMessages, buildLinearRenderItems],
+  );
+
+  const turnGroups = useMemo(() => {
+    if (activeFilters.length > 0) return [];
+    return buildChatTurnGroups(visibleMessages);
+  }, [visibleMessages, activeFilters.length]);
+  const sessionWorkspace = useMemo(
+    () => resolveSessionWorkspaceHint(session, "active"),
+    [session],
+  );
+  const turnSurfaceByIndex = useMemo(() => {
+    const turns = Array.isArray(session?.turns) ? session.turns : [];
+    return new Map(
+      turns
+        .filter((turn) => Number.isFinite(Number(turn?.turnIndex)))
+        .map((turn) => [Number(turn.turnIndex), turn]),
+    );
+  }, [session]);
 
   const refreshMessages = useCallback(async () => {
     if (!sessionId) return;
@@ -1163,6 +1504,7 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
     setVisibleCount(CHAT_PAGE_SIZE);
     setUnreadCount(0);
     setAutoScroll(true);
+    setExpandedTurnKeys({});
     topLoadArmedRef.current = true;
   }, [sessionId, filterKey]);
 
@@ -1432,6 +1774,28 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
     setFilters({ tool: false, result: false, error: false });
   }, []);
 
+  const toggleTurnGroup = useCallback((groupKey) => {
+    setExpandedTurnKeys((prev) => ({
+      ...prev,
+      [groupKey]: !prev[groupKey],
+    }));
+  }, []);
+
+  const renderLinearItem = useCallback((item) => item.kind === "thinking-group"
+    ? html`<${ThinkingGroup}
+        key=${item.key}
+        msgs=${item.msgs}
+        isLatest=${!!item.isLatest}
+        isAgentActive=${statusState !== "idle" && statusState !== "paused"}
+        verbosity=${traceVerbosity}
+      />`
+    : html`<${ChatBubble}
+        key=${item.key}
+        msg=${item.msg}
+        embedded=${embedded}
+        isFinalModelResponse=${item.messageKey === latestModelMessageKey}
+      />`, [embedded, latestModelMessageKey, statusState, traceVerbosity]);
+
   const handleCopyStream = useCallback(() => {
     if (!sessionId) return;
     const title = session?.title || session?.taskId || sessionId;
@@ -1516,6 +1880,20 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
       </${Paper}>
       `}
 
+      ${canShowContextTracker && html`
+        <${Collapse} in=${showContextTracker} unmountOnExit>
+          <${Box} sx=${{ px: embedded ? 1.5 : 2, py: 0.75, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'rgba(15,23,42,0.018)' }}>
+            <${ContextTrackerSummary}
+              contextWindow=${sessionContextWindow}
+              tokenUsage=${sessionTokenUsage}
+              compaction=${sessionCompaction}
+              contextBreakdown=${sessionContextBreakdown}
+              expanded=${true}
+            />
+          </${Box}>
+        </${Collapse}>
+      `}
+
       ${!embedded && html`
       <${Box} sx=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2, py: 0.75, borderBottom: '1px solid', borderColor: 'divider', flexWrap: 'wrap', gap: 0.5 }}>
         <${Stack} direction="row" spacing=${0.5} alignItems="center" sx=${{ flexWrap: 'wrap' }}>
@@ -1553,6 +1931,15 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
           />
           ${paused &&
           html`<${Chip} label="Paused" size="small" color="warning" variant="filled" sx=${{ height: 22, fontSize: '0.6875rem' }} />`}
+          ${canShowContextTracker &&
+          html`<${ContextTrackerSummary}
+            contextWindow=${sessionContextWindow}
+            tokenUsage=${sessionTokenUsage}
+            compaction=${sessionCompaction}
+            contextBreakdown=${sessionContextBreakdown}
+            expanded=${false}
+            onToggle=${() => setShowContextTracker((prev) => !prev)}
+          />`}
         </${Stack}>
         <${Stack} direction="row" spacing=${0.5}>
           <${ButtonGroup} size="small" variant="outlined" sx=${{ mr: 0.5 }}>
@@ -1585,12 +1972,21 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
 
       ${embedded && html`
         <${Box} sx=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 1.5, py: 0.75, borderBottom: '1px solid', borderColor: 'divider' }}>
-          <${Stack} direction="row" spacing=${1} alignItems="center">
+          <${Stack} direction="row" spacing=${1} alignItems="center" sx=${{ flexWrap: 'wrap' }}>
             <${Box} sx=${{ width: 8, height: 8, borderRadius: '50%', backgroundColor: statusState === 'idle' ? 'text.disabled' : statusState === 'paused' ? 'warning.main' : 'success.main' }} />
             <${Box}>
               <${Typography} variant="caption" sx=${{ fontWeight: 600, display: 'block', lineHeight: 1.2 }}>Status</${Typography}>
               <${Typography} variant="caption" color="text.secondary" sx=${{ lineHeight: 1.2 }}>${statusText}</${Typography}>
             </${Box}>
+            ${canShowContextTracker &&
+            html`<${ContextTrackerSummary}
+              contextWindow=${sessionContextWindow}
+              tokenUsage=${sessionTokenUsage}
+              compaction=${sessionCompaction}
+              contextBreakdown=${sessionContextBreakdown}
+              expanded=${false}
+              onToggle=${() => setShowContextTracker((prev) => !prev)}
+            />`}
           </${Stack}>
           <${Stack} direction="row" spacing=${0.5}>
             <${ButtonGroup} size="small" variant="outlined">
@@ -1738,21 +2134,126 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
             </${Button}>
           </${Box}>
         `}
-        ${renderItems.map((item) => item.kind === "thinking-group"
-          ? html`<${ThinkingGroup}
-              key=${item.key}
-              msgs=${item.msgs}
-              isLatest=${!!item.isLatest}
-              isAgentActive=${statusState !== "idle" && statusState !== "paused"}
-              verbosity=${traceVerbosity}
-            />`
-          : html`<${ChatBubble}
-              key=${item.key}
-              msg=${item.msg}
-              embedded=${embedded}
-              isFinalModelResponse=${item.messageKey === latestModelMessageKey}
-            />`
-        )}
+        ${activeFilters.length > 0
+          ? renderItems.map((item) => renderLinearItem(item))
+          : turnGroups.map((group) => {
+              const expanded = group.isLatest || expandedTurnKeys[group.key] === true;
+              if (!expanded && group.collapsedByDefault) {
+                return html`
+                  <${Paper}
+                    key=${group.key}
+                    variant="outlined"
+                    onClick=${() => toggleTurnGroup(group.key)}
+                    sx=${{
+                      mb: 1,
+                      borderRadius: 2,
+                      overflow: 'hidden',
+                      cursor: 'pointer',
+                      borderStyle: 'dashed',
+                      bgcolor: 'rgba(15,23,42,0.025)',
+                      '&:hover': { bgcolor: 'rgba(15,23,42,0.04)' },
+                    }}
+                  >
+                    <${Box} sx=${{ display: 'flex', alignItems: 'center', gap: 0.75, px: 1.25, py: 0.9, flexWrap: 'wrap' }}>
+                      <${Chip}
+                        label=${group.collapsedLabel}
+                        size="small"
+                        color="default"
+                        variant="outlined"
+                        sx=${{ height: 22, fontSize: '0.6875rem' }}
+                      />
+                      ${group.hiddenToolCount > 0
+                        ? html`<${Chip}
+                            label=${`${group.hiddenToolCount} hidden tool event${group.hiddenToolCount === 1 ? "" : "s"}`}
+                            size="small"
+                            color="info"
+                            variant="outlined"
+                            sx=${{ height: 20, fontSize: '0.625rem' }}
+                          />`
+                        : null}
+                      ${group.contextShredded
+                        ? html`<${Chip}
+                            label=${`Context shredded · ${group.hiddenTraceCount} hidden trace event${group.hiddenTraceCount === 1 ? "" : "s"}`}
+                            size="small"
+                            color="warning"
+                            variant="outlined"
+                            sx=${{ height: 20, fontSize: '0.625rem' }}
+                          />`
+                        : null}
+                      <${Typography} variant="caption" color="text.secondary" sx=${{ ml: 'auto' }}>
+                        ▸
+                      </${Typography}>
+                    </${Box}>
+                    ${group.preview.length > 0
+                      ? html`
+                          <${Box} sx=${{ px: 1.25, pb: 1 }}>
+                            ${group.preview.map((entry) => html`
+                              <${Typography}
+                                key=${entry.id}
+                                variant="caption"
+                                color="text.secondary"
+                                sx=${{ display: 'block', lineHeight: 1.5 }}
+                              >
+                                <strong>${entry.role === "user" ? "You" : entry.role === "assistant" ? "Assistant" : entry.role}</strong>
+                                ${`: ${entry.text}`}
+                              </${Typography}>
+                            `)}
+                          </${Box}>
+                        `
+                      : null}
+                  </${Paper}>
+                `;
+              }
+              const groupItems = buildLinearRenderItems(group.messages);
+              return html`
+                <${Box} key=${group.key}>
+                  ${!group.isLatest && group.collapsedByDefault
+                    ? html`
+                        <${Box}
+                          sx=${{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 0.75,
+                            px: 0.25,
+                            pb: 0.75,
+                            color: 'text.secondary',
+                          }}
+                        >
+                          <${Button}
+                            size="small"
+                            variant="text"
+                            onClick=${() => toggleTurnGroup(group.key)}
+                            sx=${{ minWidth: 'auto', fontSize: '0.6875rem', textTransform: 'none' }}
+                          >
+                            ▾ ${group.collapsedLabel}
+                          </${Button}>
+                          ${group.hiddenToolCount > 0
+                            ? html`<${Typography} variant="caption" color="text.secondary">
+                                ${group.hiddenToolCount} tool event${group.hiddenToolCount === 1 ? "" : "s"} retained
+                              </${Typography}>`
+                            : null}
+                        </${Box}>
+                      `
+                    : null}
+                  ${groupItems.map((item) => renderLinearItem(item))}
+                  ${(() => {
+                    const turn = turnSurfaceByIndex.get(Number(group.turnIndex)) || null;
+                    const fileChanges = summarizeTurnFileChanges(turn?.fileChanges);
+                    const shouldRenderTurnFilesCard =
+                      Boolean(fileChanges)
+                      && (String(turn?.status || "").trim().toLowerCase() === "completed" || group.hasAssistantMessage);
+                    if (!shouldRenderTurnFilesCard) return null;
+                    return html`
+                      <${TurnFilesChangedCard}
+                        sessionId=${sessionId}
+                        workspace=${sessionWorkspace}
+                        turn=${turn}
+                      />
+                    `;
+                  })()}
+                </${Box}>
+              `;
+            })}
 
         ${/* Pending messages (optimistic rendering) — use .peek() to avoid
               subscribing ChatView to pendingMessages signal. Pending messages

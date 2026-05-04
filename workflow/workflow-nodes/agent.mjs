@@ -24,9 +24,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { getAgentToolConfig, getEffectiveTools } from "../../agent/agent-tool-config.mjs";
 import { getToolsPromptBlock } from "../../agent/agent-custom-tools.mjs";
 import { buildRelevantSkillsPromptBlock, findRelevantSkills } from "../../agent/bosun-skills.mjs";
+import { createHarnessAgentService } from "../../agent/harness-agent-service.mjs";
 import { getSessionTracker } from "../../infra/session-tracker.mjs";
 import { fixGitConfigCorruption } from "../../workspace/worktree-manager.mjs";
 import { buildRepoTopologyContext, hasRepoMapContext } from "../../lib/repo-map.mjs";
+import { ensureContextIndexFresh } from "../../workspace/context-indexer.mjs";
+import { findReusableSkillbookStrategies } from "../../workspace/skillbook-store.mjs";
 
 import {
   registerNodeType,
@@ -207,6 +210,59 @@ export const CALIBRATED_MIN_IMPACT_SCORE = 7;
 export const CALIBRATED_MAX_RISK_WITHOUT_HUMAN = "medium";
 const PLANNER_SCORE_MODE_RATIO = "ratio";
 const PLANNER_SCORE_MODE_TEN = "ten";
+
+function normalizeSkillbookGuidancePayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const strategies = Array.isArray(value.strategies)
+    ? value.strategies.filter((entry) => entry && typeof entry === "object")
+    : [];
+  const guidanceSummary = String(value.guidanceSummary || value.summary || "").trim();
+  if (!guidanceSummary && strategies.length === 0) return null;
+  return {
+    ...value,
+    strategies,
+    guidanceSummary,
+  };
+}
+
+function buildSkillbookPromptContext(guidance) {
+  const normalized = normalizeSkillbookGuidancePayload(guidance);
+  if (!normalized) return "";
+  return String(normalized.guidanceSummary || "").trim();
+}
+
+async function resolveReusableSkillbookGuidance(ctx, options = {}) {
+  const repoRoot = String(options.repoRoot || ctx?.data?.repoRoot || process.cwd()).trim() || process.cwd();
+  const workflowId = String(options.workflowId || ctx?.data?._workflowId || ctx?.data?.workflowId || "").trim();
+  const category = String(options.category || "strategy").trim() || "strategy";
+  const status = String(options.status || "promoted").trim() || "promoted";
+  const query = String(options.query || "").trim();
+  const limit = Number.isFinite(Number(options.limit)) ? Math.max(1, Math.trunc(Number(options.limit))) : 3;
+  const result = await findReusableSkillbookStrategies({
+    repoRoot,
+    workflowId: workflowId || undefined,
+    category,
+    status,
+    query: query || undefined,
+    relatedPaths: Array.isArray(options.relatedPaths) ? options.relatedPaths : [],
+    limit,
+  });
+  const strategies = Array.isArray(result?.strategies) ? result.strategies : [];
+  return {
+    success: true,
+    repoRoot,
+    workflowId: workflowId || null,
+    category,
+    status,
+    query: query || null,
+    total: Number(result?.total || 0),
+    matched: Number(result?.matched || 0),
+    strategies,
+    guidanceSummary: String(result?.guidanceSummary || "").trim(),
+    skillbookPath: result?.skillbookPath || null,
+    strategyIds: strategies.map((entry) => entry?.strategyId).filter(Boolean),
+  };
+}
 
 function parsePlannerNumericScore(value) {
   if (value == null) return null;
@@ -449,13 +505,17 @@ export function normalizePlannerTaskForCreation(task, index) {
     mergeBackPolicy,
   };
 }
-export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5) {
+export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5, options = {}) {
   const parsed = parsePlannerJsonFromText(output);
   if (!parsed || !Array.isArray(parsed.tasks)) return [];
 
+  const exactCount = Number(options?.exactCount);
   const max = Number.isFinite(Number(maxTasks))
     ? Math.max(1, Math.min(100, Math.trunc(Number(maxTasks))))
     : 5;
+  if (Number.isFinite(exactCount) && exactCount > 0 && parsed.tasks.length !== Math.trunc(exactCount)) {
+    return [];
+  }
   const dedup = new Set();
   const tasks = [];
   for (let i = 0; i < parsed.tasks.length && tasks.length < max; i += 1) {
@@ -465,6 +525,9 @@ export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5) {
     if (dedup.has(key)) continue;
     dedup.add(key);
     tasks.push(normalized);
+  }
+  if (Number.isFinite(exactCount) && exactCount > 0 && tasks.length !== Math.trunc(exactCount)) {
+    return [];
   }
   return tasks;
 }
@@ -1070,6 +1133,10 @@ export function rankPlannerTaskCandidatesForResume(tasks, plannerFeedback) {
     })
     .filter((entry) => !entry.completed);
 
+  if (!normalizedNextStep && completedLabels.length === 0 && pendingOrder.length === 0 && hotTaskTitles.size === 0) {
+    return taskList;
+  }
+
   if (!rankedEntries.length) return [];
 
   const exactMatchEntry = normalizedNextStep
@@ -1110,6 +1177,22 @@ function resolvePlannerFeedbackContext(value) {
       .trim();
   }
   if (typeof value === "object") {
+    const lines = [];
+    const issueAdvisorSummary = String(value.issueAdvisorSummary || value.summary || "").trim();
+    const recommendedAction = String(value.recommendedAction || "").trim();
+    const nextStepGuidance = String(value.nextStepGuidance || "").trim();
+    const currentNodeLabel = String(value?.dagStateSummary?.currentNode?.label || "").trim();
+    const pendingNodes = Array.isArray(value?.dagStateSummary?.pendingNodes)
+      ? value.dagStateSummary.pendingNodes
+      : [];
+    if (issueAdvisorSummary) lines.push(`issueAdvisorSummary: ${issueAdvisorSummary}`);
+    if (recommendedAction) lines.push(`recommendedAction: ${recommendedAction}`);
+    if (nextStepGuidance) lines.push(`nextStepGuidance: ${nextStepGuidance}`);
+    if (currentNodeLabel) lines.push(`currentNode: ${currentNodeLabel}`);
+    if (pendingNodes.length > 0) {
+      lines.push(`pendingNodeCount: ${pendingNodes.length}`);
+    }
+    if (lines.length > 0) return lines.join("\n").trim();
     try {
       return JSON.stringify(value, null, 2).trim();
     } catch {
@@ -1172,16 +1255,56 @@ registerNodeType("agent.run_planner", {
     const agentPool = engine.services?.agentPool;
     const plannerPrompt = engine.services?.prompts?.planner;
     const basePrompt = explicitPrompt || plannerPrompt || "";
+    const basePromptHasPlannerFeedback = plannerFeedback
+      ? basePrompt.includes("Planner feedback context:") || basePrompt.includes(plannerFeedback)
+      : false;
+    const effectivePlannerFeedback = basePromptHasPlannerFeedback ? "" : plannerFeedback;
+    const normalizedPlannerFeedback = String(effectivePlannerFeedback || "").trim();
+    const resumeFromWriteTestsFirst = /resume\s+from\s+write\s+tests\s+first/i.test(normalizedPlannerFeedback);
+    const resumedPlanRequirements = resumeFromWriteTestsFirst
+      ? [
+        "Resume execution from the pending Write Tests First checkpoint.",
+        "Do not regenerate completed stages that occurred before Write Tests First.",
+        `Return exactly ${count} tasks in a single JSON object: {\"tasks\":[...]}.`,
+        "The first task must write or expand tests before any implementation work.",
+        "Each task must include title, description, files, tests, and api_contracts.",
+      ].join("\n")
+      : "";
     const promptHasRepoMap = hasRepoMapContext(basePrompt);
+    const resolvedRepoMap = node.config?.repoMap || ctx.data?.repoMap || null;
+    const hasResolvedRepoMap = Boolean(
+      resolvedRepoMap
+      && typeof resolvedRepoMap === "object"
+      && (
+        String(resolvedRepoMap.root || resolvedRepoMap.repoRoot || "").trim()
+        || (Array.isArray(resolvedRepoMap.files) && resolvedRepoMap.files.some((entry) => String(entry?.path || "").trim()))
+      )
+    );
     const resolvedRepoMapFileLimit = ctx.resolve(node.config?.repoMapFileLimit ?? null);
     const repoMapFileLimit =
       resolvedRepoMapFileLimit == null || resolvedRepoMapFileLimit === ""
         ? 8
         : (Number(resolvedRepoMapFileLimit) || 8);
+    const repoMapChangedFiles =
+      (Array.isArray(ctx.data?.changedFiles) ? ctx.data.changedFiles : null) ||
+      (Array.isArray(ctx.data?.task?.changedFiles) ? ctx.data.task.changedFiles : null) ||
+      [];
+    if ((node.config?.repoMap || repoMapQuery) && !promptHasRepoMap && !hasResolvedRepoMap) {
+      try {
+        await ensureContextIndexFresh({
+          rootDir: ctx.data?.repoRoot || process.cwd(),
+          changedFiles: repoMapChangedFiles,
+          useTreeSitter: false,
+          useZoekt: false,
+        });
+      } catch (error) {
+        ctx.log(node.id, `Context index refresh skipped (non-fatal): ${error?.message || error}`);
+      }
+    }
     const repoTopologyContext = (node.config?.repoMap || repoMapQuery)
       && !promptHasRepoMap
       ? buildRepoTopologyContext({
-        repoMap: node.config?.repoMap || ctx.data?.repoMap || null,
+        repoMap: resolvedRepoMap,
         repoMapFileLimit,
         repoMapQuery,
         query: [context, explicitPrompt, plannerPrompt].filter(Boolean).join(" "),
@@ -1195,10 +1318,7 @@ registerNodeType("agent.run_planner", {
           ctx.data?.taskDetail?.description ||
           ctx.data?.taskInfo?.description ||
           "",
-        changedFiles:
-          (Array.isArray(ctx.data?.changedFiles) ? ctx.data.changedFiles : null) ||
-          (Array.isArray(ctx.data?.task?.changedFiles) ? ctx.data.task.changedFiles : null) ||
-          [],
+        changedFiles: repoMapChangedFiles,
         cwd: process.cwd(),
         repoRoot: ctx.data?.repoRoot || process.cwd(),
       })
@@ -1206,14 +1326,48 @@ registerNodeType("agent.run_planner", {
     // Enforce strict output instructions to ensure the downstream materialize node
     // can parse the planner output. The planner prompt already defines the contract,
     // but we reinforce it here to prevent agents from wrapping output in prose.
+    let skillbookGuidance = normalizeSkillbookGuidancePayload(ctx.data?._skillbookGuidance);
+    const repoHasKnowledgeStore =
+      existsSync(resolve(ctx.data?.repoRoot || process.cwd(), ".git"))
+      || existsSync(resolve(ctx.data?.repoRoot || process.cwd(), ".bosun"));
+    if (!skillbookGuidance && repoHasKnowledgeStore) {
+      try {
+        skillbookGuidance = await resolveReusableSkillbookGuidance(ctx, {
+          repoRoot: ctx.data?.repoRoot || process.cwd(),
+          workflowId: ctx.data?._workflowId || "",
+          category: "strategy",
+          status: "promoted",
+          query: [
+            ctx.data?.taskTitle,
+            ctx.data?.taskDescription,
+            context,
+            explicitPrompt,
+            plannerPrompt,
+          ].filter(Boolean).join(" "),
+          limit: 3,
+        });
+        if (skillbookGuidance?.matched > 0) {
+          ctx.data._skillbookGuidance = skillbookGuidance;
+        }
+      } catch (error) {
+        ctx.log(node.id, `Reusable skillbook guidance retrieval failed (non-fatal): ${error?.message || error}`);
+      }
+    }
+    const skillbookPromptContext = buildSkillbookPromptContext(skillbookGuidance);
+    if (skillbookPromptContext) {
+      ctx.data._taskSkillbookGuidance = skillbookGuidance;
+    }
+
     const outputEnforcement =
       `\n\n## CRITICAL OUTPUT REQUIREMENT\n` +
       `Generate exactly ${count} new tasks.\n` +
-      ((context || plannerFeedback || repoTopologyContext)
+      ((context || normalizedPlannerFeedback || resumedPlanRequirements || repoTopologyContext || skillbookPromptContext)
         ? `${[
           context,
-          plannerFeedback ? `Planner feedback context:\n${plannerFeedback}` : "",
+          normalizedPlannerFeedback ? `Planner feedback context:\n${normalizedPlannerFeedback}` : "",
+          resumedPlanRequirements ? `Resume requirements:\n${resumedPlanRequirements}` : "",
           repoTopologyContext,
+          skillbookPromptContext,
         ].filter(Boolean).join("\n\n")}\n\n`
         : "\n") +
       `Your response MUST be a single fenced JSON block with shape { "tasks": [...] }.\n` +
@@ -1224,6 +1378,7 @@ registerNodeType("agent.run_planner", {
       : "";
 
     if (agentPool?.launchEphemeralThread && promptText) {
+      const harnessAgentService = createHarnessAgentService({ agentPool });
       let streamEventCount = 0;
       let lastStreamLog = "";
       const streamLines = [];
@@ -1259,7 +1414,7 @@ registerNodeType("agent.run_planner", {
 
       let result;
       try {
-        result = await agentPool.launchEphemeralThread(
+        result = await harnessAgentService.launchEphemeralThread(
           promptText,
           process.cwd(),
           agentTimeoutMs,
@@ -1346,5 +1501,3 @@ registerNodeType("agent.evidence_collect", {
 // ═══════════════════════════════════════════════════════════════════════════
 //  FLOW CONTROL — Gates, barriers, and routing
 // ═══════════════════════════════════════════════════════════════════════════
-
-

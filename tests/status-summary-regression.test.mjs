@@ -30,6 +30,8 @@ describe("status summary regressions", () => {
 
     for (const source of [uiDashboard, siteDashboard]) {
       expect(source).toContain("counts.blocked ?? counts.error ?? 0");
+      expect(source).toContain('const headerScopeLabel = useLiveTaskCounts ? "Workspace-scoped totals" : "Runtime snapshot totals";');
+      expect(source).toContain('<div class="dashboard-meta-copy">${headerScopeLabel}</div>');
     }
   });
 });

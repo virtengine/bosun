@@ -16,6 +16,11 @@ import {
   existsSync,
   statSync,
   unlinkSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+  readdirSync,
+  copyFileSync,
 } from "node:fs";
 import { syncTaskStoreToStateLedger } from "../lib/state-ledger-sqlite.mjs";
 import {
@@ -33,14 +38,9 @@ let testIsolatedStorePath = null;
 
 function isLikelyTestRuntime() {
   if (process.env.VITEST) return true;
-  if (process.env.VITEST_POOL_ID) return true;
-  if (process.env.VITEST_WORKER_ID) return true;
-  if (process.env.JEST_WORKER_ID) return true;
-  if (process.env.NODE_ENV === "test") return true;
-  const argv = Array.isArray(process.argv)
-    ? process.argv.join(" ").toLowerCase()
-    : "";
-  return argv.includes("vitest") || argv.includes("jest");
+  if (process.env.NODE_TEST_CONTEXT) return true;
+  if (process.env.BOSUN_TEST_CACHE_DIR) return true;
+  return false;
 }
 
 function pathsEqual(a, b) {
@@ -117,13 +117,13 @@ function resolvePersistentStorePath() {
   if (explicitRepoRoot) {
     return resolve(explicitRepoRoot, ".bosun", ".cache", "kanban-state.json");
   }
-  const bosunHome = resolveBosunHomeDir();
-  if (bosunHome) {
-    return resolve(bosunHome, ".cache", "kanban-state.json");
-  }
   const repoRoot = inferRepoRoot(process.cwd());
   if (repoRoot) {
     return resolve(repoRoot, ".bosun", ".cache", "kanban-state.json");
+  }
+  const bosunHome = resolveBosunHomeDir();
+  if (bosunHome) {
+    return resolve(bosunHome, ".cache", "kanban-state.json");
   }
   return resolve(__dirname, "..", ".cache", "kanban-state.json");
 }
@@ -144,6 +144,17 @@ function resolveDefaultStorePath() {
   return resolveStorePathForRuntime(resolvePersistentStorePath());
 }
 
+function maybeRefreshDefaultStorePathForRuntimeSignals() {
+  if (_loaded) return;
+  const nextPath = resolveDefaultStorePath();
+  if (nextPath === storePath) return;
+  storePath = nextPath;
+  storeTmpPath = storePath + ".tmp";
+  _didLogInitialLoad = false;
+  _lastLoadedMtimeMs = 0;
+  _lastLoadedSizeBytes = 0;
+}
+
 let storePath = resolveDefaultStorePath();
 let storeTmpPath = storePath + ".tmp";
 const MAX_STATUS_HISTORY = 50;
@@ -155,6 +166,115 @@ const MAX_WORKFLOW_RUN_LINKS = 200;
 const MAX_TASK_RUN_STEPS = 120;
 const MAX_TASK_RUNS = 20;
 const ATOMIC_RENAME_FALLBACK_CODES = new Set(["EPERM", "EACCES", "EBUSY", "EXDEV"]);
+
+/**
+ * Returns true when `raw` is empty or consists entirely of NUL bytes
+ * (the classic signature of a Windows post-crash zero-filled file: the OS
+ * extended the file metadata for the rename target but never flushed the data
+ * pages to disk before the crash). Kept tolerant of trailing/leading
+ * whitespace because some editors strip BOMs or add a single newline.
+ */
+function isNulCorruption(raw) {
+  if (raw == null) return false;
+  if (typeof raw !== "string") return false;
+  if (raw.length === 0) return false;
+  for (let i = 0; i < raw.length; i++) {
+    if (raw.charCodeAt(i) !== 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Returns true when `raw` is the empty string or only whitespace. On Windows
+ * this regularly happens for a brief window during concurrent rename-replace
+ * writes (or when an AV scanner briefly holds the file): readFileSync returns
+ * "" even though the underlying file on disk is intact and many MB long.
+ * Treating such reads as transient (and retrying) prevents a runaway
+ * "Corrupt store detected" loop that previously fired hundreds of times per
+ * minute and forced the monitor to self-restart.
+ */
+function isEmptyTransientRead(raw) {
+  return typeof raw === "string" && raw.trim().length === 0;
+}
+
+/**
+ * Read the store file with a small retry budget for the empty-window case.
+ * Synchronous because the surrounding load path is sync. Uses busy-wait
+ * (Atomics.wait on a private SharedArrayBuffer is not available in all
+ * runtimes; setTimeout is unusable in sync code). The total worst-case wait
+ * is ~150 ms (3 × 50 ms), which is acceptable on a load path that already
+ * blocks on disk I/O.
+ */
+function readStoreRawWithRetry(path) {
+  let raw = readFileSync(path, "utf-8");
+  if (!isEmptyTransientRead(raw)) return raw;
+  const stat = (() => { try { return statSync(path); } catch { return null; } })();
+  // If the file is genuinely empty on disk (size 0) there's nothing to retry.
+  if (!stat || stat.size === 0) return raw;
+  // File has bytes but the read returned empty — retry briefly.
+  const waitDeadline = Date.now() + 150;
+  while (Date.now() < waitDeadline) {
+    const start = Date.now();
+    while (Date.now() - start < 50) { /* spin */ }
+    raw = readFileSync(path, "utf-8");
+    if (!isEmptyTransientRead(raw)) return raw;
+  }
+  return raw;
+}
+
+function tryParseStoreFile(candidatePath) {
+  try {
+    if (!existsSync(candidatePath)) return null;
+    const raw = readFileSync(candidatePath, "utf-8");
+    if (isNulCorruption(raw)) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return { raw, parsed };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the most recent parseable backup of the kanban store. Searches the
+ * companion `.bak`, `.monitor-backup-*`, `.manual-bak-*`, `.bak-sync-*`,
+ * `.bak-*`, and `.backup-*` siblings. Returns `{ path, raw, parsed }` or null.
+ */
+function findLatestGoodBackup(primaryPath) {
+  try {
+    const dir = dirname(primaryPath);
+    const base = basename(primaryPath);
+    const entries = readdirSync(dir);
+    const candidates = [];
+    for (const entry of entries) {
+      if (entry === base) continue;
+      if (
+        entry === `${base}.bak` ||
+        entry.startsWith(`${base}.bak-`) ||
+        entry.startsWith(`${base}.bak.`) ||
+        entry.startsWith(`${base}.backup-`) ||
+        entry.startsWith(`${base}.manual-bak-`) ||
+        entry.startsWith(`${base}.monitor-backup-`)
+      ) {
+        const fullPath = resolve(dir, entry);
+        try {
+          const stat = statSync(fullPath);
+          candidates.push({ path: fullPath, mtimeMs: stat.mtimeMs });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const candidate of candidates) {
+      const parsed = tryParseStoreFile(candidate.path);
+      if (parsed) return { path: candidate.path, ...parsed };
+    }
+  } catch {
+    /* best effort */
+  }
+  return null;
+}
 const TERMINAL_TASK_STATUSES = new Set(["done", "cancelled"]);
 const SPRINT_ORDER_MODES = new Set(["parallel", "sequential"]);
 
@@ -254,6 +374,31 @@ export function configureTaskStore(options = {}) {
   }
 
   return storePath;
+}
+
+export async function _resetForTests() {
+  await _writeChain.catch(() => null);
+  _store = { _meta: defaultMeta(), tasks: {}, sprints: {} };
+  _loaded = true;
+  _writeChain = Promise.resolve();
+  _writeScheduled = false;
+  _writeDirty = false;
+  _didLogInitialLoad = false;
+  _lastLoadedMtimeMs = 0;
+  _lastLoadedSizeBytes = 0;
+
+  if (isLikelyTestRuntime() || isTestIsolatedStorePath(storePath)) {
+    try {
+      unlinkSync(storePath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    try {
+      unlinkSync(storeTmpPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +765,182 @@ function normalizeWorkflowRunLinks(rawRuns) {
   return normalized.slice(-MAX_WORKFLOW_RUN_LINKS);
 }
 
+const TERMINAL_WORKFLOW_RUN_LINK_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "skipped",
+  "paused",
+  "stale",
+]);
+
+function parseWorkflowRunLinkTime(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return 0;
+  const direct = Number(text);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasWorkflowRunLinkValue(value) {
+  if (typeof value === "string") return value.length > 0;
+  return value != null;
+}
+
+function scoreWorkflowRunLink(entry) {
+  if (!entry || typeof entry !== "object") return 0;
+  const status = String(entry.status || "").trim().toLowerCase();
+  let score = 0;
+  if (hasWorkflowRunLinkValue(entry.workflowId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.workflowName)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.nodeId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.status)) score += 2;
+  if (hasWorkflowRunLinkValue(entry.outcome)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.startedAt)) score += 3;
+  if (hasWorkflowRunLinkValue(entry.endedAt)) score += 4;
+  if (hasWorkflowRunLinkValue(entry.summary)) score += 2;
+  if (hasWorkflowRunLinkValue(entry.url)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.rootRunId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.parentRunId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.retryOf)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.retryMode)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.taskId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.rootTaskId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.parentTaskId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.sessionId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.rootSessionId)) score += 1;
+  if (hasWorkflowRunLinkValue(entry.parentSessionId)) score += 1;
+  if (Number.isFinite(Number(entry.delegationDepth)) && Number(entry.delegationDepth) > 0) score += 1;
+  if (TERMINAL_WORKFLOW_RUN_LINK_STATUSES.has(status)) score += 2;
+  return score;
+}
+
+function shouldPreferIncomingWorkflowRunLink(existing, incoming) {
+  const existingEndedAt = parseWorkflowRunLinkTime(existing?.endedAt);
+  const incomingEndedAt = parseWorkflowRunLinkTime(incoming?.endedAt);
+  if (incomingEndedAt !== existingEndedAt) return incomingEndedAt > existingEndedAt;
+
+  const existingLatestAt = Math.max(
+    parseWorkflowRunLinkTime(existing?.startedAt),
+    existingEndedAt,
+  );
+  const incomingLatestAt = Math.max(
+    parseWorkflowRunLinkTime(incoming?.startedAt),
+    incomingEndedAt,
+  );
+  if (incomingLatestAt !== existingLatestAt) return incomingLatestAt > existingLatestAt;
+
+  const existingScore = scoreWorkflowRunLink(existing);
+  const incomingScore = scoreWorkflowRunLink(incoming);
+  if (incomingScore !== existingScore) return incomingScore > existingScore;
+
+  return String(incoming?.runId || "").trim().localeCompare(String(existing?.runId || "").trim()) >= 0;
+}
+
+function mergeWorkflowRunLink(existingEntry, incomingEntry) {
+  const existing = normalizeWorkflowRunLinks([existingEntry])[0] || null;
+  const incoming = normalizeWorkflowRunLinks([incomingEntry])[0] || null;
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  const preferIncoming = shouldPreferIncomingWorkflowRunLink(existing, incoming);
+  const pick = (field) => {
+    const existingValue = existing[field];
+    const incomingValue = incoming[field];
+    if (!hasWorkflowRunLinkValue(existingValue)) return incomingValue;
+    if (!hasWorkflowRunLinkValue(incomingValue)) return existingValue;
+    return preferIncoming ? incomingValue : existingValue;
+  };
+
+  const merged = {
+    runId: pick("runId"),
+    workflowId: pick("workflowId"),
+    workflowName: pick("workflowName"),
+    nodeId: pick("nodeId"),
+    status: pick("status"),
+    outcome: pick("outcome"),
+    startedAt: pick("startedAt"),
+    endedAt: pick("endedAt"),
+    summary: pick("summary"),
+    url: pick("url"),
+    rootRunId: pick("rootRunId"),
+    parentRunId: pick("parentRunId"),
+    retryOf: pick("retryOf"),
+    retryMode: pick("retryMode"),
+    taskId: pick("taskId"),
+    rootTaskId: pick("rootTaskId"),
+    parentTaskId: pick("parentTaskId"),
+    sessionId: pick("sessionId"),
+    rootSessionId: pick("rootSessionId"),
+    parentSessionId: pick("parentSessionId"),
+    delegationDepth: preferIncoming
+      ? incoming.delegationDepth
+      : existing.delegationDepth,
+    source: pick("source"),
+    meta: preferIncoming
+      ? { ...(existing.meta || {}), ...(incoming.meta || {}) }
+      : { ...(incoming.meta || {}), ...(existing.meta || {}) },
+  };
+  return normalizeWorkflowRunLinks([merged])[0] || incoming || existing;
+}
+
+function shouldPromoteLatestWorkflowRun(task, run, workflowRuns = []) {
+  const incomingRunId = String(run?.runId || "").trim();
+  if (!incomingRunId) return false;
+  const currentLatestRunId = String(
+    task?.topology?.latestRunId ??
+      task?.latestRunId ??
+      "",
+  ).trim();
+  if (!currentLatestRunId || currentLatestRunId === incomingRunId) return true;
+  const currentLatest = workflowRuns.find((entry) => String(entry?.runId || "").trim() === currentLatestRunId) || null;
+  if (!currentLatest) return true;
+  const currentStatus = String(currentLatest?.status || "").trim().toLowerCase();
+  if (currentStatus === "running") return false;
+  const incomingStartedAt = Math.max(
+    parseWorkflowRunLinkTime(run?.startedAt),
+    parseWorkflowRunLinkTime(run?.endedAt),
+  );
+  const currentStartedAt = Math.max(
+    parseWorkflowRunLinkTime(currentLatest?.startedAt),
+    parseWorkflowRunLinkTime(currentLatest?.endedAt),
+  );
+  if (incomingStartedAt !== currentStartedAt) return incomingStartedAt > currentStartedAt;
+  return incomingRunId.localeCompare(currentLatestRunId) >= 0;
+}
+
+function resolveLatestWorkflowNodeId(task, run, shouldPromoteLatest) {
+  const currentTopology =
+    task?.topology && typeof task.topology === "object" && !Array.isArray(task.topology)
+      ? task.topology
+      : {};
+  const currentLatestRunId = String(
+    currentTopology.latestRunId ??
+      task?.latestRunId ??
+      "",
+  ).trim();
+  const incomingRunId = String(run?.runId || "").trim();
+  const currentLatestNodeId = String(currentTopology.latestNodeId || "").trim() || null;
+  const incomingNodeId = String(run?.nodeId || "").trim() || null;
+  const updatesCurrentLatest = Boolean(
+    incomingRunId &&
+    currentLatestRunId &&
+    incomingRunId === currentLatestRunId,
+  );
+
+  if (shouldPromoteLatest) {
+    if (incomingNodeId) return incomingNodeId;
+    return updatesCurrentLatest ? currentLatestNodeId : null;
+  }
+
+  if (updatesCurrentLatest) {
+    return incomingNodeId || currentLatestNodeId;
+  }
+
+  return currentLatestNodeId;
+}
+
 function normalizeTaskTopology(rawTopology = {}, rawTask = {}) {
   const topology =
     rawTopology && typeof rawTopology === "object" && !Array.isArray(rawTopology)
@@ -681,9 +1002,33 @@ function normalizeTaskTopology(rawTopology = {}, rawTask = {}) {
   };
 }
 
+function syncLegacyTaskTopologyFields(task) {
+  if (!task || typeof task !== "object") return task;
+  const topology = normalizeTaskTopology(task.topology, task);
+  const pickString = (...values) => {
+    for (const value of values) {
+      const normalized = String(value ?? "").trim();
+      if (normalized) return normalized;
+    }
+    return null;
+  };
+  task.topology = topology;
+  task.workflowId = pickString(topology.workflowId, task.workflowId);
+  task.workflowName = pickString(topology.workflowName, task.workflowName);
+  task.latestRunId = pickString(topology.latestRunId, task.latestRunId);
+  task.rootRunId = pickString(topology.rootRunId, task.rootRunId);
+  task.parentRunId = pickString(topology.parentRunId, task.parentRunId);
+  task.latestSessionId = pickString(topology.latestSessionId, task.latestSessionId);
+  task.sessionId = pickString(topology.sessionId, task.sessionId, task.latestSessionId);
+  task.rootSessionId = pickString(topology.rootSessionId, task.rootSessionId);
+  task.parentSessionId = pickString(topology.parentSessionId, task.parentSessionId);
+  task.worktreePath = pickString(task.worktreePath, task.meta?.worktreePath);
+  return task;
+}
+
 function refreshTaskTopology(task) {
   if (!task || typeof task !== "object") return;
-  task.topology = normalizeTaskTopology(task.topology, task);
+  syncLegacyTaskTopologyFields(task);
 }
 
 function refreshTaskGraphTopology(taskId, visited = new Set()) {
@@ -705,6 +1050,7 @@ function refreshTaskGraphTopology(taskId, visited = new Set()) {
     },
     task,
   );
+  syncLegacyTaskTopologyFields(task);
   for (const childId of uniqueStringList(task.childTaskIds || [])) {
     refreshTaskGraphTopology(childId, visited);
   }
@@ -1084,7 +1430,11 @@ function normalizeTaskStructure(rawTask = {}) {
   if (normalized.status === "draft") {
     normalized.draft = true;
   }
-  return normalized;
+  normalized.meta = {
+    ...(normalized.meta || {}),
+    draft: normalized.draft === true,
+  };
+  return syncLegacyTaskTopologyFields(normalized);
 }
 
 export function normalizeTaskStorageRecord(rawTask = {}) {
@@ -1423,6 +1773,7 @@ function recalcStats() {
 }
 
 function ensureLoaded() {
+  maybeRefreshDefaultStorePathForRuntimeSignals();
   if (_loaded) {
     maybeReloadStoreFromDisk();
     return;
@@ -1491,25 +1842,106 @@ export function loadStore() {
   let didBackfillTaskRunJournals = false;
   try {
     if (existsSync(storePath)) {
-      const raw = readFileSync(storePath, "utf-8");
+      const raw = readStoreRawWithRetry(storePath);
+      // If the file is on-disk-non-empty but our reads kept returning empty,
+      // skip backup/quarantine entirely and either keep the in-memory store
+      // (already loaded once) or recover from a known-good backup. This
+      // prevents the runaway "Corrupt store detected" loop on Windows when
+      // an AV scanner / concurrent rename briefly hides the file contents.
+      if (isEmptyTransientRead(raw)) {
+        let onDiskSize = 0;
+        try { onDiskSize = statSync(storePath).size; } catch { /* ignore */ }
+        if (onDiskSize > 0) {
+          if (_loaded && _store) {
+            // Best outcome: we already had a valid store loaded; just keep it.
+            console.warn(
+              TAG,
+              `transient empty read of ${storePath} (size=${onDiskSize}B); keeping in-memory store`,
+            );
+            return;
+          }
+          const recovered = findLatestGoodBackup(storePath);
+          if (recovered) {
+            console.warn(
+              TAG,
+              `transient empty read of ${storePath} (size=${onDiskSize}B); recovered from ${recovered.path}`,
+            );
+            _store = {
+              _meta: { ...defaultMeta(), ...(recovered.parsed._meta || {}) },
+              tasks: recovered.parsed.tasks || {},
+              sprints: recovered.parsed.sprints || {},
+            };
+            _loaded = true;
+            return;
+          }
+          // Nothing recoverable — fall through and let JSON.parse throw so
+          // we hit the existing "Failed to load store, starting fresh" path.
+        }
+      }
       let data;
       try {
-        data = JSON.parse(raw);
-      } catch (parseErr) {
-        const backupPath = `${storePath}.bak`;
-        try {
-          writeFileSync(backupPath, raw, "utf-8");
-          console.warn(
-            TAG,
-            `Corrupt store detected; backed up original to ${backupPath}`,
-          );
-        } catch (backupErr) {
-          console.warn(
-            TAG,
-            `Corrupt store detected; failed to back up to ${backupPath}: ${backupErr?.message || backupErr}`,
+        if (isNulCorruption(raw)) {
+          throw new Error(
+            `kanban-state.json is ${raw.length} bytes of NUL (zero-fill corruption from prior unflushed write)`,
           );
         }
-        throw parseErr;
+        data = JSON.parse(raw);
+      } catch (parseErr) {
+        // Quarantine the corrupt copy with a unique timestamped suffix so we
+        // never overwrite a previously-good `.bak`. Earlier versions of this
+        // module wrote unconditionally to `${storePath}.bak`, which on a
+        // second corrupt-load would replace the last known-good backup with
+        // the same corrupt bytes.
+        const ts = new Date().toISOString().replace(/[:.]/g, "-");
+        const quarantinePath = `${storePath}.bak.corrupt-${ts}`;
+        try {
+          writeFileSync(quarantinePath, raw, "utf-8");
+          console.warn(
+            TAG,
+            `Corrupt store detected; quarantined original at ${quarantinePath}`,
+          );
+        } catch (quarantineErr) {
+          console.warn(
+            TAG,
+            `Corrupt store detected; failed to quarantine at ${quarantinePath}: ${quarantineErr?.message || quarantineErr}`,
+          );
+        }
+        // Only refresh `.bak` if the existing `.bak` is missing or itself
+        // unparseable. Never clobber a parseable backup with corrupt content.
+        const backupPath = `${storePath}.bak`;
+        const existingBackup = tryParseStoreFile(backupPath);
+        if (!existingBackup) {
+          try {
+            writeFileSync(backupPath, raw, "utf-8");
+            console.warn(
+              TAG,
+              `Corrupt store detected; copied original bytes to ${backupPath}`,
+            );
+          } catch (bakErr) {
+            console.warn(
+              TAG,
+              `Corrupt store detected; failed to write ${backupPath}: ${bakErr?.message || bakErr}`,
+            );
+          }
+        } else {
+          console.warn(
+            TAG,
+            `Preserving prior good ${backupPath} (not overwriting with corrupt bytes)`,
+          );
+        }
+        // Auto-recover from the most recent parseable backup before falling
+        // back to an empty store. This includes monitor-backup-*, manual-bak-*,
+        // bak-sync-*, .bak, etc.
+        const recovered = findLatestGoodBackup(storePath);
+        if (recovered) {
+          console.warn(
+            TAG,
+            `Auto-recovered from backup ${recovered.path}`,
+          );
+          data = recovered.parsed;
+        } else {
+          throw parseErr;
+        }
       }
       const normalizedTasks = {};
       const sourceTasks = data && data.tasks && typeof data.tasks === "object" ? data.tasks : {};
@@ -1584,6 +2016,27 @@ export function saveStore() {
           }
           const json = JSON.stringify(_store, null, 2);
           writeFileSync(storeTmpPath, json, "utf-8");
+          // Force the tmp file's data to physical storage BEFORE the rename.
+          // Without this, on Windows a system crash between the rename and the
+          // OS write-back can leave the destination as a zero-filled file the
+          // size of the original allocation (`writeFileSync` returns once the
+          // bytes are buffered, not once they are durable).
+          try {
+            const fd = openSync(storeTmpPath, "r+");
+            try {
+              fsyncSync(fd);
+            } finally {
+              closeSync(fd);
+            }
+          } catch (fsyncErr) {
+            // fsync can fail on some FUSE / network filesystems; that's not
+            // fatal, the file is still written, we just lose the durability
+            // guarantee. Log once at warn level.
+            console.warn(
+              TAG,
+              `fsync of ${storeTmpPath} failed (${fsyncErr?.message || fsyncErr}); proceeding without durability barrier`,
+            );
+          }
           try {
             renameSync(storeTmpPath, storePath);
           } catch (renameErr) {
@@ -1828,6 +2281,7 @@ export function updateTask(taskId, updates) {
     workspace: (next) => { task.workspace = next; },
     repository: (next) => { task.repository = next; },
     repositories: (next) => { task.repositories = next; },
+    worktreePath: (next) => { task.worktreePath = next; },
     baseBranch: (next) => { task.baseBranch = next; },
     branchName: (next) => { task.branchName = next; },
     prLinkage: (next) => { task.prLinkage = next; },
@@ -2369,34 +2823,42 @@ export function getTaskComments(taskId) {
   return normalizeTaskComments(task.comments || []);
 }
 
-export function linkTaskWorkflowRun(taskId, workflowRun = {}) {
+export function linkTaskWorkflowRun(taskId, workflowRun = {}, options = {}) {
   ensureLoaded();
   const task = _store.tasks[taskId];
   if (!task) return null;
   const normalized = normalizeWorkflowRunLinks([workflowRun]);
   if (normalized.length === 0) return null;
-  const run = normalized[0];
+  const incomingRun = normalized[0];
   const existing = Array.isArray(task.workflowRuns) ? task.workflowRuns : [];
+  const current = existing.find((entry) => String(entry?.runId || "") === incomingRun.runId) || null;
+  const run = current ? mergeWorkflowRunLink(current, incomingRun) : incomingRun;
   const dedup = existing.filter((entry) => String(entry?.runId || "") !== run.runId);
-  task.workflowRuns = normalizeWorkflowRunLinks([...dedup, run]);
+  const nextWorkflowRuns = normalizeWorkflowRunLinks([...dedup, run]);
+  task.workflowRuns = nextWorkflowRuns;
+  const shouldPromoteLatest =
+    options?.forcePromoteLatest === true
+      || shouldPromoteLatestWorkflowRun(task, run, nextWorkflowRuns);
+  const nextLatestNodeId = resolveLatestWorkflowNodeId(task, run, shouldPromoteLatest);
   task.topology = normalizeTaskTopology({
     ...(task.topology && typeof task.topology === "object" ? task.topology : {}),
-    workflowId: run.workflowId || task.topology?.workflowId || null,
-    workflowName: run.workflowName || task.topology?.workflowName || null,
-    latestNodeId: run.nodeId || task.topology?.latestNodeId || null,
-    latestRunId: run.runId,
-    rootRunId: run.rootRunId || task.topology?.rootRunId || null,
-    parentRunId: run.parentRunId || task.topology?.parentRunId || null,
-    latestSessionId: run.sessionId || task.topology?.latestSessionId || null,
-    sessionId: run.sessionId || task.topology?.sessionId || null,
-    rootSessionId: run.rootSessionId || task.topology?.rootSessionId || null,
-    parentSessionId: run.parentSessionId || task.topology?.parentSessionId || null,
-    rootTaskId: run.rootTaskId || task.topology?.rootTaskId || task.id || null,
-    parentTaskId: run.parentTaskId || task.topology?.parentTaskId || task.parentTaskId || null,
+    workflowId: shouldPromoteLatest ? (run.workflowId || task.topology?.workflowId || null) : (task.topology?.workflowId || run.workflowId || null),
+    workflowName: shouldPromoteLatest ? (run.workflowName || task.topology?.workflowName || null) : (task.topology?.workflowName || run.workflowName || null),
+    latestNodeId: nextLatestNodeId,
+    latestRunId: shouldPromoteLatest ? run.runId : (task.topology?.latestRunId || task.latestRunId || run.runId),
+    rootRunId: shouldPromoteLatest ? (run.rootRunId || task.topology?.rootRunId || null) : (task.topology?.rootRunId || run.rootRunId || null),
+    parentRunId: shouldPromoteLatest ? (run.parentRunId || task.topology?.parentRunId || null) : (task.topology?.parentRunId || run.parentRunId || null),
+    latestSessionId: shouldPromoteLatest ? (run.sessionId || task.topology?.latestSessionId || null) : (task.topology?.latestSessionId || run.sessionId || null),
+    sessionId: shouldPromoteLatest ? (run.sessionId || task.topology?.sessionId || null) : (task.topology?.sessionId || run.sessionId || null),
+    rootSessionId: shouldPromoteLatest ? (run.rootSessionId || task.topology?.rootSessionId || null) : (task.topology?.rootSessionId || run.rootSessionId || null),
+    parentSessionId: shouldPromoteLatest ? (run.parentSessionId || task.topology?.parentSessionId || null) : (task.topology?.parentSessionId || run.parentSessionId || null),
+    rootTaskId: shouldPromoteLatest ? (run.rootTaskId || task.topology?.rootTaskId || task.id || null) : (task.topology?.rootTaskId || run.rootTaskId || task.id || null),
+    parentTaskId: shouldPromoteLatest ? (run.parentTaskId || task.topology?.parentTaskId || task.parentTaskId || null) : (task.topology?.parentTaskId || run.parentTaskId || task.parentTaskId || null),
     delegationDepth: Number.isFinite(Number(run.delegationDepth))
       ? Math.max(0, Math.trunc(Number(run.delegationDepth)))
       : (task.topology?.delegationDepth || 0),
   }, task);
+  syncLegacyTaskTopologyFields(task);
   task.links = {
     branches: uniqueStringList(task.links?.branches || []),
     prs: uniqueStringList(task.links?.prs || []),
@@ -3026,6 +3488,7 @@ export function recoverAutoBlockedTasks(options = {}) {
     if (!task || normalizeTaskStatus(task.status) !== "blocked") continue;
     const autoRecovery = task.meta?.autoRecovery;
     const worktreeFailure = task.meta?.worktreeFailure;
+    const failureKind = String(worktreeFailure?.failureKind || autoRecovery?.failureKind || "").trim();
     const hasPlaceholder = hasStaleWorktreePlaceholders(task);
     const isWorktreeRecovery = (
       autoRecovery &&
@@ -3037,6 +3500,7 @@ export function recoverAutoBlockedTasks(options = {}) {
       typeof worktreeFailure === "object"
     ) || hasPlaceholder;
     if (!isWorktreeRecovery) continue;
+    if (failureKind === "branch_refresh_conflict" && !hasPlaceholder) continue;
 
     const retryAtMs = resolveRetryAtMs(task, autoRecovery);
     if (Number.isFinite(retryAtMs) && retryAtMs > recoveredAtMs) continue;

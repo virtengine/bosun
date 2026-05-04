@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 
 const MONITOR_INTERVAL_MS = 30_000; // Check every 30 seconds
 const STUCK_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes without progress
-const REBASE_COMMIT_THRESHOLD = 20; // If rebasing >20 commits, consider merge instead
+const REBASE_COMMIT_THRESHOLD = 20; // If syncing >20 commits, consider merge instead
 const MAX_DUPLICATE_COMMITS = 5; // Flag if >5 commits with same message
 const ERROR_LOOP_THRESHOLD = 3; // Same error 3 times = loop
 const ERROR_LOOP_WINDOW_MS = 15 * 60 * 1000; // Within 15 minutes
@@ -459,12 +459,12 @@ class WorkspaceMonitor {
   detectInefficiencies(gitState, state) {
     const warnings = [];
 
-    // Massive rebase
+    // Massive sync
     if (gitState.rebaseInProgress) {
       const totalCommits = gitState.rebaseDone + gitState.rebaseTodo;
       if (totalCommits > REBASE_COMMIT_THRESHOLD) {
         warnings.push(
-          `INEFFICIENCY: Rebasing ${totalCommits} commits (consider merge for >20 commits)`,
+          `INEFFICIENCY: Syncing ${totalCommits} commits (consider merge for >20 commits)`,
         );
       }
     }

@@ -48,7 +48,7 @@ const PROMPT_DEFS = [
   {
     key: "conflictResolver",
     filename: "conflict-resolver.md",
-    description: "Prompt used for rebase conflict follow-up guidance.",
+    description: "Prompt used for merge conflict follow-up guidance.",
   },
   {
     key: "sdkConflictResolver",
@@ -574,7 +574,7 @@ Respond with JSON only:
   "summary": "One sentence overall assessment"
 }
 `,
-  conflictResolver: `Conflicts detected while rebasing onto {{UPSTREAM_BRANCH}}.
+  conflictResolver: `Conflicts detected while merging onto {{UPSTREAM_BRANCH}}.
 Auto-resolve summary: {{AUTO_RESOLVE_SUMMARY}}.
 
 {{MANUAL_CONFLICTS_SECTION}}

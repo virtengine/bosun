@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { testTimeout } from "./timeout-helper.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { WorkflowEngine } from "../workflow/workflow-engine.mjs";
 import { installTemplate } from "../workflow/workflow-templates.mjs";
 import "../workflow/workflow-nodes.mjs";
+
+vi.setConfig({ testTimeout: testTimeout(30_000) });
 
 let tmpDir;
 let engine;
@@ -80,7 +83,7 @@ describe("continuation-loop template integration", () => {
   });
 
   it("fires a session-stuck event payload and executes retry action when no progress is detected", async () => {
-    const kanban = makeStatusKanban(["inprogress", "done"]);
+    const kanban = makeStatusKanban(["inprogress", "inprogress", "done"]);
     const launchEphemeralThread = vi.fn(async (prompt) => ({
       success: true,
       output: `continued:${prompt}`,
@@ -113,7 +116,7 @@ describe("continuation-loop template integration", () => {
     expect(ctx.getNodeOutput("stuck-route")?.matchedPort).toBe("retry");
     expect(launchEphemeralThread.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(ctx.getNodeOutput("end-terminal")?.output?.externalStatus).toBe("done");
-  }, 15000);
+  });
 
   it("bounds stuck auto-retries and escalates with retry diagnostics after the limit", async () => {
     const kanban = {
@@ -155,9 +158,9 @@ describe("continuation-loop template integration", () => {
     expect(ctx.getNodeOutput("emit-stuck")?.payload?.maxStuckAutoRetries).toBe(1);
     expect(ctx.getNodeOutput("stuck-retry-budget")?.result).toBe(false);
     expect(ctx.getNodeStatus("stuck-escalate-budget")).toBe("completed");
-    expect(ctx.getNodeStatus("end-escalated")).toBe("completed");
+    expect(ctx.getNodeStatus("end-escalated-budget")).toBe("completed");
     expect(launchEphemeralThread.mock.calls.length).toBeGreaterThanOrEqual(3);
-  }, 15000);
+  });
   it("injects issue-advisor guidance into planner feedback for downstream continuation prompts", async () => {
     makeTmpEngine();
     const ctxLike = {
@@ -187,4 +190,3 @@ describe("continuation-loop template integration", () => {
     expect(ctxLike.data._plannerFeedback.dagStateSummary.counts.failed).toBe(1);
   });
 });
-

@@ -30,23 +30,15 @@ import {
 const isWindows = process.platform === "win32";
 
 // ── Workflow event bridge ─────────────────────────────────────────────────
-// Lazy-loaded to avoid circular imports (monitor → maintenance → monitor).
+// The daemon injects its workflow-event queue. Standalone callers must not
+// import monitor.mjs just to emit best-effort events.
 let _queueWorkflowEvent = null;
+export function setMaintenanceWorkflowEventQueue(queueFn) {
+  _queueWorkflowEvent = typeof queueFn === "function" ? queueFn : null;
+}
 function emitMaintenanceEvent(eventType, data = {}) {
-  if (_queueWorkflowEvent) {
-    _queueWorkflowEvent(eventType, data);
-    return;
-  }
-  import("./monitor.mjs")
-    .then((mod) => {
-      if (typeof mod.queueWorkflowEvent === "function") {
-        _queueWorkflowEvent = mod.queueWorkflowEvent;
-        _queueWorkflowEvent(eventType, data);
-      }
-    })
-    .catch(() => {
-      /* best-effort — monitor not available during tests */
-    });
+  if (!_queueWorkflowEvent) return;
+  _queueWorkflowEvent(eventType, data);
 }
 const BRANCH_SYNC_LOG_THROTTLE_MS = Math.max(
   5_000,
@@ -170,25 +162,27 @@ function logThrottledBranchSync(
 
 /**
  * Get all running processes matching a filter.
- * Returns [{pid, commandLine, creationDate}].
+ * Returns [{pid, parentPid, name, commandLine, creationDate}].
  */
 function getProcesses(filter) {
   if (!isWindows) {
     // Linux/macOS: use ps
     try {
-      const out = execSync(`ps -eo pid,lstart,args 2>/dev/null`, {
+      const out = execSync(`ps -eo pid,ppid,comm,lstart,args 2>/dev/null`, {
         encoding: "utf8",
         timeout: 10000,
       });
       const lines = out.trim().split("\n").slice(1);
       return lines
         .map((line) => {
-          const m = line.trim().match(/^(\d+)\s+(.+?\d{4})\s+(.+)$/);
+          const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+?\d{4})\s+(.+)$/);
           if (!m) return null;
           return {
             pid: Number(m[1]),
-            creationDate: new Date(m[2]),
-            commandLine: m[3],
+            parentPid: Number(m[2]),
+            name: m[3],
+            creationDate: new Date(m[4]),
+            commandLine: m[5],
           };
         })
         .filter(Boolean);
@@ -199,7 +193,7 @@ function getProcesses(filter) {
 
   // Windows: use PowerShell to get process info (WMI is more reliable for CommandLine)
   try {
-    const cmd = `Get-CimInstance Win32_Process ${filter ? `-Filter "${filter}"` : ""} | Select-Object ProcessId, CommandLine, CreationDate | ConvertTo-Json -Compress`;
+    const cmd = `Get-CimInstance Win32_Process ${filter ? `-Filter "${filter}"` : ""} | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate | ConvertTo-Json -Compress`;
     const out = spawnSync("powershell", ["-NoProfile", "-Command", cmd], {
       encoding: "utf8",
       timeout: 15000,
@@ -212,6 +206,8 @@ function getProcesses(filter) {
       .filter((p) => p && p.ProcessId)
       .map((p) => ({
         pid: p.ProcessId,
+        parentPid: p.ParentProcessId || 0,
+        name: p.Name || "",
         commandLine: p.CommandLine || "",
         creationDate: p.CreationDate
           ? new Date(p.CreationDate.replace(/\/Date\((\d+)\)\//, "$1") * 1)
@@ -225,13 +221,34 @@ function getProcesses(filter) {
 /**
  * Kill a process by PID with force.
  */
-function killPid(pid, label) {
+function killPid(pid, label, opts = {}) {
+  const tree = opts?.tree === true;
   try {
     if (isWindows) {
-      spawnSync("taskkill", ["/F", "/PID", String(pid)], {
-        timeout: 5000,
-        windowsHide: true,
-      });
+      let result = null;
+      if (tree) {
+        const args = ["/F", "/T", "/PID", String(pid)];
+        result = spawnSync("taskkill", args, {
+          encoding: "utf8",
+          timeout: 5000,
+          windowsHide: true,
+        });
+      }
+      if (!result || result.status !== 0) {
+        result = spawnSync("powershell", [
+          "-NoProfile",
+          "-Command",
+          `Stop-Process -Id ${Number(pid)} -Force -ErrorAction Stop`,
+        ], {
+          encoding: "utf8",
+          timeout: 5000,
+          windowsHide: true,
+        });
+      }
+      if (result.status !== 0) {
+        const errorText = String(result.stderr || result.stdout || "").trim();
+        throw new Error(errorText || `Windows process kill failed for PID ${pid}`);
+      }
     } else {
       process.kill(pid, "SIGKILL");
     }
@@ -244,6 +261,123 @@ function killPid(pid, label) {
     }
     return false;
   }
+}
+
+const BOSUN_PROBE_NODE_MARKERS = [
+  "starttelegramuiserver({ port: 0",
+  "skipinstancelock: true",
+  "skipautoopen: true",
+];
+const BOSUN_PROBE_IMPORT_MARKERS = [
+  "import('./server/ui-server.mjs')",
+  "import(\"./server/ui-server.mjs\")",
+  "import('playwright')",
+  "import(\"playwright\")",
+  "chromium.launch({ headless: true })",
+];
+const PLAYWRIGHT_PROFILE_MARKERS = [
+  "playwright_chromiumdev_profile-",
+  "playwright_firefoxdev_profile-",
+  "playwright_webkitdev_profile-",
+];
+const HELPER_TREE_PROCESS_NAMES = new Set([
+  "node",
+  "node.exe",
+  "chrome",
+  "chrome.exe",
+  "msedge",
+  "msedge.exe",
+  "firefox",
+  "firefox.exe",
+  "webkit",
+  "webkit.exe",
+]);
+
+export function classifyBosunHelperProcess(commandLine) {
+  const normalized = String(commandLine || "").trim().toLowerCase().replace(/\\/g, "/");
+  if (!normalized) return null;
+
+  const looksLikeBosunUiProbe =
+    normalized.includes("node") &&
+    BOSUN_PROBE_NODE_MARKERS.every((marker) => normalized.includes(marker)) &&
+    BOSUN_PROBE_IMPORT_MARKERS.some((marker) => normalized.includes(marker));
+  if (looksLikeBosunUiProbe) return "bosun-ui-probe";
+
+  const looksLikePlaywrightBrowser =
+    (normalized.includes("chrome.exe") || normalized.includes("msedge.exe") || normalized.includes("firefox")) &&
+    PLAYWRIGHT_PROFILE_MARKERS.some((marker) => normalized.includes(marker));
+  if (looksLikePlaywrightBrowser) return "playwright-browser";
+
+  return null;
+}
+
+function isHelperTreeAncestorProcess(proc, cutoff) {
+  const name = String(proc?.name || "").trim().toLowerCase();
+  if (!HELPER_TREE_PROCESS_NAMES.has(name)) return false;
+  const createdAtMs = proc?.creationDate?.getTime?.() || NaN;
+  return Number.isFinite(createdAtMs) && createdAtMs < cutoff;
+}
+
+function findHelperProcessTreeRoot(proc, processByPid, cutoff) {
+  let target = proc;
+  const visited = new Set([Number(proc?.pid) || 0]);
+
+  while (true) {
+    const parentPid = Number(target?.parentPid || 0);
+    if (!parentPid || visited.has(parentPid)) break;
+    const parent = processByPid.get(parentPid);
+    if (!parent || !isHelperTreeAncestorProcess(parent, cutoff)) break;
+    target = parent;
+    visited.add(parentPid);
+  }
+
+  return target;
+}
+
+export function reapStaleBosunHelperProcesses(maxAgeMs = 15 * 60 * 1000, opts = {}) {
+  const cutoff = Date.now() - Math.max(60_000, Number(maxAgeMs) || 15 * 60 * 1000);
+  const skipPids = new Set(
+    [process.pid, ...(Array.isArray(opts.skipPids) ? opts.skipPids : [])]
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0),
+  );
+  const filterName = isWindows
+    ? "Name='node.exe' OR Name='chrome.exe' OR Name='msedge.exe' OR Name='firefox.exe'"
+    : null;
+  const procs = getProcesses(filterName);
+  const processByPid = new Map(
+    procs
+      .map((proc) => [Number(proc?.pid || 0), proc])
+      .filter(([pid]) => Number.isFinite(pid) && pid > 0),
+  );
+  const reapedTargetPids = new Set();
+  let killed = 0;
+
+  for (const p of procs) {
+    if (skipPids.has(Number(p.pid))) continue;
+    const classification = classifyBosunHelperProcess(p.commandLine || "");
+    if (!classification) continue;
+    const createdAtMs = p.creationDate?.getTime?.() || NaN;
+    if (!Number.isFinite(createdAtMs) || createdAtMs >= cutoff) continue;
+
+    const target =
+      classification === "playwright-browser"
+        ? findHelperProcessTreeRoot(p, processByPid, cutoff)
+        : p;
+    const targetPid = Number(target?.pid || p.pid);
+    if (!Number.isFinite(targetPid) || targetPid <= 0) continue;
+    if (skipPids.has(targetPid) || reapedTargetPids.has(targetPid)) continue;
+
+    if (killPid(targetPid, classification, { tree: true })) {
+      reapedTargetPids.add(targetPid);
+      killed++;
+    }
+  }
+
+  if (killed > 0) {
+    console.log(`[maintenance] reaped ${killed} stale Bosun helper process(es)`);
+  }
+  return killed;
 }
 
 /**
@@ -1152,7 +1286,7 @@ export function syncLocalTrackingBranches(repoRoot, branches) {
       }
 
       // Truly diverged: local has unique commits AND is missing remote commits.
-      // Attempt rebase onto remote then push (checked-out branch only).
+      // Attempt merge-based integration onto remote then push (checked-out branch only).
       if (ahead > 0) {
         const statusCheck = spawnSync("git", ["status", "--porcelain"], {
           cwd: repoRoot,
@@ -1170,17 +1304,17 @@ export function syncLocalTrackingBranches(repoRoot, branches) {
           continue;
         }
         if (branch === currentBranch) {
-          const rebase = spawnSync(
+          const merge = spawnSync(
             "git",
-            ["rebase", remoteRef, "--quiet"],
+            ["merge", "--no-edit", remoteRef, "--quiet"],
             { cwd: repoRoot, encoding: "utf8", timeout: 60_000, windowsHide: true },
           );
-          if (rebase.status !== 0) {
-            spawnSync("git", ["rebase", "--abort"], {
+          if (merge.status !== 0) {
+            spawnSync("git", ["merge", "--abort"], {
               cwd: repoRoot, timeout: 10_000, windowsHide: true,
             });
             console.warn(
-              `[maintenance] rebase of '${branch}' onto ${remoteRef} failed (${ahead}↑ ${behind}↓) — skipping`,
+              `[maintenance] merge of '${branch}' with ${remoteRef} failed (${ahead}↑ ${behind}↓) — skipping`,
             );
             continue;
           }
@@ -1191,15 +1325,15 @@ export function syncLocalTrackingBranches(repoRoot, branches) {
           );
           if (push.status === 0) {
             logThrottledBranchSync(
-              `sync:${branch}:rebase-push-success`,
-              `[maintenance] rebased and pushed '${branch}' (was ${ahead}↑ ${behind}↓)`,
+              `sync:${branch}:merge-push-success`,
+              `[maintenance] merged and pushed '${branch}' (was ${ahead}↑ ${behind}↓)`,
               "info",
             );
             synced++;
           } else {
             logThrottledBranchSync(
-              `sync:${branch}:rebase-push-failed`,
-              `[maintenance] push after rebase of '${branch}' failed: ${(push.stderr || push.stdout || "").toString().trim()}`,
+              `sync:${branch}:merge-push-failed`,
+              `[maintenance] push after merge of '${branch}' failed: ${(push.stderr || push.stdout || "").toString().trim()}`,
               "warn",
             );
           }
@@ -1313,6 +1447,7 @@ export async function runMaintenanceSweep(opts = {}) {
     repoRoot,
     childPid,
     gitPushMaxAgeMs,
+    helperProcessMaxAgeMs,
     syncBranches,
     archiveCompletedTasks,
     branchCleanup,
@@ -1320,6 +1455,9 @@ export async function runMaintenanceSweep(opts = {}) {
   console.log("[maintenance] starting sweep...");
 
   const staleKilled = killStaleOrchestrators(childPid);
+  const helperProcessesReaped = reapStaleBosunHelperProcesses(helperProcessMaxAgeMs, {
+    skipPids: [childPid],
+  });
   const pushesReaped = reapStuckGitPushes(gitPushMaxAgeMs);
   const worktreesPruned = repoRoot ? cleanupWorktrees(repoRoot) : 0;
 
@@ -1391,6 +1529,7 @@ export async function runMaintenanceSweep(opts = {}) {
 
   const result = {
     staleKilled,
+    helperProcessesReaped,
     pushesReaped,
     worktreesPruned,
     branchesSynced,
@@ -1400,7 +1539,7 @@ export async function runMaintenanceSweep(opts = {}) {
   };
 
   console.log(
-    `[maintenance] sweep complete: ${staleKilled} stale orchestrators, ${pushesReaped} stuck pushes, ${worktreesPruned} worktrees pruned, ${branchesSynced} branches synced, ${branchesDeleted} stale branches deleted, ${toolLogsPruned} tool-log cache entries pruned`,
+    `[maintenance] sweep complete: ${staleKilled} stale orchestrators, ${helperProcessesReaped} stale helper processes, ${pushesReaped} stuck pushes, ${worktreesPruned} worktrees pruned, ${branchesSynced} branches synced, ${branchesDeleted} stale branches deleted, ${toolLogsPruned} tool-log cache entries pruned`,
   );
 
   // Emit workflow event so event-driven workflows can react to sweep results

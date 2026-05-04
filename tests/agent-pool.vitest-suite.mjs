@@ -249,6 +249,7 @@ let getPoolSdkName,
   getAvailableSdks,
   launchEphemeralThread,
   execPooledPrompt,
+  shouldCompressSessionItemsByDefault,
   launchOrResumeThread,
   execWithRetry,
   invalidateThreadAsync,
@@ -269,6 +270,7 @@ beforeEach(async () => {
   getAvailableSdks = mod.getAvailableSdks;
   launchEphemeralThread = mod.launchEphemeralThread;
   execPooledPrompt = mod.execPooledPrompt;
+  shouldCompressSessionItemsByDefault = mod.shouldCompressSessionItemsByDefault;
   launchOrResumeThread = mod.launchOrResumeThread;
   execWithRetry = mod.execWithRetry;
   invalidateThreadAsync = mod.invalidateThreadAsync;
@@ -1464,6 +1466,61 @@ describe("launchOrResumeThread", () => {
     expect(mockClaudeQuery).toHaveBeenCalledTimes(2);
     logSpy.mockRestore();
   });
+
+  it("registers workflow child sessions in the harness session manager", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("workflow-managed-thread", "managed-session-output"),
+    );
+
+    const sessionManagerMod = await import("../agent/session-manager.mjs");
+    const sessionManager = sessionManagerMod.getBosunSessionManager();
+
+    sessionManager.switchSession("workflow-parent-session", {
+      scope: "workflow-task",
+      sessionType: "task",
+      taskKey: "workflow-parent-session",
+      cwd: process.cwd(),
+    });
+
+    const result = await launchOrResumeThread(
+      "workflow child prompt",
+      process.cwd(),
+      5000,
+      {
+        taskKey: "workflow-task-key",
+        sdk: "codex",
+        sessionId: "workflow-child-session",
+        sessionScope: "workflow-task",
+        parentSessionId: "workflow-parent-session",
+        rootSessionId: "workflow-root-session",
+        metadata: {
+          source: "workflow-run-agent",
+          workflowRunId: "run-200",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(sessionManager.getSession("workflow-child-session")).toMatchObject({
+      sessionId: "workflow-child-session",
+      parentSessionId: "workflow-parent-session",
+      rootSessionId: "workflow-parent-session",
+      metadata: expect.objectContaining({
+        source: "workflow-run-agent",
+        workflowRunId: "run-200",
+      }),
+    });
+    expect(sessionManager.getReplaySnapshot("workflow-child-session")).toEqual(
+      expect.objectContaining({
+        lineage: expect.objectContaining({
+          parentSessionId: "workflow-parent-session",
+        }),
+      }),
+    );
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1521,6 +1578,16 @@ describe("execWithRetry", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("execPooledPrompt", () => {
+  it("routes task, workflow, delegate, and voice helper sessions through shredding by default", () => {
+    expect(shouldCompressSessionItemsByDefault("task")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("flow")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("delegate")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("voice-delegate")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("voice-workflow-generate")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("ephemeral")).toBe(false);
+    expect(shouldCompressSessionItemsByDefault("ephemeral", { compressEphemeralItems: true })).toBe(true);
+  });
+
   it("returns finalResponse on failure with error prefix", async () => {
     // Force all SDKs disabled so this path deterministically fails.
     process.env.CODEX_SDK_DISABLED = "1";

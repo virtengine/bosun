@@ -31,8 +31,13 @@ const STACK_DEFINITIONS = [
       const pm = this.detectPackageManager(rootDir);
       const run = pm === "npm" ? "npm run" : pm === "yarn" ? "yarn" : pm === "pnpm" ? "pnpm" : "bun run";
       const scripts = readPackageJsonScripts(rootDir);
+      const deps = readPackageJsonDeps(rootDir);
+      const prefersFocusedVitestRunner =
+        deps.has("vitest") && existsSync(resolve(rootDir, "tools", "vitest-runner.mjs"));
       const cmds = {
-        test: scripts.test ? `${pm} test` : "",
+        test: prefersFocusedVitestRunner
+          ? "node tools/vitest-runner.mjs run"
+          : scripts.test ? `${pm} test` : "",
         build: scripts.build ? `${run} build` : "",
         lint: scripts.lint ? `${run} lint` : "",
         syntaxCheck: "node --check",
@@ -43,7 +48,6 @@ const STACK_DEFINITIONS = [
         cmds.syntaxCheck = `${pm === "npm" ? "npx" : pm} tsc --noEmit`;
       }
       // Detect test framework
-      const deps = readPackageJsonDeps(rootDir);
       if (deps.has("vitest")) cmds.testFramework = "vitest";
       else if (deps.has("jest")) cmds.testFramework = "jest";
       else if (deps.has("mocha")) cmds.testFramework = "mocha";
@@ -395,14 +399,13 @@ function findMakeTarget(rootDir, targetNames = []) {
 function detectQualityGateCommand(rootDir, commands = {}, options = {}) {
   const packageManager = String(options.packageManager || "").trim().toLowerCase();
   const scripts = readPackageJsonScripts(rootDir);
+  if (existsSync(resolve(rootDir, ".githooks", "pre-push"))) {
+    return "bash .githooks/pre-push";
+  }
   for (const scriptName of ["prepush:check", "prepush-check", "prepush", "pre-push", "verify", "validate", "check"]) {
     if (typeof scripts[scriptName] === "string" && scripts[scriptName].trim()) {
       return buildPackageScriptCommand(packageManager, scriptName);
     }
-  }
-
-  if (existsSync(resolve(rootDir, ".githooks", "pre-push"))) {
-    return "bash .githooks/pre-push";
   }
 
   const makeTarget = findMakeTarget(rootDir, ["prepush", "pre-push", "verify", "validate", "check"]);
@@ -614,6 +617,28 @@ export function resolveAutoCommand(value, commandType, rootDir) {
   if (!value || value.toLowerCase().trim() !== "auto") return value;
   const detected = detectProjectStack(rootDir);
   return detected.commands?.[commandType] || "";
+}
+
+export function resolveManagedWorktreeCommand(
+  command,
+  { repoRoot = "", executionDir = "" } = {},
+) {
+  const trimmedCommand = String(command || "").trim();
+  if (!trimmedCommand || !repoRoot || !executionDir) return trimmedCommand;
+
+  const normalizedRepoRoot = resolve(repoRoot);
+  const normalizedExecutionDir = resolve(executionDir);
+  if (normalizedRepoRoot === normalizedExecutionDir) return trimmedCommand;
+  if (!/[\\/]\.bosun[\\/]worktrees[\\/]/i.test(normalizedExecutionDir)) return trimmedCommand;
+
+  const runnerMatch = trimmedCommand.match(
+    /^(node(?:\.exe)?)\s+tools[\\/]vitest-runner\.mjs(?=\s|$)(.*)$/i,
+  );
+  if (!runnerMatch) return trimmedCommand;
+
+  const sourceRunnerPath = resolve(normalizedRepoRoot, "tools", "vitest-runner.mjs");
+  if (!existsSync(sourceRunnerPath)) return trimmedCommand;
+  return `${runnerMatch[1]} "${sourceRunnerPath}"${runnerMatch[2] || ""}`;
 }
 
 function emptyCommands() {

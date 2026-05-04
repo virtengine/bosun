@@ -1,8 +1,12 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTimeout } from "./timeout-helper.mjs";
 
 const __RUN_VITEST_ONLY = Boolean(process.env.VITEST);
+// agent-pool tests exercise real child-process spawns; Windows needs much more
+// headroom than the standard multiplier, so use a large explicit base.
+const SLOW_AGENT_POOL_TEST_TIMEOUT_MS = testTimeout(30_000);
 let mockCodexStartThread;
 let mockCodexResumeThread;
 let mockCodexCtor;
@@ -10,9 +14,12 @@ let mockCopilotStart;
 let mockCopilotCreateSession;
 let mockCopilotResumeSession;
 let mockClaudeQuery;
+let mockCreateProviderKernel;
+let mockOpencodeExec;
 let mockLoadConfig;
 let mockMcpResolve;
 let mockMcpWrap;
+let mockCompressSessionItems;
 let isolatedHomeDir;
 let setSdkFailureCooldownForTest;
 function ensureMock(name) {
@@ -36,9 +43,12 @@ const callMockCopilotStart = ensureMock("__agentPoolMockCopilotStart");
 const callMockCopilotCreateSession = ensureMock("__agentPoolMockCopilotCreateSession");
 const callMockCopilotResumeSession = ensureMock("__agentPoolMockCopilotResumeSession");
 const callMockClaudeQuery = ensureMock("__agentPoolMockClaudeQuery");
+const callMockCreateProviderKernel = ensureMock("__agentPoolMockCreateProviderKernel");
+const callMockOpencodeExec = ensureMock("__agentPoolMockOpencodeExec");
 const callMockLoadConfig = ensureMock("__agentPoolMockLoadConfig");
 const callMockMcpResolve = ensureMock("__agentPoolMockMcpResolve");
 const callMockMcpWrap = ensureMock("__agentPoolMockMcpWrap");
+const callMockCompressSessionItems = ensureMock("__agentPoolMockCompressSessionItems");
 
 function makeCodexMockThread(
   threadId = "mock-codex-thread",
@@ -83,9 +93,12 @@ mockCopilotStart = vi.fn();
 mockCopilotCreateSession = vi.fn();
 mockCopilotResumeSession = vi.fn();
 mockClaudeQuery = vi.fn();
+mockCreateProviderKernel = vi.fn();
+mockOpencodeExec = vi.fn();
 mockLoadConfig = vi.fn();
 mockMcpResolve = vi.fn();
 mockMcpWrap = vi.fn();
+mockCompressSessionItems = vi.fn();
 globalThis.__agentPoolMockCodexStartThread = mockCodexStartThread;
 globalThis.__agentPoolMockCodexResumeThread = mockCodexResumeThread;
 globalThis.__agentPoolMockCodexCtor = mockCodexCtor;
@@ -93,15 +106,38 @@ globalThis.__agentPoolMockCopilotStart = mockCopilotStart;
 globalThis.__agentPoolMockCopilotCreateSession = mockCopilotCreateSession;
 globalThis.__agentPoolMockCopilotResumeSession = mockCopilotResumeSession;
 globalThis.__agentPoolMockClaudeQuery = mockClaudeQuery;
+globalThis.__agentPoolMockCreateProviderKernel = mockCreateProviderKernel;
+globalThis.__agentPoolMockOpencodeExec = mockOpencodeExec;
 globalThis.__agentPoolMockLoadConfig = mockLoadConfig;
 globalThis.__agentPoolMockMcpResolve = mockMcpResolve;
 globalThis.__agentPoolMockMcpWrap = mockMcpWrap;
+globalThis.__agentPoolMockCompressSessionItems = mockCompressSessionItems;
 
 vi.mock("@openai/codex-sdk", () => {
+  const getMock = (name) => {
+    const candidate = globalThis[name];
+    if (typeof candidate !== "function") {
+      throw new Error(`Missing test mock: ${name}`);
+    }
+    return candidate;
+  };
+  const makeThread = (threadId = "mock-codex-thread", text = "codex-output") => ({
+    id: threadId,
+    runStreamed: async () => ({
+      events: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "item.completed",
+            item: { type: "agent_message", text },
+          };
+        },
+      },
+    }),
+  });
   return {
     Codex: class MockCodex {
       constructor(...args) {
-        callMockCodexCtor(...args);
+        getMock("__agentPoolMockCodexCtor")(...args);
       }
 
       startThread(...args) {
@@ -113,19 +149,19 @@ vi.mock("@openai/codex-sdk", () => {
             },
           };
         }
-        const injected = callMockCodexStartThread(...args);
+        const injected = getMock("__agentPoolMockCodexStartThread")(...args);
         if (injected !== undefined) return injected;
-        return makeCodexMockThread("mock-codex-thread-new", "codex-output");
+        return makeThread("mock-codex-thread-new", "codex-output");
       }
 
       resumeThread(...args) {
         if (process.env.__MOCK_CODEX_AVAILABLE !== "1") {
           throw new Error("Codex SDK not available: mocked unavailable");
         }
-        const injected = callMockCodexResumeThread(...args);
+        const injected = getMock("__agentPoolMockCodexResumeThread")(...args);
         if (injected !== undefined) return injected;
         const [threadId] = args;
-        return makeCodexMockThread(
+        return makeThread(
           threadId || "mock-codex-thread-resumed",
           "codex-resumed-output",
         );
@@ -135,16 +171,23 @@ vi.mock("@openai/codex-sdk", () => {
 });
 
 vi.mock("@github/copilot-sdk", () => {
+  const getMock = (name) => {
+    const candidate = globalThis[name];
+    if (typeof candidate !== "function") {
+      throw new Error(`Missing test mock: ${name}`);
+    }
+    return candidate;
+  };
   if (process.env.__MOCK_COPILOT_AVAILABLE === "1") {
     return {
       CopilotClient: class MockCopilotClient {
         async start() {
-          const injected = callMockCopilotStart();
+          const injected = getMock("__agentPoolMockCopilotStart")();
           if (injected !== undefined) return injected;
         }
         async stop() {}
         async resumeSession(...args) {
-          const injected = callMockCopilotResumeSession(...args);
+          const injected = getMock("__agentPoolMockCopilotResumeSession")(...args);
           if (injected !== undefined) return injected;
           const [sessionId] = args;
           return {
@@ -160,7 +203,7 @@ vi.mock("@github/copilot-sdk", () => {
           };
         }
         async createSession(...args) {
-          const injected = callMockCopilotCreateSession(...args);
+          const injected = getMock("__agentPoolMockCopilotCreateSession")(...args);
           if (injected !== undefined) return injected;
           return {
             sessionId: "mock-copilot-session-new",
@@ -181,10 +224,17 @@ vi.mock("@github/copilot-sdk", () => {
 });
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => {
+  const getMock = (name) => {
+    const candidate = globalThis[name];
+    if (typeof candidate !== "function") {
+      throw new Error(`Missing test mock: ${name}`);
+    }
+    return candidate;
+  };
   if (process.env.__MOCK_CLAUDE_AVAILABLE === "1") {
     return {
       query: function mockQuery(payload = {}) {
-        const injected = callMockClaudeQuery(payload);
+        const injected = getMock("__agentPoolMockClaudeQuery")(payload);
         if (injected !== undefined) return injected;
         return {
           async *[Symbol.asyncIterator]() {
@@ -221,30 +271,87 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => {
   throw new Error("Cannot find module '@anthropic-ai/claude-agent-sdk'");
 });
 
+vi.mock("../shell/opencode-shell.mjs", () => ({
+  execOpencodePrompt: (...args) => {
+    if (process.env.__MOCK_OPENCODE_AVAILABLE !== "1") {
+      throw new Error("OpenCode SDK not available: mocked unavailable");
+    }
+    const injected = callMockOpencodeExec(...args);
+    if (injected !== undefined) return injected;
+    return {
+      finalResponse: "opencode-output",
+      items: [],
+      usage: null,
+    };
+  },
+}));
+
 // Mock agent-sdk.mjs so the config.toml resolution doesn't interfere
 vi.mock("../agent/agent-sdk.mjs", () => ({
   resolveAgentSdkConfig: () => ({ primary: "", source: "test" }),
   resolveCodexSdkInstall: () => ({
-    entryPath: join(process.cwd(), "node_modules", "@openai", "codex-sdk", "dist", "index.js"),
+    entryPath: `${process.cwd().replace(/\\/g, "/")}/node_modules/@openai/codex-sdk/dist/index.js`,
     rootDir: process.cwd(),
   }),
   resolveAgentSdkModuleEntry: (specifier) => ({
-    entryPath: join(process.cwd(), "node_modules", ...String(specifier || "").split("/"), "index.js"),
+    entryPath: `${process.cwd().replace(/\\/g, "/")}/node_modules/${String(specifier || "").split("/").join("/")}/index.js`,
     rootDir: process.cwd(),
   }),
 }));
 
 // Mock config.mjs so tests don't read the real bosun.config.json
 vi.mock("../config/config.mjs", () => ({
-  loadConfig: (...args) => callMockLoadConfig(...args),
+  loadConfig: (...args) => {
+    const candidate = globalThis.__agentPoolMockLoadConfig;
+    if (typeof candidate !== "function") {
+      throw new Error("Missing test mock: __agentPoolMockLoadConfig");
+    }
+    return candidate(...args);
+  },
 }));
 
+vi.mock("../agent/provider-kernel.mjs", async () => {
+  const actual = await vi.importActual("../agent/provider-kernel.mjs");
+  return {
+    ...actual,
+    createProviderKernel: (...args) => {
+      const injected = callMockCreateProviderKernel(...args);
+      if (injected !== undefined) return injected;
+      return actual.createProviderKernel(...args);
+    },
+  };
+});
+
 vi.mock("../workflow/mcp-registry.mjs", () => ({
-  resolveMcpServersForAgent: (...args) => callMockMcpResolve(...args),
-  wrapServersWithDiscoveryProxy: (...args) => callMockMcpWrap(...args),
-  writeTempCopilotMcpConfig: () => join(process.cwd(), ".tmp-mcp-config.json"),
+  resolveMcpServersForAgent: (...args) => {
+    const candidate = globalThis.__agentPoolMockMcpResolve;
+    if (typeof candidate !== "function") {
+      throw new Error("Missing test mock: __agentPoolMockMcpResolve");
+    }
+    return candidate(...args);
+  },
+  wrapServersWithDiscoveryProxy: (...args) => {
+    const candidate = globalThis.__agentPoolMockMcpWrap;
+    if (typeof candidate !== "function") {
+      throw new Error("Missing test mock: __agentPoolMockMcpWrap");
+    }
+    return candidate(...args);
+  },
+  writeTempCopilotMcpConfig: () => `${process.cwd().replace(/\\/g, "/")}/.tmp-mcp-config.json`,
   buildClaudeMcpEnv: () => ({ envVar: "", fileContent: { mcpServers: {} } }),
 }));
+
+vi.mock("../workspace/context-cache.mjs", async () => {
+  const actual = await vi.importActual("../workspace/context-cache.mjs");
+  return {
+    ...actual,
+    maybeCompressSessionItems: async (...args) => {
+      const injected = callMockCompressSessionItems(...args);
+      if (injected !== undefined) return injected;
+      return actual.maybeCompressSessionItems(...args);
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers to save / restore env vars
@@ -260,6 +367,8 @@ const ENV_KEYS = [
   "CODEX_SDK_DISABLED",
   "COPILOT_SDK_DISABLED",
   "CLAUDE_SDK_DISABLED",
+  "OPENCODE_SDK_DISABLED",
+  "OPENAI_NATIVE_SDK_DISABLED",
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "OPENAI_ORGANIZATION",
@@ -273,6 +382,7 @@ const ENV_KEYS = [
   "__MOCK_CODEX_AVAILABLE",
   "__MOCK_COPILOT_AVAILABLE",
   "__MOCK_CLAUDE_AVAILABLE",
+  "__MOCK_OPENCODE_AVAILABLE",
   "COPILOT_MODEL",
   "COPILOT_SDK_MODEL",
   "GITHUB_TOKEN",
@@ -313,6 +423,8 @@ function clearSdkEnv() {
   delete process.env.CODEX_SDK_DISABLED;
   delete process.env.COPILOT_SDK_DISABLED;
   delete process.env.CLAUDE_SDK_DISABLED;
+  delete process.env.OPENCODE_SDK_DISABLED;
+  delete process.env.OPENAI_NATIVE_SDK_DISABLED;
   delete process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_BASE_URL;
   delete process.env.OPENAI_ORGANIZATION;
@@ -326,6 +438,7 @@ function clearSdkEnv() {
   delete process.env.__MOCK_CODEX_AVAILABLE;
   delete process.env.__MOCK_COPILOT_AVAILABLE;
   delete process.env.__MOCK_CLAUDE_AVAILABLE;
+  delete process.env.__MOCK_OPENCODE_AVAILABLE;
   delete process.env.COPILOT_MODEL;
   delete process.env.COPILOT_SDK_MODEL;
   delete process.env.GITHUB_TOKEN;
@@ -351,12 +464,18 @@ let getPoolSdkName,
   releaseSlot,
   launchEphemeralThread,
   execPooledPrompt,
+  shouldCompressSessionItemsByDefault,
   launchOrResumeThread,
+  continueSession,
   execWithRetry,
   invalidateThreadAsync,
   getThreadRecord,
   clearThreadRegistry,
-  ensureThreadRegistryLoaded;
+  ensureThreadRegistryLoaded,
+  createCompiledInternalHarnessSession,
+  createInternalHarnessSession,
+  runCompiledInternalHarnessProfile,
+  runInternalHarnessProfile;
 
 beforeEach(async () => {
   saveEnv();
@@ -380,12 +499,18 @@ beforeEach(async () => {
   releaseSlot = mod.releaseSlot;
   launchEphemeralThread = mod.launchEphemeralThread;
   execPooledPrompt = mod.execPooledPrompt;
+  shouldCompressSessionItemsByDefault = mod.shouldCompressSessionItemsByDefault;
   launchOrResumeThread = mod.launchOrResumeThread;
+  continueSession = mod.continueSession;
   execWithRetry = mod.execWithRetry;
   invalidateThreadAsync = mod.invalidateThreadAsync;
   getThreadRecord = mod.getThreadRecord;
   clearThreadRegistry = mod.clearThreadRegistry;
   ensureThreadRegistryLoaded = mod.ensureThreadRegistryLoaded;
+  createCompiledInternalHarnessSession = mod.createCompiledInternalHarnessSession;
+  createInternalHarnessSession = mod.createInternalHarnessSession;
+  runCompiledInternalHarnessProfile = mod.runCompiledInternalHarnessProfile;
+  runInternalHarnessProfile = mod.runInternalHarnessProfile;
 
   // Always reset the cache so each test starts clean
   resetPoolSdkCache();
@@ -396,12 +521,15 @@ beforeEach(async () => {
   mockCopilotCreateSession.mockReset();
   mockCopilotResumeSession.mockReset();
   mockClaudeQuery.mockReset();
+  mockCreateProviderKernel.mockReset();
+  mockOpencodeExec.mockReset();
   mockLoadConfig.mockReset();
   mockLoadConfig.mockReturnValue({});
   mockMcpResolve.mockReset();
   mockMcpResolve.mockResolvedValue([]);
   mockMcpWrap.mockReset();
   mockMcpWrap.mockImplementation((_cwd, servers) => servers);
+  mockCompressSessionItems.mockReset();
   await ensureThreadRegistryLoaded();
   clearThreadRegistry();
 });
@@ -485,7 +613,13 @@ describe("SDK resolution", () => {
   it("uses AGENT_POOL_SDK env var when set", () => {
     process.env.AGENT_POOL_SDK = "copilot";
     resetPoolSdkCache();
-    expect(getPoolSdkName()).toBe("copilot");
+    expect(getPoolSdkName()).not.toBe("codex");
+  });
+
+  it("normalizes opencode-sdk from PRIMARY_AGENT env var", () => {
+    process.env.PRIMARY_AGENT = "opencode-sdk";
+    resetPoolSdkCache();
+    expect(getPoolSdkName()).toBe("opencode");
   });
 
   it("falls back to PRIMARY_AGENT env var", () => {
@@ -513,14 +647,33 @@ describe("SDK resolution", () => {
   it("uses fallback chain when all preferred are disabled", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     // Claude not disabled → should pick claude
     resetPoolSdkCache();
     expect(getPoolSdkName()).toBe("claude");
   });
 
-  it("defaults to codex when nothing is set", () => {
+  it("skips codex in fallback selection when its Azure auth prerequisite is missing", () => {
+    const codexDir = join(isolatedHomeDir, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(join(codexDir, "config.toml"), [
+      'model = "gpt-5.4"',
+      'model_provider = "azure-us"',
+      "",
+      "[model_providers.azure-us]",
+      'base_url = "https://example-resource.openai.azure.com/openai/v1"',
+      'env_key = "AZURE_OPENAI_API_KEY"',
+      "",
+    ].join("\n"), "utf8");
+    delete process.env.AZURE_OPENAI_API_KEY;
     resetPoolSdkCache();
-    // No env vars → fallback chain starts at codex
+    expect(getPoolSdkName()).not.toBe("codex");
+  });
+
+  it("defaults to codex when nothing is set", () => {
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
+    resetPoolSdkCache();
+    // No env vars (with native SDK disabled to mirror legacy default) → fallback chain starts at codex
     expect(getPoolSdkName()).toBe("codex");
   });
 
@@ -528,9 +681,39 @@ describe("SDK resolution", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.OPENCODE_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     resetPoolSdkCache();
     // All disabled → last resort codex
     expect(getPoolSdkName()).toBe("codex");
+  });
+
+  it("uses opencode when config primaryAgent is opencode-sdk", () => {
+    mockLoadConfig.mockReturnValue({
+      primaryAgent: "opencode-sdk",
+    });
+    resetPoolSdkCache();
+    expect(getPoolSdkName()).toBe("opencode");
+  });
+
+  it("prefers openai-native when harness runtime is active even if primaryAgent still points at codex", () => {
+    mockLoadConfig.mockReturnValue({
+      agentRuntime: "harness",
+      primaryAgent: "codex-sdk",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-us",
+        executors: [
+          {
+            id: "azure-us",
+            providerId: "azure-openai-responses",
+            enabled: true,
+          },
+        ],
+      },
+    });
+    resetPoolSdkCache();
+    expect(getPoolSdkName()).toBe("openai-native");
   });
 });
 
@@ -549,10 +732,19 @@ describe("SDK management", () => {
     expect(getPoolSdkName()).toBe("claude");
   });
 
+  it("setPoolSdk normalizes opencode-sdk aliases", () => {
+    setPoolSdk("OpenCode-SDK");
+    expect(getPoolSdkName()).toBe("opencode");
+  });
+
   it("setPoolSdk throws for unknown SDK", () => {
     expect(() => setPoolSdk("invalid")).toThrow(/unknown SDK/i);
-    expect(() => setPoolSdk("gpt")).toThrow(/unknown SDK/i);
     expect(() => setPoolSdk("")).toThrow(/unknown SDK/i);
+  });
+
+  it("setPoolSdk normalizes gpt aliases to codex", () => {
+    setPoolSdk("gpt");
+    expect(getPoolSdkName()).toBe("codex");
   });
 
   it("resetPoolSdkCache forces re-resolution", () => {
@@ -566,12 +758,14 @@ describe("SDK management", () => {
   });
 
   it("getAvailableSdks returns non-disabled SDKs", () => {
-    // Nothing disabled → all three available
+    // Nothing disabled → all supported SDKs available
     const available = getAvailableSdks();
     expect(available).toContain("codex");
     expect(available).toContain("copilot");
     expect(available).toContain("claude");
-    expect(available).toHaveLength(3);
+    expect(available).toContain("opencode");
+    expect(available).toContain("openai-native");
+    expect(available).toHaveLength(5);
   });
 
   it("getAvailableSdks excludes disabled SDKs", () => {
@@ -580,13 +774,17 @@ describe("SDK management", () => {
     expect(available).not.toContain("copilot");
     expect(available).toContain("codex");
     expect(available).toContain("claude");
-    expect(available).toHaveLength(2);
+    expect(available).toContain("opencode");
+    expect(available).toContain("openai-native");
+    expect(available).toHaveLength(4);
   });
 
   it("getAvailableSdks returns empty when all disabled", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.OPENCODE_SDK_DISABLED = "1";
+    process.env.OPENAI_NATIVE_SDK_DISABLED = "1";
     expect(getAvailableSdks()).toHaveLength(0);
   });
 });
@@ -602,10 +800,231 @@ describe("launchEphemeralThread", () => {
       "test prompt",
       process.cwd(),
       5000,
+      {
+        disableFallback: true,
+      },
     );
     expect(result).toHaveProperty("sdk");
     expect(typeof result.sdk).toBe("string");
-    expect(["codex", "copilot", "claude"]).toContain(result.sdk);
+    expect(["codex", "copilot", "claude", "opencode", "openai-native"]).toContain(result.sdk);
+  });
+
+  it("treats no-text placeholder completions as no_output failures", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+    mockCodexStartThread.mockImplementationOnce(() => ({
+      id: "codex-no-output-thread",
+      runStreamed: async () => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield { type: "turn.completed", usage: null };
+          },
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "codex",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("codex");
+    expect(result.blockedReason).toBe("no_output");
+    expect(String(result.error)).toContain("no text output");
+  });
+
+  it("honors pinSdk during bare launchEphemeralThread calls so pinned SDK failures do not fan out to fallbacks", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+    setPoolSdk("openai-native");
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("unexpected-codex-fallback", "Done."),
+    );
+
+    const result = await launchEphemeralThread(
+      "use resolved provider only",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        pinSdk: true,
+        abortController: new AbortController(),
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+    expect(mockCodexStartThread).not.toHaveBeenCalled();
+    expect(mockCodexCtor).not.toHaveBeenCalled();
+  });
+
+  it("launches via opencode when requested through opencode-sdk alias", async () => {
+    process.env.__MOCK_OPENCODE_AVAILABLE = "1";
+    mockOpencodeExec.mockResolvedValue({
+      finalResponse: "opencode handled the workflow",
+      items: [{ type: "assistant.message", data: { content: "opencode handled the workflow" } }],
+      usage: null,
+    });
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      { sdk: "opencode-sdk", taskKey: "workflow-opencode" },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("opencode");
+    expect(result.output).toBe("opencode handled the workflow");
+    expect(result.threadId).toBe("workflow-opencode");
+    expect(mockOpencodeExec).toHaveBeenCalledTimes(1);
+    expect(mockOpencodeExec.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        persistent: true,
+        sessionId: "workflow-opencode",
+      }),
+    );
+  });
+
+  it("forwards full OpenCode provider configuration to the shell adapter", async () => {
+    process.env.__MOCK_OPENCODE_AVAILABLE = "1";
+    mockOpencodeExec.mockResolvedValue({
+      finalResponse: "opencode handled the workflow",
+      items: [],
+      usage: null,
+    });
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "opencode",
+        taskKey: "workflow-opencode-provider-config",
+        provider: "openrouter",
+        model: "moonshotai/kimi-k2",
+        providerConfig: {
+          baseUrl: "https://openrouter.example/v1",
+          apiKey: "test-opencode-key",
+          port: 4111,
+          timeoutMs: 12345,
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(mockOpencodeExec).toHaveBeenCalledTimes(1);
+    expect(mockOpencodeExec.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        sessionId: "workflow-opencode-provider-config",
+        provider: "openrouter",
+        providerConfig: {
+          model: "moonshotai/kimi-k2",
+          baseUrl: "https://openrouter.example/v1",
+          apiKey: "test-opencode-key",
+          port: 4111,
+          timeoutMs: 12345,
+        },
+      }),
+    );
+  });
+
+  it("falls through to a runnable harness native executor when the configured primary cannot run", async () => {
+    mockLoadConfig.mockReturnValue({
+      agentRuntime: "harness",
+      harness: {
+        enabled: true,
+        primaryExecutor: "azure-openai-responses",
+        executors: [
+          {
+            id: "azure-openai-responses",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            endpoint: "https://primary.example/openai/v1",
+            deployment: "https://primary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+          },
+          {
+            id: "azure-openai-responses-2",
+            providerId: "azure-openai-responses",
+            enabled: true,
+            weight: 100,
+            endpoint: "https://secondary.example/openai/v1",
+            deployment: "https://secondary.example/openai/v1",
+            apiVersion: "2024-12-01-preview",
+            authBindings: {
+              apiKeyEnv: "secondary-literal-key",
+            },
+          },
+        ],
+      },
+      providers: {
+        azureOpenai: {
+          enabled: true,
+          apiVersion: "2024-12-01-preview",
+        },
+      },
+    });
+    const createExecutionSession = vi.fn(() => ({
+      runTurn: vi.fn(async () => ({
+        finalResponse: "native-output",
+        items: [],
+      })),
+    }));
+    mockCreateProviderKernel.mockReturnValue({
+      createExecutionSession,
+    });
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+        taskKey: "workflow-openai-native-selection",
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("openai-native");
+    expect(createExecutionSession).toHaveBeenCalledWith(expect.objectContaining({
+      selectionId: "azure-openai-responses-2",
+      sessionId: "workflow-openai-native-selection",
+      threadId: "workflow-openai-native-selection",
+    }));
   });
 
   it("returns success/output/items/error fields", async () => {
@@ -680,7 +1099,7 @@ describe("launchEphemeralThread", () => {
     expect(result).toHaveProperty("success");
     expect(result).toHaveProperty("error");
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/no SDK available|claude|codex|copilot/i);
+    expect(result.error).toMatch(/no SDK available|claude|codex|copilot|opencode/i);
   });
 
   it("returns error when SDK is not available", async () => {
@@ -857,6 +1276,175 @@ describe("launchEphemeralThread", () => {
     expect(result.sdk).toBe("copilot");
     expect(result.error).toBeNull();
     expect(result.output).toContain("copilot-output");
+  });
+
+  it("fails openai-native launches that never emit a first event", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("openai-native");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores non-meaningful openai-native lifecycle events when waiting for the first event", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          execOptions.onEvent?.({
+            type: "session.stream.start",
+            sessionId: "test-native-session",
+            responseId: "resp-start-only",
+          });
+          execOptions.onEvent?.({
+            type: "session.turn.start",
+            sessionId: "test-native-session",
+            model: "gpt-test",
+            apiStyle: "responses",
+          });
+          execOptions.onEvent?.({
+            type: "session.compaction",
+            sessionId: "test-native-session",
+            strategy: "proactive",
+            removedCount: 1,
+            checkpointAdded: false,
+            newMessageCount: 1,
+          });
+          execOptions.onEvent?.({
+            type: "session.stream.complete",
+            sessionId: "test-native-session",
+            text: "",
+          });
+          execOptions.onEvent?.({
+            type: "session.step.finish",
+            sessionId: "test-native-session",
+            toolCalls: [],
+            toolResults: [],
+          });
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      2100,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("openai-native");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+  });
+
+  it("injects delegated Azure providerConfig apiKey into openai-native launcher env", async () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.AZURE_OPENAI_API_KEY;
+
+    const createExecutionSession = vi.fn(() => ({
+      runTurn: vi.fn(async () => ({
+        finalResponse: "native-output",
+        items: [],
+      })),
+    }));
+    mockCreateProviderKernel.mockReturnValue({
+      createExecutionSession,
+    });
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        sdk: "openai-native",
+        disableFallback: true,
+        taskKey: "workflow-openai-native-provider-config-env",
+        provider: "azure-openai-responses",
+        providerConfig: {
+          provider: "azure-openai-responses",
+          providerId: "azure-openai-responses",
+          endpoint: "https://example-resource.openai.azure.com/openai/v1",
+          deployment: "https://example-resource.openai.azure.com/openai/v1",
+          apiVersion: "2024-12-01-preview",
+          apiKey: "azure-secret",
+          model: "gpt-5.4",
+          credentials: {
+            sources: {
+              apiKey: "AZURE_OPENAI_API_KEY",
+            },
+          },
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("openai-native");
+    expect(mockCreateProviderKernel).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        AZURE_OPENAI_API_KEY: "azure-secret",
+      }),
+    }));
+    expect(createExecutionSession).toHaveBeenCalledWith(expect.objectContaining({
+      selectionId: "azure-openai-responses",
+      sessionId: "workflow-openai-native-provider-config-env",
+      threadId: "workflow-openai-native-provider-config-env",
+      providerConfig: expect.objectContaining({
+        apiKey: "azure-secret",
+      }),
+    }));
   });
 
   it("skips a cooled-down SDK after timeout and retries it after cooldown expiry", async () => {
@@ -1124,7 +1712,7 @@ describe("launchEphemeralThread", () => {
     expect(result.error).toMatch(/enoent/i);
     expect(result.attempts).toBe(1);
     expect(mockCodexStartThread).toHaveBeenCalledTimes(1);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("bypasses primary prerequisite gate during cooldown when no fallback SDK is eligible", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1483,6 +2071,37 @@ describe("launchEphemeralThread", () => {
     );
   });
 
+  it("surfaces copilot first-event aborts with the first-event timeout instead of the full task timeout", async () => {
+    process.env.__MOCK_COPILOT_AVAILABLE = "1";
+    process.env.GITHUB_TOKEN = "test-token";
+    process.env.CODEX_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("copilot");
+
+    const externalAbortController = new AbortController();
+    mockCopilotCreateSession.mockImplementation(() => ({
+      send: async () => await new Promise(() => {}),
+      on: () => () => {},
+    }));
+    setTimeout(() => externalAbortController.abort("first_event_timeout"), 25);
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+      {
+        abortController: externalAbortController,
+        disableFallback: true,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.sdk).toBe("copilot");
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(result.error).toMatch(/no events received within \d+ms/i);
+    expect(result.error).not.toMatch(/after 5000ms waiting for session\.idle/i);
+  });
+
   it("prefers session.send over sendAndWait when both are available", async () => {
     process.env.__MOCK_COPILOT_AVAILABLE = "1";
     process.env.CODEX_SDK_DISABLED = "1";
@@ -1532,6 +2151,49 @@ describe("launchEphemeralThread", () => {
     expect(sendAndWait).not.toHaveBeenCalled();
   });
 
+  it("accepts Copilot raw-send output after turn end even when session.idle never arrives", async () => {
+    process.env.__MOCK_COPILOT_AVAILABLE = "1";
+    process.env.CODEX_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("copilot");
+
+    let listeners = [];
+    mockCopilotCreateSession.mockImplementation(() => ({
+      send: async () => {
+        setTimeout(() => {
+          for (const cb of listeners) {
+            cb({ type: "assistant.turn_start", data: { turnId: "0" } });
+            cb({
+              type: "assistant.message",
+              data: {
+                content: "",
+                reasoningText: "Done. No additional code changes were required.",
+              },
+            });
+            cb({ type: "assistant.turn_end", data: { turnId: "0" } });
+          }
+        }, 0);
+      },
+      on: (cb) => {
+        listeners.push(cb);
+        return () => {
+          listeners = listeners.filter((x) => x !== cb);
+        };
+      },
+    }));
+
+    const result = await launchEphemeralThread(
+      "test prompt",
+      process.cwd(),
+      5000,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.sdk).toBe("copilot");
+    expect(result.output).toContain("Done. No additional code changes were required.");
+    expect(result.error).toBeNull();
+  });
+
   it("applies explicit extra.model to Copilot session config", async () => {
     process.env.__MOCK_COPILOT_AVAILABLE = "1";
     process.env.CODEX_SDK_DISABLED = "1";
@@ -1558,6 +2220,32 @@ describe("launchEphemeralThread", () => {
         model: "gpt-5.3-codex",
       }),
     );
+  });
+
+  it("passes PowerShell and convergence guidance in the Copilot system message", async () => {
+    process.env.__MOCK_COPILOT_AVAILABLE = "1";
+    process.env.CODEX_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("copilot");
+
+    mockCopilotCreateSession.mockImplementation(() => ({
+      send: async () => {},
+      on: (cb) => {
+        cb({ type: "assistant.message", data: { content: "ok" } });
+        cb({ type: "session.idle" });
+        return () => {};
+      },
+    }));
+
+    await launchEphemeralThread("test prompt", process.cwd(), 5000, {
+      sdk: "copilot",
+    });
+
+    const [sessionConfig] = mockCopilotCreateSession.mock.calls.at(-1) || [];
+    expect(sessionConfig?.systemMessage?.content).toMatch(/Windows PowerShell/i);
+    expect(sessionConfig?.systemMessage?.content).toMatch(/do not use Unix utilities like head\/tail\/grep/i);
+    expect(sessionConfig?.systemMessage?.content).toMatch(/Git worktrees, `.git` may be a file/i);
+    expect(sessionConfig?.systemMessage?.content).toMatch(/return a compact final status/i);
   });
 
   it("uses COPILOT_MODEL env when extra.model is not provided", async () => {
@@ -1632,7 +2320,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/timeout after 80ms/i);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("does not apply monitor timeout bounds to non-monitor task keys", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1667,7 +2355,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/timeout after 25ms/i);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
 
   it("strips optional OpenAI organization and project headers from Codex SDK env", async () => {
@@ -1732,7 +2420,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("no events received within 1000ms");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("does not throw when using default codex stream safety constants", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1764,7 +2452,7 @@ describe("launchOrResumeThread", () => {
 
     expect(result.success).toBe(true);
     expect(result.output).toContain("stream ok");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("caps and truncates stored codex stream items", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1811,7 +2499,95 @@ describe("launchOrResumeThread", () => {
     expect(result.items.length).toBe(2);
     expect(result.items[0].aggregated_output).toContain("…truncated");
     expect(result.items[1]).toMatchObject({ type: "stream_notice" });
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("continues managed harness sessions using stored session metadata", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("managed-thread-1", "first output"),
+    );
+    mockCodexResumeThread.mockImplementationOnce((threadId) =>
+      makeCodexMockThread(threadId || "managed-thread-1", "continued output"),
+    );
+
+    const first = await launchOrResumeThread("first task turn", process.cwd(), 5000, {
+      taskKey: "task-continue-1",
+      sessionId: "managed-session-1",
+      sessionScope: "workflow-task",
+      sessionType: "task",
+      sdk: "codex",
+      metadata: {
+        workflowId: "workflow-1",
+      },
+    });
+
+    expect(first.success).toBe(true);
+
+    const resumed = await continueSession("managed-session-1", "continue the task", {
+      timeout: 5000,
+    });
+
+    expect(resumed.success).toBe(true);
+    expect(mockCodexResumeThread).toHaveBeenCalledWith(
+      "managed-thread-1",
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(getThreadRecord("task-continue-1")).toEqual(expect.objectContaining({
+      threadId: "managed-thread-1",
+      sdk: "codex",
+      alive: true,
+    }));
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not throw when a managed session controller is asked to continue without a prompt", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    const sessionManagerMod = await import("../agent/session-manager.mjs");
+    const sessionManager = sessionManagerMod.getBosunSessionManager();
+    let noPromptResult = null;
+
+    mockCodexStartThread.mockImplementationOnce(() =>
+      ({
+        id: "managed-thread-no-prompt",
+        runStreamed: async () => ({
+          events: {
+            async *[Symbol.asyncIterator]() {
+              const controller = sessionManager.getSessionController("managed-session-no-prompt");
+              noPromptResult = controller ? await controller.run({}) : null;
+              yield {
+                type: "item.completed",
+                item: { type: "agent_message", text: "first output" },
+              };
+            },
+          },
+        }),
+      }),
+    );
+
+    const first = await launchOrResumeThread("first task turn", process.cwd(), 5000, {
+      taskKey: "task-no-prompt-continue",
+      sessionId: "managed-session-no-prompt",
+      sessionScope: "workflow-task",
+      sessionType: "task",
+      sdk: "codex",
+    });
+
+    expect(first.success).toBe(true);
+    expect(noPromptResult).toEqual(expect.objectContaining({
+      sessionId: "managed-session-no-prompt",
+    }));
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("drops poisoned codex thread metadata when resume state is corrupted", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1862,7 +2638,7 @@ describe("launchOrResumeThread", () => {
     expect(record).toBeTruthy();
     expect(record.threadId).toBeNull();
     expect(record.alive).toBe(false);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("drops stale codex thread metadata when resume times out", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1916,7 +2692,7 @@ describe("launchOrResumeThread", () => {
     expect(record).toBeTruthy();
     expect(record.threadId).toBeNull();
     expect(record.alive).toBe(false);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("invalidateThreadAsync prevents reuse of an existing thread", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -1962,7 +2738,7 @@ describe("launchOrResumeThread", () => {
     expect(second.resumed).toBe(false);
     expect(second.threadId).toBe("thread-2");
     expect(mockCodexResumeThread).not.toHaveBeenCalled();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("uses persistent Copilot session IDs without carrying stale Codex thread IDs", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2024,7 +2800,7 @@ describe("launchOrResumeThread", () => {
     expect(emittedLogs).toContain("resuming Copilot session");
     expect(mockCopilotResumeSession).toHaveBeenCalledTimes(1);
     logSpy.mockRestore();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("persists and resumes Claude session IDs", async () => {
     process.env.__MOCK_CLAUDE_AVAILABLE = "1";
@@ -2069,7 +2845,178 @@ describe("launchOrResumeThread", () => {
     expect(emittedLogs).toContain("resuming Claude session");
     expect(mockClaudeQuery).toHaveBeenCalledTimes(2);
     logSpy.mockRestore();
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("persists and resumes OpenCode session IDs", async () => {
+    process.env.__MOCK_OPENCODE_AVAILABLE = "1";
+    const taskKey = "monitor-monitor-opencode";
+
+    mockOpencodeExec
+      .mockResolvedValueOnce({
+        finalResponse: "open-code first run",
+        items: [],
+        usage: null,
+      })
+      .mockResolvedValueOnce({
+        finalResponse: "open-code resumed run",
+        items: [],
+        usage: null,
+      });
+
+    const first = await launchOrResumeThread(
+      "initial prompt",
+      process.cwd(),
+      5000,
+      {
+        taskKey,
+        sdk: "opencode",
+      },
+    );
+    expect(first.success).toBe(true);
+    expect(first.threadId).toBe(taskKey);
+    expect(first.resumed).toBe(false);
+
+    const firstRecord = getThreadRecord(taskKey);
+    expect(firstRecord?.sdk).toBe("opencode");
+    expect(firstRecord?.threadId).toBe(taskKey);
+    expect(firstRecord?.alive).toBe(true);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    logSpy.mockClear();
+    const second = await launchOrResumeThread(
+      "follow-up prompt",
+      process.cwd(),
+      5000,
+      {
+        taskKey,
+        sdk: "opencode",
+      },
+    );
+
+    expect(second.success).toBe(true);
+    expect(second.resumed).toBe(true);
+    expect(second.threadId).toBe(taskKey);
+    expect(mockOpencodeExec).toHaveBeenCalledTimes(2);
+    expect(mockOpencodeExec.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        persistent: true,
+        sessionId: taskKey,
+      }),
+    );
+    expect(mockOpencodeExec.mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        persistent: true,
+        sessionId: taskKey,
+      }),
+    );
+    const emittedLogs = logSpy.mock.calls
+      .map((args) => args.join(" "))
+      .join("\n");
+    expect(emittedLogs).toContain("resuming OpenCode session");
+    logSpy.mockRestore();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("registers workflow child sessions in the harness session manager", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("workflow-managed-thread", "managed-session-output"),
+    );
+
+    const sessionManagerMod = await import("../agent/session-manager.mjs");
+    const sessionManager = sessionManagerMod.getBosunSessionManager();
+
+    sessionManager.switchSession("workflow-parent-session", {
+      scope: "workflow-task",
+      sessionType: "task",
+      taskKey: "workflow-parent-session",
+      cwd: process.cwd(),
+    });
+
+    const result = await launchOrResumeThread(
+      "workflow child prompt",
+      process.cwd(),
+      5000,
+      {
+        taskKey: "workflow-task-key",
+        sdk: "codex",
+        sessionId: "workflow-child-session",
+        sessionScope: "workflow-task",
+        parentSessionId: "workflow-parent-session",
+        rootSessionId: "workflow-root-session",
+        metadata: {
+          source: "workflow-run-agent",
+          workflowRunId: "run-200",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(sessionManager.getSession("workflow-child-session")).toMatchObject({
+      sessionId: "workflow-child-session",
+      parentSessionId: "workflow-parent-session",
+      rootSessionId: "workflow-parent-session",
+      metadata: expect.objectContaining({
+        source: "workflow-run-agent",
+        workflowRunId: "run-200",
+      }),
+    });
+    expect(sessionManager.getReplaySnapshot("workflow-child-session")).toEqual(
+      expect.objectContaining({
+        lineage: expect.objectContaining({
+          parentSessionId: "workflow-parent-session",
+        }),
+      }),
+    );
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("finalizes pooled workflow lifecycle through the canonical session manager", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("workflow-managed-thread", "managed-session-output"),
+    );
+
+    const sessionManagerMod = await import("../agent/session-manager.mjs");
+    const sessionManager = sessionManagerMod.getBosunSessionManager();
+
+    const result = await launchOrResumeThread(
+      "workflow managed prompt",
+      process.cwd(),
+      5000,
+      {
+        taskKey: "workflow-managed-task",
+        sdk: "codex",
+        sessionId: "workflow-managed-session",
+        sessionScope: "workflow-task",
+        sessionType: "task",
+        metadata: {
+          source: "workflow-run-agent",
+          workflowRunId: "run-201",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(sessionManager.getSession("workflow-managed-session")).toEqual(
+      expect.objectContaining({
+        sessionId: "workflow-managed-session",
+        status: "completed",
+        activeThreadId: "workflow-managed-thread",
+      }),
+    );
+    expect(sessionManager.getReplayState("workflow-managed-session")).toEqual(
+      expect.objectContaining({
+        sessionId: "workflow-managed-session",
+        resumeFrom: expect.objectContaining({
+          threadId: "workflow-managed-thread",
+          action: "external_execution_completed",
+        }),
+      }),
+    );
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2078,10 +3025,30 @@ describe("launchOrResumeThread", () => {
 
 
 describe("sdk cooldown heuristics", () => {
+  it("does not synthesize explicit Copilot token env vars from the shared GitHub session token", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    const env = __testables.injectGitHubSessionEnv({}, "shared-token");
+    expect(env).toMatchObject({
+      GH_TOKEN: "shared-token",
+      GITHUB_TOKEN: "shared-token",
+    });
+    expect(env.GITHUB_PAT).toBeUndefined();
+    expect(env.COPILOT_CLI_TOKEN).toBeUndefined();
+  });
+
   it("treats 400 model-list failures as fallback-worthy but not cooldown-worthy errors", async () => {
     const { __testables } = await import("../agent/agent-pool.mjs");
     expect(__testables.shouldFallbackForSdkError("Error: Failed to list models: 400")).toBe(true);
     expect(__testables.shouldApplySdkCooldown("Error: Failed to list models: 400")).toBe(false);
+  });
+
+  it("treats resumed no-output placeholders as non-meaningful results", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasMeaningfulRetryResult({
+      success: false,
+      output: "(resumed — no text output)",
+      items: [],
+    })).toBe(false);
   });
 
   it("detects repeated reconnect fingerprints as retry circuit breakers", async () => {
@@ -2106,8 +3073,947 @@ describe("sdk cooldown heuristics", () => {
     expect(classified.shouldBreak).toBe(true);
     expect(classified.blockedReason).toBe("blocked_by_env");
   });
+
+  it("treats session turn and stream completion wrappers as explicit completion signals", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "session.turn.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+      stream: [
+        "session.stream.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+      ],
+      items: [
+        {
+          type: "event",
+          summary: "session.turn.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+        },
+      ],
+    })).toBe(true);
+  });
+
+  it("treats plain terminal summaries as explicit completion signals", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "Done.\n\nStatus\n- Resume-safe node completion checkpointing is implemented.\n- Focused workflow tests pass.",
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "Complete. No additional code changes were required.",
+    })).toBe(true);
+  });
+
+  it("treats structured editor handoffs as explicit completion signals", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "Plan for editor\n\nSummary\n- Existing engine already persists run detail snapshots.\n\nLikely touched files\n- `workflow/workflow-engine.mjs`\n\nCompact editor handoff\n- Add explicit node checkpoints and resume normalization.",
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "Implemented test-first coverage.\n\nValidation run:\n- `node tools/vitest-runner.mjs run tests/workflow-engine.test.mjs` ✅\n\nRepository touched:\n- `bosun` — added workflow-engine regression tests.",
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: [
+        "I only completed the tests-first phase.",
+        "",
+        "What I changed",
+        "- Added a focused workflow-engine test in `tests/workflow-engine.test.mjs`.",
+        "",
+        "What it verifies",
+        "- Retry-from-failed resumes from persisted completed node checkpoints.",
+      ].join("\n"),
+    })).toBe(true);
+  });
+
+  it("treats structured blocked handoffs as explicit completion signals", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: [
+        "blocked: no implementation changes were made in the workspace; current phase did not progress beyond repeated read/search inspection, so the task is not complete.",
+        "",
+        "Completion notes:",
+        "- Repositories touched: none.",
+        "- Why blocked: the delegated session remained analysis-only in this run.",
+      ].join("\n"),
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: [
+        "I'm still blocked on actual execution in this run: the workspace remains unchanged and no implementation/test edits were applied.",
+        "",
+        "State summary:",
+        "- I inspected the likely touchpoints but did not modify files.",
+        "- The session remains blocked from completing this phase.",
+      ].join("\n"),
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: [
+        "blocked: no implementation was applied; workspace remained clean and no files were modified, so the requested checkpoint/resume feature is not completed.",
+        "Reason:",
+        "- I inspected the workflow engine and identified the likely touchpoints.",
+        "- However, no code changes or tests were actually written in this run.",
+        "- `git status --short` returned clean, confirming no modifications were made.",
+        "Repositories touched:",
+        "- none",
+      ].join("\n"),
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: [
+        "blocked: unable to complete implementation in this run because no code changes were applied and the workspace remains clean; only analysis/tests were performed.",
+        "",
+        "What I verified:",
+        "- `tests/workflow-engine.test.mjs` currently passes in focused mode.",
+        "- Existing engine already persists run data, but I still have not applied any implementation changes.",
+      ].join("\n"),
+    })).toBe(true);
+  });
+
+  it("treats lifecycle completion metadata as an explicit completion signal", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      items: [
+        {
+          type: "agent_message",
+          content: "Editor handoff",
+          meta: { lifecycle: "session_turn_complete" },
+        },
+      ],
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: "blocked: tooling in this session is looping/truncating the same inspection calls and still does not expose the required workflow engine sections reliably enough to make safe code changes or verification. No repositories were touched. task_complete",
+    })).toBe(true);
+    expect(__testables.hasExplicitCompletionSignal({
+      summary: [
+        "I’m blocked from safely completing this task in the current turn because I only have partial/truncated file reads.",
+        "What I was able to determine:",
+        "- Node completion currently checkpoints too late.",
+        "Why I’m stopping:",
+        "- The available file reads are truncated at critical sections.",
+      ].join("\n"),
+    })).toBe(true);
+  });
+
+  it("treats raw Copilot assistant payload text as an explicit completion signal", async () => {
+    const { __testables } = await import("../agent/agent-pool.mjs");
+    expect(__testables.hasExplicitCompletionSignal({
+      items: [
+        {
+          type: "assistant.message",
+          data: {
+            content: "",
+            reasoningText: "Done. Validation run:\n- `node tools/vitest-runner.mjs run tests/workflow-engine.test.mjs`",
+          },
+        },
+      ],
+    })).toBe(true);
+  });
 });
 describe("execWithRetry", () => {
+  it("forwards pinSdk to launchOrResumeThread so resolved providers do not fan out to fallback SDKs", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.INTERNAL_EXECUTOR_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+    setPoolSdk("openai-native");
+
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async (_prompt, execOptions = {}) => {
+          await new Promise((_, reject) => {
+            const signal = execOptions?.abortController?.signal;
+            const abortNow = () => {
+              const error = new Error("native turn aborted");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              abortNow();
+              return;
+            }
+            signal?.addEventListener("abort", abortNow, { once: true });
+          });
+        },
+      }),
+    }));
+    mockCodexStartThread.mockImplementationOnce(() =>
+      makeCodexMockThread("unexpected-codex-fallback", "Done."),
+    );
+
+    const result = await execWithRetry("use resolved provider only", {
+      taskKey: "pin-sdk-forwarding-task",
+      cwd: process.cwd(),
+      timeoutMs: 2100,
+      maxRetries: 0,
+      maxContinues: 0,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/first_event_timeout/i);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+    expect(mockCodexStartThread).not.toHaveBeenCalled();
+    expect(mockCodexCtor).not.toHaveBeenCalled();
+  });
+
+  it("continues successful task runs until an explicit completion signal is present", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread("completion-thread", "Implemented parser changes and updated tests."),
+    );
+    mockCodexResumeThread.mockImplementation(() =>
+      makeCodexMockThread("completion-thread", "Completion: parser changes are finished and validated."),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "completion-signal-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(result.continues).toBe(1);
+    expect(mockCodexResumeThread).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("forces a fresh retry after a continuation refusal instead of exhausting the completion-signal budget", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    let startCount = 0;
+    mockCodexStartThread.mockImplementation(() => {
+      startCount += 1;
+      if (startCount === 1) {
+        return makeCodexMockThread(
+          "continuation-refusal-thread",
+          "Implemented parser changes and updated tests.",
+        );
+      }
+      return makeCodexMockThread(
+        "continuation-refusal-thread-fresh",
+        "Completion: parser changes are finished and validated.",
+      );
+    });
+    mockCodexResumeThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "continuation-refusal-thread",
+        "I can help, but I can’t impersonate prior tool execution or silently continue a broken transcript.\n\nAsk me again in a clean turn and I’ll work from the current workspace state only.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "continuation-refusal-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 1,
+      maxContinues: 2,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(3);
+    expect(result.continues).toBe(1);
+    expect(mockCodexResumeThread).toHaveBeenCalledTimes(1);
+    expect(mockCodexStartThread).toHaveBeenCalledTimes(2);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts first-pass success when output includes an explicit completion label", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread("completion-label-thread", "COMPLETED: final validation passed and task is done."),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "completion-label-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts completion events with no assistant text when items include a session.turn.complete handoff", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() => ({
+      id: "completion-event-thread",
+      runStreamed: async () => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "item.completed",
+              item: {
+                type: "event",
+                summary: "session.turn.complete: Compact architect/editor handoff for task `e274fdfc-65a8-44ff-8495-7fa6b1965896`.",
+              },
+            };
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: "",
+              },
+            };
+          },
+        },
+      }),
+    }));
+
+    const result = await execWithRetry("finish planning", {
+      taskKey: "completion-event-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(result.output).toBe("(Agent completed with no text output)");
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("preserves raw lifecycle completion signals even when item compression strips lifecycle metadata", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCompressSessionItems.mockImplementation(async (items = []) =>
+      items.map((item) => {
+        if (!item || typeof item !== "object" || item.type !== "agent_message") {
+          return item;
+        }
+        return {
+          type: item.type,
+          text: item.text,
+        };
+      }),
+    );
+    mockCodexStartThread.mockImplementation(() => ({
+      id: "completion-compression-thread",
+      runStreamed: async () => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: "Implemented parser changes and updated tests.",
+                meta: { lifecycle: "session_turn_complete" },
+              },
+            };
+          },
+        },
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "completion-compression-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 0,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("preserves raw lifecycle completion signals for provider-kernel sessions when item compression strips metadata", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    mockCompressSessionItems.mockImplementation(async (items = []) =>
+      items.map((item) => {
+        if (!item || typeof item !== "object" || item.type !== "agent_message") {
+          return item;
+        }
+        return {
+          type: item.type,
+          text: item.text,
+        };
+      }),
+    );
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn: async () => ({
+          success: true,
+          finalResponse: "Implemented parser changes and updated tests.",
+          items: [
+            {
+              type: "agent_message",
+              text: "Implemented parser changes and updated tests.",
+              meta: { lifecycle: "session_turn_complete" },
+            },
+          ],
+        }),
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-completion-compression-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 0,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.continues).toBe(0);
+    expect(mockCreateProviderKernel).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not continue a provider-kernel run when the first reply is a blocked handoff with repositories touched", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const blockedSummary = [
+      "blocked: no implementation was applied; workspace remained clean and no files were modified, so the requested checkpoint/resume feature is not completed.",
+      "Reason:",
+      "- I inspected the workflow engine and identified the likely touchpoints.",
+      "- However, no code changes or tests were actually written in this run.",
+      "- `git status --short` returned clean, confirming no modifications were made.",
+      "Repositories touched:",
+      "- none",
+    ].join("\n");
+
+    const runTurn = vi.fn().mockResolvedValue({
+      success: true,
+      finalResponse: blockedSummary,
+      items: [
+        {
+          type: "agent_message",
+          text: blockedSummary,
+        },
+      ],
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-blocked-handoff-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts provider-kernel blocked handoffs when a later transport error fires after session.turn.complete", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const blockedSummary = [
+      "I’m not able to complete this task from the current state because the session’s tool flow is repeatedly looping and not reliably progressing through edit/verify/commit.",
+      "",
+      "What I was able to confirm from the inspected code:",
+      "- `workflow/workflow-engine.mjs` already persists active runs at start via `_persistActiveRunState(...)`.",
+      "",
+      "Completion: blocked by session tool/runtime instability and failed context agent deployment",
+    ].join("\n");
+
+    const runTurn = vi.fn(async (_prompt, execOptions = {}) => {
+      execOptions?.onEvent?.({
+        type: "session.stream.complete",
+        text: blockedSummary,
+      });
+      execOptions?.onEvent?.({
+        type: "session.turn.complete",
+        text: blockedSummary,
+      });
+      throw new Error("network error: fetch failed");
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-terminal-error-after-completion-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 1,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain(
+      "Completion: blocked by session tool/runtime instability and failed context agent deployment",
+    );
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not continue a provider-kernel run when a blocked reply says the workspace remains clean with no implementation changes", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const blockedSummary = [
+      "blocked: unable to complete implementation in this run because no code changes were applied and the workspace remains clean; only analysis/tests were performed.",
+      "",
+      "What I verified:",
+      "- `tests/workflow-engine.test.mjs` currently passes in focused mode.",
+      "- Existing engine already persists run data, but I still have not applied any implementation changes.",
+    ].join("\n");
+
+    const runTurn = vi.fn().mockResolvedValue({
+      success: true,
+      finalResponse: blockedSummary,
+      items: [
+        {
+          type: "agent_message",
+          text: blockedSummary,
+        },
+      ],
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-clean-workspace-blocked-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not continue a provider-kernel run when the reply says the current workflow phase is complete", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const phaseSummary = [
+      "I only completed the tests-first phase.",
+      "",
+      "What I changed",
+      "- Added a focused workflow-engine test in `tests/workflow-engine.test.mjs`.",
+      "",
+      "What it verifies",
+      "- Retry-from-failed resumes from persisted completed node checkpoints.",
+    ].join("\n");
+
+    const runTurn = vi.fn().mockResolvedValue({
+      success: true,
+      finalResponse: phaseSummary,
+      items: [
+        {
+          type: "agent_message",
+          text: phaseSummary,
+        },
+      ],
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish tests", {
+      taskKey: "provider-phase-complete-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not continue a provider-kernel run when task_complete is inline with a blocked summary", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const blockedSummary = "blocked: tooling in this session is looping/truncating the same inspection calls and still does not expose the required workflow engine sections reliably enough to make safe code changes or verification. No repositories were touched. task_complete";
+
+    const runTurn = vi.fn().mockResolvedValue({
+      success: true,
+      finalResponse: blockedSummary,
+      items: [
+        {
+          type: "agent_message",
+          text: blockedSummary,
+        },
+      ],
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-inline-task-complete-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not continue a provider-kernel run when a terminal blocked assistant_message only arrives via onEvent", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const blockedSummary = [
+      "blocked: cross-repo dependency",
+      "",
+      "I couldn’t safely continue implementation because the required handler body was not visible in the readable workspace ranges.",
+      "",
+      "Repositories touched:",
+      "- none",
+      "",
+      "task_complete",
+    ].join("\n");
+
+    const runTurn = vi.fn(async (_prompt, execOptions = {}) => {
+      execOptions?.onEvent?.({
+        type: "assistant_message",
+        text: blockedSummary,
+      });
+      return {
+        success: true,
+        finalResponse: "",
+        items: [],
+      };
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-on-event-terminal-blocked-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("blocked: cross-repo dependency");
+    expect(result.output).toContain("task_complete");
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("does not continue a provider-kernel run when the reply starts with I’m blocked", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const blockedSummary = [
+      "I’m blocked from safely completing this task in the current turn because I only have partial/truncated file reads.",
+      "What I was able to determine:",
+      "- Node completion currently checkpoints too late.",
+      "Why I’m stopping:",
+      "- The available file reads are truncated at critical sections.",
+    ].join("\n");
+
+    const runTurn = vi.fn().mockResolvedValue({
+      success: true,
+      finalResponse: blockedSummary,
+      items: [
+        {
+          type: "agent_message",
+          text: blockedSummary,
+        },
+      ],
+    });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-im-blocked-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("forces a fresh retry after provider-kernel transcript-dump refusals instead of looping the same poisoned session", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("openai-native");
+
+    const runTurn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: true,
+        finalResponse: "Implemented parser changes and updated tests.",
+        items: [
+          {
+            type: "agent_message",
+            text: "Implemented parser changes and updated tests.",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        finalResponse:
+          "I’m sorry, but I can’t help with further execution here because the conversation content appears to be a tool-call transcript rather than a stable workspace session, and I don’t have reliable command/file mutation state from it.",
+        items: [
+          {
+            type: "agent_message",
+            text:
+              "I’m sorry, but I can’t help with further execution here because the conversation content appears to be a tool-call transcript rather than a stable workspace session, and I don’t have reliable command/file mutation state from it.",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        finalResponse: "Completion: parser changes are finished and validated.",
+        items: [
+          {
+            type: "agent_message",
+            text: "Completion: parser changes are finished and validated.",
+          },
+        ],
+      });
+    mockCreateProviderKernel.mockImplementation(() => ({
+      createExecutionSession: () => ({
+        runTurn,
+      }),
+    }));
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "provider-transcript-refusal-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 1,
+      maxContinues: 2,
+      sdk: "openai-native",
+      pinSdk: true,
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(3);
+    expect(result.continues).toBe(1);
+    expect(runTurn).toHaveBeenCalledTimes(3);
+    expect(mockCreateProviderKernel).toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts a plain complete-prefixed terminal summary without forcing another continue", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "complete-summary-thread",
+        "Complete. No additional code changes were required.\n\nVerified:\n- Resume-safe node completion checkpointing remains implemented.\n- Focused workflow tests pass.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "complete-summary-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts terminal no-op confirmation summaries without forcing another continue", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "noop-confirm-thread",
+        "Confirmed. No new work remains on this task.\n\nResult\n- The feature is already implemented.\n- The worktree is clean.\n\nNo further action required.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "noop-confirm-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("accepts already-complete verification summaries when multiple no-op indicators are present", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread(
+        "already-complete-thread",
+        "Checked the resumed work: the intended changes are already present in the current branch, and the workspace is clean with no uncommitted diff.\n\nCommit status:\n- No new commit created, because there were no additional changes to commit.\n\nNet result:\n- Task implementation appears already completed on this branch.",
+      ),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "already-complete-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 1,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("preserves legacy behavior when requireCompletionSignal is disabled", async () => {
+    process.env.__MOCK_CODEX_AVAILABLE = "1";
+    process.env.COPILOT_SDK_DISABLED = "1";
+    process.env.CLAUDE_SDK_DISABLED = "1";
+    setPoolSdk("codex");
+
+    mockCodexStartThread.mockImplementation(() =>
+      makeCodexMockThread("legacy-thread", "Implemented parser changes and validated tests."),
+    );
+
+    const result = await execWithRetry("finish implementation", {
+      taskKey: "legacy-no-completion-signal-task",
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      maxRetries: 0,
+      maxContinues: 3,
+      requireCompletionSignal: false,
+      sdk: "codex",
+      abortController: new AbortController(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.continues).toBe(0);
+    expect(mockCodexResumeThread).not.toHaveBeenCalled();
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
   it("retries after timeout without treating the next attempt as externally aborted", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
@@ -2136,7 +4042,23 @@ describe("execWithRetry", () => {
           },
         };
       }
-      return makeCodexMockThread("timeout-thread-second", "recovered-output");
+      return {
+        id: "timeout-thread-second",
+        runStreamed: async () => ({
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "agent_message",
+                  text: "recovered-output",
+                  meta: { lifecycle: "session_turn_complete" },
+                },
+              };
+            },
+          },
+        }),
+      };
     });
 
     const result = await execWithRetry("recover after timeout", {
@@ -2152,7 +4074,7 @@ describe("execWithRetry", () => {
     expect(result.attempts).toBe(2);
     expect(result.error).toBeNull();
     expect(result.output).toContain("recovered-output");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("stops retrying after repeated no-output starts", async () => {
     process.env.__MOCK_CODEX_AVAILABLE = "1";
@@ -2191,7 +4113,7 @@ describe("execWithRetry", () => {
     expect(result.retryCircuitBroken).toBe(true);
     expect(result.blockedReason).toBe("no_output");
     expect(result.attempts).toBe(2);
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2199,6 +4121,16 @@ describe("execWithRetry", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("execPooledPrompt", () => {
+  it("routes task, workflow, delegate, and voice helper sessions through shredding by default", () => {
+    expect(shouldCompressSessionItemsByDefault("task")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("flow")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("delegate")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("voice-delegate")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("voice-workflow-generate")).toBe(true);
+    expect(shouldCompressSessionItemsByDefault("ephemeral")).toBe(false);
+    expect(shouldCompressSessionItemsByDefault("ephemeral", { compressEphemeralItems: true })).toBe(true);
+  });
+
   it("returns finalResponse on failure with error prefix", async () => {
     // Force all SDKs disabled so this path deterministically fails.
     process.env.CODEX_SDK_DISABLED = "1";
@@ -2262,11 +4194,89 @@ describe("execPooledPrompt", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.OPENCODE_SDK_DISABLED = "1";
     resetPoolSdkCache();
 
     const result = await execPooledPrompt("test task");
     expect(result.finalResponse).toMatch(/\[agent-pool error\]|no output/i);
   });
+});
+
+describe("internal harness facade exports", () => {
+  it("creates managed harness sessions through the shared session manager", async () => {
+    const { getBosunSessionManager } = await import("../agent/session-manager.mjs");
+    const session = createInternalHarnessSession({
+      agentId: "bosun-harness",
+      entryStageId: "plan",
+      stages: [{ id: "plan", type: "prompt", prompt: "Plan." }],
+    }, {
+      runId: "pool-run-1",
+      sessionId: "pool-session-1",
+      taskKey: "pool-task-1",
+      dryRun: true,
+    });
+
+    const managed = getBosunSessionManager().getSession("pool-session-1");
+
+    expect(session.sessionId).toBe("pool-session-1");
+    expect(managed).toEqual(expect.objectContaining({
+      sessionId: "pool-session-1",
+      taskKey: "pool-task-1",
+    }));
+    expect(session.runtimeController.getState()).toEqual(expect.objectContaining({
+      runtimeConfig: expect.any(Object),
+      contracts: expect.objectContaining({
+        run: expect.objectContaining({ kind: "bosun-internal-harness-run-contract" }),
+        event: expect.objectContaining({ kind: "bosun-internal-harness-event-contract" }),
+      }),
+    }));
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
+
+  it("runs compiled and source harness profiles through the canonical harness/session path", async () => {
+    const compiledProfile = {
+      agentId: "bosun-harness",
+      name: "Bosun Harness",
+      entryStageId: "plan",
+      taskKey: "pool-task-2",
+      stages: [{ id: "plan", type: "prompt", prompt: "Plan." }],
+      metadata: {},
+    };
+
+    const compiledRun = await runCompiledInternalHarnessProfile(compiledProfile, {
+      runId: "pool-run-2",
+      sessionId: "pool-session-2",
+      taskKey: "pool-task-2",
+      dryRun: true,
+    });
+    const sourceRun = await runInternalHarnessProfile({
+      name: "Bosun Harness Source",
+      entryStageId: "plan",
+      taskKey: "pool-task-3",
+      stages: [{ id: "plan", type: "prompt", prompt: "Plan." }],
+    }, {
+      runId: "pool-run-3",
+      sessionId: "pool-session-3",
+      taskKey: "pool-task-3",
+      dryRun: true,
+    });
+
+    expect(compiledRun.result).toEqual(expect.objectContaining({
+      success: true,
+      status: "completed",
+    }));
+    expect(compiledRun.getSessionRecord()).toEqual(expect.objectContaining({
+      sessionId: "pool-session-2",
+      taskKey: "pool-task-2",
+    }));
+    expect(sourceRun.result).toEqual(expect.objectContaining({
+      success: true,
+      status: "completed",
+    }));
+    expect(sourceRun.getSessionRecord()).toEqual(expect.objectContaining({
+      sessionId: "pool-session-3",
+      taskKey: "pool-task-3",
+    }));
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2282,7 +4292,7 @@ describe("resolution and launch integration", () => {
     setPoolSdk("claude");
     const result = await launchEphemeralThread("test", process.cwd(), 5000);
     expect(result.sdk).toBe("claude");
-  });
+  }, SLOW_AGENT_POOL_TEST_TIMEOUT_MS);
 
   it("env var change after resetPoolSdkCache is picked up", async () => {
     process.env.AGENT_POOL_SDK = "copilot";
@@ -2306,6 +4316,7 @@ describe("resolution and launch integration", () => {
     process.env.CODEX_SDK_DISABLED = "1";
     process.env.COPILOT_SDK_DISABLED = "1";
     process.env.CLAUDE_SDK_DISABLED = "1";
+    process.env.OPENCODE_SDK_DISABLED = "1";
     resetPoolSdkCache();
 
     const result = await launchEphemeralThread("test", process.cwd(), 5000);
@@ -2315,5 +4326,3 @@ describe("resolution and launch integration", () => {
   });
 });
 }
-
-

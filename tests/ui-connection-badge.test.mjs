@@ -8,6 +8,9 @@ describe("portal websocket connection badge", () => {
 
     expect(apiSource).toContain("wsStatus = signal");
     expect(apiSource).toContain("wsLastReconnectAt = signal");
+    expect(apiSource).toContain("backendReachability = signal");
+    expect(apiSource).toContain("createBackendUnavailableError");
+    expect(apiSource).toContain("scheduleReconnect");
     expect(apiSource).toContain('"connected"');
     expect(apiSource).toContain('"reconnecting"');
     expect(apiSource).toContain('"offline"');
@@ -19,6 +22,9 @@ describe("portal websocket connection badge", () => {
 
     expect(siteApiSource).toContain("export const wsStatus");
     expect(siteApiSource).toContain("export const wsLastReconnectAt");
+    expect(siteApiSource).toContain("export const backendReachability");
+    expect(siteApiSource).toContain("createBackendUnavailableError");
+    expect(siteApiSource).toContain("scheduleReconnect");
     expect(siteApiSource).toContain('"connected"');
     expect(siteApiSource).toContain('"reconnecting"');
     expect(siteApiSource).toContain('"offline"');

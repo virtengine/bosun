@@ -1,0 +1,20 @@
+{
+  "name": "bosun-local",
+  "interface": {
+    "displayName": "Bosun Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "windows-desktop-control",
+      "source": {
+        "source": "local",
+        "path": "./plugins/windows-desktop-control"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -19,6 +19,7 @@ import {
   getQueuedCommands,
   parsePidFileValue,
 } from "../telegram/telegram-sentinel.mjs";
+import { readFileSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cacheDir = resolve(__dirname, "..", ".cache", "test-sentinel");
@@ -55,6 +56,18 @@ describe("telegram-sentinel", () => {
       expect(typeof ensureMonitorRunning).toBe("function");
       expect(typeof getQueuedCommands).toBe("function");
       expect(typeof parsePidFileValue).toBe("function");
+    });
+  });
+
+  describe("harness session continuity", () => {
+    it("pins sentinel primary-agent fallbacks onto stable managed session ids", () => {
+      const source = readFileSync(
+        resolve(process.cwd(), "telegram", "telegram-sentinel.mjs"),
+        "utf8",
+      );
+      expect(source).toContain('sessionId: "sentinel-repair-agent"');
+      expect(source).toContain('sessionId: `sentinel-fallback-${chatId}`');
+      expect(source).toContain('sessionType: "telegram-sentinel"');
     });
   });
 

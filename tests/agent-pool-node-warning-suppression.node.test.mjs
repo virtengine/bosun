@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const source = readFileSync(resolve(process.cwd(), "agent/agent-pool.mjs"), "utf8");
+const source = readFileSync(resolve(process.cwd(), "agent/agent-launcher.mjs"), "utf8");
 
 describe("agent-pool node warning suppression", () => {
   it("defines applyNodeWarningSuppressionEnv function", () => {
@@ -31,7 +31,7 @@ describe("agent-pool node warning suppression", () => {
   it("applies suppression to Codex/Copilot spawned processes", () => {
     assert.ok(
       source.includes("applyNodeWarningSuppressionEnv"),
-      "applyNodeWarningSuppressionEnv should be called in agent-pool.mjs",
+      "applyNodeWarningSuppressionEnv should be called in agent-launcher.mjs",
     );
   });
 

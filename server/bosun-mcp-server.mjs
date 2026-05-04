@@ -668,13 +668,18 @@ export function listBosunMcpTools() {
       name: "write_file",
       description:
         "Write content to a file, creating it and any missing parent directories if needed. " +
-        "Use for new files or when a complete rewrite is necessary. " +
-        "For editing existing files prefer str_replace_editor.",
+        "Use for new files by default. " +
+        "For editing existing files prefer str_replace_editor or replace_lines. " +
+        "Set overwrite_existing=true only for an intentional full-file rewrite.",
       inputSchema: {
         type: "object",
         properties: {
           path: { type: "string", description: "Absolute or workspace-relative file path." },
           content: { type: "string", description: "Full file content to write." },
+          overwrite_existing: {
+            type: "boolean",
+            description: "When true, allows replacing an existing file with the provided full content.",
+          },
           workspace_path: { type: "string", description: "Workspace root for resolving relative paths." },
         },
         required: ["path", "content"],
@@ -1181,6 +1186,14 @@ const BOSUN_TOOL_HANDLERS = {
     const absPath = resolveFilePath(args.path, args.workspace_path);
     const rawContent = String(args.content ?? "");
     const content = repairCommonMojibake(rawContent);
+    const overwriteExisting = args.overwrite_existing === true;
+    const existed = existsSync(absPath);
+    if (existed && !overwriteExisting) {
+      throw new Error(
+        `write_file refuses to overwrite existing file: ${absPath}. ` +
+        "Use str_replace_editor/replace_lines for edits, or pass overwrite_existing=true for an intentional full rewrite.",
+      );
+    }
     const dir = dirname(absPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(absPath, content, "utf8");
@@ -1190,6 +1203,7 @@ const BOSUN_TOOL_HANDLERS = {
       path: absPath,
       bytes_written: Buffer.byteLength(content, "utf8"),
       lines: lineCount,
+      overwritten_existing: existed,
       repairedMojibake: content !== rawContent,
     };
   },

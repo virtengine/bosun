@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import htm from "htm";
-import { Box, Text } from "ink";
+import * as ink from "ink";
 
 import { ANSI_COLORS } from "./constants.js";
 import { buildRateLimitHours, deriveTelemetrySnapshot, renderSparkline } from "./telemetry-helpers.js";
+
+const Box = ink.Box ?? ink.default?.Box;
+const Text = ink.Text ?? ink.default?.Text;
 
 const html = htm.bind(React.createElement);
 const REFRESH_MS = 5000;
