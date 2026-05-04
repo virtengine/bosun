@@ -160,7 +160,7 @@ function buildCodexSdkRuntime(streamProviderOverrides, envInput = process.env, w
 
   if (isAzure) {
     try {
-      const configDefaults = readCodexConfigRuntimeDefaults();
+      const configDefaults = runtimeDefaults;
       const allProviders = configDefaults?.providers || {};
       for (const [sectionName, section] of Object.entries(allProviders)) {
         if (sectionName === providerSectionName) continue;
