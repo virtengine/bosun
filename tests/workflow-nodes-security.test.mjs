@@ -20,6 +20,9 @@ import { execSync } from "node:child_process";
 import { getNodeType } from "../workflow/workflow-nodes.mjs";
 import { getApprovalRequest, resolveApprovalRequest } from "../workflow/approval-queue.mjs";
 import { WorkflowContext } from "../workflow/workflow-engine.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
+
+const CREATE_PR_RUNTIME_TEST_TIMEOUT_MS = testTimeout(30_000);
 
 // -- Helpers ------------------------------------------------------------------
 
@@ -391,7 +394,7 @@ describe("dangerous shell payload containment", () => {
         expect(result.lifecycle).toBe("bosun_managed");
       }
     }
-  }, 30_000);
+  }, CREATE_PR_RUNTIME_TEST_TIMEOUT_MS);
 
   it("action.create_pr adds Bosun provenance labels by default", async () => {
     const nodeType = getNodeType("action.create_pr");
@@ -411,7 +414,7 @@ describe("dangerous shell payload containment", () => {
     expect(String(result.body || "")).toContain("<!-- bosun-created -->");
     expect(String(result.body || "")).toContain("Bosun-Origin: created");
     expect(result.autoMerge?.enabled).toBe(false);
-  }, 30_000);
+  }, CREATE_PR_RUNTIME_TEST_TIMEOUT_MS);
 
   it("returns autoMerge metadata when auto-merge is enabled in test runtime", async () => {
     const nodeType = getNodeType("action.create_pr");
@@ -429,7 +432,7 @@ describe("dangerous shell payload containment", () => {
     expect(result.autoMerge?.attempted).toBe(false);
     expect(result.autoMerge?.reason).toBe("test_runtime_skip");
     expect(result.autoMerge?.method).toBe("rebase");
-  }, 30_000);
+  }, CREATE_PR_RUNTIME_TEST_TIMEOUT_MS);
 });
 
 describe("action.run_command env interpolation", () => {
