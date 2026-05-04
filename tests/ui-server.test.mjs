@@ -8994,7 +8994,6 @@ describeUiServer("ui-server mini app", () => {
           live: 0,
           completed: 1,
           total: 1,
-          completed: 1,
         }),
         context: expect.objectContaining({
           liveSessionCount: 0,

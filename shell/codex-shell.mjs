@@ -137,7 +137,7 @@ function buildInjectedSandboxConfig(envInput, workingDirectory) {
 function buildCodexSdkRuntime(streamProviderOverrides, envInput = process.env, workingDirectory = DEFAULT_WORKING_DIRECTORY) {
   const resolved = resolveCodexProfileRuntime(envInput);
   const { env: resolvedEnv, configProvider } = resolved;
-  const runtimeDefaults = readCodexConfigRuntimeDefaults(envInput) || {};
+  const runtimeDefaults = readCodexConfigRuntimeDefaults(envInput);
   const baseUrl = resolvedEnv.OPENAI_BASE_URL || "";
   const isAzure = isAzureOpenAIBaseUrl(baseUrl);
   const hasCustomBaseUrl = Boolean(String(baseUrl || "").trim());

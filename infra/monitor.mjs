@@ -14859,12 +14859,10 @@ async function syncDivergedWorktrees() {
       );
 
       // Merge local with remote tracking ref to incorporate remote commits
-      let merged = false;
       try {
         await execAsync(`git merge --no-edit ${remoteRef}`, {
           cwd: wtPath, timeout: 60_000,
         });
-        merged = true;
       } catch (mergeErr) {
         console.warn(
           `[monitor:worktree-sync] ${branch} merge conflict — skipping push: ${mergeErr.message?.slice(0, 200)}`,
