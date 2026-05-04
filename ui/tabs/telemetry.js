@@ -32,13 +32,13 @@ import {
   loadRetryQueue,
   retryQueueData,
   scheduleRefresh,
-} from "../../../ui/modules/state.js";
+} from "../modules/state.js";
 import {
   Card as LegacyCard, EmptyState, Badge,
-} from "../../../ui/components/shared.js";
+} from "../components/shared.js";
 import {
   buildRepoAreaContentionViewModel,
-} from "../../../ui/modules/repo-area-contention.js";
+} from "../modules/repo-area-contention.js";
 
 // ── Colour palettes ──────────────────────────────────────────────────────────
 

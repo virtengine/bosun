@@ -15,9 +15,9 @@ function h(type, ...args) {
 
 const html = htm.bind(h);
 
-import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
-import { apiFetch } from "../../../ui/modules/api.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { haptic, showConfirm } from "../modules/telegram.js";
+import { apiFetch } from "../modules/api.js";
+import { iconText, resolveIcon } from "../modules/icon-utils.js";
 import {
   worktreeData,
   sharedWorkspaces,
@@ -27,23 +27,24 @@ import {
   refreshTab,
   runOptimistic,
   scheduleRefresh,
-} from "../../../ui/modules/state.js";
-import { cloneValue, formatRelative, formatBytes, downloadFile } from "../../../ui/modules/utils.js";
-import { buildWorktreeRecoveryViewModel } from "../../../ui/modules/worktree-recovery.js";
+} from "../modules/state.js";
+import { ICONS } from "../modules/icons.js";
+import { cloneValue, formatRelative, formatBytes, downloadFile } from "../modules/utils.js";
+import { buildWorktreeRecoveryViewModel } from "../modules/worktree-recovery.js";
 import {
   Card as LegacyCard,
   Badge as LegacyBadge,
   StatCard,
   SkeletonCard,
   EmptyState,
-} from "../../../ui/components/shared.js";
-import { ProgressBar } from "../../../ui/components/charts.js";
-import { Collapsible } from "../../../ui/components/forms.js";
+} from "../components/shared.js";
+import { ProgressBar } from "../components/charts.js";
+import { Collapsible } from "../components/forms.js";
 import {
   workspaces as managedWorkspaces,
   activeWorkspaceId,
   loadWorkspaces as loadManagedWorkspaces,
-} from "../../../ui/components/workspace-switcher.js";
+} from "../components/workspace-switcher.js";
 import {
   Typography, Box, Stack, Card, CardContent, CardHeader, CardActions,
   Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment,

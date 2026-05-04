@@ -61,19 +61,23 @@ export function DonutChart({ segments = [], size = 120, strokeWidth = 12 }) {
         width=${size}
         height=${size}
         viewBox="0 0 ${size} ${size}"
-        style="transform: rotate(-90deg); display: block; margin: 0 auto"
+        style="display: block; margin: 0 auto"
       >
-        <!-- Background track -->
-        <circle
-          cx=${cx}
-          cy=${cy}
-          r=${r}
-          fill="none"
-          stroke="var(--bg-secondary, #2a2a3e)"
-          stroke-width=${strokeWidth}
-          opacity="0.3"
-        />
-        ${arcs}
+        <!-- Arcs are rotated -90° so they start at the 12 o'clock position.
+             The centered total text stays upright by living outside this group. -->
+        <g transform="rotate(-90 ${cx} ${cy})">
+          <!-- Background track -->
+          <circle
+            cx=${cx}
+            cy=${cy}
+            r=${r}
+            fill="none"
+            stroke="var(--bg-secondary, #2a2a3e)"
+            stroke-width=${strokeWidth}
+            opacity="0.3"
+          />
+          ${arcs}
+        </g>
         <text
           x=${cx}
           y=${cy}

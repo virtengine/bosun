@@ -854,7 +854,7 @@
     await importMapPromise;
     url = (await resolve(url, parentUrl)).r;
 
-    // we mock import('../../../ui/vendor/x.css', { with: { type: 'css' }}) support via an inline static reexport
+    // we mock import('./x.css', { with: { type: 'css' }}) support via an inline static reexport
     // because we can't syntactically pass through to dynamic import with a second argument
     if (sourceType === 'css' || sourceType === 'json') {
       // Direct reexport for hot reloading skipped due to Firefox bug https://bugzilla.mozilla.org/show_bug.cgi?id=1965620
@@ -910,7 +910,7 @@
     }
   };
 
-  const urlJsString = url => `'${String(url).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  const urlJsString = url => `'${url.replace(/'/g, "\\'")}'`;
 
   let resolvedSource, lastIndex;
   const pushStringTo = (load, originalIndex, dynamicImportEndStack) => {

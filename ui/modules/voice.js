@@ -11,8 +11,8 @@
 import { h } from "preact";
 import { useState, useEffect, useRef, useCallback } from "preact/hooks";
 import htm from "htm";
-import { haptic } from "../../../ui/modules/telegram.js";
-import { resolveIcon } from "../../../ui/modules/icon-utils.js";
+import { haptic } from "./telegram.js";
+import { resolveIcon } from "./icon-utils.js";
 import { IconButton } from "@mui/material";
 
 const html = htm.bind(h);

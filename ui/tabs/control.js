@@ -15,10 +15,10 @@ function h(type, ...args) {
 
 const html = htm.bind(h);
 
-import { Typography, Box, Stack, Card as MuiCard, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Avatar, LinearProgress, Grid, Slider, Select } from "@mui/material";
+import { Typography, Box, Stack, Card as MuiCard, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge as MuiBadge, Avatar, LinearProgress, Grid, Slider, Select } from "@mui/material";
 
-import { haptic, showConfirm } from "../../../ui/modules/telegram.js";
-import { apiFetch, sendCommandToChat } from "../../../ui/modules/api.js";
+import { haptic, showConfirm } from "../modules/telegram.js";
+import { apiFetch, sendCommandToChat } from "../modules/api.js";
 import {
   executorData,
   configData,
@@ -26,19 +26,22 @@ import {
   showToast,
   runOptimistic,
   scheduleRefresh,
-} from "../../../ui/modules/state.js";
-import { ICONS } from "../../../ui/modules/icons.js";
-import { iconText as iconTextUtil } from "../../../ui/modules/icon-utils.js";
-import { cloneValue, truncate } from "../../../ui/modules/utils.js";
-import { SegmentedControl, Collapsible } from "../../../ui/components/forms.js";
-import { Card } from "../../../ui/components/shared.js";
-import { WorkspaceExecutorSettingsFields } from "../../../ui/components/workspace-executor-settings.js";
+} from "../modules/state.js";
+import { ICONS } from "../modules/icons.js";
+import { iconText as iconTextUtil } from "../modules/icon-utils.js";
+import { cloneValue, truncate } from "../modules/utils.js";
+import { SegmentedControl, Collapsible } from "../components/forms.js";
+import { Card, Badge, SkeletonCard } from "../components/shared.js";
+import { WorkspaceExecutorSettingsFields } from "../components/workspace-executor-settings.js";
 import {
   activeWorkspaceId,
   loadWorkspaces,
   setWorkspaceExecutors,
   workspaces as managedWorkspaces,
-} from "../../../ui/components/workspace-switcher.js";
+} from "../components/workspace-switcher.js";
+import { sessionsData, selectedSessionId } from "../components/session-list.js";
+import { getSessionLifecycleState, getSessionRuntimeState } from "../modules/session-api.js";
+import { getSessionPhaseState } from "../modules/session-surface.js";
 
 /* ─── Command registry for autocomplete ─── */
 const CMD_REGISTRY = [
@@ -109,6 +112,8 @@ export function ControlTab() {
   const execData = executor?.data;
   const mode = executor?.mode || "internal";
   const config = configData.value;
+  const visibleSessions = sessionsData.value || [];
+  const selectedOperatorSessionId = String(selectedSessionId.value || "").trim();
   const activeWorkspace = (managedWorkspaces.value || []).find(
     (entry) => String(entry?.id || "").trim() === String(activeWorkspaceId.value || "").trim(),
   ) || null;
@@ -182,6 +187,48 @@ export function ControlTab() {
     || workspacePool !== String(workspaceExecutors?.pool || "shared")
     || Math.abs(Number(workspaceWeight || 1) - Number(workspaceExecutors?.weight || 1)) > 0.001
   );
+  const sessionPhaseModel = useMemo(() => {
+    const workspaceId = String(activeWorkspace?.id || activeWorkspaceId.value || "").trim();
+    const sessions = (Array.isArray(visibleSessions) ? visibleSessions : [])
+      .filter(Boolean)
+      .filter((session) => {
+        if (!workspaceId) return true;
+        const metadata = session?.metadata && typeof session.metadata === "object"
+          ? session.metadata
+          : {};
+        const sessionWorkspaceId = String(session?.workspaceId || metadata.workspaceId || "").trim();
+        return !sessionWorkspaceId || sessionWorkspaceId === workspaceId;
+      })
+      .slice()
+      .sort((a, b) =>
+        String(b?.lastActiveAt || b?.runtimeUpdatedAt || b?.updatedAt || b?.createdAt || "")
+          .localeCompare(String(a?.lastActiveAt || a?.runtimeUpdatedAt || a?.updatedAt || a?.createdAt || "")),
+      );
+
+    const focusSession =
+      sessions.find((session) => String(session?.id || "").trim() === selectedOperatorSessionId)
+      || sessions[0]
+      || null;
+    const focusPhase = getSessionPhaseState(focusSession);
+    const focusLifecycle = getSessionLifecycleState(focusSession || {});
+    const focusRuntime = getSessionRuntimeState(focusSession || {});
+    const counts = new Map();
+    for (const session of sessions) {
+      const phase = getSessionPhaseState(session);
+      counts.set(phase.id, {
+        phase,
+        count: Number(counts.get(phase.id)?.count || 0) + 1,
+      });
+    }
+    return {
+      sessions,
+      focusSession,
+      focusPhase,
+      focusLifecycle,
+      focusRuntime,
+      counts: [...counts.values()].sort((a, b) => b.count - a.count || a.phase.label.localeCompare(b.phase.label)),
+    };
+  }, [activeWorkspace?.id, visibleSessions, selectedOperatorSessionId]);
 
   /* ── Load persistent history on mount ── */
   useEffect(() => {
@@ -720,6 +767,80 @@ export function ControlTab() {
             </div>
           </div>
 
+          <${Paper}
+            variant="outlined"
+            sx=${{
+              mt: 2,
+              p: 1.5,
+              borderRadius: "18px",
+              background: "rgba(255,255,255,0.04)",
+              borderColor: "rgba(255,255,255,0.08)",
+            }}
+          >
+            <div class="card-subtitle">Session Phase</div>
+            <div style=${{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginTop: "0.5rem" }}>
+              <${Chip}
+                size="small"
+                color=${sessionPhaseModel.focusPhase.tone || "default"}
+                label=${sessionPhaseModel.focusPhase.label}
+              />
+              <${Chip}
+                size="small"
+                variant="outlined"
+                color=${sessionPhaseModel.focusLifecycle.tone || "default"}
+                label=${sessionPhaseModel.focusLifecycle.label}
+              />
+              <${Chip}
+                size="small"
+                variant="outlined"
+                color=${sessionPhaseModel.focusRuntime.tone || "default"}
+                label=${sessionPhaseModel.focusRuntime.label}
+              />
+              <span class="meta-text">
+                ${sessionPhaseModel.focusSession
+                  ? `Focus: ${truncate(
+                      sessionPhaseModel.focusSession.taskTitle
+                      || sessionPhaseModel.focusSession.title
+                      || sessionPhaseModel.focusSession.id
+                      || "Unnamed session",
+                      56,
+                    )}`
+                  : "No operator sessions are loaded yet."}
+              </span>
+            </div>
+            <div class="meta-text" style=${{ marginTop: "0.5rem" }}>
+              ${sessionPhaseModel.focusPhase.description}
+            </div>
+            <div style=${{
+              display: "grid",
+              gridTemplateColumns: isCompact ? "1fr" : "repeat(2, minmax(0, 1fr))",
+              gap: "0.75rem",
+              marginTop: "0.75rem",
+            }}>
+              <${Paper} variant="outlined" sx=${{ p: 1.25, borderRadius: "14px" }}>
+                <div class="form-label">Prompt Discipline</div>
+                <div class="meta-text">${sessionPhaseModel.focusPhase.promptRule}</div>
+              <//>
+              <${Paper} variant="outlined" sx=${{ p: 1.25, borderRadius: "14px" }}>
+                <div class="form-label">Tool Discipline</div>
+                <div class="meta-text">${sessionPhaseModel.focusPhase.toolRule}</div>
+              <//>
+            </div>
+            <div style=${{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
+              ${sessionPhaseModel.counts.length > 0
+                ? sessionPhaseModel.counts.map((entry) => html`
+                    <${Chip}
+                      key=${entry.phase.id}
+                      size="small"
+                      variant="outlined"
+                      color=${entry.phase.tone || "default"}
+                      label=${`${entry.phase.label} ${entry.count}`}
+                    />
+                  `)
+                : html`<span class="meta-text">Load or create a session to populate live phase counts.</span>`}
+            </div>
+          <//>
+
           <div class="control-range">
             <div class="form-label mt-sm">Max parallel tasks</div>
             <div class="range-row mb-md">
@@ -1078,7 +1199,7 @@ export function ControlTab() {
               size="small"
               sx=${{ mt: 1 }}
               onClick=${() => {
-                import("../../../ui/modules/router.js").then(({ navigateTo }) => navigateTo("settings"));
+                import("../modules/router.js").then(({ navigateTo }) => navigateTo("settings"));
               }}
             >
               Open Settings
@@ -1130,7 +1251,7 @@ export function ControlTab() {
                 class="quick-commands-link"
                 onClick=${(e) => {
                   e.preventDefault();
-                  import("../../../ui/modules/router.js").then(({ navigateTo }) => navigateTo("logs"));
+                  import("../modules/router.js").then(({ navigateTo }) => navigateTo("logs"));
                 }}
               >Open Logs tab →</a>
             </div>

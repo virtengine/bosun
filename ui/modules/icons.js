@@ -3,7 +3,7 @@
  *  SVG icons as htm tagged template literals
  * ────────────────────────────────────────────────────────────── */
 
-import { h as _h } from "preact";
+import { cloneElement, h as _h } from "preact";
 import htm from "htm";
 
 /* Guard: recover forwardRef objects that leak as element type */
@@ -15,6 +15,7 @@ function h(type, ...args) {
 }
 
 const html = htm.bind(h);
+const DEFAULT_ICON_SIZE = "1em";
 
 /**
  * All SVG icons share these base attributes:
@@ -23,7 +24,7 @@ const html = htm.bind(h);
  *
  * Icon size is controlled exclusively by CSS (.icon-inline svg sets width/height).
  */
-export const ICONS = {
+const RAW_ICONS = {
   /* ── Brand ── */
   bosun: html`<svg
     viewBox="0 0 24 24"
@@ -1071,4 +1072,19 @@ export const ICONS = {
     <polygon points="16 8 14 14 8 16 10 10 16 8" />
   </svg>`,
 };
+
+export const ICONS = Object.freeze(
+  Object.fromEntries(
+    Object.entries(RAW_ICONS).map(([name, icon]) => [
+      name,
+      cloneElement(icon, {
+        "aria-hidden": "true",
+        focusable: "false",
+        height: icon?.props?.height || DEFAULT_ICON_SIZE,
+        preserveAspectRatio: icon?.props?.preserveAspectRatio || "xMidYMid meet",
+        width: icon?.props?.width || DEFAULT_ICON_SIZE,
+      }),
+    ]),
+  ),
+);
 

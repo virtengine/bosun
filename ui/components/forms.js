@@ -42,8 +42,8 @@ import {
 
 const PTR_OPT_OUT_SELECTOR = '[data-ptr-ignore="true"], [data-disable-pull-to-refresh="true"]';
 
-import { ICONS } from "../../../ui/modules/icons.js";
-import { haptic } from "../../../ui/modules/telegram.js";
+import { ICONS } from "../modules/icons.js";
+import { haptic } from "../modules/telegram.js";
 
 /* ═══════════════════════════════════════════════
  *  SegmentedControl

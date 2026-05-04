@@ -9,17 +9,17 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { haptic } from "../../../ui/modules/telegram.js";
-import { apiFetch } from "../../../ui/modules/api.js";
+import { haptic } from "../modules/telegram.js";
+import { apiFetch } from "../modules/api.js";
 import {
   showToast,
   refreshTab,
   setPendingChange,
   clearPendingChange,
-} from "../../../ui/modules/state.js";
-import { ICONS } from "../../../ui/modules/icons.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
-import { formatRelative, countChangedFields } from "../../../ui/modules/utils.js";
+} from "../modules/state.js";
+import { ICONS } from "../modules/icons.js";
+import { iconText, resolveIcon } from "../modules/icon-utils.js";
+import { formatRelative, countChangedFields } from "../modules/utils.js";
 import {
   Card as LegacyCard,
   Badge as LegacyBadge,
@@ -29,8 +29,8 @@ import {
   Spinner,
   ListItem as LegacyListItem,
   SaveDiscardBar,
-} from "../../../ui/components/shared.js";
-import { SearchInput, SegmentedControl, Toggle } from "../../../ui/components/forms.js";
+} from "../components/shared.js";
+import { SearchInput, SegmentedControl, Toggle } from "../components/forms.js";
 import {
   Typography, Box, Stack, Card, CardContent, CardHeader, CardActions,
   Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment,
@@ -3030,10 +3030,15 @@ export function LibraryTab() {
   const [importSkills, setImportSkills] = useState(true);
   const [importPrompts, setImportPrompts] = useState(true);
   const [importTools, setImportTools] = useState(true);
+  const isMountedRef = useRef(true);
+  const loadEntriesRequestRef = useRef(0);
 
   // Load all entries on mount and type/search changes
   const loadEntries = useCallback(async () => {
-    setLoading(true);
+    const requestId = ++loadEntriesRequestRef.current;
+    if (isMountedRef.current) {
+      setLoading(true);
+    }
     try {
       if (!importAgents && !importPrompts && !importSkills && !importTools) {
         throw new Error("Select at least one import type");
@@ -3042,14 +3047,20 @@ export function LibraryTab() {
         fetchEntries(filterType.value),
         apiFetch("/api/library").then((res) => res?.data || []),
       ]);
+      if (!isMountedRef.current || requestId !== loadEntriesRequestRef.current) return;
       entries.value = filteredEntries;
       allEntries.value = globalEntries;
       initialized.value = globalEntries.length > 0;
     } catch (err) {
-      showToast("Failed to load library: " + err.message, "error");
+      if (isMountedRef.current && requestId === loadEntriesRequestRef.current) {
+        showToast("Failed to load library: " + err.message, "error");
+      }
+    } finally {
+      if (isMountedRef.current && requestId === loadEntriesRequestRef.current) {
+        setLoading(false);
+      }
     }
-    setLoading(false);
-  }, []);
+  }, [importAgents, importPrompts, importSkills, importTools]);
 
   useEffect(() => { loadEntries(); }, [filterType.value]);
 
@@ -3066,6 +3077,10 @@ export function LibraryTab() {
 
   // Debounced search
   const searchTimer = useRef(null);
+  useEffect(() => () => {
+    isMountedRef.current = false;
+    clearTimeout(searchTimer.current);
+  }, []);
   const handleSearch = useCallback((value) => {
     searchQuery.value = value;
     clearTimeout(searchTimer.current);
