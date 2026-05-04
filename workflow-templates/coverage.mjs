@@ -200,14 +200,16 @@ export const FLOW_CONTROL_SUITE_TEMPLATE = {
   category: "coverage",
   enabled: true,
   trigger: "trigger.manual",
-  description: "Exercises flow-control primitives in a single short workflow: join, while-loop (0 iters), universal dispatch, and meeting finalization.",
+  description: "Exercises flow-control primitives in a single short workflow: approval gate, join, while-loop (0 iters), universal dispatch, and meeting finalization.",
   variables: {
     subWorkflowId: "template-health-check",
     sessionId: "session-flow-test",
     maxLoopIterations: 1,
+    gateReason: "default gate reason",
   },
   nodes: [
     node("trigger",          "trigger.manual",    "Manual Trigger",          {}),
+    node("approval-gate",    "flow.gate",         "Approval Gate",           { mode: "manual", reason: "{{gateReason}}", timeoutMs: 500, onTimeout: "proceed" }),
     node("join",             "flow.join",         "Join Branches",           { mode: "any", sourceNodeIds: [] }),
     node("loop",             "loop.while",        "While Loop",              { condition: "$iteration < 0", maxIterations: "{{maxLoopIterations}}" }),
     node("dispatch1",        "flow.universal",    "Universal Dispatch 1",    { mode: "dispatch", workflowId: "{{subWorkflowId}}" }),
@@ -216,7 +218,8 @@ export const FLOW_CONTROL_SUITE_TEMPLATE = {
     node("done",             "notify.log",        "Done",                    { message: "Flow control suite complete", level: "info" }),
   ],
   edges: [
-    edge("trigger",          "join"),
+    edge("trigger",          "approval-gate"),
+    edge("approval-gate",    "join"),
     edge("join",             "loop"),
     edge("loop",             "dispatch1"),
     edge("dispatch1",        "dispatch2"),

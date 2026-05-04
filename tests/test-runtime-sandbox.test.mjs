@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 const TEST_ENV_KEYS = [
@@ -126,12 +126,13 @@ describe("test runtime sandbox", () => {
       process.env.VITEST = "1";
       await vi.resetModules();
       const runtime = await import("../infra/test-runtime.mjs");
+      const nonTempRepo = resolve(homedir(), "bosun-non-temp-test-repo");
 
       expect(() =>
         runtime.assertSafeGitMutationInTests({
           command: "git",
           args: ["push", "origin", "HEAD"],
-          cwd: process.cwd(),
+          cwd: nonTempRepo,
         }),
       ).toThrow(/blocked destructive git command/i);
 

@@ -679,11 +679,18 @@ const DEFAULT_DELEGATION_WATCHDOG_MAX_RECOVERIES = readBoundedEnvInt(
 );
 
 function resolveNodeTimeoutMs(node, resolvedConfig) {
+  // For gate/approval nodes, `timeoutMs` is the gate's own internal wait
+  // limit (how long to poll for approval), NOT the outer execution timeout.
+  // If we used it as the engine wrapper timeout they would race — the wrapper
+  // would fire at the same instant the gate is trying to return gracefully.
+  // Skip `timeoutMs` for these node types and fall through to the default.
+  const isGateNode = node?.type === "flow.gate" || node?.type === "harness.approval";
+
   const candidates = [
     resolvedConfig?.timeout,
-    resolvedConfig?.timeoutMs,
+    isGateNode ? null : resolvedConfig?.timeoutMs,
     node?.timeout,
-    node?.timeoutMs,
+    isGateNode ? null : node?.timeoutMs,
     NODE_TIMEOUT_MS,
   ];
 

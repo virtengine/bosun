@@ -93,6 +93,27 @@ function createMockServices() {
       return calls.filter((c) => c.service === service && (!method || c.method === method));
     },
 
+    harness: {
+      requestApproval: vi.fn(async (request) => {
+        record("harness", "requestApproval", [request]);
+        const reason = String(request?.reason || "").toLowerCase();
+        if (reason.includes("deny") || reason.includes("block") || reason.includes("fail")) {
+          return {
+            approved: false,
+            status: "denied",
+            decision: "denied",
+            reason: request?.reason || "blocked by test harness",
+          };
+        }
+        return {
+          approved: true,
+          status: "approved",
+          decision: "approved",
+          reason: request?.reason || "approved by test harness",
+        };
+      }),
+    },
+
     kanban: {
       listTasks: vi.fn(async () => {
         record("kanban", "listTasks", []);
@@ -533,6 +554,28 @@ function ensureExperimentalNodeTypes() {
     },
   });
 
+  // Override flow.gate to use harness.requestApproval so tests can control
+  // gate approval/denial via the mock service rather than the real approval queue.
+  registerForE2E("flow.gate", {
+    describe: () => "Approval gate routed through harness.requestApproval (test override)",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx, eng) {
+      const reason = String(ctx.resolve?.(node.config?.reason || "") || node.config?.reason || "Waiting at gate");
+      const harnessService = eng?.services?.harness;
+      if (harnessService?.requestApproval) {
+        const result = await harnessService.requestApproval({ reason, nodeId: node.id });
+        if (result?.approved === false || result?.status === "denied") {
+          const err = new Error(`Gate denied: ${reason}`);
+          err.gateDenied = true;
+          throw err;
+        }
+        return { success: true, passed: true, approved: true, reason };
+      }
+      // No harness service — pass through by default
+      return { success: true, passed: true, reason };
+    },
+  });
+
   // These nodes have real implementations that read/write workflow history and
   // skillbook state. Override them for e2e template coverage so every template
   // executes deterministically inside the tmp test sandbox.
@@ -789,6 +832,32 @@ describe("workflow-templates E2E execution", () => {
 
       expect(ctx).toBeDefined();
       expect(ctx.errors).toEqual([]);
+    });
+  });
+
+  describe("Flow Control Suite (template-flow-control-suite)", () => {
+    it("surfaces a gate failure scenario when approval is denied", async () => {
+      const installed = installTemplate("template-flow-control-suite", engine);
+      const ctx = await engine.execute(installed.id, {
+        gateReason: "deny gate for test",
+      }, { force: true });
+
+      expect(ctx).toBeDefined();
+      expect(ctx.errors.length).toBeGreaterThanOrEqual(1);
+      const requestCalls = mockServices._getCallsFor("harness", "requestApproval");
+      expect(requestCalls.length).toBeGreaterThan(0);
+    });
+
+    it("allows the gate path to pass when approval is granted", async () => {
+      const installed = installTemplate("template-flow-control-suite", engine);
+      const ctx = await engine.execute(installed.id, {
+        gateReason: "approve gate for test",
+      }, { force: true });
+
+      expect(ctx).toBeDefined();
+      expect(ctx.errors).toEqual([]);
+      const requestCalls = mockServices._getCallsFor("harness", "requestApproval");
+      expect(requestCalls.length).toBeGreaterThan(0);
     });
   });
 
