@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createCoverageNodeResult,
   createCoverageStubResult,
   shouldExecuteOriginalForCoverage,
+  shouldStubCoverageGates,
 } from "./sandbox/coverage-report-helpers.mjs";
 
 describe("sandbox coverage report stubs", () => {
@@ -28,5 +30,30 @@ describe("sandbox coverage report stubs", () => {
       stubbedForCoverage: true,
       nodeType: "action.run_command",
     });
+  });
+
+  it("can produce failing in-process gate results", () => {
+    expect(createCoverageNodeResult("flow.gate", {
+      passed: false,
+      reason: "threshold not met",
+      summary: "timeout gate blocked in-process",
+    })).toMatchObject({
+      success: false,
+      passed: false,
+      blocked: true,
+      exitCode: 1,
+      reason: "threshold not met",
+      nodeType: "flow.gate",
+    });
+  });
+
+  it("only enables stubbed gates when BOSUN_STUB_GATES=1", () => {
+    const previous = process.env.BOSUN_STUB_GATES;
+    delete process.env.BOSUN_STUB_GATES;
+    expect(shouldStubCoverageGates()).toBe(false);
+    process.env.BOSUN_STUB_GATES = "1";
+    expect(shouldStubCoverageGates()).toBe(true);
+    if (previous === undefined) delete process.env.BOSUN_STUB_GATES;
+    else process.env.BOSUN_STUB_GATES = previous;
   });
 });

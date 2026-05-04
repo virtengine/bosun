@@ -93,6 +93,27 @@ function createMockServices() {
       return calls.filter((c) => c.service === service && (!method || c.method === method));
     },
 
+    harness: {
+      requestApproval: vi.fn(async (request) => {
+        record("harness", "requestApproval", [request]);
+        const reason = String(request?.reason || "").toLowerCase();
+        if (reason.includes("deny") || reason.includes("block") || reason.includes("fail")) {
+          return {
+            approved: false,
+            status: "denied",
+            decision: "denied",
+            reason: request?.reason || "blocked by test harness",
+          };
+        }
+        return {
+          approved: true,
+          status: "approved",
+          decision: "approved",
+          reason: request?.reason || "approved by test harness",
+        };
+      }),
+    },
+
     kanban: {
       listTasks: vi.fn(async () => {
         record("kanban", "listTasks", []);
@@ -789,6 +810,32 @@ describe("workflow-templates E2E execution", () => {
 
       expect(ctx).toBeDefined();
       expect(ctx.errors).toEqual([]);
+    });
+  });
+
+  describe("Flow Control Suite (template-flow-control-suite)", () => {
+    it("surfaces a gate failure scenario when approval is denied", async () => {
+      const installed = installTemplate("template-flow-control-suite", engine);
+      const ctx = await engine.execute(installed.id, {
+        gateReason: "deny gate for test",
+      }, { force: true });
+
+      expect(ctx).toBeDefined();
+      expect(ctx.errors.length).toBeGreaterThanOrEqual(1);
+      const requestCalls = mockServices._getCallsFor("harness", "requestApproval");
+      expect(requestCalls.length).toBeGreaterThan(0);
+    });
+
+    it("allows the gate path to pass when approval is granted", async () => {
+      const installed = installTemplate("template-flow-control-suite", engine);
+      const ctx = await engine.execute(installed.id, {
+        gateReason: "approve gate for test",
+      }, { force: true });
+
+      expect(ctx).toBeDefined();
+      expect(ctx.errors).toEqual([]);
+      const requestCalls = mockServices._getCallsFor("harness", "requestApproval");
+      expect(requestCalls.length).toBeGreaterThan(0);
     });
   });
 

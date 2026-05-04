@@ -22,8 +22,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 import {
+  createCoverageNodeResult,
   createCoverageStubResult,
   shouldExecuteOriginalForCoverage,
+  shouldStubCoverageGates,
 } from "./coverage-report-helpers.mjs";
 
 // Parse arguments
@@ -170,6 +172,7 @@ for (const type of allRegisteredTypes) {
 }
 
 function instrumentForTemplate(templateId) {
+  const stubCoverageGates = shouldStubCoverageGates();
   for (const type of allRegisteredTypes) {
     const nt = getNodeType(type);
     if (!nt) continue;
@@ -178,6 +181,26 @@ function instrumentForTemplate(templateId) {
       nodeTypeCoverage.get(type)?.add(templateId);
       if (!shouldExecuteOriginalForCoverage(type)) {
         return createCoverageStubResult(type);
+      }
+      if (type === "flow.gate" && stubCoverageGates) {
+        return createCoverageStubResult(type, {
+          summary: "stubbed coverage gate via BOSUN_STUB_GATES=1",
+        });
+      }
+      if (type === "flow.gate") {
+        const [node, ctx] = args;
+        const mode = String(ctx?.resolve?.(node?.config?.mode || "condition") || node?.config?.mode || "condition").toLowerCase();
+        const timeoutMs = Number(ctx?.resolve?.(node?.config?.timeoutMs ?? 0) ?? node?.config?.timeoutMs ?? 0);
+        const onTimeout = String(ctx?.resolve?.(node?.config?.onTimeout || "proceed") || node?.config?.onTimeout || "proceed").toLowerCase();
+        if (mode === "timeout") {
+          const passed = onTimeout !== "fail" || timeoutMs <= 1;
+          return createCoverageNodeResult(type, {
+            passed,
+            blocked: !passed,
+            reason: passed ? "" : `timeout gate failed after ${timeoutMs}ms`,
+            summary: passed ? "timeout gate completed in-process" : "timeout gate blocked in-process",
+          });
+        }
       }
       return orig(...args);
     };
