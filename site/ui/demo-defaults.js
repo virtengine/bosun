@@ -22534,7 +22534,7 @@
           "type": "action.run_agent",
           "label": "Agent Implement",
           "config": {
-            "prompt": "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
+            "prompt": "{{_taskPrompt}}\n\nExecution phase: implementation. Start with the narrowest verification that proves the changed surface. If unrelated baseline reds appear, keep the task scoped to the touched surface instead of thrashing on unrelated reds; note the blocker and say `commit blocked` when required verification for your changes cannot complete because of unrelated failures. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
             "taskId": "{{taskId}}",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",
@@ -45822,7 +45822,7 @@
           "type": "action.run_agent",
           "label": "Agent Implement",
           "config": {
-            "prompt": "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
+            "prompt": "{{_taskPrompt}}\n\nExecution phase: implementation. Start with the narrowest verification that proves the changed surface. If unrelated baseline reds appear, keep the task scoped to the touched surface instead of thrashing on unrelated reds; note the blocker and say `commit blocked` when required verification for your changes cannot complete because of unrelated failures. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
             "taskId": "{{taskId}}",
             "sdk": "{{resolvedSdk}}",
             "model": "{{resolvedModel}}",

@@ -7,7 +7,7 @@ import { h } from "preact";
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
 import { signal, computed, effect } from "@preact/signals";
-import { apiFetch, onWsMessage } from "../modules/api.js";
+import { apiFetch, onWsMessage } from "../../../ui/modules/api.js";
 import {
   buildSessionApiPath,
   classifySessionRequestError,
@@ -23,9 +23,9 @@ import {
   markSessionLoadSuccess,
   resolveSessionWorkspaceHint,
   shouldFallbackToAllSessions,
-} from "../modules/session-api.js";
-import { formatDate, formatRelative, truncate } from "../modules/utils.js";
-import { resolveIcon } from "../modules/icon-utils.js";
+} from "../../../ui/modules/session-api.js";
+import { formatDate, formatRelative, truncate } from "../../../ui/modules/utils.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   List, ListItem, ListItemButton, ListItemText, ListItemIcon,
   ListItemSecondaryAction, Typography, Box, Stack, IconButton,

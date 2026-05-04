@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { resetStateLedgerCache } from "../lib/state-ledger-sqlite.mjs";
 import { WorkflowEngine, resetWorkflowEngine } from "../workflow/workflow-engine.mjs";
 import { registerNodeType } from "../workflow/workflow-nodes.mjs";
 
@@ -32,7 +33,8 @@ describe("WorkflowEngine TUI status events", () => {
 
   afterEach(() => {
     resetWorkflowEngine();
-    rmSync(tmpDir, { recursive: true, force: true });
+    resetStateLedgerCache();
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort on Windows */ }
   });
 
   it("emits workflow:status for run start, node completion, run completion, and run errors", async () => {
@@ -86,6 +88,5 @@ describe("WorkflowEngine TUI status events", () => {
     expect(failureEvents.some((event) => (event.eventType === "run:error" && event.error === "boom") || (event.eventType === "run:end" && event.status === "failed"))).toBe(true);
   });
 });
-
 
 

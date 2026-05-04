@@ -12,11 +12,11 @@ import {
   ensureMicTrackingPatched,
   registerMicStream,
   stopTrackedMicStreams,
-} from "./mic-track-registry.js";
+} from "../../../ui/modules/mic-track-registry.js";
 import {
   shouldAutoBargeIn,
   shouldAutoBargeInFromMicLevel,
-} from "./voice-barge-in.js";
+} from "../../../ui/modules/voice-barge-in.js";
 
 // ── State Signals ───────────────────────────────────────────────────────────
 

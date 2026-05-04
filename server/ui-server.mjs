@@ -23549,21 +23549,23 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 404, { ok: false, error: "Workflow run not found" });
           return;
         }
-        if (run.status !== "failed") {
-          jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
-          return;
-        }
+        const runStatus = String(run.status || "").trim().toLowerCase();
+        const retryOptions = typeof engine.getRetryOptions === "function"
+          ? await engine.getRetryOptions(runId)
+          : null;
+        const createTasksPendingGuard = retryOptions?.guardedState?.code === "create_tasks_pending";
         const body = await readJsonBody(req);
         const mode = body?.mode;
         if (!mode) {
-          const retryOptions = typeof engine.getRetryOptions === "function"
-            ? await engine.getRetryOptions(runId)
-            : null;
-          if (retryOptions) {
+          if (retryOptions && (runStatus === "failed" || createTasksPendingGuard)) {
             jsonResponse(res, 200, {
               ok: true,
               ...retryOptions,
             });
+            return;
+          }
+          if (runStatus !== "failed") {
+            jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
             return;
           }
           jsonResponse(res, 200, {
@@ -23581,7 +23583,30 @@ if (path === "/api/agent-logs/context") {
           jsonResponse(res, 400, { ok: false, error: `Invalid mode "${mode}". Use "from_failed", "from_scratch", "replan_from_failed", or "replan_subgraph".` });
           return;
         }
-        const result = await engine.retryRun(runId, { mode });
+        if (runStatus !== "failed" && !createTasksPendingGuard) {
+          jsonResponse(res, 400, { ok: false, error: `Run status is "${run.status}" — only failed runs can be retried` });
+          return;
+        }
+        const resolvedRetry =
+          createTasksPendingGuard && typeof engine.resolveOperatorRetry === "function"
+            ? await engine.resolveOperatorRetry(runId, mode)
+            : null;
+        if (resolvedRetry?.blocked) {
+          jsonResponse(res, 409, {
+            ok: false,
+            error: resolvedRetry.blockedMessage || "Workflow retry is blocked for this run state.",
+            runId,
+            status: run.status,
+            mode: resolvedRetry.mode || mode,
+            operatorAction: resolvedRetry.operatorAction || null,
+            decisionReason: resolvedRetry.decisionReason || null,
+            guardedState: resolvedRetry.guardedState || retryOptions?.guardedState || null,
+            retryOptions,
+          });
+          return;
+        }
+        const retryArgs = resolvedRetry?.retryArgs || { mode };
+        const result = await engine.retryRun(runId, retryArgs);
         const retryStatus = result.ctx?.errors?.length > 0 ? "failed" : "completed";
         jsonResponse(res, 200, {
           ok: true,
@@ -23589,6 +23614,10 @@ if (path === "/api/agent-logs/context") {
           originalRunId: result.originalRunId,
           mode: result.mode,
           status: retryStatus,
+          operatorAction:
+            resolvedRetry?.operatorAction || (mode === "from_scratch" ? "restart" : "retry"),
+          decisionReason: resolvedRetry?.decisionReason || null,
+          guardedState: resolvedRetry?.guardedState || retryOptions?.guardedState || null,
         });
         return;
       }

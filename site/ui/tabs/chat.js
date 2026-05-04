@@ -46,20 +46,20 @@ import {
   loadSessionMessages,
   archiveSession,
   resumeSession,
-} from "../components/session-list.js";
-import { routeParams, setRouteParams } from "../modules/router.js";
-import { ChatView } from "../components/chat-view.js";
-import { apiFetch } from "../modules/api.js";
+} from "../../../ui/components/session-list.js";
+import { routeParams, setRouteParams } from "../../../ui/modules/router.js";
+import { ChatView } from "../../../ui/components/chat-view.js";
+import { apiFetch } from "../../../ui/modules/api.js";
 import {
   buildSessionApiPath,
   getSessionLifecycleState,
   getSessionRecencyTimestamp,
   getSessionRuntimeState,
   resolveSessionWorkspaceHint,
-} from "../modules/session-api.js";
-import { showToast } from "../modules/state.js";
-import { VoiceMicButton, requestVoiceModeOpen } from "../modules/voice.js";
-import { iconText, resolveIcon } from "../modules/icon-utils.js";
+} from "../../../ui/modules/session-api.js";
+import { showToast } from "../../../ui/modules/state.js";
+import { VoiceMicButton, requestVoiceModeOpen } from "../../../ui/modules/voice.js";
+import { resolveIcon } from "../../../ui/modules/icon-utils.js";
 import {
   ChatInputToolbar,
   loadAvailableAgents,
@@ -70,7 +70,7 @@ import {
   availableAgents,
   yoloMode,
   selectedModel,
-} from "../components/agent-selector.js";
+} from "../../../ui/components/agent-selector.js";
 import {
   addPendingMessage,
   confirmMessage,
@@ -78,7 +78,7 @@ import {
   markUserMessageSent,
   sendOrQueue,
   offlineQueueSize,
-} from "../modules/streaming.js";
+} from "../../../ui/modules/streaming.js";
 
 /* ─── Bosun commands (always available) ─── */
 const BOSUN_COMMANDS = [
@@ -649,7 +649,7 @@ export function ChatTab() {
           });
           const resultText = resp?.result || resp?.data || `:check: SDK command executed: ${cmdBase}`;
           if (sessionId) {
-            const { sessionMessages } = await import("../components/session-list.js");
+            const { sessionMessages } = await import("../../../ui/components/session-list.js");
             const now = new Date().toISOString();
             const msgs = sessionMessages.value || [];
             const userMsg = { id: `sdk-${Date.now()}`, role: "user", content, timestamp: now };
@@ -666,7 +666,7 @@ export function ChatTab() {
           });
           const data = resp?.data;
           if (sessionId) {
-            const { sessionMessages } = await import("../components/session-list.js");
+            const { sessionMessages } = await import("../../../ui/components/session-list.js");
             const now = new Date().toISOString();
             const msgs = sessionMessages.value || [];
             const userMsg = { id: `cmd-${Date.now()}`, role: "user", content, timestamp: now };

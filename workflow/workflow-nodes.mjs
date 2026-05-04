@@ -11011,7 +11011,10 @@ registerBuiltinNodeType("action.materialize_planner_tasks", {
     const plannerPayload = parsePlannerJsonFromText(outputText);
     const maxTasks = Number(ctx.resolve(node.config?.maxTasks || ctx.data?.taskCount || 5)) || 5;
     const failOnZero = node.config?.failOnZero !== false;
-    const minCreated = Number(ctx.resolve(node.config?.minCreated || 1)) || 1;
+    // Use nullish coalescing so an explicit minCreated:0 is respected (not coerced to 1).
+    // Default: 1 when failOnZero is true (classic behaviour), 0 when failOnZero is false
+    // (all-skipped idempotent resumes should still succeed).
+    const minCreated = Number(ctx.resolve(node.config?.minCreated ?? (failOnZero ? 1 : 0)));
     const dedupEnabled = node.config?.dedup !== false;
     const status = String(ctx.resolve(node.config?.status || "todo")).trim() || "todo";
     const projectId = String(ctx.resolve(node.config?.projectId || "")).trim();
@@ -11243,6 +11246,12 @@ registerBuiltinNodeType("action.materialize_planner_tasks", {
     if (priorStatePath) {
       savePlannerPriorState(priorStatePath, priorState);
     }
+    const existingTaskByTitle = new Map();
+    for (const row of existingRows) {
+      const titleKey = String(row?.title || "").trim().toLowerCase();
+      if (!titleKey || existingTaskByTitle.has(titleKey)) continue;
+      existingTaskByTitle.set(titleKey, row);
+    }
     const rankedTasks = rankPlannerTaskCandidatesForResume(
       rankPlannerTaskCandidates(parsedTasks, priorState, rankingConfig),
       plannerFeedback,
@@ -11263,8 +11272,10 @@ registerBuiltinNodeType("action.materialize_planner_tasks", {
       };
       const key = task.title.toLowerCase();
       if (dedupEnabled && existingTitleSet.has(key)) {
-        skipped.push({ title: task.title, reason: "duplicate_title" });
-        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "duplicate_title" });
+        const existingTask = existingTaskByTitle.get(key);
+        const existingTaskId = String(existingTask?.id || existingTask?.task_id || "").trim() || null;
+        skipped.push({ title: task.title, reason: "duplicate_title", existingTaskId });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "duplicate_title", existingTaskId });
         continue;
       }
       if (!Array.isArray(task.acceptanceCriteria) || task.acceptanceCriteria.length === 0) {
@@ -11430,7 +11441,12 @@ registerBuiltinNodeType("action.materialize_planner_tasks", {
       `Planner materialization parsed=${parsedTasks.length} created=${createdCount} skipped=${skippedCount} graphApplied=${graphAppliedCount} graphSkipped=${graphSkippedCount} histogram=${JSON.stringify(skipReasonHistogram)}`,
     );
 
-    const requiredCreated = Math.min(Math.max(1, minCreated), Math.max(1, maxTasks));
+    // When failOnZero is true: require at least max(1, minCreated) and cap at maxTasks.
+    // When failOnZero is false: caller opts into zero-created being OK (idempotent resume),
+    // so the minimum is just minCreated (which defaults to 0 in that mode).
+    const requiredCreated = failOnZero
+      ? Math.min(Math.max(1, minCreated), Math.max(1, maxTasks))
+      : minCreated;
 
     if (failOnZero && createdCount < requiredCreated) {
       recordPlannerLedgerEvent(engine, ctx, node, "planner.step_blocked", {

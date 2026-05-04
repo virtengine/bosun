@@ -192,7 +192,7 @@ export const TASK_LIFECYCLE_TEMPLATE = {
 
     // ── Execute agent (phase 3: implementation + verification) ──────────
     agentPhase("run-agent-implement", "Agent Implement",
-      "{{_taskPrompt}}\n\nExecution phase: implementation. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
+      "{{_taskPrompt}}\n\nExecution phase: implementation. Start with the narrowest verification that proves the changed surface. If unrelated baseline reds appear, keep the task scoped to the touched surface instead of thrashing on unrelated reds; note the blocker and say `commit blocked` when required verification for your changes cannot complete because of unrelated failures. Complete implementation after tests exist, run required verification (tests/lint/build), then commit, push, and create/update PR.",
       { delegationWatchdogTimeoutMs: "{{delegationWatchdogTimeoutMs}}", delegationWatchdogMaxRecoveries: "{{delegationWatchdogMaxRecoveries}}" }, { x: 200, y: 1610 }),
 
     // ── Check if claim was stolen during agent execution ─────────────────

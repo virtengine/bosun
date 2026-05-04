@@ -18,7 +18,7 @@
  * ────────────────────────────────────────────────────────────── */
 
 import { signal, computed } from "@preact/signals";
-import { apiFetch, onWsMessage } from "./api.js";
+import { apiFetch, onWsMessage } from "../../../ui/modules/api.js";
 
 /* ══════════════════════════════════════════════════════════════
  *  CONSTANTS

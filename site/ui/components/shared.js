@@ -4,7 +4,7 @@
  *  MUI Material edition — preserves all export signatures.
  * ────────────────────────────────────────────────────────────── */
 
-import { h } from "preact";
+import { h as _h } from "preact";
 import { createPortal } from "preact/compat";
 import {
   useState,
@@ -13,6 +13,14 @@ import {
   useCallback,
 } from "preact/hooks";
 import htm from "htm";
+
+/* Guard: recover forwardRef objects that leak as element type */
+function h(type, ...args) {
+  if (type != null && typeof type === "object" && typeof type !== "function" && typeof type.render === "function") {
+    return _h(type.render, ...args);
+  }
+  return _h(type, ...args);
+}
 
 const html = htm.bind(h);
 
@@ -47,19 +55,19 @@ import {
   IconButton,
 } from "@mui/material";
 
-import { ICONS } from "../modules/icons.js";
+import { ICONS } from "../../../ui/modules/icons.js";
 import {
   toasts,
   showToast,
   shouldShowToast,
-} from "../modules/state.js";
+} from "../../../ui/modules/state.js";
 import {
   haptic,
   showBackButton,
   hideBackButton,
   getTg,
-} from "../modules/telegram.js";
-import { classNames } from "../modules/utils.js";
+} from "../../../ui/modules/telegram.js";
+
 
 /* ── helper: map status strings → MUI Chip colors ─────────── */
 
