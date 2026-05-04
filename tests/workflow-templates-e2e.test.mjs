@@ -554,6 +554,28 @@ function ensureExperimentalNodeTypes() {
     },
   });
 
+  // Override flow.gate to use harness.requestApproval so tests can control
+  // gate approval/denial via the mock service rather than the real approval queue.
+  registerForE2E("flow.gate", {
+    describe: () => "Approval gate routed through harness.requestApproval (test override)",
+    schema: { type: "object", properties: {} },
+    async execute(node, ctx, eng) {
+      const reason = String(ctx.resolve?.(node.config?.reason || "") || node.config?.reason || "Waiting at gate");
+      const harnessService = eng?.services?.harness;
+      if (harnessService?.requestApproval) {
+        const result = await harnessService.requestApproval({ reason, nodeId: node.id });
+        if (result?.approved === false || result?.status === "denied") {
+          const err = new Error(`Gate denied: ${reason}`);
+          err.gateDenied = true;
+          throw err;
+        }
+        return { success: true, passed: true, approved: true, reason };
+      }
+      // No harness service — pass through by default
+      return { success: true, passed: true, reason };
+    },
+  });
+
   // These nodes have real implementations that read/write workflow history and
   // skillbook state. Override them for e2e template coverage so every template
   // executes deterministically inside the tmp test sandbox.
