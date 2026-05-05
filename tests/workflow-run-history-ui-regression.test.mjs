@@ -203,4 +203,39 @@ describe("workflow run history UI pagination", () => {
     expect(serverSource).toContain("const durableSessionListCache = new Map();");
     expect(serverSource).toContain("cloneSessionSummaryRecords");
   });
+
+  for (const [label, source] of [
+    ["ui", uiSource],
+    ["site", siteSource],
+  ]) {
+    it(`${label} exposes task materialization progress and resume state in run details`, () => {
+      expect(source).toContain("formatWorkflowRunMaterializationSummary");
+      expect(source).toContain("getWorkflowRunMaterializationSummary");
+      expect(source).toContain("Task materialization");
+      expect(source).toContain("resumed create tasks");
+    });
+
+    it(`${label} includes resumed-from-create-tasks badge in run history list`, () => {
+      expect(source).toContain("resumedFromCreateTasks");
+      expect(source).toContain(`label="resumed create tasks"`);
+    });
+
+    it(`${label} formats created and skipped duplicate counts in materialization summary`, () => {
+      expect(source).toContain("createdCount");
+      expect(source).toContain("skippedCount");
+      expect(source).toContain("Tasks created");
+      expect(source).toContain("skipped duplicates");
+    });
+
+    it(`${label} includes duplicate-prevention histogram in materialization summary`, () => {
+      expect(source).toContain("skipReasonHistogram");
+      expect(source).toContain("Duplicate prevention:");
+    });
+
+    it(`${label} resolves resumed node label from run node statuses`, () => {
+      expect(source).toContain("resumedNodeLabel");
+      expect(source).toContain(`Resumed from`);
+      expect(source).toContain("Create Tasks");
+    });
+  }
 });
