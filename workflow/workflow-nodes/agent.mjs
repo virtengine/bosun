@@ -351,6 +351,34 @@ export function normalizePlannerRiskLevel(value, { preferTenScaleIntegers = fals
   return "low";
 }
 
+function validateStrictPlannerRequiredField(name, value, { type = "string", allowEmpty = false } = {}) {
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      throw new Error(`Planner task missing required ${name} array`);
+    }
+    const normalized = value
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+    if (!allowEmpty && normalized.length === 0) {
+      throw new Error(`Planner task missing required ${name} array`);
+    }
+    return normalized;
+  }
+
+  if (type === "score") {
+    if (value === undefined || value === null || value === "") {
+      throw new Error(`Planner task missing required ${name} score`);
+    }
+    return value;
+  }
+
+  const normalized = String(value || "").trim();
+  if (!allowEmpty && !normalized) {
+    throw new Error(`Planner task missing required ${name}`);
+  }
+  return normalized;
+}
+
 export function normalizePlannerTaskForCreation(task, index) {
   if (!task || typeof task !== "object") return null;
   const title = String(task.title || "").trim();
@@ -394,18 +422,44 @@ export function normalizePlannerTaskForCreation(task, index) {
   const lines = [];
   const description = String(task.description || "").trim();
   if (description) lines.push(description);
-  const acceptanceCriteria = normalizeStringList(task.acceptance_criteria);
-  const verification = normalizeStringList(task.verification);
-  const repoAreas = normalizeRepoAreas(task.repo_areas || task.repoAreas);
-  const impact = normalizePlannerScore(task.impact, { preferTenScaleIntegers });
-  const confidence = normalizePlannerScore(task.confidence, { preferTenScaleIntegers });
-  const risk = normalizePlannerRiskLevel(task.risk, {
-    preferTenScaleIntegers,
-    preserveFractionalTenScale: scoreMode === PLANNER_SCORE_MODE_TEN,
-  });
-  const estimatedEffort = String(task.estimated_effort || task.estimatedEffort || "").trim().toLowerCase();
-  const whyNow = String(task.why_now || task.whyNow || "").trim();
-  const killCriteria = normalizeStringList(task.kill_criteria || task.killCriteria);
+  const acceptanceCriteria = validateStrictPlannerRequiredField(
+    "acceptance_criteria",
+    task.acceptance_criteria,
+    { type: "array" },
+  );
+  const verification = validateStrictPlannerRequiredField(
+    "verification",
+    task.verification,
+    { type: "array" },
+  );
+  const repoAreas = normalizeRepoAreas(
+    validateStrictPlannerRequiredField("repo_areas", task.repo_areas || task.repoAreas, { type: "array" }),
+  );
+  const impact = normalizePlannerScore(
+    validateStrictPlannerRequiredField("impact", task.impact, { type: "score" }),
+    { preferTenScaleIntegers },
+  );
+  const confidence = normalizePlannerScore(
+    validateStrictPlannerRequiredField("confidence", task.confidence, { type: "score" }),
+    { preferTenScaleIntegers },
+  );
+  const risk = normalizePlannerRiskLevel(
+    validateStrictPlannerRequiredField("risk", task.risk, { type: "score" }),
+    {
+      preferTenScaleIntegers,
+      preserveFractionalTenScale: scoreMode === PLANNER_SCORE_MODE_TEN,
+    },
+  );
+  const estimatedEffort = validateStrictPlannerRequiredField(
+    "estimated_effort",
+    task.estimated_effort || task.estimatedEffort,
+  ).toLowerCase();
+  const whyNow = validateStrictPlannerRequiredField("why_now", task.why_now || task.whyNow);
+  const killCriteria = validateStrictPlannerRequiredField(
+    "kill_criteria",
+    task.kill_criteria || task.killCriteria,
+    { type: "array" },
+  );
   const taskKey = normalizeTaskGraphKey(
     task.task_key || task.taskKey || task.key || task.id || "",
     title,
