@@ -3892,6 +3892,49 @@ export class WorkflowEngine extends EventEmitter {
     return null;
   }
 
+  _resolvePersistedResumeCheckpoint(runOrDetail, def = null) {
+    const run =
+      runOrDetail?.detail && typeof runOrDetail.detail === "object"
+        ? runOrDetail
+        : null;
+    const detail = run?.detail || runOrDetail || {};
+    const checkpoint = detail?.checkpoint && typeof detail.checkpoint === "object"
+      ? detail.checkpoint
+      : (detail?.data?._workflowCheckpoint && typeof detail.data._workflowCheckpoint === "object"
+        ? detail.data._workflowCheckpoint
+        : null);
+    if (!checkpoint) return null;
+    const workflowDefinition = def || detail?.workflowDefinition || detail?.data?._workflowDefinitionSnapshot || null;
+    const nextPendingNodeId = String(checkpoint.nextPendingNodeId || "").trim();
+    if (nextPendingNodeId) {
+      const nodeDef = Array.isArray(workflowDefinition?.nodes)
+        ? workflowDefinition.nodes.find((node) => String(node?.id || "").trim() === nextPendingNodeId) || null
+        : null;
+      return {
+        nodeId: nextPendingNodeId,
+        label: String(checkpoint.nextPendingNodeLabel || nodeDef?.label || nextPendingNodeId).trim() || null,
+        type: String(checkpoint.nextPendingNodeType || nodeDef?.type || "").trim() || null,
+        planningTaskRef: checkpoint.planningTaskRef && typeof checkpoint.planningTaskRef === "object"
+          ? checkpoint.planningTaskRef
+          : null,
+        reason: String(checkpoint.reason || "checkpoint.next_pending_node").trim() || "checkpoint.next_pending_node",
+        source: "persisted_checkpoint",
+      };
+    }
+    const lastCompletedNodeId = String(checkpoint.lastCompletedNodeId || "").trim();
+    if (!lastCompletedNodeId) return null;
+    return {
+      nodeId: lastCompletedNodeId,
+      label: String(checkpoint.lastCompletedNodeLabel || lastCompletedNodeId).trim() || null,
+      type: null,
+      planningTaskRef: checkpoint.planningTaskRef && typeof checkpoint.planningTaskRef === "object"
+        ? checkpoint.planningTaskRef
+        : null,
+      reason: String(checkpoint.reason || "checkpoint.last_completed_node").trim() || "checkpoint.last_completed_node",
+      source: "persisted_checkpoint",
+    };
+  }
+
   _resolvePendingCreateTasksGuard(runOrDetail, def = null) {
     const run =
       runOrDetail?.detail && typeof runOrDetail.detail === "object"
@@ -3901,7 +3944,17 @@ export class WorkflowEngine extends EventEmitter {
     const runStatus = String(run?.status || detail?.status || "").trim().toLowerCase();
     if (runStatus !== WorkflowStatus.PAUSED) return null;
 
-    const nextPending = this._resolveNextPendingDagNode(detail, def);
+    const checkpointResume = this._resolvePersistedResumeCheckpoint(detail, def);
+    const nextPending = checkpointResume?.nodeId
+      ? {
+          nodeId: checkpointResume.nodeId,
+          label: checkpointResume.label,
+          type: checkpointResume.type,
+          config: Array.isArray(def?.nodes)
+            ? (def.nodes.find((node) => String(node?.id || "").trim() === checkpointResume.nodeId)?.config || {})
+            : {},
+        }
+      : this._resolveNextPendingDagNode(detail, def);
     if (!nextPending || String(nextPending.type || "").trim() !== "action.materialize_planner_tasks") {
       return null;
     }
@@ -8514,6 +8567,53 @@ export class WorkflowEngine extends EventEmitter {
     };
   }
 
+  _buildRunCheckpointState(ctx, detail = null) {
+    const runDetail = detail && typeof detail === "object" ? detail : sanitizeJsonValue(ctx?.toJSON?.(Date.now())) || {};
+    const data = runDetail?.data && typeof runDetail.data === "object" ? runDetail.data : {};
+    const nodeStatuses = runDetail?.nodeStatuses && typeof runDetail.nodeStatuses === "object" ? runDetail.nodeStatuses : {};
+    const nodeOutputs = runDetail?.nodeOutputs && typeof runDetail.nodeOutputs === "object" ? runDetail.nodeOutputs : {};
+    const workflowDefinition =
+      ctx?.data?._workflowDefinitionSnapshot ||
+      data?._workflowDefinitionSnapshot ||
+      runDetail?.workflowDefinition ||
+      null;
+    const defNodes = Array.isArray(workflowDefinition?.nodes) ? workflowDefinition.nodes : [];
+    const completedNodeIds = Object.entries(nodeStatuses)
+      .filter(([, status]) => status === NodeStatus.COMPLETED)
+      .map(([nodeId]) => nodeId);
+    const lastCompletedNodeId = completedNodeIds.length > 0 ? completedNodeIds[completedNodeIds.length - 1] : null;
+    const lastCompletedNode = lastCompletedNodeId
+      ? defNodes.find((node) => String(node?.id || "").trim() === lastCompletedNodeId) || null
+      : null;
+    const nextPending = workflowDefinition
+      ? this._resolveNextPendingDagNode(runDetail, workflowDefinition)
+      : null;
+    const planningTaskRef = [
+      "materialize-tasks",
+      "planner",
+      "agent-plan",
+      "plan",
+    ].reduce((best, key) => {
+      if (best) return best;
+      const value = nodeOutputs?.[key];
+      return value && typeof value === "object" ? sanitizeJsonValue(value) : null;
+    }, null);
+    const checkpoint = {
+      capturedAt: new Date().toISOString(),
+      lastCompletedNodeId,
+      lastCompletedNodeLabel: String(lastCompletedNode?.label || lastCompletedNodeId || "").trim() || null,
+      nextPendingNodeId: String(nextPending?.nodeId || "").trim() || null,
+      nextPendingNodeLabel: String(nextPending?.label || nextPending?.nodeId || "").trim() || null,
+      nextPendingNodeType: String(nextPending?.type || "").trim() || null,
+      planningTaskRef,
+      nodeStatuses,
+      reason: nextPending?.nodeId
+        ? "checkpoint.next_pending_node"
+        : (lastCompletedNodeId ? "checkpoint.last_completed_node" : "checkpoint.empty"),
+    };
+    return compactPersistedRunDetail(sanitizeJsonValue(checkpoint));
+  }
+
   _serializeRunContext(ctx, isRunning = false) {
     const detail = sanitizeJsonValue(ctx.toJSON(Date.now())) || {};
     if (!detail.data || typeof detail.data !== "object") detail.data = {};
@@ -8584,6 +8684,8 @@ export class WorkflowEngine extends EventEmitter {
         cloneRunSnapshot(ctx.data._workflowDefinitionSnapshot),
       );
     }
+    detail.checkpoint = this._buildRunCheckpointState(ctx, detail);
+    detail.data._workflowCheckpoint = detail.checkpoint;
     if (isRunning) {
       detail.endedAt = null;
       detail.duration = Math.max(0, Date.now() - Number(ctx?.startedAt || Date.now()));
