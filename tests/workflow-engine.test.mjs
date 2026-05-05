@@ -16248,6 +16248,7 @@ it("action.materialize_planner_tasks preserves partial progress across repeated 
       failOnZero: true,
       dedup: true,
       minCreated: 1,
+      minImpactScore: 0,
       maxTasks: 8,
     },
   };
