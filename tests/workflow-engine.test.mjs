@@ -15983,7 +15983,7 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       "{",
       '  "tasks": [',
       '    { "title": "[m] fix(workflow): create tasks", "description": "A", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.8, "confidence": 0.7, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): duplicate title", "description": "B" }',
+      '    { "title": "[m] fix(workflow): duplicate title", "description": "B", "acceptance_criteria": ["ac2"], "verification": ["v2"], "repo_areas": ["workflow"], "impact": 0.6, "confidence": 0.6, "risk": 0.2 }',
       "  ]",
       "}",
       "```",
@@ -16055,6 +16055,102 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       }),
     }),
   }));
+});
+
+it("action.materialize_planner_tasks rejects malformed planner tasks before creating any tasks", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[m] feat(workflow): valid planned task",
+          description: "Looks valid but should never be created because another task is malformed.",
+          acceptance_criteria: ["ac1"],
+          verification: ["v1"],
+          repo_areas: ["workflow"],
+          impact: 0.8,
+          confidence: 0.7,
+          risk: 0.2,
+        },
+        {
+          title: "[m] feat(workflow): malformed planned task",
+          description: "Missing acceptance criteria",
+          verification: ["v2"],
+          repo_areas: ["workflow"],
+          impact: 0.4,
+          confidence: 0.5,
+          risk: 0.2,
+        },
+      ],
+    }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([]);
+  const mockEngine = {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  };
+
+  const node = {
+    id: "materialize-invalid",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-invalid",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/task\[1\]\.acceptance_criteria/i);
+  expect(createTask).not.toHaveBeenCalled();
+});
+
+it("action.materialize_planner_tasks rejects empty planner task arrays before creating any tasks", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({ tasks: [] }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([]);
+  const mockEngine = {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  };
+
+  const node = {
+    id: "materialize-empty",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-empty",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/non-empty tasks array/i);
+  expect(createTask).not.toHaveBeenCalled();
 });
 
 it("action.materialize_planner_tasks resumed run does not recreate already-created tasks (idempotent handoff)", async () => {
