@@ -16142,12 +16142,6 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
 });
 
 it("action.materialize_planner_tasks repeated resume attempts produce no duplicate task side effects", async () => {
-  // RED TEST — implementation gap: when failOnZero:false and minCreated:0, the node
-  // clamps minCreated to 1 and returns success:false even though all tasks are accounted for.
-  // Fix needed in actions.mjs: respect minCreated:0 when failOnZero:false so a fully-idempotent
-  // resume (all tasks already exist) is treated as success.
-  // Verifies that calling the node multiple times (repeated resumes for the same run/node)
-  // is safe: once all tasks exist in listTasks the node creates nothing and skips all.
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
 
@@ -16179,7 +16173,6 @@ it("action.materialize_planner_tasks repeated resume attempts produce no duplica
     }),
   });
 
-  // All tasks are already present — full idempotent run
   const createTask = vi.fn();
   const listTasks = vi.fn().mockResolvedValue([
     { id: "exist-a", title: "[s] fix(task): idempotent-a" },
@@ -16203,16 +16196,92 @@ it("action.materialize_planner_tasks repeated resume attempts produce no duplica
 
   const result = await handler.execute(node, ctx, mockEngine);
 
-  // All tasks already exist — nothing new created, no errors
   expect(result.success).toBe(true);
   expect(result.createdCount).toBe(0);
   expect(result.skippedCount).toBe(2);
   expect(createTask).not.toHaveBeenCalled();
-
-  // Both skipped items carry the pre-existing task ids
   expect(result.skipped).toEqual(expect.arrayContaining([
     expect.objectContaining({ title: "[s] fix(task): idempotent-a", existingTaskId: "exist-a" }),
     expect.objectContaining({ title: "[s] fix(task): idempotent-b", existingTaskId: "exist-b" }),
+  ]));
+});
+
+it("action.materialize_planner_tasks preserves partial progress across repeated retries", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: Array.from({ length: 8 }, (_, index) => ({
+        title: `[m] feat(task): planned-${index + 1}`,
+        description: `Task ${index + 1}`,
+        acceptance_criteria: [`ac-${index + 1}`],
+        verification: [`v-${index + 1}`],
+        repo_areas: ["task"],
+        impact: 0.9 - index * 0.05,
+        confidence: 0.85,
+        risk: 0.2,
+      })),
+    }),
+  });
+
+  const createdRows = [];
+  const listTasks = vi.fn(async () => createdRows.map((row) => ({ ...row })));
+  const createTask = vi.fn(async (_projectId, payload) => {
+    const createdTask = { id: `created-${createdRows.length + 1}`, title: payload.title };
+    createdRows.push(createdTask);
+    if (createdRows.length === 3) {
+      throw new Error("simulated create failure after partial progress");
+    }
+    return createdTask;
+  });
+
+  const mockEngine = { services: { kanban: { createTask, listTasks } } };
+  const node = {
+    id: "materialize-partial-progress",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-partial",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+      maxTasks: 8,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/simulated create failure/i);
+  expect(createdRows.map((row) => row.title)).toEqual([
+    "[m] feat(task): planned-1",
+    "[m] feat(task): planned-2",
+    "[m] feat(task): planned-3",
+  ]);
+
+  createTask.mockImplementation(async (_projectId, payload) => {
+    const createdTask = { id: `created-${createdRows.length + 1}`, title: payload.title };
+    createdRows.push(createdTask);
+    return createdTask;
+  });
+
+  const resumed = await handler.execute(node, ctx, mockEngine);
+
+  expect(resumed.success).toBe(true);
+  expect(resumed.parsedCount).toBe(8);
+  expect(resumed.createdCount).toBe(5);
+  expect(resumed.skippedCount).toBe(3);
+  expect(resumed.created.map((row) => row.title)).toEqual([
+    "[m] feat(task): planned-4",
+    "[m] feat(task): planned-5",
+    "[m] feat(task): planned-6",
+    "[m] feat(task): planned-7",
+    "[m] feat(task): planned-8",
+  ]);
+  expect(resumed.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({ title: "[m] feat(task): planned-1", existingTaskId: "created-1", reason: "duplicate_title" }),
+    expect.objectContaining({ title: "[m] feat(task): planned-2", existingTaskId: "created-2", reason: "duplicate_title" }),
+    expect.objectContaining({ title: "[m] feat(task): planned-3", existingTaskId: "created-3", reason: "duplicate_title" }),
   ]));
 });
 
