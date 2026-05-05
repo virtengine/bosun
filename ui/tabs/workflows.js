@@ -6574,6 +6574,65 @@ function safePrettyJson(value) {
   }
 }
 
+function formatWorkflowRunMaterializationSummary(summary) {
+  if (!summary || typeof summary !== "object") return [];
+  const lines = [];
+  const resumedNodeLabel = String(summary.resumedNodeLabel || summary.resumeNodeLabel || "").trim();
+  if (summary.resumedFromCreateTasks || resumedNodeLabel) {
+    lines.push(`Resumed from ${resumedNodeLabel || "Create Tasks"}`);
+  }
+  if (Number.isFinite(Number(summary.createdCount)) || Number.isFinite(Number(summary.skippedCount))) {
+    const createdCount = Number(summary.createdCount || 0);
+    const skippedCount = Number(summary.skippedCount || 0);
+    lines.push(`Tasks created ${createdCount} • skipped duplicates ${skippedCount}`);
+  }
+  const histogram = summary.skipReasonHistogram && typeof summary.skipReasonHistogram === "object"
+    ? Object.entries(summary.skipReasonHistogram)
+      .map(([reason, count]) => {
+        const safeReason = String(reason || "").replace(/[_-]+/g, " ").trim() || "other";
+        const safeCount = Number(count || 0);
+        return safeCount > 0 ? `${safeReason} ${safeCount}` : "";
+      })
+      .filter(Boolean)
+    : [];
+  if (histogram.length) {
+    lines.push(`Duplicate prevention: ${histogram.join(" • ")}`);
+  }
+  return lines;
+}
+
+function getWorkflowRunMaterializationSummary(run) {
+  if (!run || typeof run !== "object") return null;
+  const nodeStatuses = Array.isArray(run.nodeStatuses) ? run.nodeStatuses : [];
+  const createTasksStatus = nodeStatuses.find((node) => {
+    const label = String(node?.label || node?.name || node?.nodeLabel || "").trim().toLowerCase();
+    const type = String(node?.type || "").trim().toLowerCase();
+    return label === "create tasks" || type.endsWith(".create_tasks") || type.endsWith(".create-tasks");
+  }) || null;
+  const detailData = run.data && typeof run.data === "object" ? run.data : {};
+  const rawSummary =
+    detailData._resumeResult && String(detailData._resumeResult).trim().toLowerCase().includes("resume")
+      ? {
+          resumedFromCreateTasks: true,
+          resumedNodeLabel: "Create Tasks",
+          createdCount: createTasksStatus?.output?.createdCount ?? createTasksStatus?.createdCount ?? null,
+          skippedCount: createTasksStatus?.output?.skippedCount ?? createTasksStatus?.skippedCount ?? null,
+          skipReasonHistogram: createTasksStatus?.output?.skipReasonHistogram ?? createTasksStatus?.skipReasonHistogram ?? null,
+        }
+      : null;
+  const summary = rawSummary || null;
+  if (!summary) return null;
+  return {
+    resumedFromCreateTasks: summary.resumedFromCreateTasks === true,
+    resumedNodeLabel: summary.resumedNodeLabel || null,
+    createdCount: Number.isFinite(Number(summary.createdCount)) ? Number(summary.createdCount) : null,
+    skippedCount: Number.isFinite(Number(summary.skippedCount)) ? Number(summary.skippedCount) : null,
+    skipReasonHistogram: summary.skipReasonHistogram && typeof summary.skipReasonHistogram === "object"
+      ? summary.skipReasonHistogram
+      : null,
+  };
+}
+
 function RunHistoryView() {
   const runs = workflowRuns.value || [];
   const runsLoading = workflowRunsLoading.value === true;
@@ -7428,6 +7487,8 @@ function RunHistoryView() {
         ? ((selectedRun?.issueAdvisorRecommendation === "replan_from_failed" || selectedRun?.issueAdvisorRecommendation === "replan_subgraph") ? "from_scratch" : "from_failed")
         : "";
     const recommendedRetryLabel = formatRetryModeLabel(recommendedRetryMode);
+    const materializationSummary = getWorkflowRunMaterializationSummary(selectedRun);
+    const materializationSummaryLines = formatWorkflowRunMaterializationSummary(materializationSummary);
 
     return html`
       <div style="padding: 0 4px;">
@@ -7438,6 +7499,11 @@ function RunHistoryView() {
           ${selectedRun.workflowId && html`<${Button} variant="text" size="small" onClick=${() => openWorkflowCanvas(selectedRun.workflowId)}>Open Workflow<//>`}
           <h2 style="margin: 0; font-size: 18px; font-weight: 700;">Run Details</h2>
           <${Button} variant="text" size="small" onClick=${() => loadRunDetail(selectedRun.runId)}>Refresh<//>
+          ${materializationSummary && html`
+            <span class="wf-badge" style="background:#7c3aed22;color:#c4b5fd;border:1px solid #7c3aed55;">
+              resumed create tasks
+            </span>
+          `}
           <${Button} variant="text" size="small" onClick=${() => refreshRunDiagnostics(selectedRun.runId)} disabled=${runDiagnosticsLoading}>
             ${runDiagnosticsLoading ? "Refreshing Diagnostics…" : "Refresh Diagnostics"}
           <//>
@@ -7468,6 +7534,12 @@ function RunHistoryView() {
               <span class="btn-icon">${resolveIcon("settings")}</span>
               Fix With Bosun
             <//>
+          `}
+          ${materializationSummaryLines.length > 0 && html`
+            <div style="width:100%;padding:10px 12px;border:1px solid var(--color-border,#2a3040);border-radius:10px;background:rgba(124,58,237,0.08);margin-top:4px;">
+              <div style="font-size:12px;font-weight:700;color:#ddd6fe;margin-bottom:6px;">Task materialization</div>
+              ${materializationSummaryLines.map((line) => html`<div style="font-size:12px;color:#e9d5ff;line-height:1.5;">${line}</div>`)}
+            </div>
           `}
           ${selectedRun.status === "failed" && html`
             <${Button}
@@ -8745,6 +8817,7 @@ function RunHistoryView() {
                       />
                       ${run.isStuck && html`<${Chip} size="small" label="stuck" color="warning" variant="outlined" />`}
                       ${run.retryOf && html`<${Chip} size="small" label="retry" color="success" variant="outlined" />`}
+                      ${getWorkflowRunMaterializationSummary(run)?.resumedFromCreateTasks && html`<${Chip} size="small" label="resumed create tasks" color="secondary" variant="outlined" />`}
                     <//>
                   <//>
                   <${TableCell}>
