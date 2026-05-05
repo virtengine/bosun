@@ -29,12 +29,19 @@ import { resolve, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   normalizeWorkspaceStorageKey,
   normalizeWorkspaceStorageKeys,
 } from "./task-store.mjs";
 import { getTaskLifetimeTotals } from "../infra/runtime-accumulator.mjs";
+
+const VERIFICATION_STATUS = Object.freeze({
+  PASSED: "passed",
+  FAILED: "failed",
+  PARTIAL: "partial",
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -490,6 +497,59 @@ function formatDurationMs(ms) {
   const hours = Math.floor(minutes / 60);
   const remMinutes = minutes % 60;
   return remMinutes > 0 ? `${hours}h ${remMinutes}m` : `${hours}h`;
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function getTaskVerificationCommands(task) {
+  if (!Array.isArray(task?.verification)) return [];
+  return task.verification.filter(isNonEmptyString).map((command) => command.trim());
+}
+
+function createVerificationPrefix(index, total) {
+  return `[verify ${index}/${total}]`;
+}
+
+function prefixOutputChunk(chunk, prefix) {
+  const text = String(chunk || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!text) return "";
+  const trailingNewline = text.endsWith("\n");
+  const lines = text.split("\n");
+  if (trailingNewline) lines.pop();
+  return lines.map((line) => `${prefix} ${line}`).join("\n") + (trailingNewline ? "\n" : "");
+}
+
+function writePrefixedChunk(stream, chunk, prefix) {
+  const formatted = prefixOutputChunk(chunk, prefix);
+  if (formatted) stream.write(formatted);
+}
+
+async function runVerificationCommand(command, { cwd, index, total }) {
+  const prefix = createVerificationPrefix(index, total);
+  return await new Promise((resolve) => {
+    const child = spawn(command, [], { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout?.on("data", (chunk) => writePrefixedChunk(process.stdout, chunk, prefix));
+    child.stderr?.on("data", (chunk) => writePrefixedChunk(process.stderr, chunk, prefix));
+    child.on("error", (error) => {
+      writePrefixedChunk(process.stderr, error?.message || String(error), prefix);
+      resolve({ status: 1, error });
+    });
+    child.on("close", (code, signal) => {
+      const status = Number.isInteger(code) ? code : 1;
+      if (signal) {
+        writePrefixedChunk(process.stderr, `Process terminated with signal ${signal}`, prefix);
+      }
+      resolve({ status, signal: signal || null });
+    });
+  });
+}
+
+function getVerificationFailureStatus(completedCount, total) {
+  return completedCount > 0 && completedCount < total
+    ? VERIFICATION_STATUS.PARTIAL
+    : VERIFICATION_STATUS.FAILED;
 }
 
 /**
@@ -1182,6 +1242,8 @@ export async function runTaskCli(args) {
       return;
     case "stats":
       return await cliStats(subArgs);
+    case "verify":
+      return await cliVerify(subArgs);
     case "import":
       return await cliImport(subArgs);
     default:
@@ -1761,6 +1823,7 @@ function showTaskHelp() {
     delete, rm  Delete a task              bosun task delete --help
     stats       Aggregate statistics        bosun task stats --json/--debug
     import      Bulk import from JSON file  bosun task import --help
+    verify      Run verification commands   bosun task verify --help
 
   QUICK REFERENCE
 
