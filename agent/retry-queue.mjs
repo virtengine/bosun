@@ -36,6 +36,7 @@ function normalizeItem(raw = {}, now = Date.now()) {
     nextAttemptAt,
     status: String(raw.status || "pending"),
     reason: String(raw.reason || "").trim() || "",
+    fallbackReason: String(raw.fallbackReason || raw.fallback_reason || "").trim() || "",
     updatedAt,
     expiresAt,
   };
