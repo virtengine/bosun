@@ -15981,9 +15981,14 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       "Planner analysis complete.",
       "```json",
       "{",
+      '  "recentPrContext": {',
+      '    "merged": [',
+      '      { "title": "feat(workflow): create tasks workflow materialization", "branch": "task/workflow-create-tasks", "repo": "virtengine/bosun", "taskId": "task-1000" }',
+      "    ]",
+      "  },",
       '  "tasks": [',
-      '    { "title": "[m] fix(workflow): create tasks", "description": "A", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.8, "confidence": 0.7, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): duplicate title", "description": "B" }',
+      '    { "title": "[m] docs(workflow): duplicate title", "description": "B", "impact": 0.8, "confidence": 0.7, "risk": "low" },',
+      '    { "title": "[m] fix(workflow): create tasks", "description": "A", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.8, "confidence": 0.7, "risk": "low" }',
       "  ]",
       "}",
       "```",
@@ -18357,6 +18362,41 @@ describe("delegation audit trail hydration", () => {
     ]);
     expect(detail?.delegationAuditTrail).toEqual(detail?.delegationTrail);
     expect(detail?.latestDelegationEvent).toEqual(expect.objectContaining({ type: "handoff-complete" }));
+    expect(detail?.detail?.data?._workflowDelegationTrail).toHaveLength(2);
+    expect(detail?.delegationTransitionGuards).toMatchObject({
+      "assign:delegate:child-wf:task-1": expect.objectContaining({
+        type: "assign",
+        claimToken: "claim-history",
+      }),
+    });
+    expect(detail?.detail?.data?._delegationTransitionGuards).toMatchObject({
+      "assign:delegate:child-wf:task-1": expect.objectContaining({
+        type: "assign",
+        claimToken: "claim-history",
+      }),
+    });
+
+    const history = engine.getRunHistory(null, 20);
+    expect(history).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runId,
+        delegationTrail: expect.arrayContaining([
+          expect.objectContaining({ type: "assign" }),
+          expect.objectContaining({ type: "handoff-complete" }),
+        ]),
+        delegationAuditTrail: expect.arrayContaining([
+          expect.objectContaining({ type: "assign" }),
+          expect.objectContaining({ type: "handoff-complete" }),
+        ]),
+        latestDelegationEvent: expect.objectContaining({ type: "handoff-complete" }),
+        delegationTransitionGuards: expect.objectContaining({
+          "assign:delegate:child-wf:task-1": expect.objectContaining({ type: "assign" }),
+        }),
+      }),
+    ]));
+  });
+});
+onEvent).toEqual(expect.objectContaining({ type: "handoff-complete" }));
     expect(detail?.detail?.data?._workflowDelegationTrail).toHaveLength(2);
     expect(detail?.delegationTransitionGuards).toMatchObject({
       "assign:delegate:child-wf:task-1": expect.objectContaining({

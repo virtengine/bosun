@@ -918,17 +918,88 @@ export function resolvePlannerPriorRankingConfig(config) {
     failurePriorStep: Math.max(0, Number(ranking.failurePriorStep ?? 1.5) || 1.5),
     maxNegativePrior: Math.max(0, Number(ranking.maxNegativePrior ?? ranking.maxFailurePriorPenalty ?? 8) || 8),
     signalPenaltyScale: Math.max(0, Number(ranking.signalPenaltyScale ?? ranking.feedbackSignalScale ?? 0.12) || 0.12),
+    implementationFollowupBoost: Math.max(0, Number(ranking.implementationFollowupBoost ?? ranking.recentPrImplementationBoost ?? 2.4) || 2.4),
+    maintenancePenalty: Math.max(0, Number(ranking.maintenancePenalty ?? ranking.documentationOnlyPenalty ?? 1.75) || 1.75),
+  };
+}
+
+function normalizePlannerRankingText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectRecentMergedPrSignals(prContext) {
+  const context = prContext && typeof prContext === "object" && !Array.isArray(prContext)
+    ? prContext
+    : {};
+  const merged = Array.isArray(context.merged) ? context.merged : [];
+  const normalized = merged
+    .map((entry) => {
+      const title = String(entry?.title || "").trim();
+      const branch = String(entry?.branch || "").trim();
+      const repo = String(entry?.repo || entry?.repository || "").trim();
+      const taskId = String(entry?.taskId || "").trim();
+      const normalizedText = normalizePlannerRankingText([title, branch, repo, taskId].filter(Boolean).join(" "));
+      if (!normalizedText) return null;
+      return { title, branch, repo, taskId, normalizedText };
+    })
+    .filter(Boolean);
+  return {
+    merged: normalized,
+    hasSignals: normalized.length > 0,
+  };
+}
+
+function classifyPlannerTaskFollowup(task, recentPrSignals) {
+  const fallback = {
+    implementationLike: false,
+    maintenanceLike: false,
+    followupMatch: false,
+    signalMatches: [],
+  };
+  if (!task || typeof task !== "object") return fallback;
+  const taskText = normalizePlannerRankingText([
+    task.title,
+    task.description,
+    task.whyNow,
+    Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria.join(" ") : "",
+    Array.isArray(task.verification) ? task.verification.join(" ") : "",
+    Array.isArray(task.repoAreas) ? task.repoAreas.join(" ") : "",
+    Array.isArray(task.tags) ? task.tags.join(" ") : "",
+  ].filter(Boolean).join(" "));
+  const implementationLike = /(implement|implementation|build|ship|add|extend|integrate|wire|follow up|followup|complete|support|enable|hook|materializ|resume|planner|workflow|engine|task)/.test(taskText);
+  const maintenanceLike = /(document|docs|documentation|readme|comment cleanups?|chore|maintenance|housekeeping|audit only|rename only)/.test(taskText);
+  const signalMatches = Array.isArray(recentPrSignals?.merged)
+    ? recentPrSignals.merged.filter((signal) => {
+        if (!signal?.normalizedText) return false;
+        const words = signal.normalizedText.split(" ").filter((token) => token.length >= 4);
+        if (words.length === 0) return false;
+        const overlapCount = words.filter((token) => taskText.includes(token)).length;
+        return overlapCount >= Math.min(2, words.length);
+      })
+    : [];
+  return {
+    implementationLike,
+    maintenanceLike,
+    followupMatch: signalMatches.length > 0,
+    signalMatches,
   };
 }
 
 export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
   const config = resolvePlannerPriorRankingConfig(rankingConfig);
+  const recentPrSignals = collectRecentMergedPrSignals(rankingConfig?.recentPrContext || rankingConfig?.prContext);
   const scored = (Array.isArray(tasks) ? tasks : []).map((task) => {
     const impact = Number.isFinite(task?.impact) ? Number(task.impact) : 5;
     const confidence = Number.isFinite(task?.confidence) ? Number(task.confidence) : 5;
     const riskLevel = String(task?.risk || "").trim().toLowerCase();
     const riskPenalty = ({ low: 0, medium: 0.4, high: 0.9, critical: 1.6 })[riskLevel] || 0;
     const baseScore = (impact * 1.15) + (confidence * 0.85) - riskPenalty;
+    const followupSignals = classifyPlannerTaskFollowup(task, recentPrSignals);
 
     const keys = resolvePlannerPatternKeys(task);
     const penalties = keys.map((key) => {
