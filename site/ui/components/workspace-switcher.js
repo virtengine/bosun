@@ -8,14 +8,14 @@ import { h } from "preact";
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
 import htm from "htm";
-import { apiFetch, onWsMessage } from "../../../ui/modules/api.js";
-import { haptic } from "../../../ui/modules/telegram.js";
-import { Modal } from "../../../ui/components/shared.js";
+import { apiFetch, onWsMessage } from "../modules/api.js";
+import { haptic } from "../modules/telegram.js";
+import { Modal } from "./shared.js";
 import {
   WorkspaceExecutorSettingsFields,
   formatWorkspaceExecutorSummary,
-} from "../../../ui/components/workspace-executor-settings.js";
-import { iconText, resolveIcon } from "../../../ui/modules/icon-utils.js";
+} from "./workspace-executor-settings.js";
+import { iconText, resolveIcon } from "../modules/icon-utils.js";
 import {
   Card, CardContent, CardActions,
   Typography, TextField, Button, IconButton,
@@ -79,7 +79,7 @@ export async function switchWorkspace(wsId) {
       // no-op
     }
     try {
-      const { refreshTab } = await import("../../../ui/modules/state.js");
+      const { refreshTab } = await import("../modules/state.js");
       await Promise.allSettled([
         refreshTab("tasks", { background: true, manual: false }),
         refreshTab("dashboard", { background: true, manual: false }),
