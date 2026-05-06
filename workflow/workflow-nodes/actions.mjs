@@ -7239,6 +7239,19 @@ registerNodeType("action.materialize_planner_tasks", {
         description: task.description,
         status,
       };
+      const materializationFingerprint = createHash("sha256")
+        .update(JSON.stringify({
+          plannerNodeId,
+          title: task.title,
+          description: task.description,
+          status,
+          repoAreas: Array.isArray(task.repoAreas) ? task.repoAreas : [],
+          acceptanceCriteria: Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria : [],
+          verification: Array.isArray(task.verification) ? task.verification : [],
+          repository: task.repository || materializationDefaults.repository || "",
+          workspace: task.workspace || materializationDefaults.workspace || "",
+        }))
+        .digest("hex");
       if (task.priority) payload.priority = task.priority;
       if (task.workspace || materializationDefaults.workspace) {
         payload.workspace = task.workspace || materializationDefaults.workspace;
