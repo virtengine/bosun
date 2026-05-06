@@ -17979,6 +17979,9 @@ function resolveTaskMutationActorId(body = {}, req = null) {
   return normalizeOptionalStringInput(
     body?.actorId
       ?? body?.actor
+      ?? req?.headers?.["x-bosun-actor"]
+      ?? req?.headers?.["x-bosun-user"]
+      ?? req?.headers?.["x-user-id"]
       ?? req?.headers?.["x-task-actor-id"]
       ?? req?.headers?.["x-actor-id"],
   );
@@ -17993,17 +17996,22 @@ function evaluateTaskMutationAuthorization(task = {}, actorId = "") {
   }
   const normalizedActorId = normalizeOptionalStringInput(actorId);
   if (!normalizedActorId) {
-    return { allowed: false, explicitPolicy: true, reason: "task_mutation_actor_missing", actorId: null };
+    return { allowed: false, explicitPolicy: true, reason: "missing_actor", actorId: null };
   }
   if (ownerUserId && normalizedActorId === ownerUserId) {
     return { allowed: true, explicitPolicy: true, actorId: normalizedActorId, role: "owner" };
   }
   const membership = workspaceMembers.find((entry) => entry.userId === normalizedActorId) || null;
   if (!membership) {
-    return { allowed: false, explicitPolicy: true, reason: "task_mutation_not_workspace_member", actorId: normalizedActorId };
+    return {
+      allowed: false,
+      explicitPolicy: true,
+      reason: ownerUserId ? "ownership_required" : "workspace_membership_required",
+      actorId: normalizedActorId,
+    };
   }
   if (membership.role === "viewer") {
-    return { allowed: false, explicitPolicy: true, reason: "task_mutation_role_read_only", actorId: normalizedActorId, role: membership.role };
+    return { allowed: false, explicitPolicy: true, reason: "insufficient_membership_role", actorId: normalizedActorId, role: membership.role };
   }
   return { allowed: true, explicitPolicy: true, actorId: normalizedActorId, role: membership.role };
 }
@@ -22053,11 +22061,6 @@ async function handleApi(req, res, url) {
         writeTaskMutationForbidden(res, authorization);
         return;
       }
-      const authorization = evaluateTaskMutationAuthorization(previousTask || {}, resolveTaskMutationActorId(body, req));
-      if (!authorization.allowed) {
-        writeTaskMutationForbidden(res, authorization);
-        return;
-      }
       const tagsProvided = hasOwn(body, "tags");
       const tags = tagsProvided ? normalizeTagsInput(body?.tags) : undefined;
       const draftProvided = hasOwn(body, "draft");
@@ -22235,6 +22238,11 @@ async function handleApi(req, res, url) {
       const previousTask = typeof adapter.getTask === "function"
         ? await adapter.getTask(taskId).catch(() => null)
         : null;
+      const authorization = evaluateTaskMutationAuthorization(previousTask || {}, resolveTaskMutationActorId(body, req));
+      if (!authorization.allowed) {
+        writeTaskMutationForbidden(res, authorization);
+        return;
+      }
       const tagsProvided = hasOwn(body, "tags");
       const tags = tagsProvided ? normalizeTagsInput(body?.tags) : undefined;
       const draftProvided = hasOwn(body, "draft");
