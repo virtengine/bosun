@@ -41,6 +41,7 @@ import {
   extractPlannerTasksFromWorkflowOutput,
   loadPlannerPriorState,
   parsePlannerJsonFromText,
+  validateStrictTaskPlannerPayload,
   normalizePlannerAreaKey,
   normalizePlannerRiskLevel,
   normalizePlannerScore,
@@ -7028,6 +7029,7 @@ registerNodeType("action.materialize_planner_tasks", {
     const plannerOutput = ctx.getNodeOutput(plannerNodeId) || {};
     const outputText = String(plannerOutput?.output || "").trim();
     const plannerPayload = parsePlannerJsonFromText(outputText);
+    const plannerValidation = validateStrictTaskPlannerPayload(plannerPayload);
     const maxTasks = Number(ctx.resolve(node.config?.maxTasks || ctx.data?.taskCount || 5)) || 5;
     const failOnZero = node.config?.failOnZero !== false;
     // Use nullish coalescing so an explicit minCreated:0 is respected (not coerced to 1).
@@ -7069,13 +7071,28 @@ registerNodeType("action.materialize_planner_tasks", {
     const rankingConfig = resolvePlannerPriorRankingConfig(plannerFeedback?.rankingSignals?.config || null);
     const feedbackWeights = resolvePlannerPriorFeedbackWeights(plannerFeedback?.rankingSignals?.weights || null);
 
+    if (!plannerValidation.ok) {
+      const message = `Planner output from "${plannerNodeId}" failed TaskPlanner schema validation: ${plannerValidation.error}`;
+      ctx.log(node.id, message, failOnZero ? "error" : "warn");
+      if (failOnZero) throw new Error(message);
+      return {
+        success: false,
+        parsedCount: 0,
+        createdCount: 0,
+        skippedCount: 0,
+        created: [],
+        skipped: [],
+        error: message,
+        validationError: plannerValidation,
+      };
+    }
+
     const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
     if (!parsedTasks.length) {
-      // Log diagnostic info to help debug planner output format issues
       const outputPreview = outputText.length > 200
         ? `${outputText.slice(0, 200)}…`
         : outputText || "(empty)";
-      const message = `Planner output from "${plannerNodeId}" did not include parseable tasks. ` +
+      const message = `Planner output from "${plannerNodeId}" did not include valid materializable tasks after schema validation. ` +
         `Output length: ${outputText.length} chars. Preview: ${outputPreview}`;
       ctx.log(node.id, message, failOnZero ? "error" : "warn");
       if (failOnZero) throw new Error(message);
