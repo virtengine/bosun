@@ -7297,6 +7297,23 @@ registerNodeType("action.materialize_planner_tasks", {
         merge_back_policy: task.mergeBackPolicy || null,
       };
       payload.meta = existingMeta;
+      const existingTaskByProvenance = Array.isArray(existingTasks)
+        ? existingTasks.find((candidate) => {
+            const candidateKey = String(candidate?.meta?.planner?.dedupe_key || "").trim();
+            return candidateKey && candidateKey === plannerDedupeKey;
+          })
+        : null;
+      if (existingTaskByProvenance) {
+        skipped.push({
+          title: task.title,
+          reason: "duplicate_planner_provenance",
+          existingTaskId: existingTaskByProvenance.id || null,
+          dedupeKey: plannerDedupeKey,
+        });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "duplicate_planner_provenance" });
+        existingTitleSet.add(key);
+        continue;
+      }
       const createdTask = await createKanbanTaskWithProject(kanban, payload, projectId);
       created.push({
         id: createdTask?.id || null,

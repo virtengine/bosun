@@ -15975,7 +15975,10 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
 
-  const ctx = new WorkflowContext({});
+  const ctx = new WorkflowContext({
+    workflowId: "wf-123",
+    runId: "run-456",
+  });
   ctx.setNodeOutput("run-planner", {
     output: [
       "Planner analysis complete.",
@@ -16048,6 +16051,13 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
     meta: expect.objectContaining({
       repo_areas: ["workflow"],
       planner: expect.objectContaining({
+        workflowId: "wf-123",
+        runId: "run-456",
+        nodeId: "materialize",
+        plannerNodeId: "run-planner",
+        plannerTaskIndex: 0,
+        dedupe_key: expect.stringContaining("wf-123:run-456:materialize:run-planner:0"),
+        materialization_fingerprint: expect.any(String),
         impact: 8,
         confidence: 7,
         risk: "low",
@@ -16055,6 +16065,75 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       }),
     }),
   }));
+});
+
+it("action.materialize_planner_tasks skips duplicate planner provenance on retry", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    workflowId: "wf-dup",
+    runId: "run-dup",
+  });
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[m] feat(workflow): duplicate from provenance",
+          description: "Created in prior retry attempt",
+          acceptance_criteria: ["ac1"],
+          verification: ["v1"],
+          repo_areas: ["workflow"],
+          impact: 0.8,
+          confidence: 0.7,
+          risk: 0.2,
+        },
+      ],
+    }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([
+    {
+      id: "existing-prov-1",
+      title: "[m] feat(workflow): duplicate from provenance",
+      meta: {
+        planner: {
+          dedupe_key: "wf-dup:run-dup:materialize:run-planner:0",
+        },
+      },
+    },
+  ]);
+
+  const result = await handler.execute({
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      dedup: true,
+      failOnZero: false,
+      minCreated: 0,
+    },
+  }, ctx, {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.createdCount).toBe(0);
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      title: "[m] feat(workflow): duplicate from provenance",
+      reason: "duplicate_planner_provenance",
+      existingTaskId: "existing-prov-1",
+      dedupeKey: "wf-dup:run-dup:materialize:run-planner:0",
+    }),
+  ]));
+  expect(createTask).not.toHaveBeenCalled();
 });
 
 it("action.materialize_planner_tasks resumed run does not recreate already-created tasks (idempotent handoff)", async () => {

@@ -6013,6 +6013,20 @@ export function TaskDetailModal({ task, onClose, onStart, onOpenTask = null, pre
           </div>
         </div>
 
+        ${task?.meta?.planner && html`
+          <div class="task-sidebar-field" data-field="planner-provenance" style="flex-direction:column;gap:6px;align-items:stretch;">
+            <div class="task-sidebar-label" style="width:auto;">Planner Provenance</div>
+            <div class="task-sidebar-value" style="display:grid;gap:4px;">
+              ${task.meta.planner.workflowId && html`<div class="meta-text"><strong>Workflow:</strong> ${task.meta.planner.workflowId}</div>`}
+              ${task.meta.planner.runId && html`<div class="meta-text"><strong>Run:</strong> ${task.meta.planner.runId}</div>`}
+              ${(task.meta.planner.nodeId || task.meta.planner.plannerNodeId) && html`<div class="meta-text"><strong>Nodes:</strong> ${task.meta.planner.nodeId || "—"} → ${task.meta.planner.plannerNodeId || "—"}</div>`}
+              ${(task.meta.planner.plannerTaskIndex != null) && html`<div class="meta-text"><strong>Planner index:</strong> ${task.meta.planner.plannerTaskIndex}</div>`}
+              ${task.meta.planner.dedupe_key && html`<div class="meta-text" style=${{ wordBreak: "break-all" }}><strong>Dedupe:</strong> ${task.meta.planner.dedupe_key}</div>`}
+              ${task.meta.planner.materialization_fingerprint && html`<div class="meta-text" style=${{ wordBreak: "break-all" }}><strong>Fingerprint:</strong> ${task.meta.planner.materialization_fingerprint}</div>`}
+            </div>
+          </div>
+        `}
+
         ${/* Dependencies */ ""}
         <div class="task-sidebar-field" data-field="dependencies" style="flex-direction:column;gap:6px;">
           <div class="task-sidebar-label" style="width:auto;">Dependencies</div>
