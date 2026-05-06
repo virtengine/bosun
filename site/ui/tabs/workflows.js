@@ -378,6 +378,40 @@ function formatRetryModeLabel(mode) {
   return normalized || "Unknown retry mode";
 }
 
+function getRunResumeMetadata(run) {
+  const revisions = Array.isArray(run?.detail?.dagState?.revisions) ? run.detail.dagState.revisions : [];
+  const resumeRevision = revisions.find((revision) => {
+    const reason = String(revision?.reason || "").trim().toLowerCase();
+    if (!reason) return false;
+    return reason.includes("resume") || reason.includes("retry");
+  }) || null;
+  const preservedCompletedNodeIds = Array.isArray(resumeRevision?.preservedCompletedNodeIds)
+    ? [...new Set(resumeRevision.preservedCompletedNodeIds.map((id) => String(id || "").trim()).filter(Boolean))]
+    : [];
+  const checkpoint = run?.detail?.checkpoint && typeof run.detail.checkpoint === "object"
+    ? run.detail.checkpoint
+    : (run?.detail?.data?._workflowCheckpoint && typeof run.detail.data._workflowCheckpoint === "object"
+        ? run.detail.data._workflowCheckpoint
+        : null);
+  const nextPendingNodeId = String(
+    checkpoint?.nextPendingNodeId
+    || resumeRevision?.pendingNodeIds?.[0]
+    || ""
+  ).trim();
+  const nextPendingNodeLabel = String(
+    checkpoint?.nextPendingNodeLabel
+    || nextPendingNodeId
+    || ""
+  ).trim();
+  const resumed = Boolean(run?.retryOf || run?.detail?.dagState?.retryOf || resumeRevision || checkpoint?.nextPendingNodeId);
+  return {
+    resumed,
+    preservedCompletedNodeIds,
+    nextPendingNodeId: nextPendingNodeId || "",
+    nextPendingNodeLabel: nextPendingNodeLabel || "",
+  };
+}
+
 function formatRetryDecisionReason(reason) {
   const normalized = String(reason || "").trim().toLowerCase();
   if (!normalized) return "No retry decision reason recorded.";
@@ -8718,6 +8752,7 @@ function RunHistoryView() {
                 ? Math.max(0, nowTick - run.startedAt)
                 : run.duration;
               const triggerLabel = getWorkflowRunTriggerLabel(run);
+              const resumeMeta = getRunResumeMetadata(run);
               return html`
                 <${TableRow}
                   key=${run.runId}
@@ -8745,6 +8780,7 @@ function RunHistoryView() {
                       />
                       ${run.isStuck && html`<${Chip} size="small" label="stuck" color="warning" variant="outlined" />`}
                       ${run.retryOf && html`<${Chip} size="small" label="retry" color="success" variant="outlined" />`}
+                      ${resumeMeta.resumed && html`<${Chip} size="small" label="resumed" color="info" variant="outlined" />`}
                     <//>
                   <//>
                   <${TableCell}>
