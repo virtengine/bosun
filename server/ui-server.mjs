@@ -17928,6 +17928,96 @@ function normalizeAssigneesInput(input) {
   return assignees;
 }
 
+function normalizeWorkspaceMemberRole(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "admin" || normalized === "member" || normalized === "viewer") return normalized;
+  return null;
+}
+
+function normalizeWorkspaceMembersInput(value) {
+  const input = Array.isArray(value)
+    ? value
+    : (value && typeof value === "object" ? Object.entries(value).map(([userId, role]) => ({ userId, role })) : []);
+  const members = [];
+  const seen = new Set();
+  for (const entry of input) {
+    if (!entry) continue;
+    const userId = normalizeOptionalStringInput(
+      entry?.userId ?? entry?.user ?? entry?.id ?? entry?.memberId ?? entry?.actorId,
+    );
+    const role = normalizeWorkspaceMemberRole(entry?.role ?? entry?.access ?? entry?.permission);
+    if (!userId || !role || seen.has(userId)) continue;
+    seen.add(userId);
+    members.push({ userId, role });
+  }
+  return members;
+}
+
+function resolveTaskOwnerUserId(task = {}) {
+  return normalizeOptionalStringInput(
+    task?.ownerUserId
+      ?? task?.ownerId
+      ?? task?.owner
+      ?? task?.meta?.ownerUserId
+      ?? task?.meta?.ownerId
+      ?? task?.meta?.owner,
+  );
+}
+
+function resolveTaskWorkspaceMembers(task = {}) {
+  return normalizeWorkspaceMembersInput(
+    task?.workspaceMembers
+      ?? task?.workspaceRoles
+      ?? task?.workspace_roles
+      ?? task?.meta?.workspaceMembers
+      ?? task?.meta?.workspaceRoles
+      ?? task?.meta?.workspace_roles,
+  );
+}
+
+function resolveTaskMutationActorId(body = {}, req = null) {
+  return normalizeOptionalStringInput(
+    body?.actorId
+      ?? body?.actor
+      ?? req?.headers?.["x-task-actor-id"]
+      ?? req?.headers?.["x-actor-id"],
+  );
+}
+
+function evaluateTaskMutationAuthorization(task = {}, actorId = "") {
+  const ownerUserId = resolveTaskOwnerUserId(task);
+  const workspaceMembers = resolveTaskWorkspaceMembers(task);
+  const explicitPolicy = Boolean(ownerUserId) || workspaceMembers.length > 0;
+  if (!explicitPolicy) {
+    return { allowed: true, explicitPolicy: false, actorId: normalizeOptionalStringInput(actorId) || null };
+  }
+  const normalizedActorId = normalizeOptionalStringInput(actorId);
+  if (!normalizedActorId) {
+    return { allowed: false, explicitPolicy: true, reason: "task_mutation_actor_missing", actorId: null };
+  }
+  if (ownerUserId && normalizedActorId === ownerUserId) {
+    return { allowed: true, explicitPolicy: true, actorId: normalizedActorId, role: "owner" };
+  }
+  const membership = workspaceMembers.find((entry) => entry.userId === normalizedActorId) || null;
+  if (!membership) {
+    return { allowed: false, explicitPolicy: true, reason: "task_mutation_not_workspace_member", actorId: normalizedActorId };
+  }
+  if (membership.role === "viewer") {
+    return { allowed: false, explicitPolicy: true, reason: "task_mutation_role_read_only", actorId: normalizedActorId, role: membership.role };
+  }
+  return { allowed: true, explicitPolicy: true, actorId: normalizedActorId, role: membership.role };
+}
+
+function writeTaskMutationForbidden(res, authorization) {
+  jsonResponse(res, 403, {
+    ok: false,
+    error: "forbidden",
+    reason: authorization?.reason || "task_mutation_forbidden",
+    actorId: authorization?.actorId || null,
+    role: authorization?.role || null,
+  });
+}
+
 function buildTaskMetadataPatch(input = {}) {
   const topLevel = {};
   const meta = {};
@@ -18037,6 +18127,24 @@ function buildTaskMetadataPatch(input = {}) {
     if (Number.isFinite(budgetCents) && budgetCents >= 0) {
       topLevel.budgetCents = Math.trunc(budgetCents);
       meta.budgetCents = Math.trunc(budgetCents);
+    }
+  }
+
+  if (hasOwn(input, "ownerUserId") || hasOwn(input, "ownerId") || hasOwn(input, "owner")) {
+    const ownerUserId = normalizeOptionalStringInput(input?.ownerUserId ?? input?.ownerId ?? input?.owner);
+    if (ownerUserId) {
+      topLevel.ownerUserId = ownerUserId;
+      meta.ownerUserId = ownerUserId;
+    }
+  }
+
+  if (hasOwn(input, "workspaceMembers") || hasOwn(input, "workspaceRoles") || hasOwn(input, "workspace_roles")) {
+    const workspaceMembers = normalizeWorkspaceMembersInput(
+      input?.workspaceMembers ?? input?.workspaceRoles ?? input?.workspace_roles,
+    );
+    if (workspaceMembers.length > 0) {
+      topLevel.workspaceMembers = workspaceMembers;
+      meta.workspaceMembers = workspaceMembers;
     }
   }
 
@@ -18164,6 +18272,8 @@ function withTaskMetadataTopLevel(task) {
     "coordinationRole",
     "coordinationReportsTo",
     "coordinationLevel",
+    "ownerUserId",
+    "workspaceMembers",
   ];
   for (const key of keys) {
     if (meta[key] != null && next[key] !== meta[key]) {
@@ -21336,6 +21446,12 @@ async function handleApi(req, res, url) {
       }
 
       const adapter = getKanbanAdapter();
+      const task = await getTaskByIdForApi(taskId, adapter).catch(() => null);
+      const authorization = evaluateTaskMutationAuthorization(task || {}, resolveTaskMutationActorId(body, req));
+      if (!authorization.allowed) {
+        writeTaskMutationForbidden(res, authorization);
+        return;
+      }
       const assigned = await assignTaskToSprintForApi({
         taskId,
         sprintId,
@@ -21932,6 +22048,16 @@ async function handleApi(req, res, url) {
       const previousTask = typeof adapter.getTask === "function"
         ? await adapter.getTask(taskId).catch(() => null)
         : null;
+      const authorization = evaluateTaskMutationAuthorization(previousTask || {}, resolveTaskMutationActorId(body, req));
+      if (!authorization.allowed) {
+        writeTaskMutationForbidden(res, authorization);
+        return;
+      }
+      const authorization = evaluateTaskMutationAuthorization(previousTask || {}, resolveTaskMutationActorId(body, req));
+      if (!authorization.allowed) {
+        writeTaskMutationForbidden(res, authorization);
+        return;
+      }
       const tagsProvided = hasOwn(body, "tags");
       const tags = tagsProvided ? normalizeTagsInput(body?.tags) : undefined;
       const draftProvided = hasOwn(body, "draft");
@@ -22439,6 +22565,12 @@ async function handleApi(req, res, url) {
         return;
       }
       const adapter = getKanbanAdapter();
+      const task = await getTaskByIdForApi(taskId, adapter).catch(() => null);
+      const authorization = evaluateTaskMutationAuthorization(task || {}, resolveTaskMutationActorId({}, req));
+      if (!authorization.allowed) {
+        writeTaskMutationForbidden(res, authorization);
+        return;
+      }
       const deleted = await adapter.deleteTask(taskId);
       jsonResponse(res, 200, { ok: true, taskId, deleted: Boolean(deleted) });
       broadcastUiEvent(["tasks", "overview"], "invalidate", {
