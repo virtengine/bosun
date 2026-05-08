@@ -306,12 +306,13 @@ describe("provider auth and model settings", () => {
 
     expect(auth.credentialLifecycle).toEqual(expect.objectContaining({
       providerId: "openai-responses",
-      status: "configured",
+      status: "authenticated",
     }));
     expect(auth.credentialLifecycle.methods).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: "apiKey",
         configured: true,
+        authenticated: true,
         credentialName: "openai-runtime",
         templates: expect.objectContaining({
           headers: { Authorization: "Bearer sk-runtime-1234567890" },
