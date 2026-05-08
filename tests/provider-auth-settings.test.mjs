@@ -298,6 +298,7 @@ describe("provider auth and model settings", () => {
     const auth = normalizeProviderAuthState("openai-responses", {}, {
       implicitAuth: false,
       credentialStore,
+      env: {},
       settings: {
         BOSUN_PROVIDER_OPENAI_ENABLED: "true",
         BOSUN_PROVIDER_OPENAI_MODE: "apiKey",
@@ -306,13 +307,14 @@ describe("provider auth and model settings", () => {
 
     expect(auth.credentialLifecycle).toEqual(expect.objectContaining({
       providerId: "openai-responses",
-      status: "authenticated",
+      status: "configured",
     }));
     expect(auth.credentialLifecycle.methods).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: "apiKey",
         configured: true,
-        authenticated: true,
+        authenticated: false,
+        status: "ready",
         credentialName: "openai-runtime",
         templates: expect.objectContaining({
           headers: { Authorization: "Bearer sk-runtime-1234567890" },
