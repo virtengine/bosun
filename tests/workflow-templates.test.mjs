@@ -1290,6 +1290,35 @@ describe("template drift + update behavior", () => {
     expect(refreshed.metadata.templateState.isCustomized).toBe(false);
   });
 
+  it("reconciles legacy built-in template id workflows without installedFrom metadata", () => {
+    const legacy = structuredClone(getTemplate("template-bosun-pr-watchdog"));
+    delete legacy.metadata.installedFrom;
+    const dispatchNode = legacy.nodes.find((node) => node.id === "dispatch-fix-agents");
+    const securityDispatchNode = legacy.nodes.find((node) => node.id === "dispatch-security-fix-agents");
+    delete dispatchNode.config.mode;
+    delete securityDispatchNode.config.mode;
+    engine.save(legacy);
+
+    const result = reconcileInstalledTemplates(engine, {
+      autoUpdateUnmodified: true,
+      forceUpdateTemplateIds: ["template-bosun-pr-watchdog"],
+    });
+
+    expect(result.scanned).toBe(1);
+    expect(result.forceUpdated).toEqual(["template-bosun-pr-watchdog"]);
+
+    const refreshed = engine.get("template-bosun-pr-watchdog");
+    expect(refreshed.metadata.installedFrom).toBe("template-bosun-pr-watchdog");
+    expect(
+      refreshed.nodes.find((node) => node.id === "dispatch-fix-agents")?.config?.mode,
+    ).toBe("dispatch");
+    expect(
+      refreshed.nodes.find((node) => node.id === "dispatch-security-fix-agents")?.config?.mode,
+    ).toBe("dispatch");
+    expect(refreshed.metadata.templateState.updateAvailable).toBe(false);
+    expect(refreshed.metadata.templateState.isCustomized).toBe(false);
+  });
+
   it("force-refreshes startup-critical task lifecycle workflows with banned trigger statuses or missing required edges", () => {
     const installed = installTemplate("template-task-lifecycle", engine);
     const wf = engine.get(installed.id);
