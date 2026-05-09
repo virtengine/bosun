@@ -83,6 +83,7 @@ import { requireWorkflowActionApproval } from "../action-approval.mjs";
 import { resolve, dirname, basename } from "node:path";
 import { execSync, execFileSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { format as formatConsoleArgs } from "node:util";
 import { resolveAutoCommand } from "../project-detection.mjs";
 import { resolveCodexProfileRuntime } from "../../shell/codex-model-profiles.mjs";
@@ -150,6 +151,28 @@ function spawnAsync(command, args, opts = {}) {
       reject(err);
     });
   });
+}
+
+const ACTIONS_MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+
+export function buildRunAgentShellFallbackInvocation(finalPrompt, cwd, timeoutMs) {
+  const script = [
+    "import('../../agent/agent-pool.mjs')",
+    ".then(m => m.launchEphemeralThread(process.argv[1], process.argv[2], Number(process.argv[3]) || 0))",
+    ".then(r => console.log(JSON.stringify(r)))",
+  ].join("");
+  return {
+    command: process.execPath,
+    args: [
+      "--input-type=module",
+      "-e",
+      script,
+      String(finalPrompt || ""),
+      String(cwd || ""),
+      String(Number(timeoutMs) || 0),
+    ],
+    cwd: ACTIONS_MODULE_DIR,
+  };
 }
 
 function detectInlineNodeExecutionSpec(command, args = [], input = null) {
@@ -5291,15 +5314,11 @@ registerNodeType("action.run_agent", {
     };
 
     try {
-      const escapedPrompt = String(finalPrompt || "")
-        .replace(/\\/g, "\\\\")
-        .replace(/"/g, '\\"');
-      const escapedCwd = String(cwd || "")
-        .replace(/\\/g, "\\\\")
-        .replace(/"/g, '\\"');
-      const output = execSync(
-        `node -e "import('../../agent/agent-pool.mjs').then(m => m.launchEphemeralThread(process.argv[1], process.argv[2], ${timeoutMs}).then(r => console.log(JSON.stringify(r))))" "${escapedPrompt}" "${escapedCwd}"`,
-        { cwd: resolve(dirname(new URL(import.meta.url).pathname)), timeout: timeoutMs + 30000, encoding: "utf8" }
+      const fallback = buildRunAgentShellFallbackInvocation(finalPrompt, cwd, timeoutMs);
+      const output = execFileSync(
+        fallback.command,
+        fallback.args,
+        { cwd: fallback.cwd, timeout: timeoutMs + 30000, encoding: "utf8" },
       );
       const parsed = JSON.parse(output);
       if (node.config?.failOnError && parsed?.success === false) {

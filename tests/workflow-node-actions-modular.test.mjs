@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import "../workflow/workflow-nodes/triggers.mjs";
-import "../workflow/workflow-nodes/actions.mjs";
+import {
+  buildRunAgentShellFallbackInvocation,
+} from "../workflow/workflow-nodes/actions.mjs";
 import "../workflow/workflow-nodes/flow.mjs";
 import { getNodeType } from "../workflow/workflow-engine.mjs";
 import { _resetSingleton, getSessionTracker } from "../infra/session-tracker.mjs";
@@ -36,6 +38,20 @@ describe("workflow modular actions", () => {
     expect(nodeType.schema.properties.skipHooks).toBeDefined();
     expect(nodeType.schema.properties.requireApproval).toBeDefined();
     expect(nodeType.schema.properties.approvalTimeoutMs).toBeDefined();
+  });
+
+  it("builds run_agent fallback launches without Windows URL pathname cwd corruption", () => {
+    const invocation = buildRunAgentShellFallbackInvocation("prompt", "C:\\repo", 12345);
+
+    expect(invocation.command).toBe(process.execPath);
+    expect(invocation.args.slice(0, 3)).toEqual([
+      "--input-type=module",
+      "-e",
+      expect.stringContaining("launchEphemeralThread"),
+    ]);
+    expect(invocation.args.slice(-3)).toEqual(["prompt", "C:\\repo", "12345"]);
+    expect(invocation.cwd).toContain(join("workflow", "workflow-nodes"));
+    expect(invocation.cwd).not.toMatch(/[A-Za-z]:\\[A-Za-z]:\\/);
   });
 
   it("waits for operator approval before creating a PR in the modular registry when risky approvals are enabled", async () => {
