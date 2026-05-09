@@ -9570,6 +9570,113 @@ describeUiServer("ui-server mini app", () => {
     expect(Array.isArray(sprintDagJson.data.nodes)).toBe(true);
   });
 
+  it("enforces task ownership metadata on write task APIs", async () => {
+    process.env.TELEGRAM_UI_TUNNEL = "disabled";
+
+    const mod = await import("../server/ui-server.mjs");
+    const server = await mod.startTelegramUiServer({
+      port: await getFreePort(),
+      host: "127.0.0.1",
+      skipInstanceLock: true,
+      skipAutoOpen: true,
+    });
+    const port = server.address().port;
+    const url = (path) => `http://127.0.0.1:${port}${path}`;
+    const jsonHeaders = (actor) => ({
+      "content-type": "application/json",
+      "x-bosun-actor": actor,
+    });
+
+    const created = await fetch(url("/api/tasks/create"), {
+      method: "POST",
+      headers: jsonHeaders("alice"),
+      body: JSON.stringify({
+        title: "ownership guarded task",
+        description: "authorization metadata",
+        ownerUserId: "alice",
+        workspaceMembers: [
+          { userId: "bob", role: "viewer" },
+          { userId: "carol", role: "member" },
+          { userId: "dana", role: "admin" },
+        ],
+      }),
+    }).then((r) => r.json());
+
+    expect(created.ok).toBe(true);
+    expect(created.data.ownerUserId).toBe("alice");
+    expect(created.data.workspaceMembers).toEqual([
+      { userId: "bob", role: "viewer" },
+      { userId: "carol", role: "member" },
+      { userId: "dana", role: "admin" },
+    ]);
+
+    const taskId = created.data.id;
+    const nonMember = await fetch(url("/api/tasks/update"), {
+      method: "POST",
+      headers: jsonHeaders("eve"),
+      body: JSON.stringify({ taskId, priority: "high" }),
+    });
+    const nonMemberJson = await nonMember.json();
+    expect(nonMember.status).toBe(403);
+    expect(nonMemberJson.reason).toBe("ownership_required");
+
+    const viewer = await fetch(url("/api/tasks/update"), {
+      method: "POST",
+      headers: jsonHeaders("bob"),
+      body: JSON.stringify({ taskId, priority: "high" }),
+    });
+    const viewerJson = await viewer.json();
+    expect(viewer.status).toBe(403);
+    expect(viewerJson.reason).toBe("insufficient_membership_role");
+    expect(viewerJson.role).toBe("viewer");
+
+    const member = await fetch(url("/api/tasks/update"), {
+      method: "POST",
+      headers: jsonHeaders("carol"),
+      body: JSON.stringify({ taskId, priority: "high" }),
+    }).then((r) => r.json());
+    expect(member.ok).toBe(true);
+    expect(member.data.priority).toBe("high");
+
+    const ownerEdit = await fetch(url("/api/tasks/edit"), {
+      method: "POST",
+      headers: jsonHeaders("alice"),
+      body: JSON.stringify({ taskId, description: "owner edit" }),
+    }).then((r) => r.json());
+    expect(ownerEdit.ok).toBe(true);
+    expect(ownerEdit.data.description).toBe("owner edit");
+
+    const viewerAssign = await fetch(url("/api/tasks/sprints/sprint-authz/tasks"), {
+      method: "POST",
+      headers: jsonHeaders("bob"),
+      body: JSON.stringify({ taskId, sprintOrder: 1 }),
+    });
+    expect(viewerAssign.status).toBe(403);
+    expect((await viewerAssign.json()).reason).toBe("insufficient_membership_role");
+
+    const adminAssign = await fetch(url("/api/tasks/sprints/sprint-authz/tasks"), {
+      method: "POST",
+      headers: jsonHeaders("dana"),
+      body: JSON.stringify({ taskId, sprintOrder: 1 }),
+    }).then((r) => r.json());
+    expect(adminAssign.ok).toBe(true);
+    expect(adminAssign.data.sprintId).toBe("sprint-authz");
+
+    const nonMemberDelete = await fetch(url(`/api/tasks/${encodeURIComponent(taskId)}`), {
+      method: "DELETE",
+      headers: { "x-bosun-actor": "eve" },
+    });
+    expect(nonMemberDelete.status).toBe(403);
+    expect((await nonMemberDelete.json()).reason).toBe("ownership_required");
+
+    const ownerDelete = await fetch(url(`/api/tasks/${encodeURIComponent(taskId)}`), {
+      method: "DELETE",
+      headers: { "x-bosun-actor": "alice" },
+    }).then((r) => r.json());
+    expect(ownerDelete.ok).toBe(true);
+    expect(ownerDelete.deleted).toBe(true);
+  });
+
 
   it("persists jira-style metadata fields on create, update, and edit", async () => {
     process.env.TELEGRAM_UI_TUNNEL = "disabled";
