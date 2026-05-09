@@ -79,7 +79,7 @@ ADJACENCY_MAP=(
   ".githooks/pre-push|prepublish-check|vitest-runner"
   "workflow/|workflow-*|workflow-task-lifecycle*|workflow-write-file-encoding*|workflow-pipeline-primitives*|workflow-research-evidence-sidecar*|manual-flows*|mcp-workflow-adapter*|bosun-native-workflow-nodes*|meeting-workflow*|run-evaluator*|state-ledger-sqlite*|webhook-gateway*|credential-store*|cron-scheduler*"
   "workflow-templates/|workflow-templates*|workflow-new-templates*|workflow-engine*|manual-flows*"
-  "task/|task-*|workflow-task-lifecycle*|kanban-*|state-ledger-sqlite*|ve-orchestrator*|vk-api*|ve-kanban*"
+  "task/|task-*|workflow-engine*|workflow-task-lifecycle*|kanban-*|state-ledger-sqlite*|ve-orchestrator*|vk-api*|ve-kanban*"
   "kanban/|kanban-*|task-store*|task-claims*|ve-kanban*|ve-orchestrator*|vk-api*"
   "workspace/|workspace-*|shared-state*|worktree-*|worktree-recovery-regression*|sync-engine*"
   "infra/|monitor-*|heartbeat-monitor*|daemon-*|restart-*|startup-*|maintenance-*|anomaly-*|preflight*|tracing*|tui-bridge*|windows-hidden-child-processes*|weekly-agent-work-report*|workflow-task-lifecycle*|workflow-engine*|session-telemetry*"
@@ -393,11 +393,40 @@ is_deferred_local_suite() {
   is_isolated_project_suite "$1"
 }
 
+is_critical_deferred_suite() {
+  local test_file="$1"
+  case "$test_file" in
+    tests/workflow-engine.test.mjs|\
+    tests/workflow-task-lifecycle.test.mjs|\
+    tests/workflow-templates.test.mjs)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  local changed_path normalized
+  for changed_path in "${CHANGED_FILES[@]}"; do
+    normalized="${changed_path//\\//}"
+    case "$normalized" in
+      workflow/*|\
+      workflow-templates/*|\
+      task/*|\
+      tests/workflow-engine.test.mjs|\
+      tests/workflow-task-lifecycle.test.mjs|\
+      tests/workflow-templates.test.mjs)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 declare -a DEFERRED_LOCAL_TESTS=()
 if ! should_include_deferred_local_suites; then
   declare -a FILTERED_TARGET_TESTS=()
   for test_file in "${SORTED_TARGET_TESTS[@]}"; do
-    if is_deferred_local_suite "$test_file"; then
+    if is_deferred_local_suite "$test_file" && ! is_critical_deferred_suite "$test_file"; then
       DEFERRED_LOCAL_TESTS+=("$test_file")
       continue
     fi
