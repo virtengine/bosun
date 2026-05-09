@@ -1974,6 +1974,10 @@ describe("github template CLI compatibility", () => {
     expect(command).toContain("databaseId,attempt,conclusion,status,workflowName,displayTitle,url,createdAt,updatedAt");
     expect(command).toContain("collectCiDiagnostics(repo,failedRun,runGh)");
     expect(command).toContain("runGh(['run','list','--repo',repo,'--branch',branch,'--json','databaseId,attempt,conclusion,status,workflowName,displayTitle,url,createdAt,updatedAt','--limit','8'])");
+    expect(command).toContain("function runMatchesFailedChecks(run,failedNames)");
+    expect(command).toContain("const recentFailedRunCount=relevantFailedRuns.length||(failedRun?1:0);");
+    expect(command).toContain("recentFailedRunCount<=MAX_AUTO_RERUN_ATTEMPT");
+    expect(command).toContain("reason:'ci_rerun_pending'");
     expect(command).toContain("reason:'auto_rerun_limit_reached'");
     expect(command).toContain("failedLogExcerpt");
     expect(command).toContain("failedJobs");
@@ -2035,6 +2039,9 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(inspectNode)).toContain("else if(prState==='CLOSED'){classification='closed';reason='pr_closed';}");
     expect(getNodeCommandCode(inspectNode)).toContain("classification='conflict';reason='merge_conflict';");
     expect(getNodeCommandCode(fixNode)).toContain("MAX_AUTO_RERUN_ATTEMPT=1");
+    expect(getNodeCommandCode(fixNode)).toContain("function runMatchesFailedChecks(run,failedNames)");
+    expect(getNodeCommandCode(fixNode)).toContain("recentFailedRunCount<=MAX_AUTO_RERUN_ATTEMPT");
+    expect(getNodeCommandCode(fixNode)).toContain("reason:'ci_rerun_pending'");
     expect(getNodeCommandCode(fixNode)).toContain("--log-failed");
     expect(getNodeCommandCode(fixNode)).toContain("reason:'auto_rerun_limit_reached'");
     expect(getNodeCommandCode(fixNode)).toContain("classification==='conflict'");
