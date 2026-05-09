@@ -1877,6 +1877,8 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(fetchNode)).toContain("pendingChecks:hasPend");
     expect(getNodeCommandCode(fetchNode)).toContain("sharedFailures=[]");
     expect(getNodeCommandCode(fetchNode)).toContain("collectDefaultBranchFailureNames(repo,baseBranch)");
+    expect(getNodeCommandCode(fetchNode)).toContain("const isSharedFailure=hasFail&&!hasSecurityFail&&!isConflict&&allFailuresOnDefaultBranch;");
+    expect(getNodeCommandCode(fetchNode)).not.toContain("repeatedFailureCount>=2");
     expect(getNodeCommandCode(fetchNode)).toContain("reviewStatus:'shared_ci_failure'");
     expect(getNodeCommandCode(fetchNode)).toContain("failureScope:'shared'");
     expect(getNodeCommandCode(fetchNode)).toContain("taskReviewSignalsUpdated");
