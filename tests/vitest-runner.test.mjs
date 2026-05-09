@@ -227,7 +227,7 @@ describe("vitest-runner", () => {
     mkdirSync(resolve(sharedDeps, "vitest"), { recursive: true });
     writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
     writeFileSync(configPath, "export default {};\n");
-    symlinkSync(sharedDeps, resolve(root, "node_modules"));
+    symlinkSync(sharedDeps, resolve(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
 
     expect(resolveVitestConfigLoader({ startDir: nestedWorktree })).toBe("native");
     expect(
