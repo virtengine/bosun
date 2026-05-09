@@ -1978,6 +1978,7 @@ describe("github template CLI compatibility", () => {
     expect(command).toContain("const recentFailedRunCount=relevantFailedRuns.length||(failedRun?1:0);");
     expect(command).toContain("recentFailedRunCount<=MAX_AUTO_RERUN_ATTEMPT");
     expect(command).toContain("reason:'ci_rerun_pending'");
+    expect(command).toContain("rerunPendingCount:pendingReruns.length");
     expect(command).toContain("reason:'auto_rerun_limit_reached'");
     expect(command).toContain("failedLogExcerpt");
     expect(command).toContain("failedJobs");
