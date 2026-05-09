@@ -2225,6 +2225,7 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
         "}catch{return []}})()",
       variable: "item",
       maxConcurrent: "{{maxConcurrentFixes}}",
+      mode: "dispatch",
       workflowId: "template-pr-security-fix-single",
     }, { x: 120, y: 1100 }),
 
@@ -2411,6 +2412,7 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
         "}catch{return []}})()",
       variable: "item",
       maxConcurrent: "{{maxConcurrentFixes}}",
+      mode: "dispatch",
       workflowId: "template-pr-fix-single",
     }, { x: 280, y: 1160 }),
 

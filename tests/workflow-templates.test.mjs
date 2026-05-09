@@ -1918,6 +1918,7 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(securityNode)).toContain("digestSummary");
     expect(getNodeCommandCode(securityNode)).toContain("reason:'security_code_scanning_failure'");
     expect(securityDispatchNode?.type).toBe("loop.for_each");
+    expect(securityDispatchNode?.config?.mode).toBe("dispatch");
     expect(securityDispatchNode?.config?.workflowId).toBe("template-pr-security-fix-single");
     expect(securityPromptNode?.config?.value).toContain("security remediation");
     expect(securityPromptNode?.config?.value).toContain("Fix ONLY the security/CodeQL findings");
@@ -1956,6 +1957,7 @@ describe("github template CLI compatibility", () => {
     expect(dispatchNode?.type).toBe("loop.for_each");
     expect(dispatchNode?.config?.items).toContain("d.unclaimed");
     expect(dispatchNode?.config?.maxConcurrent).toBe("{{maxConcurrentFixes}}");
+    expect(dispatchNode?.config?.mode).toBe("dispatch");
     expect(dispatchNode?.config?.workflowId).toBe("template-pr-fix-single");
     expect(singleFixTemplate?.trigger).toBe("trigger.manual");
   });
