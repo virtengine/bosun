@@ -97,7 +97,7 @@ import { ensureWorktreeRuntimeSetup } from "../../workspace/worktree-setup.mjs";
  */
 function spawnAsync(command, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    const MAX_BUFFER = 10 * 1024 * 1024;
+    const maxBuffer = Math.max(1, Number(opts.maxBuffer) || 10 * 1024 * 1024);
     const captureOutput = opts.stdio !== "inherit";
     const needsInput = opts.input != null;
     const stdio = captureOutput
@@ -117,9 +117,12 @@ function spawnAsync(command, args, opts = {}) {
     if (captureOutput) {
       child.stdout?.on("data", (chunk) => {
         stdout += chunk;
-        if (stdout.length > MAX_BUFFER) stdout = stdout.slice(stdout.length - MAX_BUFFER);
+        if (stdout.length > maxBuffer) stdout = stdout.slice(stdout.length - maxBuffer);
       });
-      child.stderr?.on("data", (chunk) => { stderr += chunk; });
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk;
+        if (stderr.length > maxBuffer) stderr = stderr.slice(stderr.length - maxBuffer);
+      });
     }
     if (needsInput && child.stdin) {
       child.stdin.on("error", () => {});
@@ -154,6 +157,29 @@ function spawnAsync(command, args, opts = {}) {
 }
 
 const ACTIONS_MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const RUN_AGENT_SHELL_FALLBACK_OUTPUT_BUFFER = 64 * 1024 * 1024;
+
+export function parseRunAgentShellFallbackOutput(rawOutput) {
+  const trimmed = String(rawOutput || "").trim();
+  if (!trimmed) {
+    throw new Error("Agent fallback did not return JSON");
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line.startsWith("{") && !line.startsWith("[")) continue;
+      try {
+        return JSON.parse(line);
+      } catch {
+        // Keep walking backward; agent logs may contain JSON-looking snippets.
+      }
+    }
+    throw new Error("Agent fallback did not return parseable JSON");
+  }
+}
 
 export function buildRunAgentShellFallbackInvocation(finalPrompt, cwd, timeoutMs) {
   const script = [
@@ -172,6 +198,7 @@ export function buildRunAgentShellFallbackInvocation(finalPrompt, cwd, timeoutMs
       String(Number(timeoutMs) || 0),
     ],
     cwd: ACTIONS_MODULE_DIR,
+    maxBuffer: RUN_AGENT_SHELL_FALLBACK_OUTPUT_BUFFER,
   };
 }
 
@@ -5315,12 +5342,16 @@ registerNodeType("action.run_agent", {
 
     try {
       const fallback = buildRunAgentShellFallbackInvocation(finalPrompt, cwd, timeoutMs);
-      const output = execFileSync(
+      const output = await spawnAsync(
         fallback.command,
         fallback.args,
-        { cwd: fallback.cwd, timeout: timeoutMs + 30000, encoding: "utf8" },
+        {
+          cwd: fallback.cwd,
+          timeout: timeoutMs + 30000,
+          maxBuffer: fallback.maxBuffer,
+        },
       );
-      const parsed = JSON.parse(output);
+      const parsed = parseRunAgentShellFallbackOutput(output);
       if (node.config?.failOnError && parsed?.success === false) {
         throw new Error(trimLogText(parsed?.error || parsed?.output || "Agent reported failure", 400));
       }

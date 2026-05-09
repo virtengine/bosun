@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import "../workflow/workflow-nodes/triggers.mjs";
 import {
   buildRunAgentShellFallbackInvocation,
+  parseRunAgentShellFallbackOutput,
 } from "../workflow/workflow-nodes/actions.mjs";
 import "../workflow/workflow-nodes/flow.mjs";
 import { getNodeType } from "../workflow/workflow-engine.mjs";
@@ -52,6 +53,21 @@ describe("workflow modular actions", () => {
     expect(invocation.args.slice(-3)).toEqual(["prompt", "C:\\repo", "12345"]);
     expect(invocation.cwd).toContain(join("workflow", "workflow-nodes"));
     expect(invocation.cwd).not.toMatch(/[A-Za-z]:\\[A-Za-z]:\\/);
+    expect(invocation.maxBuffer).toBeGreaterThan(10 * 1024 * 1024);
+  });
+
+  it("parses run_agent fallback JSON from the tail of verbose agent logs", () => {
+    const parsed = parseRunAgentShellFallbackOutput([
+      "[agent-pool] primary SDK missing prerequisites; trying fallback chain",
+      "{\"event\":\"not the final result\"}",
+      "{\"success\":true,\"output\":\"agent completed\",\"threadId\":\"thread-1\"}",
+    ].join("\n"));
+
+    expect(parsed).toEqual({
+      success: true,
+      output: "agent completed",
+      threadId: "thread-1",
+    });
   });
 
   it("waits for operator approval before creating a PR in the modular registry when risky approvals are enabled", async () => {
