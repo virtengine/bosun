@@ -44,7 +44,7 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('"infra/|monitor-*|heartbeat-monitor*|daemon-*|restart-*|startup-*|maintenance-*|anomaly-*|preflight*|tracing*|tui-bridge*|windows-hidden-child-processes*|weekly-agent-work-report*|workflow-task-lifecycle*|workflow-engine*|session-telemetry*"');
     expect(prePushHook).toContain('"agent/|agent-*|primary-agent*|fleet-*|review-agent*|analyze-agent*|autofix*|streaming-agent*|hook-library*|weekly-agent-work-report*|internal-harness*|harness-runtime*|harness-surface-integration*|provider-kernel*|provider-kernel-support*|session-manager*|tool-governance-support*|tool-orchestrator*"');
     expect(prePushHook).toContain('"telegram/|telegram-*|harness-surface-integration*|whatsapp-*|weekly-agent-work-report*|harness-surface-clients*"');
-    expect(prePushHook).toContain('"task/|task-*|workflow-task-lifecycle*|kanban-*|state-ledger-sqlite*|ve-orchestrator*|vk-api*|ve-kanban*"');
+    expect(prePushHook).toContain('"task/|task-*|workflow-engine*|workflow-task-lifecycle*|kanban-*|state-ledger-sqlite*|ve-orchestrator*|vk-api*|ve-kanban*"');
     expect(prePushHook).toContain('"lib/|logger*|log-tail*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*|hot-path-runtime*"');
   });
 
@@ -395,6 +395,9 @@ describe("vitest-runner", () => {
     expect(prePushHook).toContain('BOSUN_PREPUSH_RUN_PACKED_SMOKE');
     expect(prePushHook).toContain('BOSUN_PREPUSH_INCLUDE_HEAVY');
     expect(prePushHook).toContain('BOSUN_RUN_HEAVY_TESTS');
+    expect(prePushHook).toContain('is_critical_deferred_suite()');
+    expect(prePushHook).toContain('workflow-templates/*|\\');
+    expect(prePushHook).toContain('task/*|\\');
     expect(prePushHook).toContain('tests/workflow-templates-e2e.test.mjs|\\');
     expect(prePushHook).toContain('tests/workflow-guaranteed.test.mjs');
     expect(prePushHook).toContain('tests/ui-server.test.mjs');
