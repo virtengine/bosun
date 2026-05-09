@@ -1929,7 +1929,7 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
         "  const defaultBranchFailureNames=repo&&base?collectDefaultBranchFailureNames(repo,base):[];",
         "  const defaultBranchFailureSet=new Set((Array.isArray(defaultBranchFailureNames)?defaultBranchFailureNames:[]).map(normalizeCheckKey).filter(Boolean));",
         "  const allFailuresOnDefaultBranch=failedCheckNames.length>0&&failedCheckNames.every((name)=>defaultBranchFailureSet.has(normalizeCheckKey(name)));",
-        "  const isSharedFailure=hasFail&&!hasSecurityFail&&!isConflict&&(allFailuresOnDefaultBranch||repeatedFailureCount>=2);",
+        "  const isSharedFailure=hasFail&&!hasSecurityFail&&!isConflict&&allFailuresOnDefaultBranch;",
         "  const sharedIncidentId=isSharedFailure&&failureFingerprint?[repo,base,failureFingerprint].join(':'):null;",
         "  if(isDraft){drafted.push({n:pr.number,repo});continue;}",
         "  if(!bosunCreated && !attachEligible){skippedUntrusted.push({n:pr.number,repo,reason:'attach_policy_excluded'});continue;}",
