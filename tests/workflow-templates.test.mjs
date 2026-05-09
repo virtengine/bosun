@@ -1967,6 +1967,8 @@ describe("github template CLI compatibility", () => {
     const claimNode = watchdogTemplate.nodes.find((n) => n.id === "claim-unclaimed-prs");
     const dispatchNode = watchdogTemplate.nodes.find((n) => n.id === "dispatch-fix-agents");
     const singleFixTemplate = getTemplate("template-pr-fix-single");
+    const singleFixPushNode = singleFixTemplate.nodes.find((n) => n.id === "push-fixes");
+    const singleFixSiblingNode = singleFixTemplate.nodes.find((n) => n.id === "update-sibling-branches");
     const command = getNodeCommandCode(fixNode);
     expect(command).toContain("MAX_AUTO_RERUN_ATTEMPT=1");
     expect(command).toContain("databaseId,attempt,conclusion,status,workflowName,displayTitle,url,createdAt,updatedAt");
@@ -1989,6 +1991,10 @@ describe("github template CLI compatibility", () => {
     expect(dispatchNode?.config?.mode).toBe("dispatch");
     expect(dispatchNode?.config?.workflowId).toBe("template-pr-fix-single");
     expect(singleFixTemplate?.trigger).toBe("trigger.manual");
+    expect(getNodeCommandCode(singleFixPushNode)).toContain("push_disabled");
+    expect(singleFixPushNode?.config?.env?.ALLOW_PUSH).toBe("{{allowPush}}");
+    expect(getNodeCommandCode(singleFixSiblingNode)).toContain("push_disabled");
+    expect(singleFixSiblingNode?.config?.env?.ALLOW_PUSH).toBe("{{allowPush}}");
   });
   it("PR progressor is registered as the immediate single-PR handoff workflow", () => {
     const progressorTemplate = getTemplate("template-bosun-pr-progressor");
