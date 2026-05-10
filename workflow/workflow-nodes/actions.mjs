@@ -40,6 +40,7 @@ import {
   CALIBRATED_MIN_IMPACT_SCORE,
   extractPlannerTasksFromWorkflowOutput,
   loadPlannerPriorState,
+  normalizePlannerTaskForCreation,
   parsePlannerJsonFromText,
   normalizePlannerAreaKey,
   normalizePlannerRiskLevel,
@@ -7069,13 +7070,8 @@ registerNodeType("action.materialize_planner_tasks", {
     const rankingConfig = resolvePlannerPriorRankingConfig(plannerFeedback?.rankingSignals?.config || null);
     const feedbackWeights = resolvePlannerPriorFeedbackWeights(plannerFeedback?.rankingSignals?.weights || null);
 
-    const requiredTaskCount = Number.isFinite(maxTasks)
-      ? Math.max(1, Math.trunc(maxTasks))
-      : 0;
     const plannerTasks = Array.isArray(plannerPayload?.tasks) ? plannerPayload.tasks : null;
-    const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER, {
-      exactCount: requiredTaskCount > 0 ? requiredTaskCount : undefined,
-    });
+    const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
     if (!parsedTasks.length) {
       // Log diagnostic info to help debug planner output format issues
       const outputPreview = outputText.length > 200
@@ -7085,8 +7081,6 @@ registerNodeType("action.materialize_planner_tasks", {
         `Output length: ${outputText.length} chars. Preview: ${outputPreview}`;
       if (!plannerPayload || !plannerTasks) {
         message = `Planner output from "${plannerNodeId}" must be a JSON object with a tasks array.`;
-      } else if (requiredTaskCount > 0 && plannerTasks.length !== requiredTaskCount) {
-        message = `Planner output from "${plannerNodeId}" must contain exactly ${requiredTaskCount} tasks; received ${plannerTasks.length}.`;
       } else {
         const invalidTaskIndex = plannerTasks.findIndex((task, index) => !normalizePlannerTaskForCreation(task, index));
         if (invalidTaskIndex >= 0) {
