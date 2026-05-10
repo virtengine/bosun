@@ -16311,6 +16311,77 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
   expect(listTasks).toHaveBeenCalledTimes(1);
 });
 
+it("action.materialize_planner_tasks skips duplicate planner provenance on retry", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    workflowId: "wf-dup",
+    runId: "run-dup",
+  });
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[m] feat(workflow): duplicate from provenance",
+          description: "Created in prior retry attempt",
+          acceptance_criteria: ["ac1"],
+          verification: ["v1"],
+          repo_areas: ["workflow"],
+          impact: 0.8,
+          confidence: 0.7,
+          risk: "low",
+        },
+      ],
+    }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([
+    {
+      id: "existing-prov-1",
+      title: "[m] feat(workflow): prior retry title changed",
+      meta: {
+        planner: {
+          dedupe_key: "wf-dup:run-dup:materialize:run-planner:0",
+        },
+      },
+    },
+  ]);
+
+  const result = await handler.execute({
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      dedup: true,
+      failOnZero: false,
+      minCreated: 0,
+    },
+  }, ctx, {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.createdCount).toBe(0);
+  expect(result.skippedCount).toBe(1);
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      title: "[m] feat(workflow): duplicate from provenance",
+      reason: "duplicate_planner_provenance",
+      existingTaskId: "existing-prov-1",
+      dedupeKey: "wf-dup:run-dup:materialize:run-planner:0",
+    }),
+  ]));
+  expect(createTask).not.toHaveBeenCalled();
+  expect(listTasks).toHaveBeenCalledTimes(1);
+});
+
 it("action.materialize_planner_tasks repeated resume attempts produce no duplicate task side effects", async () => {
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
