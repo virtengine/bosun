@@ -678,13 +678,29 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
     };
   }
 
+  function resolveWorkflowTemplateId(def = {}) {
+    const explicit = String(def?.metadata?.installedFrom || "").trim();
+    if (explicit) return explicit;
+    const id = String(def?.id || "").trim();
+    return id && getTemplate(id) ? id : "";
+  }
+
+  function ensureWorkflowTemplateMetadata(def = {}, templateId = "") {
+    if (!def || typeof def !== "object" || !templateId) return def;
+    if (!def.metadata || typeof def.metadata !== "object") def.metadata = {};
+    if (!String(def.metadata.installedFrom || "").trim()) {
+      def.metadata.installedFrom = templateId;
+    }
+    return def;
+  }
+
   function applyWorkflowTemplateState(def = {}) {
     if (!def || typeof def !== "object") return def;
-    const templateId = String(def?.metadata?.installedFrom || "").trim();
+    const templateId = resolveWorkflowTemplateId(def);
     if (!templateId) return def;
     const template = getTemplate(templateId);
     if (!template) return def;
-    if (!def.metadata || typeof def.metadata !== "object") def.metadata = {};
+    ensureWorkflowTemplateMetadata(def, templateId);
     def.metadata.templateState = deriveTemplateState(def, template);
     return def;
   }
@@ -744,8 +760,9 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
 
     const existing = engine.get(workflowId);
     if (!existing) throw new Error(`Workflow "${workflowId}" not found`);
-    const templateId = String(existing?.metadata?.installedFrom || "").trim();
+    const templateId = resolveWorkflowTemplateId(existing);
     if (!templateId) throw new Error(`Workflow "${workflowId}" is not template-backed`);
+    ensureWorkflowTemplateMetadata(existing, templateId);
     const template = getTemplate(templateId);
     if (!template) throw new Error(`Template "${templateId}" not found`);
 
@@ -788,7 +805,9 @@ function createWorkflowTemplateState({ getTemplate, cloneTemplateDefinition }) {
       const wfId = summary?.id;
       if (!wfId) continue;
       const def = engine.get(wfId);
-      if (!def?.metadata?.installedFrom) continue;
+      const inferredTemplateId = resolveWorkflowTemplateId(def);
+      if (!inferredTemplateId) continue;
+      ensureWorkflowTemplateMetadata(def, inferredTemplateId);
       result.scanned += 1;
 
       try {
