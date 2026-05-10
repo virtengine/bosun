@@ -2679,6 +2679,10 @@ export const BOSUN_PR_WATCHDOG_TEMPLATE = {
     createdAt: "2025-07-01T00:00:00Z",
     templateVersion: "3.1.0",
     tags: ["github", "pr", "ci", "merge", "watchdog", "bosun-attached", "safety"],
+    requiredTemplates: [
+      "template-pr-fix-single",
+      "template-pr-security-fix-single",
+    ],
     replaces: {
       module: "agent-hooks.mjs",
       functions: ["registerBuiltinHooks (PostPR block)"],
