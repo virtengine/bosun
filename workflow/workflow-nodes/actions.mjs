@@ -7309,8 +7309,17 @@ registerNodeType("action.materialize_planner_tasks", {
       existingTaskByTitle.set(titleKey, row);
     }
 
+    const plannerRecentPrContext =
+      plannerPayload?.recentPrContext && typeof plannerPayload.recentPrContext === "object"
+        ? plannerPayload.recentPrContext
+        : plannerPayload?.prContext && typeof plannerPayload.prContext === "object"
+          ? plannerPayload.prContext
+          : null;
     const rankedTasks = rankPlannerTaskCandidatesForResume(
-      rankPlannerTaskCandidates(parsedTasks, priorState, rankingConfig),
+      rankPlannerTaskCandidates(parsedTasks, priorState, {
+        ...rankingConfig,
+        recentPrContext: plannerRecentPrContext,
+      }),
       plannerFeedback,
     );
     const limitedRankedTasks = rankedTasks.slice(0, materializationLimit);
