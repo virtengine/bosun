@@ -3043,6 +3043,8 @@ async function collectTaskLogDiagnostics(task, workspaceDir = "", limit = 8) {
     pushLogPath(resolve(workspaceDir, ".bosun", "logs", "monitor-error.log"));
     pushLogPath(resolve(workspaceDir, ".bosun", "logs", "monitor.log"));
   }
+  pushLogPath(resolve(process.cwd(), ".bosun", "logs", "monitor-error.log"));
+  pushLogPath(resolve(process.cwd(), ".bosun", "logs", "monitor.log"));
   pushLogPath(resolve(repoRoot, ".bosun", "logs", "monitor-error.log"));
   pushLogPath(resolve(repoRoot, ".bosun", "logs", "monitor.log"));
 
@@ -5256,10 +5258,103 @@ function extractImportedTaskList(body = null) {
   return null;
 }
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeImportedTaskCollection(baseEntries = [], incomingEntries = [], keyBuilder) {
+  const merged = [];
+  const indexByKey = new Map();
+  const appendEntry = (entry) => {
+    if (!entry || typeof entry !== "object") return;
+    const key = typeof keyBuilder === "function" ? String(keyBuilder(entry) || "").trim() : "";
+    if (key && indexByKey.has(key)) {
+      merged[indexByKey.get(key)] = { ...merged[indexByKey.get(key)], ...entry };
+      return;
+    }
+    merged.push(entry);
+    if (key) indexByKey.set(key, merged.length - 1);
+  };
+  for (const entry of Array.isArray(baseEntries) ? baseEntries : []) appendEntry(entry);
+  for (const entry of Array.isArray(incomingEntries) ? incomingEntries : []) appendEntry(entry);
+  return merged;
+}
+
+function mergeImportedTaskTimeline(baseEntries = [], incomingEntries = []) {
+  return mergeImportedTaskCollection(baseEntries, incomingEntries, (entry) => (
+    entry?.id
+      || [
+        entry?.type,
+        entry?.source,
+        entry?.at,
+        entry?.status,
+        entry?.fromStatus,
+        entry?.toStatus,
+        entry?.message,
+      ].map((value) => String(value || "").trim()).join("|")
+  ));
+}
+
+function mergeImportedTaskStatusHistory(baseEntries = [], incomingEntries = []) {
+  return mergeImportedTaskCollection(baseEntries, incomingEntries, (entry) => [
+    entry?.status,
+    entry?.timestamp,
+    entry?.source,
+  ].map((value) => String(value || "").trim()).join("|"));
+}
+
+function mergeImportedTaskMeta(currentMeta = {}, incomingMeta = {}) {
+  const base = isPlainObject(currentMeta) ? currentMeta : {};
+  const incoming = isPlainObject(incomingMeta) ? incomingMeta : {};
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (isPlainObject(value) && isPlainObject(base[key])) {
+      merged[key] = mergeImportedTaskMeta(base[key], value);
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function buildImportedTaskPatch(currentTask = {}, importedTask = {}, mode = "merge") {
+  const patch = importedTask && typeof importedTask === "object" ? { ...importedTask } : {};
+  if (mode !== "merge") return patch;
+
+  if (Object.prototype.hasOwnProperty.call(importedTask, "workflowRuns")
+      && Array.isArray(importedTask.workflowRuns)) {
+    patch.workflowRuns = mergeTaskWorkflowRuns(
+      Array.isArray(currentTask?.workflowRuns) ? currentTask.workflowRuns : [],
+      importedTask.workflowRuns,
+      200,
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(importedTask, "timeline")
+      && Array.isArray(importedTask.timeline)) {
+    patch.timeline = mergeImportedTaskTimeline(
+      Array.isArray(currentTask?.timeline) ? currentTask.timeline : [],
+      importedTask.timeline,
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(importedTask, "statusHistory")
+      && Array.isArray(importedTask.statusHistory)) {
+    patch.statusHistory = mergeImportedTaskStatusHistory(
+      Array.isArray(currentTask?.statusHistory) ? currentTask.statusHistory : [],
+      importedTask.statusHistory,
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(importedTask, "meta")
+      && isPlainObject(importedTask.meta)) {
+    patch.meta = mergeImportedTaskMeta(currentTask?.meta, importedTask.meta);
+  }
+  return patch;
+}
+
 async function importInternalTaskStateSnapshot(body = {}) {
   const taskStore = await ensureTaskStoreApi();
   const addTaskFn = typeof taskStore?.addTask === "function" ? taskStore.addTask : null;
   const updateTaskFn = typeof taskStore?.updateTask === "function" ? taskStore.updateTask : null;
+  const getTaskFn = typeof taskStore?.getTask === "function" ? taskStore.getTask : null;
   if (!addTaskFn || !updateTaskFn) {
     throw new Error("Internal task store import is unavailable");
   }
@@ -5303,12 +5398,19 @@ async function importInternalTaskStateSnapshot(body = {}) {
 
     try {
       if (existingById.has(taskId)) {
-        updateTaskFn(taskId, task);
+        const currentTask = existingById.get(taskId) || {};
+        const patch = buildImportedTaskPatch(currentTask, task, mode);
+        updateTaskFn(taskId, patch);
+        if (getTaskFn) {
+          existingById.set(taskId, getTaskFn(taskId) || { ...currentTask, ...patch });
+        } else {
+          existingById.set(taskId, { ...currentTask, ...patch });
+        }
         summary.updated += 1;
         results.push({ id: taskId, status: "updated" });
       } else {
         addTaskFn(task);
-        existingById.set(taskId, task);
+        existingById.set(taskId, getTaskFn ? (getTaskFn(taskId) || task) : task);
         summary.created += 1;
         results.push({ id: taskId, status: "created" });
       }
