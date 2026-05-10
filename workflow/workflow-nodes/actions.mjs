@@ -7301,18 +7301,18 @@ registerNodeType("action.materialize_planner_tasks", {
         continue;
       }
       if (!Array.isArray(task.acceptanceCriteria) || task.acceptanceCriteria.length === 0) {
-        skipped.push({ title: task.title, reason: "missing_acceptance_criteria" });
-        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "missing_acceptance_criteria" });
+        skipped.push({ title: task.title, reason: "planner_validation_error", field: "acceptance_criteria" });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "planner_validation_error", field: "acceptance_criteria" });
         continue;
       }
       if (!Array.isArray(task.verification) || task.verification.length === 0) {
-        skipped.push({ title: task.title, reason: "missing_verification" });
-        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "missing_verification" });
+        skipped.push({ title: task.title, reason: "planner_validation_error", field: "verification" });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "planner_validation_error", field: "verification" });
         continue;
       }
       if (!Array.isArray(task.repoAreas) || task.repoAreas.length === 0) {
-        skipped.push({ title: task.title, reason: "missing_repo_areas" });
-        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "missing_repo_areas" });
+        skipped.push({ title: task.title, reason: "planner_validation_error", field: "repo_areas" });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "planner_validation_error", field: "repo_areas" });
         continue;
       }
       if (Number.isFinite(minImpactScore) && Number.isFinite(task.impact) && task.impact < minImpactScore) {

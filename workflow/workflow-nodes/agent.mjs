@@ -392,10 +392,11 @@ function validateStrictPlannerRequiredField(name, value, { type = "string", allo
   return normalized;
 }
 
-export function normalizePlannerTaskForCreation(task, index) {
+export function normalizePlannerTaskForCreation(task, index, options = {}) {
   if (!task || typeof task !== "object") return null;
   const title = String(task.title || "").trim();
   if (!title) return null;
+  const strict = options?.strict === true;
 
   const normalizeStringList = (value) => {
     if (!Array.isArray(value)) return [];
@@ -435,44 +436,41 @@ export function normalizePlannerTaskForCreation(task, index) {
   const lines = [];
   const description = String(task.description || "").trim();
   if (description) lines.push(description);
-  const acceptanceCriteria = validateStrictPlannerRequiredField(
-    "acceptance_criteria",
-    task.acceptance_criteria,
-    { type: "array" },
-  );
-  const verification = validateStrictPlannerRequiredField(
-    "verification",
-    task.verification,
-    { type: "array" },
-  );
+  const acceptanceCriteria = strict
+    ? validateStrictPlannerRequiredField("acceptance_criteria", task.acceptance_criteria, { type: "array" })
+    : normalizeStringList(task.acceptance_criteria);
+  const verification = strict
+    ? validateStrictPlannerRequiredField("verification", task.verification, { type: "array" })
+    : normalizeStringList(task.verification);
   const repoAreas = normalizeRepoAreas(
-    validateStrictPlannerRequiredField("repo_areas", task.repo_areas || task.repoAreas, { type: "array" }),
+    strict
+      ? validateStrictPlannerRequiredField("repo_areas", task.repo_areas || task.repoAreas, { type: "array" })
+      : (task.repo_areas || task.repoAreas),
   );
   const impact = normalizePlannerScore(
-    validateStrictPlannerRequiredField("impact", task.impact, { type: "score" }),
+    strict
+      ? validateStrictPlannerRequiredField("impact", task.impact, { type: "score" })
+      : task.impact,
     { preferTenScaleIntegers },
   );
   const confidence = normalizePlannerScore(
-    validateStrictPlannerRequiredField("confidence", task.confidence, { type: "score" }),
+    strict
+      ? validateStrictPlannerRequiredField("confidence", task.confidence, { type: "score" })
+      : task.confidence,
     { preferTenScaleIntegers },
   );
   const risk = normalizePlannerRiskLevel(
-    validateStrictPlannerRequiredField("risk", task.risk, { type: "score" }),
+    strict
+      ? validateStrictPlannerRequiredField("risk", task.risk, { type: "score" })
+      : task.risk,
     {
       preferTenScaleIntegers,
       preserveFractionalTenScale: scoreMode === PLANNER_SCORE_MODE_TEN,
     },
   );
-  const estimatedEffort = validateStrictPlannerRequiredField(
-    "estimated_effort",
-    task.estimated_effort || task.estimatedEffort,
-  ).toLowerCase();
-  const whyNow = validateStrictPlannerRequiredField("why_now", task.why_now || task.whyNow);
-  const killCriteria = validateStrictPlannerRequiredField(
-    "kill_criteria",
-    task.kill_criteria || task.killCriteria,
-    { type: "array" },
-  );
+  const estimatedEffort = String(task.estimated_effort || task.estimatedEffort || "").trim().toLowerCase();
+  const whyNow = String(task.why_now || task.whyNow || "").trim();
+  const killCriteria = normalizeStringList(task.kill_criteria || task.killCriteria);
   const taskKey = normalizeTaskGraphKey(
     task.task_key || task.taskKey || task.key || task.id || "",
     title,
@@ -720,7 +718,7 @@ export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5, opti
   const dedup = new Set();
   const tasks = [];
   for (let i = 0; i < sourceTasks.length && tasks.length < max; i += 1) {
-    const normalized = normalizePlannerTaskForCreation(sourceTasks[i], i);
+    const normalized = normalizePlannerTaskForCreation(sourceTasks[i], i, { strict });
     if (!normalized) continue;
     const key = normalized.title.toLowerCase();
     if (dedup.has(key)) continue;
