@@ -16352,6 +16352,113 @@ it("action.materialize_planner_tasks fails when all parsed tasks are skipped and
   expect(createTask).not.toHaveBeenCalled();
 });
 
+it("action.materialize_planner_tasks accepts scheduled replenishment payloads with exactly 8 tasks", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  const tasks = Array.from({ length: 8 }, (_, index) => ({
+    title: `[m] feat(workflow): replenishment task ${index + 1}`,
+    description: `Task ${index + 1}`,
+    acceptance_criteria: [`Task ${index + 1} has a deterministic acceptance check`],
+    verification: [`Run targeted verification for task ${index + 1}`],
+    repo_areas: ["workflow"],
+  }));
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({ tasks }),
+  });
+
+  const createTask = vi.fn(async (_projectId, taskData) => ({
+    id: `task-${taskData.title.split(" ").at(-1)}`,
+  }));
+  const mockEngine = {
+    services: {
+      kanban: {
+        listTasks: vi.fn().mockResolvedValue([]),
+        createTask,
+      },
+    },
+  };
+
+  const node = {
+    id: "materialize-replenishment-valid",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      failOnZero: true,
+      exactTaskCount: 8,
+      exactTaskCountLabel: "scheduled replenishment",
+      exactTaskCountRetryable: true,
+    },
+  };
+
+  const result = await handler.execute(node, ctx, mockEngine);
+
+  expect(result.success).toBe(true);
+  expect(result.parsedCount).toBe(8);
+  expect(result.createdCount).toBe(8);
+  expect(result.created).toHaveLength(8);
+  expect(createTask).toHaveBeenCalledTimes(8);
+});
+
+it.each([
+  {
+    parsedCount: 7,
+    comparator: "fewer than",
+  },
+  {
+    parsedCount: 9,
+    comparator: "more than",
+  },
+])("action.materialize_planner_tasks rejects scheduled replenishment payloads with $parsedCount tasks", async ({ parsedCount, comparator }) => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  const tasks = Array.from({ length: parsedCount }, (_, index) => ({
+    title: `[m] feat(workflow): replenishment task ${index + 1}`,
+    description: `Task ${index + 1}`,
+  }));
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({ tasks }),
+  });
+
+  const createTask = vi.fn();
+  const mockEngine = {
+    services: {
+      kanban: {
+        listTasks: vi.fn().mockResolvedValue([]),
+        createTask,
+      },
+    },
+  };
+
+  const node = {
+    id: `materialize-replenishment-${parsedCount}`,
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      exactTaskCount: 8,
+      exactTaskCountLabel: "scheduled replenishment",
+      exactTaskCountRetryable: true,
+      exactTaskCountRetryHint: "Regenerate the planner output with exactly 8 backlog tasks before retrying.",
+    },
+  };
+
+  const mismatchError = await handler.execute(node, ctx, mockEngine).catch((error) => error);
+  expect(mismatchError).toBeInstanceOf(Error);
+  expect(mismatchError).toMatchObject({
+    retryable: true,
+    parsedCount,
+    expectedTaskCount: 8,
+    failureKind: "planner_task_count_mismatch",
+    message: expect.stringMatching(new RegExp(`scheduled replenishment requires exactly 8 tasks, but planner produced ${parsedCount}`, "i")),
+  });
+  expect(mismatchError.message).toMatch(new RegExp(comparator, "i"));
+  expect(mismatchError.message).toMatch(/Regenerate the planner output with exactly 8 backlog tasks before retrying\./i);
+  expect(createTask).not.toHaveBeenCalled();
+});
+
 it("action.materialize_planner_tasks passes two args to createTask even with default-param adapters", async () => {
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
