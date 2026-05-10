@@ -466,8 +466,8 @@ describe("storage-janitor: VACUUM INTO compaction", () => {
     db.exec("CREATE TABLE blobs(id INTEGER PRIMARY KEY, data BLOB)");
     const ins = db.prepare("INSERT INTO blobs(data) VALUES (?)");
     const payload = Buffer.alloc(8 * 1024, "x"); // 8 KB each
-    for (let i = 0; i < 2000; i++) ins.run(payload); // ~16 MB of data
-    db.exec("DELETE FROM blobs WHERE id > 50"); // leave 50 rows = ~400 KB live
+    for (let i = 0; i < 400; i++) ins.run(payload); // ~3.2 MB of data
+    db.exec("DELETE FROM blobs WHERE id > 20"); // leave 20 rows = ~160 KB live
     db.close();
 
     const before = statSync(dbPath).size;
@@ -479,7 +479,7 @@ describe("storage-janitor: VACUUM INTO compaction", () => {
     // Original data still queryable
     const verify = new DatabaseSync(dbPath);
     const c = verify.prepare("SELECT COUNT(*) AS c FROM blobs").get().c;
-    expect(c).toBe(50);
+    expect(c).toBe(20);
     verify.close();
   });
 });
