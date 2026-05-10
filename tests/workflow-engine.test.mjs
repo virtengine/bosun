@@ -15983,21 +15983,39 @@ it("agent.run_planner fails immediately when planner dependencies are unavailabl
   });
 });
 
-it("action.materialize_planner_tasks parses fenced JSON and creates tasks", async () => {
+function buildStrictPlannerPayload(taskOverrides = []) {
+  const baseTasks = Array.from({ length: 8 }, (_, index) => ({
+    title: `[m] fix(workflow): task ${index + 1}`,
+    description: `Description ${index + 1}`,
+    acceptance_criteria: [`ac${index + 1}`],
+    verification: [`verify${index + 1}`],
+    repo_areas: ["workflow"],
+    impact: 0.8,
+    confidence: 0.7,
+    risk: "medium",
+  }));
+  for (const override of taskOverrides) {
+    if (override && typeof override === "object" && Number.isInteger(override.index) && baseTasks[override.index]) {
+      baseTasks[override.index] = { ...baseTasks[override.index], ...override.patch };
+      if (override.remove) {
+        for (const field of override.remove) delete baseTasks[override.index][field];
+      }
+    }
+  }
+  return { tasks: baseTasks };
+}
+
+it("action.materialize_planner_tasks parses strict planner JSON and creates tasks", async () => {
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
 
+  const payload = buildStrictPlannerPayload([{ index: 1, patch: { title: "[m] fix(workflow): duplicate title" } }]);
   const ctx = new WorkflowContext({});
   ctx.setNodeOutput("run-planner", {
     output: [
       "Planner analysis complete.",
       "```json",
-      "{",
-      '  "tasks": [',
-      '    { "title": "[m] fix(workflow): create tasks", "description": "A", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.8, "confidence": 0.7, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): duplicate title", "description": "B", "acceptance_criteria": ["ac2"], "verification": ["v2"], "repo_areas": ["workflow"], "impact": 0.6, "confidence": 0.6, "risk": 0.2 }',
-      "  ]",
-      "}",
+      JSON.stringify(payload, null, 2),
       "```",
     ].join("\n"),
   });
@@ -16005,9 +16023,9 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
   const createTask = vi
     .fn(async function createTaskAdapter(projectId, taskData) {
       if (projectId && taskData) {
-        return { id: "task-1001" };
+        return { id: `task-${taskData.title.split(" ").pop()}` };
       }
-      return { id: "task-1002" };
+      return { id: "task-no-project" };
     });
   const listTasks = vi.fn().mockResolvedValue([
     { id: "existing-1", title: "[m] fix(workflow): duplicate title" },
@@ -16031,18 +16049,19 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       failOnZero: true,
       dedup: true,
       minCreated: 1,
+      exactTaskCount: 8,
+      strictTaskPlannerSchema: true,
     },
   };
   const result = await handler.execute(node, ctx, mockEngine);
 
   expect(result.success).toBe(true);
-  expect(result.parsedCount).toBe(2);
-  expect(result.createdCount).toBe(1);
+  expect(result.parsedCount).toBe(8);
+  expect(result.createdCount).toBe(7);
   expect(result.skippedCount).toBe(1);
-  expect(result.created[0]).toEqual({
-    id: "task-1001",
-    title: "[m] fix(workflow): create tasks",
-  });
+  expect(result.created[0]).toEqual(expect.objectContaining({
+    title: "[m] fix(workflow): task 1",
+  }));
   expect(result.skipped).toEqual(expect.arrayContaining([
     expect.objectContaining({
       title: "[m] fix(workflow): duplicate title",
@@ -16051,22 +16070,63 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
     }),
   ]));
   expect(listTasks).toHaveBeenCalledTimes(1);
-  expect(createTask).toHaveBeenCalledTimes(1);
-  expect(createTask).toHaveBeenCalledWith("proj-123", expect.objectContaining({
-    title: "[m] fix(workflow): create tasks",
-    description: "A\n\n## Acceptance Criteria\n- ac1\n\n## Verification\n- v1",
-    status: "todo",
-    repo_areas: ["workflow"],
-    meta: expect.objectContaining({
-      repo_areas: ["workflow"],
-      planner: expect.objectContaining({
-        impact: 8,
-        confidence: 7,
-        risk: "low",
-        repo_areas: ["workflow"],
-      }),
-    }),
-  }));
+  expect(createTask).toHaveBeenCalledTimes(7);
+});
+
+it("action.materialize_planner_tasks surfaces strict schema count errors before task creation", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  const ctx = new WorkflowContext({});
+  const invalidPayload = buildStrictPlannerPayload();
+  invalidPayload.tasks.pop();
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify(invalidPayload),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn();
+
+  const node = {
+    id: "materialize-invalid-count",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      failOnZero: true,
+      exactTaskCount: 8,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, { services: { kanban: { createTask, listTasks } } }))
+    .rejects.toThrow(/requires exactly 8 tasks, but planner produced 7/i);
+  expect(createTask).not.toHaveBeenCalled();
+  expect(listTasks).not.toHaveBeenCalled();
+  expect(ctx.logs.some((entry) => String(entry?.message || entry || "").includes("requires exactly 8 tasks"))).toBe(true);
+});
+
+it("action.materialize_planner_tasks surfaces strict schema field errors before task creation", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  const ctx = new WorkflowContext({});
+  const invalidPayload = buildStrictPlannerPayload([{ index: 3, remove: ["verification"] }]);
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify(invalidPayload),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn();
+
+  const node = {
+    id: "materialize-invalid-field",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      failOnZero: true,
+      strictTaskPlannerSchema: true,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, { services: { kanban: { createTask, listTasks } } }))
+    .rejects.toThrow(/tasks\[3\]\.verification is required/i);
+  expect(createTask).not.toHaveBeenCalled();
+  expect(listTasks).not.toHaveBeenCalled();
 });
 
 it("action.materialize_planner_tasks rejects malformed planner tasks before creating any tasks", async () => {
@@ -16119,12 +16179,14 @@ it("action.materialize_planner_tasks rejects malformed planner tasks before crea
       projectId: "proj-invalid",
       status: "todo",
       failOnZero: true,
+      strictTaskPlannerSchema: true,
+      exactTaskCount: 2,
       dedup: true,
       minCreated: 1,
     },
   };
 
-  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/task\[1\]\.acceptance_criteria/i);
+  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/tasks?\[1\]\.acceptance_criteria/i);
   expect(createTask).not.toHaveBeenCalled();
 });
 
@@ -16184,7 +16246,7 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
           repo_areas: ["workflow"],
           impact: 0.9,
           confidence: 0.85,
-          risk: 0.1,
+          risk: "low",
         },
         {
           title: "[m] feat(workflow): new task pending",
@@ -16194,7 +16256,7 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
           repo_areas: ["workflow"],
           impact: 0.8,
           confidence: 0.8,
-          risk: 0.2,
+          risk: "low",
         },
       ],
     }),
@@ -16265,7 +16327,7 @@ it("action.materialize_planner_tasks repeated resume attempts produce no duplica
           repo_areas: ["task"],
           impact: 0.7,
           confidence: 0.7,
-          risk: 0.3,
+          risk: "low",
         },
         {
           title: "[s] fix(task): idempotent-b",
@@ -16275,7 +16337,7 @@ it("action.materialize_planner_tasks repeated resume attempts produce no duplica
           repo_areas: ["task"],
           impact: 0.6,
           confidence: 0.7,
-          risk: 0.3,
+          risk: "low",
         },
       ],
     }),

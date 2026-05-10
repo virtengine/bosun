@@ -1971,6 +1971,8 @@ describe("github template CLI compatibility", () => {
     const claimNode = watchdogTemplate.nodes.find((n) => n.id === "claim-unclaimed-prs");
     const dispatchNode = watchdogTemplate.nodes.find((n) => n.id === "dispatch-fix-agents");
     const singleFixTemplate = getTemplate("template-pr-fix-single");
+    const singleFixAgentNode = singleFixTemplate.nodes.find((n) => n.id === "fix-agent");
+    const singleFixReleaseNode = singleFixTemplate.nodes.find((n) => n.id === "release-claim");
     const singleFixPushNode = singleFixTemplate.nodes.find((n) => n.id === "push-fixes");
     const singleFixSiblingNode = singleFixTemplate.nodes.find((n) => n.id === "update-sibling-branches");
     const command = getNodeCommandCode(fixNode);
@@ -2000,6 +2002,10 @@ describe("github template CLI compatibility", () => {
     expect(dispatchNode?.config?.mode).toBe("dispatch");
     expect(dispatchNode?.config?.workflowId).toBe("template-pr-fix-single");
     expect(singleFixTemplate?.trigger).toBe("trigger.manual");
+    expect(singleFixAgentNode?.config?.prompt).toContain("Do NOT run raw `npm test`");
+    expect(singleFixAgentNode?.config?.prompt).toContain("tools/vitest-runner.mjs");
+    expect(getNodeCommandCode(singleFixReleaseNode)).toContain("process.env.BOSUN_HOME");
+    expect(getNodeCommandCode(singleFixReleaseNode)).toContain("path.join(bosunHome,'tmp')");
     expect(getNodeCommandCode(singleFixPushNode)).toContain("push_disabled");
     expect(singleFixPushNode?.config?.env?.ALLOW_PUSH).toBe("{{allowPush}}");
     expect(getNodeCommandCode(singleFixSiblingNode)).toContain("push_disabled");
