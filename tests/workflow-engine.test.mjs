@@ -16129,6 +16129,104 @@ it("action.materialize_planner_tasks surfaces strict schema field errors before 
   expect(listTasks).not.toHaveBeenCalled();
 });
 
+it("action.materialize_planner_tasks rejects malformed planner tasks before creating any tasks", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[m] feat(workflow): valid planned task",
+          description: "Looks valid but should never be created because another task is malformed.",
+          acceptance_criteria: ["ac1"],
+          verification: ["v1"],
+          repo_areas: ["workflow"],
+          impact: 0.8,
+          confidence: 0.7,
+          risk: 0.2,
+        },
+        {
+          title: "[m] feat(workflow): malformed planned task",
+          description: "Missing acceptance criteria",
+          verification: ["v2"],
+          repo_areas: ["workflow"],
+          impact: 0.4,
+          confidence: 0.5,
+          risk: 0.2,
+        },
+      ],
+    }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([]);
+  const mockEngine = {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  };
+
+  const node = {
+    id: "materialize-invalid",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-invalid",
+      status: "todo",
+      failOnZero: true,
+      strictTaskPlannerSchema: true,
+      exactTaskCount: 2,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/tasks?\[1\]\.acceptance_criteria/i);
+  expect(createTask).not.toHaveBeenCalled();
+});
+
+it("action.materialize_planner_tasks rejects empty planner task arrays before creating any tasks", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({ tasks: [] }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([]);
+  const mockEngine = {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  };
+
+  const node = {
+    id: "materialize-empty",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-empty",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/non-empty tasks array/i);
+  expect(createTask).not.toHaveBeenCalled();
+});
+
 it("action.materialize_planner_tasks resumed run does not recreate already-created tasks (idempotent handoff)", async () => {
   // Simulates a replenishment run that was interrupted while Create Tasks was executing.
   // On resume the node re-runs; previously materialized tasks must be detected via
@@ -16148,7 +16246,7 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
           repo_areas: ["workflow"],
           impact: 0.9,
           confidence: 0.85,
-          risk: 0.1,
+          risk: "low",
         },
         {
           title: "[m] feat(workflow): new task pending",
@@ -16158,7 +16256,7 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
           repo_areas: ["workflow"],
           impact: 0.8,
           confidence: 0.8,
-          risk: 0.2,
+          risk: "low",
         },
       ],
     }),
@@ -16229,7 +16327,7 @@ it("action.materialize_planner_tasks repeated resume attempts produce no duplica
           repo_areas: ["task"],
           impact: 0.7,
           confidence: 0.7,
-          risk: 0.3,
+          risk: "low",
         },
         {
           title: "[s] fix(task): idempotent-b",
@@ -16239,7 +16337,7 @@ it("action.materialize_planner_tasks repeated resume attempts produce no duplica
           repo_areas: ["task"],
           impact: 0.6,
           confidence: 0.7,
-          risk: 0.3,
+          risk: "low",
         },
       ],
     }),
