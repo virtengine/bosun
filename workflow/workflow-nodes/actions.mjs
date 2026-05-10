@@ -40,6 +40,7 @@ import {
   CALIBRATED_MIN_IMPACT_SCORE,
   extractPlannerTasksFromWorkflowOutput,
   loadPlannerPriorState,
+  normalizePlannerTaskForCreation,
   parsePlannerJsonFromText,
   normalizePlannerAreaKey,
   normalizePlannerRiskLevel,
@@ -7119,14 +7120,30 @@ registerNodeType("action.materialize_planner_tasks", {
     const rankingConfig = resolvePlannerPriorRankingConfig(plannerFeedback?.rankingSignals?.config || null);
     const feedbackWeights = resolvePlannerPriorFeedbackWeights(plannerFeedback?.rankingSignals?.weights || null);
 
+    const plannerTasks = Array.isArray(plannerPayload?.tasks) ? plannerPayload.tasks : null;
     const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
     if (!parsedTasks.length) {
       // Log diagnostic info to help debug planner output format issues
       const outputPreview = outputText.length > 200
         ? `${outputText.slice(0, 200)}…`
         : outputText || "(empty)";
-      const message = `Planner output from "${plannerNodeId}" did not include parseable tasks. ` +
+      let message = `Planner output from "${plannerNodeId}" did not include parseable tasks. ` +
         `Output length: ${outputText.length} chars. Preview: ${outputPreview}`;
+      if (!plannerPayload || !plannerTasks) {
+        message = `Planner output from "${plannerNodeId}" must be a JSON object with a tasks array.`;
+      } else {
+        const invalidTaskIndex = plannerTasks.findIndex((task, index) => !normalizePlannerTaskForCreation(task, index));
+        if (invalidTaskIndex >= 0) {
+          const invalidTask = plannerTasks[invalidTaskIndex] || {};
+          const invalidTaskTitle = String(invalidTask?.title || "").trim();
+          let offendingField = "title";
+          if (!invalidTaskTitle) offendingField = "title";
+          else if (!Array.isArray(invalidTask?.acceptance_criteria) || invalidTask.acceptance_criteria.length === 0) offendingField = "acceptance_criteria";
+          else if (!Array.isArray(invalidTask?.verification) || invalidTask.verification.length === 0) offendingField = "verification";
+          else if (!Array.isArray(invalidTask?.repo_areas) || invalidTask.repo_areas.length === 0) offendingField = "repo_areas";
+          message = `Planner output from "${plannerNodeId}" has invalid tasks[${invalidTaskIndex}].${offendingField}.`;
+        }
+      }
       ctx.log(node.id, message, failOnZero ? "error" : "warn");
       if (failOnZero) throw new Error(message);
       return {
@@ -7335,6 +7352,8 @@ registerNodeType("action.materialize_planner_tasks", {
         repo_areas: task.repoAreas,
         why_now: task.whyNow,
         kill_criteria: task.killCriteria,
+        materialization_fingerprint: materializationFingerprint,
+        run_id: String(ctx?.runId || ctx?.data?._runId || "").trim() || null,
         acceptance_criteria: task.acceptanceCriteria,
         verification: task.verification,
         task_key: task.taskKey || null,
