@@ -1901,6 +1901,10 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(fetchNode)).toContain("OPTIONAL_CHECK_PATTERNS");
     expect(getNodeCommandCode(fetchNode)).toContain("IGNORE_CHECK_PATTERNS");
     expect(getNodeCommandCode(fetchNode)).toContain("evaluateCheckGates(checks");
+    expect(getNodeCommandCode(fetchNode)).toContain("mergeable,mergeStateStatus,statusCheckRollup");
+    expect(getNodeCommandCode(fetchNode)).toContain("const mergeStateStatus=String(pr.mergeStateStatus||'').toUpperCase();");
+    expect(getNodeCommandCode(fetchNode)).toContain("const isBehind=BEHIND_MERGEABLES.has(mergeableState)||BEHIND_MERGEABLES.has(mergeStateStatus);");
+    expect(getNodeCommandCode(fetchNode)).toContain("mergeStateStatus});");
     expect(getNodeCommandCode(fetchNode)).toContain("skippedUntrusted");
     expect(getNodeCommandCode(fetchNode)).toContain("attachEligible");
     expect(getNodeCommandCode(fetchNode)).toContain("pendingChecks:hasPend");
