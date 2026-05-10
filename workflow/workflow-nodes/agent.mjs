@@ -80,6 +80,164 @@ import {
   trimLogText,
 } from "./definitions.mjs";
 
+const MAX_PROFILE_TITLE_PATTERN_LENGTH = 160;
+const MAX_PROFILE_TITLE_TEXT_LENGTH = 512;
+
+function isTitlePatternWordChar(char) {
+  if (!char) return false;
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    char === "_"
+  );
+}
+
+function isAsciiAlphaNumeric(char) {
+  if (!char) return false;
+  const code = char.charCodeAt(0);
+  return (code >= 48 && code <= 57) || (code >= 97 && code <= 122);
+}
+
+function normalizePlannerTaskKeySegment(value, fallback = "") {
+  const raw = String(value || fallback || "").trim().toLowerCase();
+  let normalized = "";
+  let previousWasSeparator = true;
+
+  for (const char of raw) {
+    if (isAsciiAlphaNumeric(char)) {
+      normalized += char;
+      previousWasSeparator = false;
+      continue;
+    }
+    if (!previousWasSeparator) {
+      normalized += "_";
+      previousWasSeparator = true;
+    }
+  }
+
+  return normalized.endsWith("_") ? normalized.slice(0, -1) : normalized;
+}
+
+function isTitlePatternBoundary(text, index) {
+  return isTitlePatternWordChar(text[index - 1]) !== isTitlePatternWordChar(text[index]);
+}
+
+function tokenizeProfileTitlePattern(pattern) {
+  const tokens = [];
+  let anchorStart = false;
+  let anchorEnd = false;
+  let literal = "";
+  const flushLiteral = () => {
+    if (literal) {
+      tokens.push({ type: "literal", value: literal });
+      literal = "";
+    }
+  };
+
+  let index = 0;
+  if (pattern.startsWith("^")) {
+    anchorStart = true;
+    index = 1;
+  }
+
+  while (index < pattern.length) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+
+    if (char === "$" && index === pattern.length - 1) {
+      anchorEnd = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === "\\") {
+      if (next === "b") {
+        flushLiteral();
+        tokens.push({ type: "boundary" });
+      } else if (next) {
+        literal += next;
+      } else {
+        literal += char;
+      }
+      index += next ? 2 : 1;
+      continue;
+    }
+
+    if (char === "." && next === "*") {
+      flushLiteral();
+      tokens.push({ type: "wildcardMany" });
+      index += 2;
+      continue;
+    }
+
+    if (char === "." && next === "?") {
+      flushLiteral();
+      tokens.push({ type: "wildcardOptional" });
+      index += 2;
+      continue;
+    }
+
+    if (char === ".") {
+      flushLiteral();
+      tokens.push({ type: "wildcardOne" });
+      index += 1;
+      continue;
+    }
+
+    literal += char;
+    index += 1;
+  }
+
+  flushLiteral();
+  return { anchorStart, anchorEnd, tokens };
+}
+
+function profileTitlePatternMatches(pattern, title) {
+  const normalizedPattern = String(pattern || "").trim().toLowerCase();
+  if (!normalizedPattern || normalizedPattern.length > MAX_PROFILE_TITLE_PATTERN_LENGTH) return false;
+
+  const normalizedTitle = String(title || "").slice(0, MAX_PROFILE_TITLE_TEXT_LENGTH).toLowerCase();
+  const { anchorStart, anchorEnd, tokens } = tokenizeProfileTitlePattern(normalizedPattern);
+  const failedStates = new Set();
+
+  const matchAt = (tokenIndex, textIndex) => {
+    const key = `${tokenIndex}:${textIndex}`;
+    if (failedStates.has(key)) return false;
+    if (tokenIndex >= tokens.length) {
+      return !anchorEnd || textIndex === normalizedTitle.length;
+    }
+
+    const token = tokens[tokenIndex];
+    if (token.type === "boundary") {
+      if (isTitlePatternBoundary(normalizedTitle, textIndex) && matchAt(tokenIndex + 1, textIndex)) return true;
+    } else if (token.type === "literal") {
+      if (normalizedTitle.startsWith(token.value, textIndex) && matchAt(tokenIndex + 1, textIndex + token.value.length)) {
+        return true;
+      }
+    } else if (token.type === "wildcardOne") {
+      if (textIndex < normalizedTitle.length && matchAt(tokenIndex + 1, textIndex + 1)) return true;
+    } else if (token.type === "wildcardOptional") {
+      if (matchAt(tokenIndex + 1, textIndex)) return true;
+      if (textIndex < normalizedTitle.length && matchAt(tokenIndex + 1, textIndex + 1)) return true;
+    } else if (token.type === "wildcardMany") {
+      for (let nextIndex = textIndex; nextIndex <= normalizedTitle.length; nextIndex += 1) {
+        if (matchAt(tokenIndex + 1, nextIndex)) return true;
+      }
+    }
+
+    failedStates.add(key);
+    return false;
+  };
+
+  if (anchorStart) return matchAt(0, 0);
+  for (let startIndex = 0; startIndex <= normalizedTitle.length; startIndex += 1) {
+    if (matchAt(0, startIndex)) return true;
+  }
+  return false;
+}
+
 registerNodeType("agent.select_profile", {
   describe: () => "Select an agent profile based on task characteristics",
   schema: {
@@ -109,7 +267,7 @@ registerNodeType("agent.select_profile", {
       // Check title patterns
       if (criteria.titlePatterns) {
         for (const pattern of criteria.titlePatterns) {
-          if (new RegExp(pattern, "i").test(taskTitle)) {
+          if (profileTitlePatternMatches(pattern, taskTitle)) {
             ctx.log(node.id, `Matched profile "${profileName}" via title pattern`);
             return { profile: profileName, matchedBy: "title" };
           }
@@ -364,10 +522,39 @@ export function normalizePlannerRiskLevel(value, { preferTenScaleIntegers = fals
   return "low";
 }
 
-export function normalizePlannerTaskForCreation(task, index) {
+function validateStrictPlannerRequiredField(name, value, { type = "string", allowEmpty = false } = {}) {
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      throw new Error(`Planner task missing required ${name} array`);
+    }
+    const normalized = value
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+    if (!allowEmpty && normalized.length === 0) {
+      throw new Error(`Planner task missing required ${name} array`);
+    }
+    return normalized;
+  }
+
+  if (type === "score") {
+    if (value === undefined || value === null || value === "") {
+      throw new Error(`Planner task missing required ${name} score`);
+    }
+    return value;
+  }
+
+  const normalized = String(value || "").trim();
+  if (!allowEmpty && !normalized) {
+    throw new Error(`Planner task missing required ${name}`);
+  }
+  return normalized;
+}
+
+export function normalizePlannerTaskForCreation(task, index, options = {}) {
   if (!task || typeof task !== "object") return null;
   const title = String(task.title || "").trim();
   if (!title) return null;
+  const strict = options?.strict === true;
 
   const normalizeStringList = (value) => {
     if (!Array.isArray(value)) return [];
@@ -394,11 +581,7 @@ export function normalizePlannerTaskForCreation(task, index) {
     return entry ? [entry] : [];
   };
   const normalizeTaskGraphKey = (value, fallback = "") => {
-    const normalized = String(value || fallback || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "");
+    const normalized = normalizePlannerTaskKeySegment(value, fallback);
     return normalized || "";
   };
   const scoreMode = inferPlannerTaskScoreMode(task);
@@ -407,15 +590,38 @@ export function normalizePlannerTaskForCreation(task, index) {
   const lines = [];
   const description = String(task.description || "").trim();
   if (description) lines.push(description);
-  const acceptanceCriteria = normalizeStringList(task.acceptance_criteria);
-  const verification = normalizeStringList(task.verification);
-  const repoAreas = normalizeRepoAreas(task.repo_areas || task.repoAreas);
-  const impact = normalizePlannerScore(task.impact, { preferTenScaleIntegers });
-  const confidence = normalizePlannerScore(task.confidence, { preferTenScaleIntegers });
-  const risk = normalizePlannerRiskLevel(task.risk, {
-    preferTenScaleIntegers,
-    preserveFractionalTenScale: scoreMode === PLANNER_SCORE_MODE_TEN,
-  });
+  const acceptanceCriteria = strict
+    ? validateStrictPlannerRequiredField("acceptance_criteria", task.acceptance_criteria, { type: "array" })
+    : normalizeStringList(task.acceptance_criteria);
+  const verification = strict
+    ? validateStrictPlannerRequiredField("verification", task.verification, { type: "array" })
+    : normalizeStringList(task.verification);
+  const repoAreas = normalizeRepoAreas(
+    strict
+      ? validateStrictPlannerRequiredField("repo_areas", task.repo_areas || task.repoAreas, { type: "array" })
+      : (task.repo_areas || task.repoAreas),
+  );
+  const impact = normalizePlannerScore(
+    strict
+      ? validateStrictPlannerRequiredField("impact", task.impact, { type: "score" })
+      : task.impact,
+    { preferTenScaleIntegers },
+  );
+  const confidence = normalizePlannerScore(
+    strict
+      ? validateStrictPlannerRequiredField("confidence", task.confidence, { type: "score" })
+      : task.confidence,
+    { preferTenScaleIntegers },
+  );
+  const risk = normalizePlannerRiskLevel(
+    strict
+      ? validateStrictPlannerRequiredField("risk", task.risk, { type: "score" })
+      : task.risk,
+    {
+      preferTenScaleIntegers,
+      preserveFractionalTenScale: scoreMode === PLANNER_SCORE_MODE_TEN,
+    },
+  );
   const estimatedEffort = String(task.estimated_effort || task.estimatedEffort || "").trim().toLowerCase();
   const whyNow = String(task.why_now || task.whyNow || "").trim();
   const killCriteria = normalizeStringList(task.kill_criteria || task.killCriteria);
@@ -666,7 +872,7 @@ export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5, opti
   const dedup = new Set();
   const tasks = [];
   for (let i = 0; i < sourceTasks.length && tasks.length < max; i += 1) {
-    const normalized = normalizePlannerTaskForCreation(sourceTasks[i], i);
+    const normalized = normalizePlannerTaskForCreation(sourceTasks[i], i, { strict });
     if (!normalized) continue;
     const key = normalized.title.toLowerCase();
     if (dedup.has(key)) continue;
@@ -1062,7 +1268,18 @@ export function resolvePlannerPriorRankingConfig(config) {
     failurePriorStep: Math.max(0, Number(ranking.failurePriorStep ?? 1.5) || 1.5),
     maxNegativePrior: Math.max(0, Number(ranking.maxNegativePrior ?? ranking.maxFailurePriorPenalty ?? 8) || 8),
     signalPenaltyScale: Math.max(0, Number(ranking.signalPenaltyScale ?? ranking.feedbackSignalScale ?? 0.12) || 0.12),
+    implementationFollowupBoost: Math.max(0, Number(ranking.implementationFollowupBoost ?? ranking.recentPrImplementationBoost ?? 2.4) || 2.4),
+    maintenancePenalty: Math.max(0, Number(ranking.maintenancePenalty ?? ranking.documentationOnlyPenalty ?? 1.75) || 1.75),
   };
+}
+
+function normalizePlannerRankingText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
@@ -1073,7 +1290,6 @@ export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
     const riskLevel = String(task?.risk || "").trim().toLowerCase();
     const riskPenalty = ({ low: 0, medium: 0.4, high: 0.9, critical: 1.6 })[riskLevel] || 0;
     const baseScore = (impact * 1.15) + (confidence * 0.85) - riskPenalty;
-
     const keys = resolvePlannerPatternKeys(task);
     const penalties = keys.map((key) => {
       const prior = priorState?.patterns?.[key];

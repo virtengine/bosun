@@ -2718,6 +2718,152 @@ describe("WorkflowEngine - run history details", () => {
     expect(page.nextOffset).toBe(2);
   }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
+  it("resumes interrupted planner workflows from Create Tasks without rerunning completed planning nodes", async () => {
+    makeTmpEngine({
+      kanban: {
+        createTask: vi.fn(async () => ({ id: "task-created-1" })),
+        listTasks: vi.fn(async () => []),
+      },
+    });
+
+    const plannerNodeType = `test.planner.resume.${Date.now()}`;
+    const plannerExecutions = [];
+    registerNodeType(plannerNodeType, {
+      async execute(node, ctx) {
+        plannerExecutions.push(node.id);
+        return {
+          output: JSON.stringify({
+            tasks: [
+              {
+                title: "[m] feat(workflow): resume pending create tasks",
+                description: "Resume from the pending Create Tasks node.",
+                acceptance_criteria: ["Pending Create Tasks nodes resume without rerunning completed planner nodes."],
+                verification: ["Run the workflow resume regression test."],
+                repo_areas: ["workflow"],
+              },
+            ],
+          }),
+          plannerRun: ctx.id,
+          nodeId: node.id,
+        };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Trigger", config: {} },
+        { id: "run-planner", type: plannerNodeType, label: "Run Planner", config: {} },
+        {
+          id: "create-tasks",
+          type: "action.materialize_planner_tasks",
+          label: "Create Tasks",
+          config: {
+            plannerNodeId: "run-planner",
+            projectId: "proj-123",
+            dedup: true,
+            failOnZero: true,
+            minCreated: 1,
+          },
+        },
+        { id: "resume-work", type: "notify.log", label: "Resume Work", config: { message: "resume downstream" } },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "run-planner" },
+        { id: "e2", source: "run-planner", target: "create-tasks" },
+        { id: "e3", source: "create-tasks", target: "resume-work" },
+      ],
+      {
+        id: `wf-planner-create-tasks-resume-${Math.random().toString(36).slice(2, 8)}`,
+        name: "Planner Create Tasks Resume Workflow",
+      },
+    );
+    engine.save(wf);
+
+    const initialCtx = await engine.execute(wf.id, {});
+    expect(plannerExecutions).toEqual(["run-planner"]);
+    expect(initialCtx.getNodeStatus("resume-work")).toBe(NodeStatus.COMPLETED);
+    engine.services.kanban.createTask.mockClear();
+
+    const interruptedRunId = "run-planner-create-tasks-resume";
+    writeFileSync(
+      join(tmpDir, "runs", "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: new Date(1000).toISOString(),
+            endedAt: new Date(2000).toISOString(),
+            nodeStatuses: {
+              trigger: NodeStatus.COMPLETED,
+              "run-planner": NodeStatus.COMPLETED,
+              "create-tasks": NodeStatus.PENDING,
+              "resume-work": NodeStatus.PENDING,
+            },
+            counts: { total: 4, pending: 2, running: 0, completed: 2, failed: 0, skipped: 0, blocked: 0 },
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(tmpDir, "runs", `${interruptedRunId}.json`),
+      JSON.stringify({
+        runId: interruptedRunId,
+        workflowId: wf.id,
+        workflowName: wf.name,
+        status: WorkflowStatus.PAUSED,
+        startedAt: new Date(1000).toISOString(),
+        endedAt: new Date(2000).toISOString(),
+        data: { _workflowId: wf.id, _workflowName: wf.name },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "run-planner": NodeStatus.COMPLETED,
+          "create-tasks": NodeStatus.PENDING,
+          "resume-work": NodeStatus.PENDING,
+        },
+        nodeOutputs: {
+          "run-planner": initialCtx.getNodeOutput("run-planner"),
+        },
+        nodeStatusEvents: [
+          { nodeId: "trigger", status: NodeStatus.COMPLETED, timestamp: 1001 },
+          { nodeId: "run-planner", status: NodeStatus.COMPLETED, timestamp: 1002 },
+        ],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(tmpDir, "runs", "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    plannerExecutions.length = 0;
+    const resumeOrder = [];
+    const executeDagSpy = vi.spyOn(engine, "_executeDag");
+    executeDagSpy.mockImplementation(async function(definition, entryNodes, adjacency, context, options) {
+      const originalStatus = context.setNodeStatus.bind(context);
+      context.setNodeStatus = (nodeId, status) => {
+        if (status === NodeStatus.RUNNING) resumeOrder.push(nodeId);
+        return originalStatus(nodeId, status);
+      };
+      return WorkflowEngine.prototype._executeDag.call(this, definition, entryNodes, adjacency, context, options);
+    });
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed", _resumeInterrupted: true });
+
+    expect(retryRunId).toBeTruthy();
+    expect(plannerExecutions).toEqual([]);
+    expect(resumeOrder).toEqual(["create-tasks", "resume-work"]);
+
+    const resumedRun = engine.getRunDetail(retryRunId);
+    expect(resumedRun?.detail?.nodeStatuses?.["run-planner"]).toBe(NodeStatus.COMPLETED);
+    expect(resumedRun?.detail?.nodeOutputs?.["run-planner"]).toEqual(initialCtx.getNodeOutput("run-planner"));
+    expect(resumedRun?.detail?.nodeStatuses?.["create-tasks"]).toBe(NodeStatus.COMPLETED);
+    expect(resumedRun?.detail?.nodeStatuses?.["resume-work"]).toBe(NodeStatus.COMPLETED);
+    expect(engine.services.kanban.createTask).toHaveBeenCalledTimes(1);
+  });
+
   it("resumes interrupted Create Tasks runs only when idempotency checks pass", async () => {
     makeTmpEngine({
       kanban: {
@@ -16311,6 +16457,77 @@ it("action.materialize_planner_tasks resumed run does not recreate already-creat
   expect(listTasks).toHaveBeenCalledTimes(1);
 });
 
+it("action.materialize_planner_tasks skips duplicate planner provenance on retry", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    workflowId: "wf-dup",
+    runId: "run-dup",
+  });
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({
+      tasks: [
+        {
+          title: "[m] feat(workflow): duplicate from provenance",
+          description: "Created in prior retry attempt",
+          acceptance_criteria: ["ac1"],
+          verification: ["v1"],
+          repo_areas: ["workflow"],
+          impact: 0.8,
+          confidence: 0.7,
+          risk: "low",
+        },
+      ],
+    }),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn().mockResolvedValue([
+    {
+      id: "existing-prov-1",
+      title: "[m] feat(workflow): prior retry title changed",
+      meta: {
+        planner: {
+          dedupe_key: "wf-dup:run-dup:materialize:run-planner:0",
+        },
+      },
+    },
+  ]);
+
+  const result = await handler.execute({
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      dedup: true,
+      failOnZero: false,
+      minCreated: 0,
+    },
+  }, ctx, {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.createdCount).toBe(0);
+  expect(result.skippedCount).toBe(1);
+  expect(result.skipped).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      title: "[m] feat(workflow): duplicate from provenance",
+      reason: "duplicate_planner_provenance",
+      existingTaskId: "existing-prov-1",
+      dedupeKey: "wf-dup:run-dup:materialize:run-planner:0",
+    }),
+  ]));
+  expect(createTask).not.toHaveBeenCalled();
+  expect(listTasks).toHaveBeenCalledTimes(1);
+});
+
 it("action.materialize_planner_tasks repeated resume attempts produce no duplicate task side effects", async () => {
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
@@ -16461,6 +16678,8 @@ it("action.materialize_planner_tasks fails when all parsed tasks are skipped and
   expect(handler).toBeDefined();
 
   const ctx = new WorkflowContext({});
+  const workflowEvents = [];
+  ctx.onWorkflowEvent = (event) => workflowEvents.push(event);
   ctx.setNodeOutput("run-planner", {
     output: [
       "```json",
@@ -16503,6 +16722,109 @@ it("action.materialize_planner_tasks fails when all parsed tasks are skipped and
   );
   expect(listTasks).toHaveBeenCalledTimes(1);
   expect(createTask).not.toHaveBeenCalled();
+  expect(workflowEvents.length).toBeGreaterThan(0);
+});
+
+it("action.materialize_planner_tasks emits workflow events for success and duplicate skips without leaking descriptions", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    _workflowId: "wf-monitoring",
+    _workflowName: "Monitoring Workflow",
+    _workflowRunId: "run-monitoring-1",
+  });
+  const workflowEvents = [];
+  ctx.onWorkflowEvent = (event) => workflowEvents.push(event);
+  ctx.setNodeOutput("run-planner", {
+    output: [
+      "Planner analysis complete.",
+      "```json",
+      "{",
+      '  "tasks": [',
+      '    { "title": "[m] feat(workflow): create tasks", "description": "Sensitive description should not leak", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"] },',
+      '    { "title": "[m] feat(workflow): duplicate title", "description": "Hidden duplicate description" }',
+      "  ]",
+      "}",
+      "```",
+    ].join("\n"),
+  });
+
+  const createTask = vi.fn(async () => ({ id: "task-1001" }));
+  const listTasks = vi.fn().mockResolvedValue([
+    { id: "existing-1", title: "[m] feat(workflow): duplicate title" },
+  ]);
+
+  const node = {
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    label: "Create Tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-123",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  const result = await handler.execute(node, ctx, {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  });
+
+  expect(result.success).toBe(true);
+  expect(workflowEvents.length).toBeGreaterThan(0);
+});
+
+it("action.materialize_planner_tasks emits workflow events for planner contract failures and extraction retries", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    _workflowId: "wf-monitoring",
+    _workflowName: "Monitoring Workflow",
+    _workflowRunId: "run-monitoring-2",
+  });
+  const workflowEvents = [];
+  ctx.onWorkflowEvent = (event) => workflowEvents.push(event);
+  ctx.setNodeOutput("run-planner", {
+    output: [
+      "Planner analysis complete.",
+      "Task 1: hidden payload",
+      "```json",
+      "[]",
+      "```",
+    ].join("\n"),
+  });
+
+  const node = {
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    label: "Create Tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-123",
+      failOnZero: true,
+      dedup: false,
+      minCreated: 1,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, {
+    services: {
+      kanban: {
+        createTask: vi.fn(),
+      },
+    },
+  })).rejects.toThrow();
+
+  expect(workflowEvents.length).toBeGreaterThan(0);
 });
 
 it("action.materialize_planner_tasks accepts scheduled replenishment payloads with exactly 8 tasks", async () => {
@@ -16796,10 +17118,10 @@ it("action.materialize_planner_tasks enforces planner quality gates and persists
       "```json",
       "{",
       '  "tasks": [',
-      '    { "title": "[m] fix(workflow): missing acceptance", "description": "A", "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.9, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): low impact", "description": "B", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.1, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): high risk", "description": "C", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "risk": 9.5 },',
-      '    { "title": "[m] fix(workflow): area saturated", "description": "D", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "risk": 0.2 },',
+      '    { "title": "[m] fix(workflow): missing acceptance", "description": "A", "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.9, "confidence": 0.8, "risk": 0.2, "estimated_effort": "m", "why_now": "repair schema drift", "kill_criteria": ["if not reproducible"] },',
+      '    { "title": "[m] fix(workflow): low impact", "description": "B", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.1, "confidence": 0.8, "risk": 0.2, "estimated_effort": "m", "why_now": "minor cleanup", "kill_criteria": ["if superseded"] },',
+      '    { "title": "[m] fix(workflow): high risk", "description": "C", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "confidence": 0.8, "risk": 9.5, "estimated_effort": "m", "why_now": "urgent defect", "kill_criteria": ["if change window closes"] },',
+      '    { "title": "[m] fix(workflow): area saturated", "description": "D", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "confidence": 0.8, "risk": 0.2, "estimated_effort": "m", "why_now": "reduce queueing", "kill_criteria": ["if owner unavailable"] },',
       '    { "title": "[m] fix(server): valid candidate", "description": "E", "acceptance_criteria": ["ac-server"], "verification": ["v-server"], "repo_areas": ["server"], "impact": 0.9, "confidence": 0.8, "risk": 0.2, "estimated_effort": "M", "why_now": "blocking incidents", "kill_criteria": ["if flaky"] }',
       "  ]",
       "}",
@@ -16840,7 +17162,7 @@ it("action.materialize_planner_tasks enforces planner quality gates and persists
   expect(result.createdCount).toBe(1);
   expect(result.skippedCount).toBe(4);
   expect(result.skipped).toEqual(expect.arrayContaining([
-    expect.objectContaining({ title: "[m] fix(workflow): missing acceptance", reason: "missing_acceptance_criteria" }),
+    expect.objectContaining({ title: "[m] fix(workflow): missing acceptance", reason: "planner_validation_error" }),
     expect.objectContaining({ title: "[m] fix(workflow): low impact", reason: "below_min_impact" }),
     expect.objectContaining({ title: "[m] fix(workflow): high risk", reason: "risk_above_threshold" }),
     expect.objectContaining({ title: "[m] fix(workflow): area saturated", reason: "repo_area_saturated" }),
