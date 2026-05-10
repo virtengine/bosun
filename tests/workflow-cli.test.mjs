@@ -8,6 +8,7 @@ import {
   installTemplateRunDependencies,
   listWorkflowSummaries,
   parseWorkflowInput,
+  waitForTemplateRunDispatches,
 } from "../workflow/workflow-cli.mjs";
 
 describe("workflow CLI helpers", () => {
@@ -111,6 +112,19 @@ describe("workflow CLI helpers", () => {
       ]),
     );
     expect(savedIds).toEqual(expect.arrayContaining(installed));
+  });
+
+  it("waits for template-run dispatches added while draining", async () => {
+    const dispatches = [];
+    dispatches.push(Promise.resolve().then(() => {
+      dispatches.push(Promise.resolve({ status: "fulfilled", workflowId: "child-b" }));
+      return { status: "fulfilled", workflowId: "child-a" };
+    }));
+
+    await expect(waitForTemplateRunDispatches(dispatches)).resolves.toEqual([
+      { status: "fulfilled", workflowId: "child-a" },
+      { status: "fulfilled", workflowId: "child-b" },
+    ]);
   });
 
   it("dry-runs workflow-engine templates with traced node output", async () => {
