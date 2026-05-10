@@ -15983,21 +15983,39 @@ it("agent.run_planner fails immediately when planner dependencies are unavailabl
   });
 });
 
-it("action.materialize_planner_tasks parses fenced JSON and creates tasks", async () => {
+function buildStrictPlannerPayload(taskOverrides = []) {
+  const baseTasks = Array.from({ length: 8 }, (_, index) => ({
+    title: `[m] fix(workflow): task ${index + 1}`,
+    description: `Description ${index + 1}`,
+    acceptance_criteria: [`ac${index + 1}`],
+    verification: [`verify${index + 1}`],
+    repo_areas: ["workflow"],
+    impact: 0.8,
+    confidence: 0.7,
+    risk: "medium",
+  }));
+  for (const override of taskOverrides) {
+    if (override && typeof override === "object" && Number.isInteger(override.index) && baseTasks[override.index]) {
+      baseTasks[override.index] = { ...baseTasks[override.index], ...override.patch };
+      if (override.remove) {
+        for (const field of override.remove) delete baseTasks[override.index][field];
+      }
+    }
+  }
+  return { tasks: baseTasks };
+}
+
+it("action.materialize_planner_tasks parses strict planner JSON and creates tasks", async () => {
   const handler = getNodeType("action.materialize_planner_tasks");
   expect(handler).toBeDefined();
 
+  const payload = buildStrictPlannerPayload([{ index: 1, patch: { title: "[m] fix(workflow): duplicate title" } }]);
   const ctx = new WorkflowContext({});
   ctx.setNodeOutput("run-planner", {
     output: [
       "Planner analysis complete.",
       "```json",
-      "{",
-      '  "tasks": [',
-      '    { "title": "[m] fix(workflow): create tasks", "description": "A", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.8, "confidence": 0.7, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): duplicate title", "description": "B" }',
-      "  ]",
-      "}",
+      JSON.stringify(payload, null, 2),
       "```",
     ].join("\n"),
   });
@@ -16005,9 +16023,9 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
   const createTask = vi
     .fn(async function createTaskAdapter(projectId, taskData) {
       if (projectId && taskData) {
-        return { id: "task-1001" };
+        return { id: `task-${taskData.title.split(" ").pop()}` };
       }
-      return { id: "task-1002" };
+      return { id: "task-no-project" };
     });
   const listTasks = vi.fn().mockResolvedValue([
     { id: "existing-1", title: "[m] fix(workflow): duplicate title" },
@@ -16031,18 +16049,19 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
       failOnZero: true,
       dedup: true,
       minCreated: 1,
+      exactTaskCount: 8,
+      strictTaskPlannerSchema: true,
     },
   };
   const result = await handler.execute(node, ctx, mockEngine);
 
   expect(result.success).toBe(true);
-  expect(result.parsedCount).toBe(2);
-  expect(result.createdCount).toBe(1);
+  expect(result.parsedCount).toBe(8);
+  expect(result.createdCount).toBe(7);
   expect(result.skippedCount).toBe(1);
-  expect(result.created[0]).toEqual({
-    id: "task-1001",
-    title: "[m] fix(workflow): create tasks",
-  });
+  expect(result.created[0]).toEqual(expect.objectContaining({
+    title: "[m] fix(workflow): task 1",
+  }));
   expect(result.skipped).toEqual(expect.arrayContaining([
     expect.objectContaining({
       title: "[m] fix(workflow): duplicate title",
@@ -16051,22 +16070,63 @@ it("action.materialize_planner_tasks parses fenced JSON and creates tasks", asyn
     }),
   ]));
   expect(listTasks).toHaveBeenCalledTimes(1);
-  expect(createTask).toHaveBeenCalledTimes(1);
-  expect(createTask).toHaveBeenCalledWith("proj-123", expect.objectContaining({
-    title: "[m] fix(workflow): create tasks",
-    description: "A\n\n## Acceptance Criteria\n- ac1\n\n## Verification\n- v1",
-    status: "todo",
-    repo_areas: ["workflow"],
-    meta: expect.objectContaining({
-      repo_areas: ["workflow"],
-      planner: expect.objectContaining({
-        impact: 8,
-        confidence: 7,
-        risk: "low",
-        repo_areas: ["workflow"],
-      }),
-    }),
-  }));
+  expect(createTask).toHaveBeenCalledTimes(7);
+});
+
+it("action.materialize_planner_tasks surfaces strict schema count errors before task creation", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  const ctx = new WorkflowContext({});
+  const invalidPayload = buildStrictPlannerPayload();
+  invalidPayload.tasks.pop();
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify(invalidPayload),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn();
+
+  const node = {
+    id: "materialize-invalid-count",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      failOnZero: true,
+      exactTaskCount: 8,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, { services: { kanban: { createTask, listTasks } } }))
+    .rejects.toThrow(/requires exactly 8 tasks, but planner produced 7/i);
+  expect(createTask).not.toHaveBeenCalled();
+  expect(listTasks).not.toHaveBeenCalled();
+  expect(ctx.logs.some((entry) => String(entry?.message || entry || "").includes("requires exactly 8 tasks"))).toBe(true);
+});
+
+it("action.materialize_planner_tasks surfaces strict schema field errors before task creation", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  const ctx = new WorkflowContext({});
+  const invalidPayload = buildStrictPlannerPayload([{ index: 3, remove: ["verification"] }]);
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify(invalidPayload),
+  });
+
+  const createTask = vi.fn();
+  const listTasks = vi.fn();
+
+  const node = {
+    id: "materialize-invalid-field",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      failOnZero: true,
+      strictTaskPlannerSchema: true,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, { services: { kanban: { createTask, listTasks } } }))
+    .rejects.toThrow(/tasks\[3\]\.verification is required/i);
+  expect(createTask).not.toHaveBeenCalled();
+  expect(listTasks).not.toHaveBeenCalled();
 });
 
 it("action.materialize_planner_tasks resumed run does not recreate already-created tasks (idempotent handoff)", async () => {
@@ -16344,6 +16404,113 @@ it("action.materialize_planner_tasks fails when all parsed tasks are skipped and
     /created 0 tasks/i,
   );
   expect(listTasks).toHaveBeenCalledTimes(1);
+  expect(createTask).not.toHaveBeenCalled();
+});
+
+it("action.materialize_planner_tasks accepts scheduled replenishment payloads with exactly 8 tasks", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  const tasks = Array.from({ length: 8 }, (_, index) => ({
+    title: `[m] feat(workflow): replenishment task ${index + 1}`,
+    description: `Task ${index + 1}`,
+    acceptance_criteria: [`Task ${index + 1} has a deterministic acceptance check`],
+    verification: [`Run targeted verification for task ${index + 1}`],
+    repo_areas: ["workflow"],
+  }));
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({ tasks }),
+  });
+
+  const createTask = vi.fn(async (_projectId, taskData) => ({
+    id: `task-${taskData.title.split(" ").at(-1)}`,
+  }));
+  const mockEngine = {
+    services: {
+      kanban: {
+        listTasks: vi.fn().mockResolvedValue([]),
+        createTask,
+      },
+    },
+  };
+
+  const node = {
+    id: "materialize-replenishment-valid",
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      failOnZero: true,
+      exactTaskCount: 8,
+      exactTaskCountLabel: "scheduled replenishment",
+      exactTaskCountRetryable: true,
+    },
+  };
+
+  const result = await handler.execute(node, ctx, mockEngine);
+
+  expect(result.success).toBe(true);
+  expect(result.parsedCount).toBe(8);
+  expect(result.createdCount).toBe(8);
+  expect(result.created).toHaveLength(8);
+  expect(createTask).toHaveBeenCalledTimes(8);
+});
+
+it.each([
+  {
+    parsedCount: 7,
+    comparator: "fewer than",
+  },
+  {
+    parsedCount: 9,
+    comparator: "more than",
+  },
+])("action.materialize_planner_tasks rejects scheduled replenishment payloads with $parsedCount tasks", async ({ parsedCount, comparator }) => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({});
+  const tasks = Array.from({ length: parsedCount }, (_, index) => ({
+    title: `[m] feat(workflow): replenishment task ${index + 1}`,
+    description: `Task ${index + 1}`,
+  }));
+  ctx.setNodeOutput("run-planner", {
+    output: JSON.stringify({ tasks }),
+  });
+
+  const createTask = vi.fn();
+  const mockEngine = {
+    services: {
+      kanban: {
+        listTasks: vi.fn().mockResolvedValue([]),
+        createTask,
+      },
+    },
+  };
+
+  const node = {
+    id: `materialize-replenishment-${parsedCount}`,
+    type: "action.materialize_planner_tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      exactTaskCount: 8,
+      exactTaskCountLabel: "scheduled replenishment",
+      exactTaskCountRetryable: true,
+      exactTaskCountRetryHint: "Regenerate the planner output with exactly 8 backlog tasks before retrying.",
+    },
+  };
+
+  const mismatchError = await handler.execute(node, ctx, mockEngine).catch((error) => error);
+  expect(mismatchError).toBeInstanceOf(Error);
+  expect(mismatchError).toMatchObject({
+    retryable: true,
+    parsedCount,
+    expectedTaskCount: 8,
+    failureKind: "planner_task_count_mismatch",
+    message: expect.stringMatching(new RegExp(`scheduled replenishment requires exactly 8 tasks, but planner produced ${parsedCount}`, "i")),
+  });
+  expect(mismatchError.message).toMatch(new RegExp(comparator, "i"));
+  expect(mismatchError.message).toMatch(/Regenerate the planner output with exactly 8 backlog tasks before retrying\./i);
   expect(createTask).not.toHaveBeenCalled();
 });
 
