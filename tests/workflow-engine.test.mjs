@@ -17118,10 +17118,10 @@ it("action.materialize_planner_tasks enforces planner quality gates and persists
       "```json",
       "{",
       '  "tasks": [',
-      '    { "title": "[m] fix(workflow): missing acceptance", "description": "A", "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.9, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): low impact", "description": "B", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.1, "risk": 0.2 },',
-      '    { "title": "[m] fix(workflow): high risk", "description": "C", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "risk": 9.5 },',
-      '    { "title": "[m] fix(workflow): area saturated", "description": "D", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "risk": 0.2 },',
+      '    { "title": "[m] fix(workflow): missing acceptance", "description": "A", "verification": ["v1"], "repo_areas": ["workflow"], "impact": 0.9, "confidence": 0.8, "risk": 0.2, "estimated_effort": "m", "why_now": "repair schema drift", "kill_criteria": ["if not reproducible"] },',
+      '    { "title": "[m] fix(workflow): low impact", "description": "B", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.1, "confidence": 0.8, "risk": 0.2, "estimated_effort": "m", "why_now": "minor cleanup", "kill_criteria": ["if superseded"] },',
+      '    { "title": "[m] fix(workflow): high risk", "description": "C", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "confidence": 0.8, "risk": 9.5, "estimated_effort": "m", "why_now": "urgent defect", "kill_criteria": ["if change window closes"] },',
+      '    { "title": "[m] fix(workflow): area saturated", "description": "D", "acceptance_criteria": ["ac"], "verification": ["v"], "repo_areas": ["workflow"], "impact": 0.9, "confidence": 0.8, "risk": 0.2, "estimated_effort": "m", "why_now": "reduce queueing", "kill_criteria": ["if owner unavailable"] },',
       '    { "title": "[m] fix(server): valid candidate", "description": "E", "acceptance_criteria": ["ac-server"], "verification": ["v-server"], "repo_areas": ["server"], "impact": 0.9, "confidence": 0.8, "risk": 0.2, "estimated_effort": "M", "why_now": "blocking incidents", "kill_criteria": ["if flaky"] }',
       "  ]",
       "}",
@@ -17162,7 +17162,7 @@ it("action.materialize_planner_tasks enforces planner quality gates and persists
   expect(result.createdCount).toBe(1);
   expect(result.skippedCount).toBe(4);
   expect(result.skipped).toEqual(expect.arrayContaining([
-    expect.objectContaining({ title: "[m] fix(workflow): missing acceptance", reason: "missing_acceptance_criteria" }),
+    expect.objectContaining({ title: "[m] fix(workflow): missing acceptance", reason: "planner_validation_error" }),
     expect.objectContaining({ title: "[m] fix(workflow): low impact", reason: "below_min_impact" }),
     expect.objectContaining({ title: "[m] fix(workflow): high risk", reason: "risk_above_threshold" }),
     expect.objectContaining({ title: "[m] fix(workflow): area saturated", reason: "repo_area_saturated" }),
