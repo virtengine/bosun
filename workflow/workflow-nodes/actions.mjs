@@ -7137,6 +7137,20 @@ registerNodeType("action.materialize_planner_tasks", {
     const rankingConfig = resolvePlannerPriorRankingConfig(plannerFeedback?.rankingSignals?.config || null);
     const feedbackWeights = resolvePlannerPriorFeedbackWeights(plannerFeedback?.rankingSignals?.weights || null);
     const plannerTasks = Array.isArray(plannerPayload?.tasks) ? plannerPayload.tasks : null;
+    const emitPlannerMaterializationEvent = (type, payload = {}) => {
+      if (typeof ctx?.onWorkflowEvent !== "function") return;
+      ctx.onWorkflowEvent({
+        type,
+        nodeId: node.id,
+        nodeType: node.type,
+        plannerNodeId,
+        workflowId: String(ctx?.data?._workflowId || ctx?.data?.workflowId || "").trim() || null,
+        workflowName: String(ctx?.data?._workflowName || ctx?.data?.workflowName || "").trim() || null,
+        runId: String(ctx?.data?._workflowRunId || ctx?.data?._runId || ctx?.runId || "").trim() || null,
+        timestamp: new Date().toISOString(),
+        ...payload,
+      });
+    };
 
     const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
     if (Number.isInteger(exactTaskCount) && exactTaskCount >= 0 && parsedTasks.length !== exactTaskCount) {
@@ -7149,11 +7163,23 @@ registerNodeType("action.materialize_planner_tasks", {
       error.expectedTaskCount = exactTaskCount;
       error.failureKind = "planner_task_count_mismatch";
       ctx.log(node.id, message, "error");
+      emitPlannerMaterializationEvent("planner.materialization.contract_failed", {
+        reason: "task_count_mismatch",
+        expectedTaskCount: exactTaskCount,
+        parsedCount: parsedTasks.length,
+        retryable: exactTaskCountRetryable,
+      });
       throw error;
     }
     if (!plannerValidation.ok) {
       const message = `Planner output from "${plannerNodeId}" failed TaskPlanner schema validation: ${plannerValidation.error}`;
       ctx.log(node.id, message, failOnZero ? "error" : "warn");
+      emitPlannerMaterializationEvent("planner.materialization.contract_failed", {
+        reason: plannerValidation.code || "schema_validation_failed",
+        field: plannerValidation.field || null,
+        taskIndex: Number.isInteger(plannerValidation.taskIndex) ? plannerValidation.taskIndex : null,
+        retryable: false,
+      });
       if (failOnZero) throw new Error(message);
       return {
         success: false,
@@ -7173,6 +7199,11 @@ registerNodeType("action.materialize_planner_tasks", {
     if (plannerTasks && plannerTasks.length === 0) {
       const message = `Planner output from "${plannerNodeId}" must include a non-empty tasks array.`;
       ctx.log(node.id, message, failOnZero ? "error" : "warn");
+      emitPlannerMaterializationEvent("planner.materialization.contract_failed", {
+        reason: "empty_tasks",
+        parsedCount: 0,
+        retryable: false,
+      });
       if (failOnZero) throw new Error(message);
       return {
         success: false,
@@ -7205,6 +7236,11 @@ registerNodeType("action.materialize_planner_tasks", {
         }
       }
       ctx.log(node.id, message, failOnZero ? "error" : "warn");
+      emitPlannerMaterializationEvent("planner.materialization.contract_failed", {
+        reason: plannerPayload && plannerTasks ? "no_materializable_tasks" : "missing_tasks_array",
+        parsedCount: 0,
+        retryable: false,
+      });
       if (failOnZero) throw new Error(message);
       return {
         success: false,
@@ -7497,6 +7533,23 @@ registerNodeType("action.materialize_planner_tasks", {
       node.id,
       `Planner materialization parsed=${parsedTasks.length} created=${createdCount} skipped=${skippedCount} graphApplied=${graphAppliedCount} graphSkipped=${graphSkippedCount} histogram=${JSON.stringify(skipReasonHistogram)}`,
     );
+    emitPlannerMaterializationEvent("planner.materialization.completed", {
+      parsedCount: parsedTasks.length,
+      createdCount,
+      skippedCount,
+      graphAppliedCount,
+      graphSkippedCount,
+      skipReasonHistogram,
+      created: created.map((task) => ({
+        id: task.id || null,
+        title: task.title,
+      })),
+      skipped: skipped.map((task) => ({
+        title: task.title,
+        reason: task.reason || null,
+        existingTaskId: task.existingTaskId || null,
+      })),
+    });
 
     // When failOnZero is true enforce at least 1 (or minCreated, whichever is larger).
     // When failOnZero is false the caller explicitly accepts 0 created tasks (idempotent resume).
