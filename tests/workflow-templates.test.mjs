@@ -1290,6 +1290,35 @@ describe("template drift + update behavior", () => {
     expect(refreshed.metadata.templateState.isCustomized).toBe(false);
   });
 
+  it("reconciles legacy built-in template id workflows without installedFrom metadata", () => {
+    const legacy = structuredClone(getTemplate("template-bosun-pr-watchdog"));
+    delete legacy.metadata.installedFrom;
+    const dispatchNode = legacy.nodes.find((node) => node.id === "dispatch-fix-agents");
+    const securityDispatchNode = legacy.nodes.find((node) => node.id === "dispatch-security-fix-agents");
+    delete dispatchNode.config.mode;
+    delete securityDispatchNode.config.mode;
+    engine.save(legacy);
+
+    const result = reconcileInstalledTemplates(engine, {
+      autoUpdateUnmodified: true,
+      forceUpdateTemplateIds: ["template-bosun-pr-watchdog"],
+    });
+
+    expect(result.scanned).toBe(1);
+    expect(result.forceUpdated).toEqual(["template-bosun-pr-watchdog"]);
+
+    const refreshed = engine.get("template-bosun-pr-watchdog");
+    expect(refreshed.metadata.installedFrom).toBe("template-bosun-pr-watchdog");
+    expect(
+      refreshed.nodes.find((node) => node.id === "dispatch-fix-agents")?.config?.mode,
+    ).toBe("dispatch");
+    expect(
+      refreshed.nodes.find((node) => node.id === "dispatch-security-fix-agents")?.config?.mode,
+    ).toBe("dispatch");
+    expect(refreshed.metadata.templateState.updateAvailable).toBe(false);
+    expect(refreshed.metadata.templateState.isCustomized).toBe(false);
+  });
+
   it("force-refreshes startup-critical task lifecycle workflows with banned trigger statuses or missing required edges", () => {
     const installed = installTemplate("template-task-lifecycle", engine);
     const wf = engine.get(installed.id);
@@ -1918,6 +1947,7 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(securityNode)).toContain("digestSummary");
     expect(getNodeCommandCode(securityNode)).toContain("reason:'security_code_scanning_failure'");
     expect(securityDispatchNode?.type).toBe("loop.for_each");
+    expect(securityDispatchNode?.config?.mode).toBe("dispatch");
     expect(securityDispatchNode?.config?.workflowId).toBe("template-pr-security-fix-single");
     expect(securityPromptNode?.config?.value).toContain("security remediation");
     expect(securityPromptNode?.config?.value).toContain("Fix ONLY the security/CodeQL findings");
@@ -1937,11 +1967,18 @@ describe("github template CLI compatibility", () => {
     const claimNode = watchdogTemplate.nodes.find((n) => n.id === "claim-unclaimed-prs");
     const dispatchNode = watchdogTemplate.nodes.find((n) => n.id === "dispatch-fix-agents");
     const singleFixTemplate = getTemplate("template-pr-fix-single");
+    const singleFixPushNode = singleFixTemplate.nodes.find((n) => n.id === "push-fixes");
+    const singleFixSiblingNode = singleFixTemplate.nodes.find((n) => n.id === "update-sibling-branches");
     const command = getNodeCommandCode(fixNode);
     expect(command).toContain("MAX_AUTO_RERUN_ATTEMPT=1");
     expect(command).toContain("databaseId,attempt,conclusion,status,workflowName,displayTitle,url,createdAt,updatedAt");
     expect(command).toContain("collectCiDiagnostics(repo,failedRun,runGh)");
     expect(command).toContain("runGh(['run','list','--repo',repo,'--branch',branch,'--json','databaseId,attempt,conclusion,status,workflowName,displayTitle,url,createdAt,updatedAt','--limit','8'])");
+    expect(command).toContain("function runMatchesFailedChecks(run,failedNames)");
+    expect(command).toContain("const recentFailedRunCount=relevantFailedRuns.length||(failedRun?1:0);");
+    expect(command).toContain("recentFailedRunCount<=MAX_AUTO_RERUN_ATTEMPT");
+    expect(command).toContain("reason:'ci_rerun_pending'");
+    expect(command).toContain("rerunPendingCount:pendingReruns.length");
     expect(command).toContain("reason:'auto_rerun_limit_reached'");
     expect(command).toContain("failedLogExcerpt");
     expect(command).toContain("failedJobs");
@@ -1956,8 +1993,13 @@ describe("github template CLI compatibility", () => {
     expect(dispatchNode?.type).toBe("loop.for_each");
     expect(dispatchNode?.config?.items).toContain("d.unclaimed");
     expect(dispatchNode?.config?.maxConcurrent).toBe("{{maxConcurrentFixes}}");
+    expect(dispatchNode?.config?.mode).toBe("dispatch");
     expect(dispatchNode?.config?.workflowId).toBe("template-pr-fix-single");
     expect(singleFixTemplate?.trigger).toBe("trigger.manual");
+    expect(getNodeCommandCode(singleFixPushNode)).toContain("push_disabled");
+    expect(singleFixPushNode?.config?.env?.ALLOW_PUSH).toBe("{{allowPush}}");
+    expect(getNodeCommandCode(singleFixSiblingNode)).toContain("push_disabled");
+    expect(singleFixSiblingNode?.config?.env?.ALLOW_PUSH).toBe("{{allowPush}}");
   });
   it("PR progressor is registered as the immediate single-PR handoff workflow", () => {
     const progressorTemplate = getTemplate("template-bosun-pr-progressor");
@@ -1998,6 +2040,9 @@ describe("github template CLI compatibility", () => {
     expect(getNodeCommandCode(inspectNode)).toContain("else if(prState==='CLOSED'){classification='closed';reason='pr_closed';}");
     expect(getNodeCommandCode(inspectNode)).toContain("classification='conflict';reason='merge_conflict';");
     expect(getNodeCommandCode(fixNode)).toContain("MAX_AUTO_RERUN_ATTEMPT=1");
+    expect(getNodeCommandCode(fixNode)).toContain("function runMatchesFailedChecks(run,failedNames)");
+    expect(getNodeCommandCode(fixNode)).toContain("recentFailedRunCount<=MAX_AUTO_RERUN_ATTEMPT");
+    expect(getNodeCommandCode(fixNode)).toContain("reason:'ci_rerun_pending'");
     expect(getNodeCommandCode(fixNode)).toContain("--log-failed");
     expect(getNodeCommandCode(fixNode)).toContain("reason:'auto_rerun_limit_reached'");
     expect(getNodeCommandCode(fixNode)).toContain("classification==='conflict'");
@@ -2097,6 +2142,8 @@ describe("github template CLI compatibility", () => {
     const securityValidateNode = securityFixTemplate.nodes.find((n) => n.id === "validate-pr-state");
     const fixResolveNode = fixTemplate.nodes.find((n) => n.id === "resolve-pr-task");
     const securityResolveNode = securityFixTemplate.nodes.find((n) => n.id === "resolve-pr-task");
+    const fixCleanupNode = fixTemplate.nodes.find((n) => n.id === "cleanup-worktree");
+    const securityCleanupNode = securityFixTemplate.nodes.find((n) => n.id === "cleanup-worktree");
     const fixValidateCode = getNodeCommandCode(fixValidateNode);
     const securityValidateCode = getNodeCommandCode(securityValidateNode);
     const fixSetupWorktree = fixTemplate.nodes.find((n) => n.id === "setup-worktree");
@@ -2105,6 +2152,8 @@ describe("github template CLI compatibility", () => {
     const securitySetupCode = getNodeCommandCode(securitySetupWorktree);
     const fixResolveCode = getNodeCommandCode(fixResolveNode);
     const securityResolveCode = getNodeCommandCode(securityResolveNode);
+    const fixCleanupCode = getNodeCommandCode(fixCleanupNode);
+    const securityCleanupCode = getNodeCommandCode(securityCleanupNode);
 
     expect(fixValidateCode).toContain("gh',['pr','view',num,'--repo',repo,'--json','state,isDraft,headRefName,baseRefName,url,mergedAt,closedAt']");
     expect(fixValidateCode).toContain("const merged=state==='MERGED'||Boolean(mergedAt);");
@@ -2112,8 +2161,10 @@ describe("github template CLI compatibility", () => {
     expect(fixValidateCode).toContain("reason=open?'open':(merged?'pr_merged':(state==='CLOSED'?'pr_closed':(isDraft?'draft_pr':'pr_not_open')))");
     expect(securityValidateCode).toContain("gh',['pr','view',num,'--repo',repo,'--json','state,isDraft,headRefName,baseRefName,url,mergedAt,closedAt']");
     expect(securityValidateCode).toContain("const merged=state==='MERGED'||Boolean(mergedAt);");
-    expect(fixSetupWorktree?.config?.env?.PR_BRANCH).toBe("{{validate-pr-state.output.branch || prParams.branch}}");
-    expect(securitySetupWorktree?.config?.env?.PR_BRANCH).toBe("{{validate-pr-state.output.branch || prParams.branch}}");
+    expect(fixSetupWorktree?.config?.env?.PR_BRANCH).toContain("$ctx.getNodeOutput('validate-pr-state')?.output?.branch");
+    expect(fixSetupWorktree?.config?.env?.PR_BRANCH).toContain("$data?.prParams?.branch");
+    expect(securitySetupWorktree?.config?.env?.PR_BRANCH).toContain("$ctx.getNodeOutput('validate-pr-state')?.output?.branch");
+    expect(securitySetupWorktree?.config?.env?.PR_BRANCH).toContain("$data?.prParams?.branch");
     expect(fixSetupCode).toContain("head_branch_missing_after_pr_resolution");
     expect(fixSetupCode).toContain("if(isMissingBranchError(err)){const prState=viewPrState();if(prState.shouldResolveTask)");
     expect(securitySetupCode).toContain("head_branch_missing_after_pr_resolution");
@@ -2121,16 +2172,44 @@ describe("github template CLI compatibility", () => {
     expect(fixResolveCode).toContain("targetTaskStatus==='cancelled'");
     expect(fixResolveCode).toContain("runTask(['update',taskId,JSON.stringify(patch)])");
     expect(securityResolveCode).toContain("const resolutionKey='pr-resolution:'+repo+'#'+num+':'+targetTaskStatus;");
+    expect(fixCleanupNode?.config?.parseJson).toBe(true);
+    expect(securityCleanupNode?.config?.parseJson).toBe(true);
+    expect(fixCleanupCode).toContain("outside_temp_root");
+    expect(fixCleanupCode).toContain("for(let attempt=1;attempt<=8;attempt++)");
+    expect(securityCleanupCode).toContain("outside_temp_root");
+    expect(securityCleanupCode).toContain("for(let attempt=1;attempt<=8;attempt++)");
     expect(fixTemplate.edges.find((e) => e.source === "resolve-pr-params" && e.target === "validate-pr-state")).toBeDefined();
-    expect(fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "setup-worktree")).toBeDefined();
-    expect(fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "resolve-pr-task")).toBeDefined();
-    expect(fixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "resolve-pr-task")).toBeDefined();
-    expect(fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "release-claim")).toBeDefined();
+    const fixOpenEdge = fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "setup-worktree");
+    const fixResolveEdge = fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "resolve-pr-task");
+    const fixReleaseEdge = fixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "release-claim");
+    const fixSetupResolveEdge = fixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "resolve-pr-task");
+    const fixSetupPathEdge = fixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "set-worktree-path");
+    const securityOpenEdge = securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "setup-worktree");
+    const securityResolveEdge = securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "resolve-pr-task");
+    const securityReleaseEdge = securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "release-claim");
+    const securitySetupResolveEdge = securityFixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "resolve-pr-task");
+    const securitySetupPathEdge = securityFixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "set-worktree-path");
+    expect(fixOpenEdge).toBeDefined();
+    expect(fixOpenEdge?.condition).toContain("$output?.output?.open");
+    expect(fixResolveEdge).toBeDefined();
+    expect(fixResolveEdge?.condition).toContain("$output?.output?.shouldResolveTask");
+    expect(fixSetupResolveEdge).toBeDefined();
+    expect(fixSetupResolveEdge?.condition).toContain("$output?.output?.skip");
+    expect(fixSetupPathEdge).toBeDefined();
+    expect(fixSetupPathEdge?.condition).toContain("$output?.output?.skip");
+    expect(fixReleaseEdge).toBeDefined();
+    expect(fixReleaseEdge?.condition).toContain("$output?.output?.shouldResolveTask");
     expect(securityFixTemplate.edges.find((e) => e.source === "resolve-pr-params" && e.target === "validate-pr-state")).toBeDefined();
-    expect(securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "setup-worktree")).toBeDefined();
-    expect(securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "resolve-pr-task")).toBeDefined();
-    expect(securityFixTemplate.edges.find((e) => e.source === "setup-worktree" && e.target === "resolve-pr-task")).toBeDefined();
-    expect(securityFixTemplate.edges.find((e) => e.source === "validate-pr-state" && e.target === "release-claim")).toBeDefined();
+    expect(securityOpenEdge).toBeDefined();
+    expect(securityOpenEdge?.condition).toContain("$output?.output?.open");
+    expect(securityResolveEdge).toBeDefined();
+    expect(securityResolveEdge?.condition).toContain("$output?.output?.shouldResolveTask");
+    expect(securitySetupResolveEdge).toBeDefined();
+    expect(securitySetupResolveEdge?.condition).toContain("$output?.output?.skip");
+    expect(securitySetupPathEdge).toBeDefined();
+    expect(securitySetupPathEdge?.condition).toContain("$output?.output?.skip");
+    expect(securityReleaseEdge).toBeDefined();
+    expect(securityReleaseEdge?.condition).toContain("$output?.output?.shouldResolveTask");
   });
 
   it("task batch processor binds currentTask through loop.for_each variable", () => {
