@@ -7379,6 +7379,17 @@ registerNodeType("action.materialize_planner_tasks", {
           workspace: task.workspace || materializationDefaults.workspace || "",
         }))
         .digest("hex");
+      const workflowDedupeId =
+        String(ctx?.data?.workflowId || ctx?.data?._workflowId || "workflow").trim() || "workflow";
+      const runDedupeId =
+        String(ctx?.data?.runId || ctx?.data?._runId || ctx?.id || "run").trim() || "run";
+      const plannerDedupeKey = [
+        workflowDedupeId,
+        runDedupeId,
+        String(node.id || "materialize").trim() || "materialize",
+        plannerNodeId,
+        String(task.index),
+      ].join(":");
       if (task.priority) payload.priority = task.priority;
       if (task.workspace || materializationDefaults.workspace) {
         payload.workspace = task.workspace || materializationDefaults.workspace;
@@ -7433,8 +7444,26 @@ registerNodeType("action.materialize_planner_tasks", {
         decomposition_kind: task.decompositionKind || null,
         spawn_when: task.spawnWhen || null,
         merge_back_policy: task.mergeBackPolicy || null,
+        dedupe_key: plannerDedupeKey,
       };
       payload.meta = existingMeta;
+      const existingTaskByProvenance = Array.isArray(existingRows)
+        ? existingRows.find((candidate) => {
+            const candidateKey = String(candidate?.meta?.planner?.dedupe_key || "").trim();
+            return candidateKey && candidateKey === plannerDedupeKey;
+          })
+        : null;
+      if (existingTaskByProvenance) {
+        skipped.push({
+          title: task.title,
+          reason: "duplicate_planner_provenance",
+          existingTaskId: existingTaskByProvenance.id || null,
+          dedupeKey: plannerDedupeKey,
+        });
+        materializationOutcomes.push({ ...baseOutcome, created: false, reason: "duplicate_planner_provenance" });
+        existingTitleSet.add(key);
+        continue;
+      }
       const createdTask = await createKanbanTaskWithProject(kanban, payload, projectId);
       created.push({
         id: createdTask?.id || null,
