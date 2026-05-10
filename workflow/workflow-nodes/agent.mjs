@@ -1062,7 +1062,18 @@ export function resolvePlannerPriorRankingConfig(config) {
     failurePriorStep: Math.max(0, Number(ranking.failurePriorStep ?? 1.5) || 1.5),
     maxNegativePrior: Math.max(0, Number(ranking.maxNegativePrior ?? ranking.maxFailurePriorPenalty ?? 8) || 8),
     signalPenaltyScale: Math.max(0, Number(ranking.signalPenaltyScale ?? ranking.feedbackSignalScale ?? 0.12) || 0.12),
+    implementationFollowupBoost: Math.max(0, Number(ranking.implementationFollowupBoost ?? ranking.recentPrImplementationBoost ?? 2.4) || 2.4),
+    maintenancePenalty: Math.max(0, Number(ranking.maintenancePenalty ?? ranking.documentationOnlyPenalty ?? 1.75) || 1.75),
   };
+}
+
+function normalizePlannerRankingText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
@@ -1073,7 +1084,6 @@ export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
     const riskLevel = String(task?.risk || "").trim().toLowerCase();
     const riskPenalty = ({ low: 0, medium: 0.4, high: 0.9, critical: 1.6 })[riskLevel] || 0;
     const baseScore = (impact * 1.15) + (confidence * 0.85) - riskPenalty;
-
     const keys = resolvePlannerPatternKeys(task);
     const penalties = keys.map((key) => {
       const prior = priorState?.patterns?.[key];
