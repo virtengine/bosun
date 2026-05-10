@@ -954,45 +954,8 @@ function collectRecentMergedPrSignals(prContext) {
   };
 }
 
-function classifyPlannerTaskFollowup(task, recentPrSignals) {
-  const fallback = {
-    implementationLike: false,
-    maintenanceLike: false,
-    followupMatch: false,
-    signalMatches: [],
-  };
-  if (!task || typeof task !== "object") return fallback;
-  const taskText = normalizePlannerRankingText([
-    task.title,
-    task.description,
-    task.whyNow,
-    Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria.join(" ") : "",
-    Array.isArray(task.verification) ? task.verification.join(" ") : "",
-    Array.isArray(task.repoAreas) ? task.repoAreas.join(" ") : "",
-    Array.isArray(task.tags) ? task.tags.join(" ") : "",
-  ].filter(Boolean).join(" "));
-  const implementationLike = /(implement|implementation|build|ship|add|extend|integrate|wire|follow up|followup|complete|support|enable|hook|materializ|resume|planner|workflow|engine|task)/.test(taskText);
-  const maintenanceLike = /(document|docs|documentation|readme|comment cleanups?|chore|maintenance|housekeeping|audit only|rename only)/.test(taskText);
-  const signalMatches = Array.isArray(recentPrSignals?.merged)
-    ? recentPrSignals.merged.filter((signal) => {
-        if (!signal?.normalizedText) return false;
-        const words = signal.normalizedText.split(" ").filter((token) => token.length >= 4);
-        if (words.length === 0) return false;
-        const overlapCount = words.filter((token) => taskText.includes(token)).length;
-        return overlapCount >= Math.min(2, words.length);
-      })
-    : [];
-  return {
-    implementationLike,
-    maintenanceLike,
-    followupMatch: signalMatches.length > 0,
-    signalMatches,
-  };
-}
-
 export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
   const config = resolvePlannerPriorRankingConfig(rankingConfig);
-  const recentPrSignals = collectRecentMergedPrSignals(rankingConfig?.recentPrContext || rankingConfig?.prContext);
   const scored = (Array.isArray(tasks) ? tasks : []).map((task) => {
     const impact = Number.isFinite(task?.impact) ? Number(task.impact) : 5;
     const confidence = Number.isFinite(task?.confidence) ? Number(task.confidence) : 5;
