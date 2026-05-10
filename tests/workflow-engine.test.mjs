@@ -16156,7 +16156,7 @@ it("action.materialize_planner_tasks parses strict planner JSON and creates task
   expect(handler).toBeDefined();
 
   const payload = buildStrictPlannerPayload([{ index: 1, patch: { title: "[m] fix(workflow): duplicate title" } }]);
-  const ctx = new WorkflowContext({});
+  const ctx = new WorkflowContext({ _runId: "run-materialize-1" });
   ctx.setNodeOutput("run-planner", {
     output: [
       "Planner analysis complete.",
@@ -16217,6 +16217,23 @@ it("action.materialize_planner_tasks parses strict planner JSON and creates task
   ]));
   expect(listTasks).toHaveBeenCalledTimes(1);
   expect(createTask).toHaveBeenCalledTimes(7);
+  expect(createTask.mock.calls[0][1]).toEqual(expect.objectContaining({
+    meta: expect.objectContaining({
+      planner: expect.objectContaining({
+        nodeId: "run-planner",
+        dedupe_key: expect.stringContaining("run-materialize-1"),
+      }),
+      plannerProvenance: expect.objectContaining({
+        plannerRunId: "run-materialize-1",
+        workflowRunId: "run-materialize-1",
+        plannerNodeId: "run-planner",
+        sourceNodeId: "materialize",
+        sourceNodeType: "action.materialize_planner_tasks",
+        sourceLabels: ["workflow", "planner", "materialize_planner_tasks"],
+        dedupeKey: expect.stringContaining("run-materialize-1"),
+      }),
+    }),
+  }));
 });
 
 it("action.materialize_planner_tasks surfaces strict schema count errors before task creation", async () => {
@@ -17181,6 +17198,12 @@ it("action.materialize_planner_tasks enforces planner quality gates and persists
         repo_areas: ["server"],
         why_now: "blocking incidents",
         kill_criteria: ["if flaky"],
+      }),
+      plannerProvenance: expect.objectContaining({
+        plannerNodeId: "run-planner",
+        sourceNodeId: "materialize-quality",
+        sourceNodeType: "action.materialize_planner_tasks",
+        sourceLabels: ["workflow", "planner", "materialize_planner_tasks"],
       }),
     }),
   }));

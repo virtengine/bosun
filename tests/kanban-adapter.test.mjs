@@ -2087,7 +2087,15 @@ describe("kanban-adapter internal backend", () => {
       workflowRuns: [{ workflowId: "wf-1", runId: "run-1", status: "completed", endedAt: "2026-03-08T10:05:00.000Z" }],
       statusHistory: [{ status: "inprogress", timestamp: "2026-03-08T09:55:00.000Z", source: "workflow" }],
       lastActivityAt: "2026-03-08T10:05:00.000Z",
-      meta: {},
+      meta: {
+        plannerProvenance: {
+          plannerRunId: "run-1",
+          workflowRunId: "run-1",
+          plannerNodeId: "plan-1",
+          sourceNodeId: "materialize-1",
+          sourceNodeType: "action.materialize_planner_tasks",
+        },
+      },
     });
 
     const task = await adapter.getTask("internal-detail-1");
@@ -2100,6 +2108,13 @@ describe("kanban-adapter internal backend", () => {
     expect(task.lastActivityAt).toBe("2026-03-08T10:05:00.000Z");
     expect(Array.isArray(task.meta.workflowRuns)).toBe(true);
     expect(Array.isArray(task.meta.timeline)).toBe(true);
+    expect(task.meta.plannerProvenance).toEqual(expect.objectContaining({
+      plannerRunId: "run-1",
+      workflowRunId: "run-1",
+      plannerNodeId: "plan-1",
+      sourceNodeId: "materialize-1",
+      sourceNodeType: "action.materialize_planner_tasks",
+    }));
   });
 
   it("recovers title/description from legacy malformed planner payloads", async () => {

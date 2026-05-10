@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
   buildExportFileName,
   buildSearchMatches,
   createDefaultLogsFilterState,
+  exportVisibleLogs,
   filterLogEntries,
   formatLogTimestamp,
   getActiveLogSources,
@@ -120,13 +121,20 @@ describe("tui logs screen helpers", () => {
     expect(buildExportFileName(new Date("2026-03-06T14:30:00.000Z"))).toBe("bosun-2026-03-06T14-30-00.log");
 
     const dir = createTempDir();
-    const exportPath = join(dir, buildExportFileName(new Date("2026-03-06T14:30:00.000Z")));
     const contents = [
       "14:30:00.000 | INFO | monitor | first line",
       "14:30:01.000 | ERROR | workflow | second line",
     ].join("\n");
 
-    writeFileSync(exportPath, contents, "utf8");
-    expect(readFileSync(exportPath, "utf8")).toBe(contents);
+    const exportResult = exportVisibleLogs({
+      cwd: dir,
+      entries: contents.split("\n"),
+      date: new Date("2026-03-06T14:30:00.000Z"),
+    });
+
+    expect(exportResult.fileName).toBe(buildExportFileName(new Date("2026-03-06T14:30:00.000Z")));
+    expect(exportResult.relativePath).toBe("logs/bosun-2026-03-06T14-30-00.log");
+    expect(exportResult.filePath).toBe(join(dir, "logs", exportResult.fileName));
+    expect(readFileSync(exportResult.filePath, "utf8")).toBe(contents);
   });
 });

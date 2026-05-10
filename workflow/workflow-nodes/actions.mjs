@@ -5169,7 +5169,7 @@ registerNodeType("action.run_agent", {
         for (let idx = 1; idx <= configuredCandidateCount; idx += 1) {
           const candidateBranch =
             `${safeBranchPart(currentBranch)}-cand-${idx}-${batchToken}`.slice(0, 120);
-          execSync(`git checkout -B "${candidateBranch}" "${baselineHead}"`, {
+          execFileSync("git", ["checkout", "-B", candidateBranch, baselineHead], {
             cwd,
             stdio: ["ignore", "pipe", "pipe"],
             encoding: "utf8",
@@ -5252,7 +5252,7 @@ registerNodeType("action.run_agent", {
       }
 
       const selectedHead = selected.hasCommit ? selected.head : baselineHead;
-      execSync(`git checkout -B "${currentBranch}" "${selectedHead}"`, {
+      execFileSync("git", ["checkout", "-B", currentBranch, selectedHead], {
         cwd,
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
@@ -5261,7 +5261,7 @@ registerNodeType("action.run_agent", {
       for (const candidate of candidateRuns) {
         if (!candidate?.branch) continue;
         try {
-          execSync(`git branch -D "${candidate.branch}"`, {
+          execFileSync("git", ["branch", "-D", candidate.branch], {
             cwd,
             stdio: ["ignore", "pipe", "pipe"],
             encoding: "utf8",
@@ -7481,6 +7481,22 @@ registerNodeType("action.materialize_planner_tasks", {
         spawn_when: task.spawnWhen || null,
         merge_back_policy: task.mergeBackPolicy || null,
         dedupe_key: plannerDedupeKey,
+      };
+      const plannerWorkflowRunId = String(ctx?.runId || ctx?.data?.runId || ctx?.data?._runId || "").trim() || null;
+      existingMeta.plannerProvenance = {
+        plannerRunId: plannerWorkflowRunId,
+        workflowRunId: plannerWorkflowRunId,
+        plannerNodeId,
+        sourceNodeId: node.id,
+        sourceNodeType: "action.materialize_planner_tasks",
+        sourceLabels: ["workflow", "planner", "materialize_planner_tasks"],
+        generatedAt:
+          typeof existingMeta.plannerProvenance?.generatedAt === "string"
+            ? existingMeta.plannerProvenance.generatedAt
+            : new Date().toISOString(),
+        dedupeKey: plannerDedupeKey,
+        materializationFingerprint,
+        taskIndex: task.index,
       };
       payload.meta = existingMeta;
       const existingTaskByProvenance = Array.isArray(existingRows)
