@@ -1,5 +1,6 @@
 import { getShreddingStats, retrieveToolLog } from "../../workspace/context-cache.mjs";
 import { deriveHarnessSessionPhase } from "../../agent/session-manager.mjs";
+import { repairCommonMojibake } from "../../lib/mojibake-repair.mjs";
 
 function toTrimmedString(value) {
   return String(value ?? "").trim();
@@ -14,6 +15,32 @@ function trimText(value, maxLength = 400) {
   if (!text) return text;
   if (!Number.isFinite(Number(maxLength)) || maxLength <= 0) return text;
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function repairSessionText(value) {
+  if (value == null) return value;
+  const normalized = String(value);
+  if (!normalized) return normalized;
+  return repairCommonMojibake(normalized);
+}
+
+function repairSessionTextFields(session = {}) {
+  if (!session || typeof session !== "object") return session;
+  const metadata = session.metadata && typeof session.metadata === "object"
+    ? { ...session.metadata }
+    : session.metadata;
+  if (metadata && typeof metadata === "object" && metadata.title != null) {
+    metadata.title = repairSessionText(metadata.title);
+  }
+  return {
+    ...session,
+    title: repairSessionText(session.title),
+    taskTitle: repairSessionText(session.taskTitle),
+    preview: repairSessionText(session.preview),
+    lastMessage: repairSessionText(session.lastMessage),
+    summary: repairSessionText(session.summary),
+    metadata,
+  };
 }
 
 function isPathWithinPath(normalizeCandidatePath, parentPath, childPath) {
@@ -486,7 +513,7 @@ function compactSessionInsights(insights = {}) {
 
 function compactSessionListItem(session = {}) {
   if (!session || typeof session !== "object") return session;
-  const compact = { ...session };
+  const compact = repairSessionTextFields(session);
   const messageCount = Array.isArray(compact.messages) ? compact.messages.length : undefined;
   const turnCountFromRows = Array.isArray(compact.turns) ? compact.turns.length : 0;
   if (messageCount != null) compact.messageCount = messageCount;
@@ -633,20 +660,24 @@ function enrichSessionTurnsForSurface(session = null) {
 
 async function buildSessionResponsePayload(session = null, workspaceContext = {}, deps = {}, options = {}) {
   if (!session || typeof session !== "object") return session;
+  const repairedSession = repairSessionTextFields(session);
+  const includeSurface = options.includeSurface !== false;
   const responseSession = {
-    ...session,
+    ...repairedSession,
     metadata:
-      session.metadata && typeof session.metadata === "object"
-        ? { ...session.metadata }
+      repairedSession.metadata && typeof repairedSession.metadata === "object"
+        ? { ...repairedSession.metadata }
         : {},
   };
   if (responseSession.metadata && typeof responseSession.metadata === "object") {
     delete responseSession.metadata.turnDiffs;
   }
-  responseSession.turns = enrichSessionTurnsForSurface(session);
-  responseSession.surface = await buildSessionSurfacePayload(session, workspaceContext, deps, {
-    includeBranches: options.includeBranches === true,
-  });
+  responseSession.turns = enrichSessionTurnsForSurface(repairedSession);
+  responseSession.surface = includeSurface
+    ? await buildSessionSurfacePayload(repairedSession, workspaceContext, deps, {
+        includeBranches: options.includeBranches === true,
+      })
+    : (repairedSession.surface && typeof repairedSession.surface === "object" ? repairedSession.surface : null);
   return responseSession;
 }
 
@@ -655,13 +686,14 @@ function mergeSessionListItems(primarySessions = [], fallbackSessions = [], merg
   for (const session of Array.isArray(primarySessions) ? primarySessions : []) {
     const sessionId = toTrimmedString(session?.id || session?.taskId);
     if (!sessionId) continue;
-    byId.set(sessionId, session);
+    byId.set(sessionId, repairSessionTextFields(session));
   }
   for (const session of Array.isArray(fallbackSessions) ? fallbackSessions : []) {
     const sessionId = toTrimmedString(session?.id || session?.taskId);
     if (!sessionId) continue;
+    const repairedSession = repairSessionTextFields(session);
     const existing = byId.get(sessionId) || null;
-    byId.set(sessionId, existing ? mergeSessionRecords(existing, session) : session);
+    byId.set(sessionId, existing ? mergeSessionRecords(existing, repairedSession) : repairedSession);
   }
   return [...byId.values()].sort((a, b) =>
     String(b?.lastActiveAt || "").localeCompare(String(a?.lastActiveAt || "")),
@@ -886,6 +918,7 @@ export async function tryHandleHarnessSessionRoutes(context = {}) {
         && !statusFilter
         && (!requestedWorkspace || requestedWorkspace === "active");
       const lightweightList = !wantsFull;
+      const includeSurface = wantsFull || requestedWorkspace === "all";
       const liveSessions = tracker.listAllSessions({
         includePersisted: false,
         includeRuntimeProgress: wantsFull,
@@ -966,6 +999,7 @@ export async function tryHandleHarnessSessionRoutes(context = {}) {
       const responseSessions = await Promise.all(
         sessionPayloads.map((session) => buildSessionResponsePayload(session, workspaceContext, deps, {
           includeBranches: false,
+          includeSurface,
         })),
       );
       jsonResponse(res, 200, {

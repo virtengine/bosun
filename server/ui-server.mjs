@@ -36,6 +36,12 @@ import {
 import { createShellAdapterRegistry } from "../shell/shell-adapter-registry.mjs";
 
 const gzipAsync = promisify(zlibGzip);
+const STARTUP_WORKSPACE_DIR_HINTS = Object.freeze({
+  CODEX_MONITOR_HOME: process.env.CODEX_MONITOR_HOME,
+  CODEX_MONITOR_DIR: process.env.CODEX_MONITOR_DIR,
+  BOSUN_HOME: process.env.BOSUN_HOME,
+  BOSUN_DIR: process.env.BOSUN_DIR,
+});
 const DURABLE_ACTIVE_SESSION_EXPIRY_MS = 10 * 60 * 1000;
 const DURABLE_SESSION_PLACEHOLDER_OUTPUTS = new Set([
   "continued",
@@ -9737,6 +9743,26 @@ function cloneSessionSummaryRecords(sessions = [], options = {}) {
   });
 }
 
+function repairSessionSummaryTextFields(session) {
+  if (!session || typeof session !== "object") return session;
+  const repairText = (value) => {
+    if (value == null) return value;
+    const normalized = String(value);
+    if (!normalized) return normalized;
+    return repairCommonMojibake(normalized);
+  };
+  return {
+    ...session,
+    title: repairText(session.title),
+    taskTitle: repairText(session.taskTitle),
+    preview: repairText(session.preview),
+    lastMessage: repairText(session.lastMessage),
+    metadata: session.metadata && typeof session.metadata === "object"
+      ? { ...session.metadata }
+      : session.metadata,
+  };
+}
+
 function listDurableSessionsFromLedger(workspaceContext = null, options = {}) {
   const cacheKey = buildDurableSessionListCacheKey(workspaceContext);
   const now = Date.now();
@@ -9786,10 +9812,11 @@ function mergeTrackerAndLedgerSessions(baseSessions = [], workspaceContext = nul
   for (const session of Array.isArray(baseSessions) ? baseSessions : []) {
     const sessionId = String(session?.id || session?.taskId || "").trim();
     if (!sessionId) continue;
+    const repairedSession = repairSessionSummaryTextFields(session);
     const directLedgerSession = durableById.get(sessionId) || null;
     byId.set(
       sessionId,
-      directLedgerSession ? mergeSessionRecords(session, directLedgerSession) : session,
+      directLedgerSession ? mergeSessionRecords(repairedSession, directLedgerSession) : repairedSession,
     );
   }
   for (const session of durableSessions) {
@@ -11614,19 +11641,42 @@ function buildManualFlowGuardrailsInput(template, templateId, formValues = {}, e
   };
 }
 
-function buildGuardrailsSnapshot(targetWorkspaceDir) {
+function resolveGuardrailsWorkspaceContext(targetWorkspaceDir) {
   const workspaceContext = resolveActiveWorkspaceExecutionContext();
+  const targetDir = normalizeCandidatePath(targetWorkspaceDir);
   const explicitWorkspaceDirHint = normalizeCandidatePath(
     process.env.CODEX_MONITOR_HOME
     || process.env.CODEX_MONITOR_DIR
+    || STARTUP_WORKSPACE_DIR_HINTS.CODEX_MONITOR_HOME
+    || STARTUP_WORKSPACE_DIR_HINTS.CODEX_MONITOR_DIR
+    || STARTUP_WORKSPACE_DIR_HINTS.BOSUN_HOME
+    || STARTUP_WORKSPACE_DIR_HINTS.BOSUN_DIR
     || process.env.BOSUN_HOME
     || process.env.BOSUN_DIR,
   );
+  const contextWorkspaceDir = normalizeCandidatePath(workspaceContext?.workspaceDir);
   const workspaceDir =
-    targetWorkspaceDir
-    || (!String(workspaceContext?.workspaceId || "").trim() && explicitWorkspaceDirHint)
-    || String(workspaceContext?.workspaceDir || repoRoot).trim()
+    targetDir
+    || explicitWorkspaceDirHint
+    || contextWorkspaceDir
     || repoRoot;
+  const contextMatchesWorkspace = Boolean(contextWorkspaceDir && contextWorkspaceDir === workspaceDir);
+  return {
+    workspaceContext,
+    workspaceDir,
+    workspaceRoot: contextMatchesWorkspace
+      ? (normalizeCandidatePath(workspaceContext?.workspaceRoot) || workspaceDir)
+      : workspaceDir,
+    workspaceId: contextMatchesWorkspace ? String(workspaceContext?.workspaceId || "").trim() : "",
+  };
+}
+
+function buildGuardrailsSnapshot(targetWorkspaceDir) {
+  const {
+    workspaceDir,
+    workspaceRoot,
+    workspaceId,
+  } = resolveGuardrailsWorkspaceContext(targetWorkspaceDir);
   const { configData } = readConfigDocument();
   const guardrailsPolicy = ensureGuardrailsPolicy(workspaceDir);
   const hooks = buildHookGuardrailsOverview(workspaceDir);
@@ -11657,9 +11707,9 @@ function buildGuardrailsSnapshot(targetWorkspaceDir) {
 
   return {
     workspace: {
-      workspaceId: workspaceContext?.workspaceId || "",
+      workspaceId,
       workspaceDir,
-      workspaceRoot: workspaceContext?.workspaceRoot || workspaceDir,
+      workspaceRoot,
     },
     summary: {
       status: warnings.length === 0 ? "guarded" : warnings.length <= 2 ? "partial" : "needs-attention",
@@ -18523,8 +18573,17 @@ function getEffectiveRepoRoot() {
 
 async function readCompletedSessionEntries(maxLines = 100_000) {
   const explicitTestCacheDir = normalizeCandidatePath(process.env.BOSUN_TEST_CACHE_DIR);
-  if (explicitTestCacheDir && !normalizeCandidatePath(process.env.REPO_ROOT)) {
-    const sessionLogPath = resolve(explicitTestCacheDir, "session-accumulator.jsonl");
+  const explicitTestSessionLogPath = explicitTestCacheDir
+    ? resolve(explicitTestCacheDir, "session-accumulator.jsonl")
+    : "";
+  if (
+    explicitTestCacheDir
+    && (
+      !normalizeCandidatePath(process.env.REPO_ROOT)
+      || existsSync(explicitTestSessionLogPath)
+    )
+  ) {
+    const sessionLogPath = explicitTestSessionLogPath;
     const entries = await readJsonlTail(sessionLogPath, maxLines, 50_000_000);
     return {
       sessionLogPath,
@@ -18901,10 +18960,24 @@ async function buildUsageAnalytics(days) {
   };
 }
 
+function hasAgentWorkLogData(dir) {
+  if (!dir || !existsSync(dir)) return false;
+  for (const file of ["agent-work-stream.jsonl", "agent-metrics.jsonl", "agent-errors.jsonl"]) {
+    try {
+      if (statSync(resolve(dir, file)).size > 0) return true;
+    } catch {
+      // Try the next supported log file.
+    }
+  }
+  return false;
+}
+
 function resolveAgentWorkLogDir() {
   const explicitTestCacheDir = normalizeCandidatePath(process.env.BOSUN_TEST_CACHE_DIR);
+  const explicitLogDir = explicitTestCacheDir
+    ? resolve(explicitTestCacheDir, "agent-work-logs")
+    : "";
   if (explicitTestCacheDir && !normalizeCandidatePath(process.env.REPO_ROOT)) {
-    const explicitLogDir = resolve(explicitTestCacheDir, "agent-work-logs");
     try {
       mkdirSync(explicitLogDir, { recursive: true });
     } catch {
@@ -18932,16 +19005,16 @@ function resolveAgentWorkLogDir() {
     resolve(activeRepoRoot, "..", "..", ".cache", "agent-work-logs"),
     resolve(activeRepoRoot, "..", ".cache", "agent-work-logs"),
     ...(explicitTestCacheDir
-      ? [resolve(explicitTestCacheDir, "agent-work-logs")]
+      ? [explicitLogDir]
       : []),
   ];
+  if (hasAgentWorkLogData(explicitLogDir)) {
+    return explicitLogDir;
+  }
   // Prefer directories that actually contain data (non-empty stream file).
   for (const dir of candidates) {
     if (!existsSync(dir)) continue;
-    const streamFile = resolve(dir, "agent-work-stream.jsonl");
-    try {
-      if (existsSync(streamFile) && statSync(streamFile).size > 0) return dir;
-    } catch { /* stat failed, skip */ }
+    if (hasAgentWorkLogData(dir)) return dir;
   }
   // Fall back to first existing directory, then first candidate.
   for (const dir of candidates) {
@@ -27857,8 +27930,7 @@ if (path === "/api/agent-logs/context") {
         return;
       }
 
-      const workspaceContext = resolveActiveWorkspaceExecutionContext();
-      const workspaceDir = String(workspaceContext?.workspaceDir || repoRoot).trim() || repoRoot;
+      const { workspaceDir } = resolveGuardrailsWorkspaceContext();
       const currentPolicy = ensureGuardrailsPolicy(workspaceDir);
       const nextPolicy = saveGuardrailsPolicy(workspaceDir, {
         ...currentPolicy,
@@ -27950,8 +28022,7 @@ if (path === "/api/agent-logs/context") {
   if (path === "/api/guardrails/assess" && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
-      const workspaceContext = resolveActiveWorkspaceExecutionContext();
-      const workspaceDir = String(workspaceContext?.workspaceDir || repoRoot).trim() || repoRoot;
+      const { workspaceDir } = resolveGuardrailsWorkspaceContext();
       const policy = ensureGuardrailsPolicy(workspaceDir);
       const assessmentInput = body?.input ?? body?.payload ?? body?.assessmentInput ?? body;
       const assessment = assessInputQuality(assessmentInput, policy.INPUT);
