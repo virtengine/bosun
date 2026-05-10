@@ -1474,6 +1474,9 @@ export const BOSUN_PR_PROGRESSOR_TEMPLATE = {
         "- For merge conflicts: `git merge origin/{{setup-pr-worktree.output.base}}` and resolve.\n" +
         "- For CI failures: study the error output and apply the MINIMAL code fix.\n" +
         "- For review feedback: address each comment precisely.\n" +
+        "- Validation rule: do NOT run raw `npm test` from this ephemeral PR-fix agent. In this repo, raw `npm test` exceeds the agent command budget and stalls repair.\n" +
+        "- For Node/Vitest worktrees with `tools/vitest-runner.mjs`, run the narrowest relevant command first, for example `node tools/vitest-runner.mjs run --config vitest.config.mjs --project isolated tests/<target>.test.mjs --reporter dot`.\n" +
+        "- If a full-suite signal is still needed, leave a note in your final response; the workflow/operator will run the broad suite after the focused branch fix is committed.\n" +
         "- After fixing, remove the label:\n" +
         "  `gh pr edit {{setup-pr-worktree.output.number}} --repo {{setup-pr-worktree.output.repo}} --remove-label bosun-needs-fix`\n",
       sdk: "auto",
@@ -3227,10 +3230,15 @@ export const PR_FIX_SINGLE_TEMPLATE = {
         "- `merge_conflict_requires_code_resolution`: Run `git merge origin/{{setup-worktree.output.base}}`, " +
         "  resolve *all* conflicts in code, run available tests, then `git commit`.\n" +
         "- `auto_rerun_limit_reached` / `ci_rerun_failed`: Study the failed log excerpt and " +
-        "  job details to find the root cause. Fix the code, run tests, `git add` and `git commit`.\n" +
+        "  job details to find the root cause. Fix the code, run focused tests, `git add` and `git commit`.\n" +
         "- `no_rerunnable_failed_run_found`: Look at `gh pr checks` for this PR, inspect the failure, " +
         "  fix the issue, and commit.\n" +
         "- `branch_update_failed` / `missing_repo_or_branch`: Inspect with `gh pr view`, diagnose, fix.\n\n" +
+        "**Validation rule:** Do NOT run raw `npm test` from this ephemeral PR-fix agent. In this repo, raw `npm test` exceeds the agent command budget and stalls repair. If `tools/vitest-runner.mjs` exists, run the narrowest relevant focused command first, for example:\n" +
+        "```\n" +
+        "node tools/vitest-runner.mjs run --config vitest.config.mjs --project isolated tests/<target>.test.mjs --reporter dot\n" +
+        "```\n" +
+        "If the fix genuinely needs full-suite validation, say so in your final response; the workflow/operator will run the broad suite after the branch-local fix is committed.\n\n" +
         "**After fixing:** Commit with a clear message like `fix: resolve CI failure in <check_name>`.\n" +
         "Then remove the fix label:\n" +
         "```\n" +
@@ -3365,7 +3373,9 @@ export const PR_FIX_SINGLE_TEMPLATE = {
         "const path=require('path');",
         "const claimKey=String(process.env.PR_CLAIM_KEY||'').trim();",
         "if(!claimKey){console.log(JSON.stringify({released:false,reason:'no_claim_key'}));process.exit(0);}",
-        "const CLAIM_FILE=path.join(process.cwd(),'.cache','bosun','pr-fix-claims.json');",
+        "const bosunHome=String(process.env.BOSUN_HOME||'').trim();",
+        "const claimDir=bosunHome?path.join(bosunHome,'tmp'):path.join(process.cwd(),'.cache','bosun');",
+        "const CLAIM_FILE=path.join(claimDir,'pr-fix-claims.json');",
         "try{",
         "  if(!fs.existsSync(CLAIM_FILE)){console.log(JSON.stringify({released:false,reason:'no_claim_file'}));process.exit(0);}",
         "  const data=JSON.parse(fs.readFileSync(CLAIM_FILE,'utf8'));",
