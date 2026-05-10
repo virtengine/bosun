@@ -650,18 +650,23 @@ export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5, opti
   const parsed = parsePlannerJsonFromText(output);
   if (!parsed) return [];
 
-  const validation = validateStrictTaskPlannerPayload(parsed, {
-    exactTaskCount: options?.exactCount,
-  });
-  if (!validation.ok) return [];
+  const strict = options?.strict === true;
+  const sourceTasks = strict
+    ? (() => {
+        const validation = validateStrictTaskPlannerPayload(parsed, {
+          exactTaskCount: options?.exactCount,
+        });
+        return validation.ok ? validation.tasks : [];
+      })()
+    : (Array.isArray(parsed?.tasks) ? parsed.tasks : []);
 
   const max = Number.isFinite(Number(maxTasks))
     ? Math.max(1, Math.min(100, Math.trunc(Number(maxTasks))))
     : 5;
   const dedup = new Set();
   const tasks = [];
-  for (let i = 0; i < validation.tasks.length && tasks.length < max; i += 1) {
-    const normalized = normalizePlannerTaskForCreation(validation.tasks[i], i);
+  for (let i = 0; i < sourceTasks.length && tasks.length < max; i += 1) {
+    const normalized = normalizePlannerTaskForCreation(sourceTasks[i], i);
     if (!normalized) continue;
     const key = normalized.title.toLowerCase();
     if (dedup.has(key)) continue;

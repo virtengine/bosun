@@ -16049,6 +16049,8 @@ it("action.materialize_planner_tasks parses strict planner JSON and creates task
       failOnZero: true,
       dedup: true,
       minCreated: 1,
+      exactTaskCount: 8,
+      strictTaskPlannerSchema: true,
     },
   };
   const result = await handler.execute(node, ctx, mockEngine);
@@ -16089,6 +16091,7 @@ it("action.materialize_planner_tasks surfaces strict schema count errors before 
     config: {
       plannerNodeId: "run-planner",
       failOnZero: true,
+      exactTaskCount: 8,
     },
   };
 
@@ -16096,7 +16099,7 @@ it("action.materialize_planner_tasks surfaces strict schema count errors before 
     .rejects.toThrow(/requires exactly 8 tasks, but planner produced 7/i);
   expect(createTask).not.toHaveBeenCalled();
   expect(listTasks).not.toHaveBeenCalled();
-  expect(ctx.logs.some((entry) => String(entry?.message || entry || "").includes("failed TaskPlanner schema validation"))).toBe(true);
+  expect(ctx.logs.some((entry) => String(entry?.message || entry || "").includes("requires exactly 8 tasks"))).toBe(true);
 });
 
 it("action.materialize_planner_tasks surfaces strict schema field errors before task creation", async () => {
@@ -16116,6 +16119,7 @@ it("action.materialize_planner_tasks surfaces strict schema field errors before 
     config: {
       plannerNodeId: "run-planner",
       failOnZero: true,
+      strictTaskPlannerSchema: true,
     },
   };
 

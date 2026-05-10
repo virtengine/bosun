@@ -7077,6 +7077,7 @@ registerNodeType("action.materialize_planner_tasks", {
       exactTaskCountLabel: { type: "string", description: "Operator-facing label for exact task-count guardrails" },
       exactTaskCountRetryable: { type: "boolean", default: false, description: "Mark exact task-count validation failures as retryable" },
       exactTaskCountRetryHint: { type: "string", description: "Optional remediation hint appended to exact task-count validation errors" },
+      strictTaskPlannerSchema: { type: "boolean", default: false, description: "Require strict TaskPlanner schema fields before materialization" },
     },
   },
   async execute(node, ctx, engine) {
@@ -7084,8 +7085,18 @@ registerNodeType("action.materialize_planner_tasks", {
     const plannerOutput = ctx.getNodeOutput(plannerNodeId) || {};
     const outputText = String(plannerOutput?.output || "").trim();
     const plannerPayload = parsePlannerJsonFromText(outputText);
-    const plannerValidation = validateStrictTaskPlannerPayload(plannerPayload);
     const maxTasks = Number(ctx.resolve(node.config?.maxTasks || ctx.data?.taskCount || 5)) || 5;
+    const exactTaskCountRaw = ctx.resolve(node.config?.exactTaskCount);
+    const exactTaskCount = Number.isFinite(Number(exactTaskCountRaw)) ? Number(exactTaskCountRaw) : null;
+    const exactTaskCountLabel = String(ctx.resolve(node.config?.exactTaskCountLabel || "planner output")).trim() || "planner output";
+    const exactTaskCountRetryable = ctx.resolve(node.config?.exactTaskCountRetryable) === true;
+    const exactTaskCountRetryHint = String(ctx.resolve(node.config?.exactTaskCountRetryHint || "")).trim();
+    const strictTaskPlannerSchema = ctx.resolve(node.config?.strictTaskPlannerSchema) === true;
+    const plannerValidation = strictTaskPlannerSchema
+      ? validateStrictTaskPlannerPayload(plannerPayload, {
+          exactTaskCount: Number.isInteger(exactTaskCount) && exactTaskCount >= 0 ? exactTaskCount : undefined,
+        })
+      : { ok: true };
     const failOnZero = node.config?.failOnZero !== false;
     // Use nullish coalescing so an explicit minCreated:0 is respected (not coerced to 1).
     // Default: 1 when failOnZero is true (classic behaviour), 0 when failOnZero is false
@@ -7127,6 +7138,19 @@ registerNodeType("action.materialize_planner_tasks", {
     const feedbackWeights = resolvePlannerPriorFeedbackWeights(plannerFeedback?.rankingSignals?.weights || null);
     const plannerTasks = Array.isArray(plannerPayload?.tasks) ? plannerPayload.tasks : null;
 
+    const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
+    if (Number.isInteger(exactTaskCount) && exactTaskCount >= 0 && parsedTasks.length !== exactTaskCount) {
+      const comparator = parsedTasks.length < exactTaskCount ? "fewer than" : "more than";
+      const retryMessage = exactTaskCountRetryHint ? ` ${exactTaskCountRetryHint}` : "";
+      const message = `${exactTaskCountLabel} requires exactly ${exactTaskCount} tasks, but planner produced ${parsedTasks.length} (${comparator} expected).${retryMessage}`;
+      const error = new Error(message);
+      error.retryable = exactTaskCountRetryable;
+      error.parsedCount = parsedTasks.length;
+      error.expectedTaskCount = exactTaskCount;
+      error.failureKind = "planner_task_count_mismatch";
+      ctx.log(node.id, message, "error");
+      throw error;
+    }
     if (!plannerValidation.ok) {
       const message = `Planner output from "${plannerNodeId}" failed TaskPlanner schema validation: ${plannerValidation.error}`;
       ctx.log(node.id, message, failOnZero ? "error" : "warn");
@@ -7141,25 +7165,6 @@ registerNodeType("action.materialize_planner_tasks", {
         error: message,
         validationError: plannerValidation,
       };
-    }
-
-    const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
-    const exactTaskCountRaw = ctx.resolve(node.config?.exactTaskCount);
-    const exactTaskCount = Number.isFinite(Number(exactTaskCountRaw)) ? Number(exactTaskCountRaw) : null;
-    const exactTaskCountLabel = String(ctx.resolve(node.config?.exactTaskCountLabel || "planner output")).trim() || "planner output";
-    const exactTaskCountRetryable = ctx.resolve(node.config?.exactTaskCountRetryable) === true;
-    const exactTaskCountRetryHint = String(ctx.resolve(node.config?.exactTaskCountRetryHint || "")).trim();
-    if (Number.isInteger(exactTaskCount) && exactTaskCount >= 0 && parsedTasks.length !== exactTaskCount) {
-      const comparator = parsedTasks.length < exactTaskCount ? "fewer than" : "more than";
-      const retryMessage = exactTaskCountRetryHint ? ` ${exactTaskCountRetryHint}` : "";
-      const message = `${exactTaskCountLabel} requires exactly ${exactTaskCount} tasks, but planner produced ${parsedTasks.length} (${comparator} expected).${retryMessage}`;
-      const error = new Error(message);
-      error.retryable = exactTaskCountRetryable;
-      error.parsedCount = parsedTasks.length;
-      error.expectedTaskCount = exactTaskCount;
-      error.failureKind = "planner_task_count_mismatch";
-      ctx.log(node.id, message, "error");
-      throw error;
     }
     const materializationLimit =
       Number.isInteger(exactTaskCount) && exactTaskCount >= 0
