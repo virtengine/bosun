@@ -7170,6 +7170,19 @@ registerNodeType("action.materialize_planner_tasks", {
       Number.isInteger(exactTaskCount) && exactTaskCount >= 0
         ? Math.max(1, maxTasks, exactTaskCount)
         : Math.max(1, maxTasks);
+    if (plannerTasks && plannerTasks.length === 0) {
+      const message = `Planner output from "${plannerNodeId}" must include a non-empty tasks array.`;
+      ctx.log(node.id, message, failOnZero ? "error" : "warn");
+      if (failOnZero) throw new Error(message);
+      return {
+        success: false,
+        parsedCount: 0,
+        createdCount: 0,
+        skippedCount: 0,
+        reason: "empty_tasks",
+        outputPreview: outputText,
+      };
+    }
     if (!parsedTasks.length) {
       const outputPreview = outputText.length > 200
         ? `${outputText.slice(0, 200)}…`
