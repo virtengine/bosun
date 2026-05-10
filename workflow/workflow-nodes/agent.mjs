@@ -94,6 +94,32 @@ function isTitlePatternWordChar(char) {
   );
 }
 
+function isAsciiAlphaNumeric(char) {
+  if (!char) return false;
+  const code = char.charCodeAt(0);
+  return (code >= 48 && code <= 57) || (code >= 97 && code <= 122);
+}
+
+function normalizePlannerTaskKeySegment(value, fallback = "") {
+  const raw = String(value || fallback || "").trim().toLowerCase();
+  let normalized = "";
+  let previousWasSeparator = true;
+
+  for (const char of raw) {
+    if (isAsciiAlphaNumeric(char)) {
+      normalized += char;
+      previousWasSeparator = false;
+      continue;
+    }
+    if (!previousWasSeparator) {
+      normalized += "_";
+      previousWasSeparator = true;
+    }
+  }
+
+  return normalized.endsWith("_") ? normalized.slice(0, -1) : normalized;
+}
+
 function isTitlePatternBoundary(text, index) {
   return isTitlePatternWordChar(text[index - 1]) !== isTitlePatternWordChar(text[index]);
 }
@@ -555,11 +581,7 @@ export function normalizePlannerTaskForCreation(task, index, options = {}) {
     return entry ? [entry] : [];
   };
   const normalizeTaskGraphKey = (value, fallback = "") => {
-    const normalized = String(value || fallback || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "");
+    const normalized = normalizePlannerTaskKeySegment(value, fallback);
     return normalized || "";
   };
   const scoreMode = inferPlannerTaskScoreMode(task);
