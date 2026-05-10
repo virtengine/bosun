@@ -28,8 +28,61 @@ import { _resetRuntimeAccumulatorForTests } from "../../infra/runtime-accumulato
 import { installTemplate, installTemplateSet, WORKFLOW_TEMPLATES } from "../../workflow/workflow-templates.mjs";
 import { createExecSandbox } from "./exec-sandbox.mjs";
 
-// All template IDs — installed together so sub-workflow chains (action.execute_workflow) always resolve.
+// All template IDs — useful as an explicit debug fallback.
 const ALL_TEMPLATE_IDS = WORKFLOW_TEMPLATES.map((t) => t.id);
+const TEMPLATE_BY_ID = new Map(WORKFLOW_TEMPLATES.map((t) => [t.id, t]));
+
+function resolveTemplateReference(raw, template, inputVars = {}, varOverrides = {}) {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  const interpolation = trimmed.match(/^\{\{\s*([A-Za-z0-9_$?.-]+)\s*\}\}$/);
+  if (!interpolation) return trimmed;
+
+  const key = interpolation[1]
+    .replace(/^\$data\??\./, "")
+    .replace(/^\$vars\??\./, "")
+    .replace(/^\$input\??\./, "");
+  const values = {
+    ...(template?.variables || {}),
+    ...varOverrides,
+    ...inputVars,
+  };
+  return typeof values[key] === "string" ? values[key].trim() : "";
+}
+
+function collectHarnessTemplateIds(templateId, inputVars = {}, varOverrides = {}) {
+  if (process.env.BOSUN_TEST_HARNESS_INSTALL_ALL === "1") return ALL_TEMPLATE_IDS;
+
+  const selected = new Set();
+  const pending = [templateId];
+
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (!id || selected.has(id)) continue;
+    const template = TEMPLATE_BY_ID.get(id);
+    if (!template) continue;
+
+    selected.add(id);
+    for (const depId of template.metadata?.requiredTemplates || []) {
+      if (TEMPLATE_BY_ID.has(depId) && !selected.has(depId)) pending.push(depId);
+    }
+
+    for (const node of template.nodes || []) {
+      if (
+        node.type !== "action.execute_workflow" &&
+        node.type !== "action.invoke_workflow" &&
+        node.type !== "flow.universal"
+      ) {
+        continue;
+      }
+      const workflowId = resolveTemplateReference(node.config?.workflowId, template, inputVars, varOverrides);
+      if (TEMPLATE_BY_ID.has(workflowId) && !selected.has(workflowId)) pending.push(workflowId);
+    }
+  }
+
+  return [...selected];
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 //  Experimental node stubs (meeting.*  trigger.meeting.*)
@@ -209,10 +262,13 @@ export function createTemplateHarness(templateId, scenario = {}, varOverrides = 
   async function run(inputVars = {}) {
     const speedOpts = { promotionDelayMs: 10, ...varOverrides };
 
-    // Install ALL templates so action.execute_workflow cross-template chains resolve.
+    // Install only the templates this run can dispatch to. Installing the full
+    // library for every guaranteed-template case makes schedule/planner tests
+    // run close to CI timeouts before the target workflow does useful work.
     if (!allInstalled) {
-      installTemplateSet(engine, ALL_TEMPLATE_IDS, Object.fromEntries(
-        ALL_TEMPLATE_IDS.map((id) => [id, speedOpts]),
+      const templateIds = collectHarnessTemplateIds(templateId, inputVars, speedOpts);
+      installTemplateSet(engine, templateIds, Object.fromEntries(
+        templateIds.map((id) => [id, speedOpts]),
       ));
 
       // Patch engine.get() to also resolve workflow IDs that are template slugs
@@ -237,6 +293,18 @@ export function createTemplateHarness(templateId, scenario = {}, varOverrides = 
       // can execute these sub-workflow chains without production errors.
       for (const [, wf] of engine._workflows) {
         for (const node of wf.nodes ?? []) {
+          if (node.type === "agent.run_planner" && !node.config?.repoMap) {
+            node.config.repoMap = {
+              root: tmpDir,
+              files: [
+                {
+                  path: "workflow-templates/planning.mjs",
+                  symbols: ["TASK_PLANNER_TEMPLATE", "TASK_REPLENISH_TEMPLATE"],
+                },
+              ],
+            };
+          }
+
           if (node.config?.mode === "dispatch") {
             // Tests need deterministic teardown. Dispatch mode leaves child
             // workflows running after the parent test completes.
@@ -362,4 +430,3 @@ export function createTemplateHarness(templateId, scenario = {}, varOverrides = 
     },
   };
 }
-
