@@ -110,6 +110,9 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
       - name: Prepublish check
         run: node tools/prepublish-check.mjs
 
