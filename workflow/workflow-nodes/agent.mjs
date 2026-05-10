@@ -80,6 +80,138 @@ import {
   trimLogText,
 } from "./definitions.mjs";
 
+const MAX_PROFILE_TITLE_PATTERN_LENGTH = 160;
+const MAX_PROFILE_TITLE_TEXT_LENGTH = 512;
+
+function isTitlePatternWordChar(char) {
+  if (!char) return false;
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    char === "_"
+  );
+}
+
+function isTitlePatternBoundary(text, index) {
+  return isTitlePatternWordChar(text[index - 1]) !== isTitlePatternWordChar(text[index]);
+}
+
+function tokenizeProfileTitlePattern(pattern) {
+  const tokens = [];
+  let anchorStart = false;
+  let anchorEnd = false;
+  let literal = "";
+  const flushLiteral = () => {
+    if (literal) {
+      tokens.push({ type: "literal", value: literal });
+      literal = "";
+    }
+  };
+
+  let index = 0;
+  if (pattern.startsWith("^")) {
+    anchorStart = true;
+    index = 1;
+  }
+
+  while (index < pattern.length) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+
+    if (char === "$" && index === pattern.length - 1) {
+      anchorEnd = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === "\\") {
+      if (next === "b") {
+        flushLiteral();
+        tokens.push({ type: "boundary" });
+      } else if (next) {
+        literal += next;
+      } else {
+        literal += char;
+      }
+      index += next ? 2 : 1;
+      continue;
+    }
+
+    if (char === "." && next === "*") {
+      flushLiteral();
+      tokens.push({ type: "wildcardMany" });
+      index += 2;
+      continue;
+    }
+
+    if (char === "." && next === "?") {
+      flushLiteral();
+      tokens.push({ type: "wildcardOptional" });
+      index += 2;
+      continue;
+    }
+
+    if (char === ".") {
+      flushLiteral();
+      tokens.push({ type: "wildcardOne" });
+      index += 1;
+      continue;
+    }
+
+    literal += char;
+    index += 1;
+  }
+
+  flushLiteral();
+  return { anchorStart, anchorEnd, tokens };
+}
+
+function profileTitlePatternMatches(pattern, title) {
+  const normalizedPattern = String(pattern || "").trim().toLowerCase();
+  if (!normalizedPattern || normalizedPattern.length > MAX_PROFILE_TITLE_PATTERN_LENGTH) return false;
+
+  const normalizedTitle = String(title || "").slice(0, MAX_PROFILE_TITLE_TEXT_LENGTH).toLowerCase();
+  const { anchorStart, anchorEnd, tokens } = tokenizeProfileTitlePattern(normalizedPattern);
+  const failedStates = new Set();
+
+  const matchAt = (tokenIndex, textIndex) => {
+    const key = `${tokenIndex}:${textIndex}`;
+    if (failedStates.has(key)) return false;
+    if (tokenIndex >= tokens.length) {
+      return !anchorEnd || textIndex === normalizedTitle.length;
+    }
+
+    const token = tokens[tokenIndex];
+    if (token.type === "boundary") {
+      if (isTitlePatternBoundary(normalizedTitle, textIndex) && matchAt(tokenIndex + 1, textIndex)) return true;
+    } else if (token.type === "literal") {
+      if (normalizedTitle.startsWith(token.value, textIndex) && matchAt(tokenIndex + 1, textIndex + token.value.length)) {
+        return true;
+      }
+    } else if (token.type === "wildcardOne") {
+      if (textIndex < normalizedTitle.length && matchAt(tokenIndex + 1, textIndex + 1)) return true;
+    } else if (token.type === "wildcardOptional") {
+      if (matchAt(tokenIndex + 1, textIndex)) return true;
+      if (textIndex < normalizedTitle.length && matchAt(tokenIndex + 1, textIndex + 1)) return true;
+    } else if (token.type === "wildcardMany") {
+      for (let nextIndex = textIndex; nextIndex <= normalizedTitle.length; nextIndex += 1) {
+        if (matchAt(tokenIndex + 1, nextIndex)) return true;
+      }
+    }
+
+    failedStates.add(key);
+    return false;
+  };
+
+  if (anchorStart) return matchAt(0, 0);
+  for (let startIndex = 0; startIndex <= normalizedTitle.length; startIndex += 1) {
+    if (matchAt(0, startIndex)) return true;
+  }
+  return false;
+}
+
 registerNodeType("agent.select_profile", {
   describe: () => "Select an agent profile based on task characteristics",
   schema: {
@@ -109,7 +241,7 @@ registerNodeType("agent.select_profile", {
       // Check title patterns
       if (criteria.titlePatterns) {
         for (const pattern of criteria.titlePatterns) {
-          if (new RegExp(pattern, "i").test(taskTitle)) {
+          if (profileTitlePatternMatches(pattern, taskTitle)) {
             ctx.log(node.id, `Matched profile "${profileName}" via title pattern`);
             return { profile: profileName, matchedBy: "title" };
           }
