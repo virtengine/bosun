@@ -555,7 +555,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.1",
     "figures": "^6.1.0",
-    "hono": "^4.12.14",
+    "hono": "^4.12.18",
     "htm": "3.1.1",
     "ink": "^5.0.0",
     "ink-text-input": "^6.0.0",
