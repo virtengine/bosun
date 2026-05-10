@@ -2718,6 +2718,152 @@ describe("WorkflowEngine - run history details", () => {
     expect(page.nextOffset).toBe(2);
   }, SLOW_WORKFLOW_ENGINE_RUN_HISTORY_PAGINATION_TEST_TIMEOUT_MS);
 
+  it("resumes interrupted planner workflows from Create Tasks without rerunning completed planning nodes", async () => {
+    makeTmpEngine({
+      kanban: {
+        createTask: vi.fn(async () => ({ id: "task-created-1" })),
+        listTasks: vi.fn(async () => []),
+      },
+    });
+
+    const plannerNodeType = `test.planner.resume.${Date.now()}`;
+    const plannerExecutions = [];
+    registerNodeType(plannerNodeType, {
+      async execute(node, ctx) {
+        plannerExecutions.push(node.id);
+        return {
+          output: JSON.stringify({
+            tasks: [
+              {
+                title: "[m] feat(workflow): resume pending create tasks",
+                description: "Resume from the pending Create Tasks node.",
+                acceptance_criteria: ["Pending Create Tasks nodes resume without rerunning completed planner nodes."],
+                verification: ["Run the workflow resume regression test."],
+                repo_areas: ["workflow"],
+              },
+            ],
+          }),
+          plannerRun: ctx.id,
+          nodeId: node.id,
+        };
+      },
+    });
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Trigger", config: {} },
+        { id: "run-planner", type: plannerNodeType, label: "Run Planner", config: {} },
+        {
+          id: "create-tasks",
+          type: "action.materialize_planner_tasks",
+          label: "Create Tasks",
+          config: {
+            plannerNodeId: "run-planner",
+            projectId: "proj-123",
+            dedup: true,
+            failOnZero: true,
+            minCreated: 1,
+          },
+        },
+        { id: "resume-work", type: "notify.log", label: "Resume Work", config: { message: "resume downstream" } },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "run-planner" },
+        { id: "e2", source: "run-planner", target: "create-tasks" },
+        { id: "e3", source: "create-tasks", target: "resume-work" },
+      ],
+      {
+        id: `wf-planner-create-tasks-resume-${Math.random().toString(36).slice(2, 8)}`,
+        name: "Planner Create Tasks Resume Workflow",
+      },
+    );
+    engine.save(wf);
+
+    const initialCtx = await engine.execute(wf.id, {});
+    expect(plannerExecutions).toEqual(["run-planner"]);
+    expect(initialCtx.getNodeStatus("resume-work")).toBe(NodeStatus.COMPLETED);
+    engine.services.kanban.createTask.mockClear();
+
+    const interruptedRunId = "run-planner-create-tasks-resume";
+    writeFileSync(
+      join(tmpDir, "runs", "index.json"),
+      JSON.stringify({
+        runs: [
+          {
+            runId: interruptedRunId,
+            workflowId: wf.id,
+            workflowName: wf.name,
+            status: WorkflowStatus.PAUSED,
+            startedAt: new Date(1000).toISOString(),
+            endedAt: new Date(2000).toISOString(),
+            nodeStatuses: {
+              trigger: NodeStatus.COMPLETED,
+              "run-planner": NodeStatus.COMPLETED,
+              "create-tasks": NodeStatus.PENDING,
+              "resume-work": NodeStatus.PENDING,
+            },
+            counts: { total: 4, pending: 2, running: 0, completed: 2, failed: 0, skipped: 0, blocked: 0 },
+          },
+        ],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(tmpDir, "runs", `${interruptedRunId}.json`),
+      JSON.stringify({
+        runId: interruptedRunId,
+        workflowId: wf.id,
+        workflowName: wf.name,
+        status: WorkflowStatus.PAUSED,
+        startedAt: new Date(1000).toISOString(),
+        endedAt: new Date(2000).toISOString(),
+        data: { _workflowId: wf.id, _workflowName: wf.name },
+        nodeStatuses: {
+          trigger: NodeStatus.COMPLETED,
+          "run-planner": NodeStatus.COMPLETED,
+          "create-tasks": NodeStatus.PENDING,
+          "resume-work": NodeStatus.PENDING,
+        },
+        nodeOutputs: {
+          "run-planner": initialCtx.getNodeOutput("run-planner"),
+        },
+        nodeStatusEvents: [
+          { nodeId: "trigger", status: NodeStatus.COMPLETED, timestamp: 1001 },
+          { nodeId: "run-planner", status: NodeStatus.COMPLETED, timestamp: 1002 },
+        ],
+        logs: [],
+        errors: [],
+      }, null, 2),
+      "utf8",
+    );
+    writeFileSync(join(tmpDir, "runs", "_active-runs.json"), JSON.stringify([], null, 2), "utf8");
+
+    plannerExecutions.length = 0;
+    const resumeOrder = [];
+    const executeDagSpy = vi.spyOn(engine, "_executeDag");
+    executeDagSpy.mockImplementation(async function(definition, entryNodes, adjacency, context, options) {
+      const originalStatus = context.setNodeStatus.bind(context);
+      context.setNodeStatus = (nodeId, status) => {
+        if (status === NodeStatus.RUNNING) resumeOrder.push(nodeId);
+        return originalStatus(nodeId, status);
+      };
+      return WorkflowEngine.prototype._executeDag.call(this, definition, entryNodes, adjacency, context, options);
+    });
+
+    const { retryRunId } = await engine.retryRun(interruptedRunId, { mode: "from_failed", _resumeInterrupted: true });
+
+    expect(retryRunId).toBeTruthy();
+    expect(plannerExecutions).toEqual([]);
+    expect(resumeOrder).toEqual(["create-tasks", "resume-work"]);
+
+    const resumedRun = engine.getRunDetail(retryRunId);
+    expect(resumedRun?.detail?.nodeStatuses?.["run-planner"]).toBe(NodeStatus.COMPLETED);
+    expect(resumedRun?.detail?.nodeOutputs?.["run-planner"]).toEqual(initialCtx.getNodeOutput("run-planner"));
+    expect(resumedRun?.detail?.nodeStatuses?.["create-tasks"]).toBe(NodeStatus.COMPLETED);
+    expect(resumedRun?.detail?.nodeStatuses?.["resume-work"]).toBe(NodeStatus.COMPLETED);
+    expect(engine.services.kanban.createTask).toHaveBeenCalledTimes(1);
+  });
+
   it("resumes interrupted Create Tasks runs only when idempotency checks pass", async () => {
     makeTmpEngine({
       kanban: {

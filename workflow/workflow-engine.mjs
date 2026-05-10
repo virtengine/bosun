@@ -5156,13 +5156,14 @@ export class WorkflowEngine extends EventEmitter {
       throw new Error(`${TAG} Workflow "${workflowId}" no longer exists — cannot retry`);
     }
     const createTasksGuard = this._resolvePendingCreateTasksGuard(originalRun, def);
+    const isInterruptedResume = retryOpts._resumeInterrupted === true;
     const isResumeLikeRetry =
-      mode === "from_failed"
+      (mode === "from_failed" && !isInterruptedResume)
       || mode === "replan_from_failed"
       || mode === "replan_subgraph";
     const blocksManualRestart = mode === "from_scratch" && createTasksGuard?.safeResume;
     if (createTasksGuard && (isResumeLikeRetry || blocksManualRestart)) {
-      if (retryOpts._resumeInterrupted === true) {
+      if (isInterruptedResume) {
         if (!createTasksGuard.safeResume) {
           throw new Error(`${TAG} ${createTasksGuard.resumeBlockedMessage}`);
         }
