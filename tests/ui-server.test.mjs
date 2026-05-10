@@ -2843,6 +2843,10 @@ describeUiServer("ui-server mini app", () => {
   it("imports task state snapshots with merge semantics via mini app API", async () => {
     const mod = await import("../server/ui-server.mjs");
     const taskStore = await import("../task/task-store.mjs");
+    const existingTimelineAt = new Date("2026-04-29T10:00:00.000Z").toISOString();
+    const importedTimelineAt = new Date("2026-04-29T11:00:00.000Z").toISOString();
+    const existingStatusAt = new Date("2026-04-29T10:05:00.000Z").toISOString();
+    const importedStatusAt = new Date("2026-04-29T11:05:00.000Z").toISOString();
 
     const server = await mod.startTelegramUiServer({
       port: await getFreePort(),
@@ -2854,6 +2858,30 @@ describeUiServer("ui-server mini app", () => {
       id: "task-import-1",
       title: "Original title",
       status: "todo",
+      timeline: [{
+        id: "timeline-local-1",
+        type: "task.created",
+        source: "local",
+        at: existingTimelineAt,
+        message: "Existing timeline entry",
+      }],
+      workflowRuns: [{
+        runId: "run-local-1",
+        workflowId: "wf-local-1",
+        status: "running",
+        summary: "Existing workflow link",
+      }],
+      statusHistory: [{
+        status: "todo",
+        timestamp: existingStatusAt,
+        source: "local",
+      }],
+      meta: {
+        localOnly: true,
+        nested: {
+          keep: "local-value",
+        },
+      },
     });
     await taskStore.waitForStoreWrites();
 
@@ -2867,9 +2895,21 @@ describeUiServer("ui-server mini app", () => {
             id: "task-import-1",
             title: "Updated title",
             status: "inreview",
-            timeline: [{ type: "status.transition", source: "import" }],
+            timeline: [{
+              id: "timeline-import-1",
+              type: "status.transition",
+              source: "import",
+              at: importedTimelineAt,
+              message: "Imported timeline entry",
+            }],
             workflowRuns: [{ runId: "run-import-1", workflowId: "wf-import-1", status: "completed" }],
-            statusHistory: [{ status: "inreview", timestamp: new Date().toISOString(), source: "import" }],
+            statusHistory: [{ status: "inreview", timestamp: importedStatusAt, source: "import" }],
+            meta: {
+              importedOnly: true,
+              nested: {
+                imported: "import-value",
+              },
+            },
           },
           {
             id: "task-import-2",
@@ -2891,8 +2931,114 @@ describeUiServer("ui-server mini app", () => {
     expect(updatedTask?.title).toBe("Updated title");
     expect(updatedTask?.status).toBe("inreview");
     expect(Array.isArray(updatedTask?.workflowRuns)).toBe(true);
-    expect(updatedTask?.workflowRuns?.[0]?.runId).toBe("run-import-1");
+    expect(updatedTask?.workflowRuns?.map((run) => run.runId)).toEqual(
+      expect.arrayContaining(["run-local-1", "run-import-1"]),
+    );
+    expect(updatedTask?.timeline?.map((entry) => entry.id)).toEqual(
+      expect.arrayContaining(["timeline-local-1", "timeline-import-1"]),
+    );
+    expect(updatedTask?.statusHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "todo", source: "local" }),
+      expect.objectContaining({ status: "inreview", source: "import" }),
+    ]));
+    expect(updatedTask?.meta).toMatchObject({
+      localOnly: true,
+      importedOnly: true,
+      nested: {
+        keep: "local-value",
+        imported: "import-value",
+      },
+    });
     expect(createdTask?.title).toBe("Imported task");
+  }, 15000);
+
+  it("imports task state snapshots with upsert replace semantics via mini app API", async () => {
+    const mod = await import("../server/ui-server.mjs");
+    const taskStore = await import("../task/task-store.mjs");
+
+    const server = await mod.startTelegramUiServer({
+      port: await getFreePort(),
+      host: "127.0.0.1",
+    });
+    const port = server.address().port;
+
+    taskStore.addTask({
+      id: "task-import-upsert-1",
+      title: "Original title",
+      status: "todo",
+      timeline: [{
+        id: "timeline-local-upsert",
+        type: "task.created",
+        source: "local",
+      }],
+      workflowRuns: [{
+        runId: "run-local-upsert",
+        workflowId: "wf-local-upsert",
+        status: "running",
+      }],
+      statusHistory: [{
+        status: "todo",
+        timestamp: new Date("2026-04-29T09:00:00.000Z").toISOString(),
+        source: "local",
+      }],
+      meta: {
+        localOnly: true,
+      },
+    });
+    await taskStore.waitForStoreWrites();
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/tasks/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mode: "upsert",
+        tasks: [
+          {
+            id: "task-import-upsert-1",
+            title: "Updated title",
+            status: "inreview",
+            timeline: [{
+              id: "timeline-import-upsert",
+              type: "status.transition",
+              source: "import",
+            }],
+            workflowRuns: [{
+              runId: "run-import-upsert",
+              workflowId: "wf-import-upsert",
+              status: "completed",
+            }],
+            statusHistory: [{
+              status: "inreview",
+              timestamp: new Date("2026-04-29T11:30:00.000Z").toISOString(),
+              source: "import",
+            }],
+            meta: {
+              importedOnly: true,
+            },
+          },
+        ],
+      }),
+    });
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.data.summary.created).toBe(0);
+    expect(json.data.summary.updated).toBe(1);
+
+    const updatedTask = taskStore.getTask("task-import-upsert-1");
+    expect(updatedTask?.title).toBe("Updated title");
+    expect(updatedTask?.timeline?.map((entry) => entry.id)).not.toContain("timeline-local-upsert");
+    expect(updatedTask?.timeline?.map((entry) => entry.id)).toContain("timeline-import-upsert");
+    expect(updatedTask?.workflowRuns?.map((run) => run.runId)).toEqual(["run-import-upsert"]);
+    expect(updatedTask?.statusHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "inreview", source: "import" }),
+    ]));
+    expect(updatedTask?.statusHistory).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "todo", source: "local" }),
+    ]));
+    expect(updatedTask?.meta?.localOnly).toBeUndefined();
+    expect(updatedTask?.meta?.importedOnly).toBe(true);
   }, 15000);
 
   it("queues /plan commands in background to avoid request timeouts", async () => {
