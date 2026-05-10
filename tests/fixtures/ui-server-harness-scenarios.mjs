@@ -74,6 +74,13 @@ async function cleanupRuntimeEnv(root) {
   await removeDirWithRetries(root);
 }
 
+async function stopScenarioServer(mod, serverRef) {
+  if (!serverRef) return null;
+  mod.stopTelegramUiServer();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  return null;
+}
+
 async function runHistoryScenario() {
   const root = setupRuntimeEnv("bosun-harness-run-script-");
   const mod = await import("../../server/ui-server.mjs");
@@ -165,9 +172,7 @@ async function runHistoryScenario() {
       },
     };
   } finally {
-    if (server) {
-      await new Promise((resolve) => server.close(resolve));
-    }
+    server = await stopScenarioServer(mod, server);
     await cleanupRuntimeEnv(root);
   }
 }
@@ -251,9 +256,7 @@ async function runStopScenario() {
       },
     };
   } finally {
-    if (server) {
-      await new Promise((resolve) => server.close(resolve));
-    }
+    server = await stopScenarioServer(mod, server);
     await cleanupRuntimeEnv(root);
   }
 }
@@ -365,9 +368,7 @@ async function runNudgeScenario() {
       },
     };
   } finally {
-    if (server) {
-      await new Promise((resolve) => server.close(resolve));
-    }
+    server = await stopScenarioServer(mod, server);
     await cleanupRuntimeEnv(root);
   }
 }

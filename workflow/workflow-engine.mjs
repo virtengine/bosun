@@ -5157,13 +5157,14 @@ export class WorkflowEngine extends EventEmitter {
     }
     const createTasksGuard = this._resolvePendingCreateTasksGuard(originalRun, def);
     const isInterruptedResume = retryOpts._resumeInterrupted === true;
+    const operatorAction = String(retryOpts.operatorAction || "").trim().toLowerCase();
     const isResumeLikeRetry =
       (mode === "from_failed" && !isInterruptedResume)
       || mode === "replan_from_failed"
       || mode === "replan_subgraph";
     const blocksManualRestart = mode === "from_scratch" && createTasksGuard?.safeResume;
     if (createTasksGuard && (isResumeLikeRetry || blocksManualRestart)) {
-      if (isInterruptedResume) {
+      if (isInterruptedResume || operatorAction === "resume") {
         if (!createTasksGuard.safeResume) {
           throw new Error(`${TAG} ${createTasksGuard.resumeBlockedMessage}`);
         }
@@ -7108,7 +7109,6 @@ export class WorkflowEngine extends EventEmitter {
       ],
     };
   }
-
 
   /**
    * Get task-linked workflow trace events for a run.
@@ -9937,6 +9937,14 @@ export class WorkflowEngine extends EventEmitter {
         }
       }
 
+      const indexedRunCountsByTaskId = new Map();
+      for (const run of allRuns) {
+        const ident = identityCache.get(run.runId) ?? getIdentity(run.runId);
+        const taskId = this._resolveRunTaskIdentity(run, ident)?.taskId || "";
+        if (!taskId) continue;
+        indexedRunCountsByTaskId.set(taskId, (indexedRunCountsByTaskId.get(taskId) || 0) + 1);
+      }
+
       // Mark older duplicate runs as not-resumable before entering the loop.
       // This must consider the full paused+resumable set so historical siblings
       // outside the current startup cohort are still retired when a newer run wins.
@@ -10082,7 +10090,7 @@ export class WorkflowEngine extends EventEmitter {
             : (watchdogDecision || this._chooseRetryModeFromDetail(detail, {
                 fallbackMode: "from_scratch",
               }));
-          const detailedRun = this.getRunDetail(run.runId) || run;
+          const detailedRun = this.getRunDetail(run.runId, { decorate: false }) || { ...run, detail };
           const createTasksGuard = this._resolvePendingCreateTasksGuard(detailedRun, def);
           if (createTasksGuard && !createTasksGuard.safeResume) {
             console.warn(`${TAG} Skipping run ${run.runId}: ${createTasksGuard.resumeBlockedMessage}`);

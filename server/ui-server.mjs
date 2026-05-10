@@ -3037,6 +3037,8 @@ async function collectTaskLogDiagnostics(task, workspaceDir = "", limit = 8) {
     if (!candidate || !existsSync(candidate) || logPaths.includes(candidate)) return;
     logPaths.push(candidate);
   };
+  pushLogPath(resolve(__dirname, "..", ".bosun", "logs", "monitor-error.log"));
+  pushLogPath(resolve(__dirname, "..", ".bosun", "logs", "monitor.log"));
   if (workspaceDir) {
     pushLogPath(resolve(workspaceDir, ".bosun", "logs", "monitor-error.log"));
     pushLogPath(resolve(workspaceDir, ".bosun", "logs", "monitor.log"));
