@@ -244,7 +244,19 @@ registerNodeType("loop.for_each", {
           }
           try {
             if (subWorkflowMode === "dispatch") {
-              Promise.resolve(engine.execute(subWorkflowId, itemData))
+              const dispatchedWorkflow = Promise.resolve(engine.execute(subWorkflowId, itemData));
+              if (typeof engine.trackDispatchedWorkflow === "function") {
+                try {
+                  engine.trackDispatchedWorkflow(dispatchedWorkflow, {
+                    nodeId: node.id,
+                    workflowId: subWorkflowId,
+                    index: itemIndex,
+                  });
+                } catch (trackErr) {
+                  ctx.log(node.id, `Loop dispatch item ${itemIndex} tracking failed: ${trackErr?.message || trackErr}`, "warn");
+                }
+              }
+              dispatchedWorkflow
                 .then((runCtx) => {
                   const status = Array.isArray(runCtx?.errors) && runCtx.errors.length > 0 ? "failed" : "completed";
                   ctx.log(node.id, `Loop dispatch item ${itemIndex} finished with status=${status}`);
