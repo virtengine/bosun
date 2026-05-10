@@ -15,9 +15,10 @@ import { createSessionTracker } from "../infra/session-tracker.mjs";
 
 describe("SessionTracker.getProgressStatus", () => {
   let tracker;
+  const idleThresholdMs = 10_000;
 
   beforeEach(() => {
-    tracker = createSessionTracker({ maxMessages: 20, idleThresholdMs: 100 });
+    tracker = createSessionTracker({ maxMessages: 20, idleThresholdMs });
   });
 
   it("returns not_found for unknown taskId", () => {
@@ -55,22 +56,22 @@ describe("SessionTracker.getProgressStatus", () => {
       item: { type: "agent_message", text: "did something" },
     });
 
-    // Hack lastActivityAt to simulate idle (150ms is between idle=100ms and stalled=200ms thresholds)
+    // Hack lastActivityAt to simulate idle (between idle and stalled thresholds)
     const session = tracker.getSession("task-1");
-    session.lastActivityAt = Date.now() - 150;
+    session.lastActivityAt = Date.now() - idleThresholdMs * 1.5;
 
     const status = tracker.getProgressStatus("task-1");
     expect(status.status).toBe("idle");
-    expect(status.idleMs).toBeGreaterThan(100);
+    expect(status.idleMs).toBeGreaterThan(idleThresholdMs);
     expect(status.recommendation).toBe("continue"); // has events, so continue
   });
 
   it("returns nudge recommendation when idle with 0 events", () => {
     tracker.startSession("task-1", "Test");
 
-    // Make idle without any events (150ms is between idle=100ms and stalled=200ms thresholds)
+    // Make idle without any events (between idle and stalled thresholds)
     const session = tracker.getSession("task-1");
-    session.lastActivityAt = Date.now() - 150;
+    session.lastActivityAt = Date.now() - idleThresholdMs * 1.5;
 
     const status = tracker.getProgressStatus("task-1");
     expect(status.status).toBe("idle");
@@ -80,7 +81,7 @@ describe("SessionTracker.getProgressStatus", () => {
   it("does not treat turn_context noise as real activity", () => {
     tracker.startSession("task-1", "Test");
     const session = tracker.getSession("task-1");
-    session.lastActivityAt = Date.now() - 150;
+    session.lastActivityAt = Date.now() - idleThresholdMs * 1.5;
 
     tracker.recordEvent("task-1", { type: "turn_context" });
     tracker.recordEvent("task-1", {
@@ -251,9 +252,10 @@ describe("shouldAutoResume patterns", () => {
 
 describe("idle detection integration", () => {
   let tracker;
+  const idleThresholdMs = 5_000;
 
   beforeEach(() => {
-    tracker = createSessionTracker({ maxMessages: 20, idleThresholdMs: 50 });
+    tracker = createSessionTracker({ maxMessages: 20, idleThresholdMs });
   });
 
   it("full lifecycle: active → idle → continue recommendation", () => {
@@ -276,7 +278,7 @@ describe("idle detection integration", () => {
 
     // Simulate agent going idle
     const session = tracker.getSession("task-1");
-    session.lastActivityAt = Date.now() - 80; // between idle=50ms and stalled=100ms thresholds
+    session.lastActivityAt = Date.now() - idleThresholdMs * 1.5; // between idle and stalled thresholds
 
     // Should now be idle with continue recommendation
     progress = tracker.getProgressStatus("task-1");
@@ -321,9 +323,9 @@ describe("idle detection integration", () => {
     tracker.startSession("task-3", "Done");
     tracker.endSession("task-3", "completed");
 
-    // Make task-2 idle (between idleThreshold=50 and stalledThreshold=100)
+    // Make task-2 idle (between idle and stalled thresholds)
     const session2 = tracker.getSession("task-2");
-    session2.lastActivityAt = Date.now() - 80;
+    session2.lastActivityAt = Date.now() - idleThresholdMs * 1.5;
 
     const active = tracker.getActiveSessions();
     expect(active).toHaveLength(2);
@@ -331,7 +333,7 @@ describe("idle detection integration", () => {
     // Find idle session
     const idleSession = active.find((s) => s.taskId === "task-2");
     expect(idleSession).toBeTruthy();
-    expect(idleSession.idleMs).toBeGreaterThan(50);
+    expect(idleSession.idleMs).toBeGreaterThan(idleThresholdMs);
 
     // Check if it should get a CONTINUE
     const progress = tracker.getProgressStatus("task-2");
@@ -345,7 +347,7 @@ describe("continue prompt building", () => {
   let tracker;
 
   beforeEach(() => {
-    tracker = createSessionTracker({ maxMessages: 20, idleThresholdMs: 50 });
+    tracker = createSessionTracker({ maxMessages: 20, idleThresholdMs: 5_000 });
   });
 
   it("progress status reflects edits for commit nudge", () => {
@@ -396,9 +398,10 @@ describe("continue prompt building", () => {
 
 describe("edge cases", () => {
   let tracker;
+  const idleThresholdMs = 10_000;
 
   beforeEach(() => {
-    tracker = createSessionTracker({ maxMessages: 10, idleThresholdMs: 100 });
+    tracker = createSessionTracker({ maxMessages: 10, idleThresholdMs });
   });
 
   it("handles rapid session restart gracefully", () => {
@@ -417,7 +420,7 @@ describe("edge cases", () => {
   });
 
   it("stalled status threshold is 2x idle threshold", () => {
-    tracker = createSessionTracker({ maxMessages: 10, idleThresholdMs: 50 });
+    tracker = createSessionTracker({ maxMessages: 10, idleThresholdMs });
     tracker.startSession("task-1", "Test");
     tracker.recordEvent("task-1", {
       type: "item.completed",
@@ -426,13 +429,13 @@ describe("edge cases", () => {
 
     // Set to 1.5x threshold — should be idle, not stalled
     const session = tracker.getSession("task-1");
-    session.lastActivityAt = Date.now() - 75; // 1.5x of 50ms
+    session.lastActivityAt = Date.now() - idleThresholdMs * 1.5;
 
     let progress = tracker.getProgressStatus("task-1");
     expect(progress.status).toBe("idle");
 
     // Set to 2.5x threshold — should be stalled
-    session.lastActivityAt = Date.now() - 125; // 2.5x of 50ms
+    session.lastActivityAt = Date.now() - idleThresholdMs * 2.5;
     progress = tracker.getProgressStatus("task-1");
     // Due to order: stalled check (>2x) comes after idle check (>1x)
     // The code checks idle first, so at 2.5x, idle fires
