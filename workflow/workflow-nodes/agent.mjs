@@ -208,6 +208,19 @@ const PLANNER_RISK_LEVELS = ["low", "medium", "high", "critical"];
 export const PLANNER_RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
 export const CALIBRATED_MIN_IMPACT_SCORE = 7;
 export const CALIBRATED_MAX_RISK_WITHOUT_HUMAN = "medium";
+export const STRICT_TASK_PLANNER_TASK_COUNT = 8;
+const TASK_PLANNER_REQUIRED_TOP_LEVEL_KEYS = ["tasks"];
+const TASK_PLANNER_REQUIRED_TASK_FIELDS = [
+  "title",
+  "description",
+  "acceptance_criteria",
+  "verification",
+  "repo_areas",
+  "impact",
+  "confidence",
+  "risk",
+];
+const TASK_PLANNER_ALLOWED_ESTIMATED_EFFORT = ["small", "medium", "large"];
 const PLANNER_SCORE_MODE_RATIO = "ratio";
 const PLANNER_SCORE_MODE_TEN = "ten";
 
@@ -505,29 +518,160 @@ export function normalizePlannerTaskForCreation(task, index) {
     mergeBackPolicy,
   };
 }
+export function validateStrictTaskPlannerPayload(payload, options = {}) {
+  const exactTaskCount = Number.isFinite(Number(options?.exactTaskCount))
+    ? Math.max(1, Math.trunc(Number(options.exactTaskCount)))
+    : STRICT_TASK_PLANNER_TASK_COUNT;
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {
+      ok: false,
+      error: "Planner payload must be a JSON object with exactly one top-level \"tasks\" key",
+      code: "invalid_top_level_type",
+    };
+  }
+
+  const topLevelKeys = Object.keys(payload);
+  if (topLevelKeys.length !== TASK_PLANNER_REQUIRED_TOP_LEVEL_KEYS.length || topLevelKeys[0] !== "tasks") {
+    return {
+      ok: false,
+      error: `Planner payload must contain exactly one top-level \"tasks\" key; found ${topLevelKeys.length ? topLevelKeys.join(", ") : "none"}`,
+      code: "invalid_top_level_keys",
+    };
+  }
+
+  if (!Array.isArray(payload.tasks)) {
+    return {
+      ok: false,
+      error: 'Planner payload field "tasks" must be an array',
+      code: "invalid_tasks_type",
+      field: "tasks",
+    };
+  }
+
+  if (payload.tasks.length !== exactTaskCount) {
+    return {
+      ok: false,
+      error: `Planner payload must contain exactly ${exactTaskCount} tasks; found ${payload.tasks.length}`,
+      code: "invalid_task_count",
+      field: "tasks",
+      expected: exactTaskCount,
+      actual: payload.tasks.length,
+    };
+  }
+
+  for (let i = 0; i < payload.tasks.length; i += 1) {
+    const task = payload.tasks[i];
+    const taskLabel = `tasks[${i}]`;
+    if (!task || typeof task !== "object" || Array.isArray(task)) {
+      return {
+        ok: false,
+        error: `${taskLabel} must be an object`,
+        code: "invalid_task_type",
+        taskIndex: i,
+      };
+    }
+
+    for (const field of TASK_PLANNER_REQUIRED_TASK_FIELDS) {
+      if (!(field in task)) {
+        return {
+          ok: false,
+          error: `${taskLabel}.${field} is required`,
+          code: "missing_required_field",
+          taskIndex: i,
+          field,
+        };
+      }
+    }
+
+    if (String(task.title || "").trim() === "") {
+      return { ok: false, error: `${taskLabel}.title must be a non-empty string`, code: "invalid_field", taskIndex: i, field: "title" };
+    }
+    if (String(task.description || "").trim() === "") {
+      return { ok: false, error: `${taskLabel}.description must be a non-empty string`, code: "invalid_field", taskIndex: i, field: "description" };
+    }
+
+    const listFields = ["acceptance_criteria", "verification", "repo_areas"];
+    for (const field of listFields) {
+      const value = task[field];
+      if (!Array.isArray(value) || value.length === 0 || value.some((entry) => String(entry || "").trim() === "")) {
+        return {
+          ok: false,
+          error: `${taskLabel}.${field} must be a non-empty array of non-empty strings`,
+          code: "invalid_field",
+          taskIndex: i,
+          field,
+        };
+      }
+    }
+
+    const impact = normalizePlannerScore(task.impact, { preferTenScaleIntegers: false, preserveFractionalTenScale: true });
+    if (!Number.isFinite(impact)) {
+      return { ok: false, error: `${taskLabel}.impact must be a numeric planner score`, code: "invalid_field", taskIndex: i, field: "impact" };
+    }
+    const confidence = normalizePlannerScore(task.confidence, { preferTenScaleIntegers: false, preserveFractionalTenScale: true });
+    if (!Number.isFinite(confidence)) {
+      return { ok: false, error: `${taskLabel}.confidence must be a numeric planner score`, code: "invalid_field", taskIndex: i, field: "confidence" };
+    }
+
+    const risk = normalizePlannerRiskLevel(task.risk, { preferTenScaleIntegers: false, preserveFractionalTenScale: true });
+    if (!risk || !PLANNER_RISK_LEVELS.includes(risk)) {
+      return {
+        ok: false,
+        error: `${taskLabel}.risk must be one of: ${PLANNER_RISK_LEVELS.join(", ")}`,
+        code: "invalid_enum",
+        taskIndex: i,
+        field: "risk",
+      };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(task, "estimated_effort")) {
+      const estimatedEffort = String(task.estimated_effort || "").trim().toLowerCase();
+      if (!TASK_PLANNER_ALLOWED_ESTIMATED_EFFORT.includes(estimatedEffort)) {
+        return {
+          ok: false,
+          error: `${taskLabel}.estimated_effort must be one of: ${TASK_PLANNER_ALLOWED_ESTIMATED_EFFORT.join(", ")}`,
+          code: "invalid_enum",
+          taskIndex: i,
+          field: "estimated_effort",
+        };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    payload,
+    tasks: payload.tasks,
+  };
+}
+
 export function extractPlannerTasksFromWorkflowOutput(output, maxTasks = 5, options = {}) {
   const parsed = parsePlannerJsonFromText(output);
-  if (!parsed || !Array.isArray(parsed.tasks)) return [];
+  if (!parsed) return [];
 
-  const exactCount = Number(options?.exactCount);
+  const strict = options?.strict === true;
+  const sourceTasks = strict
+    ? (() => {
+        const validation = validateStrictTaskPlannerPayload(parsed, {
+          exactTaskCount: options?.exactCount,
+        });
+        return validation.ok ? validation.tasks : [];
+      })()
+    : (Array.isArray(parsed?.tasks) ? parsed.tasks : []);
+
   const max = Number.isFinite(Number(maxTasks))
     ? Math.max(1, Math.min(100, Math.trunc(Number(maxTasks))))
     : 5;
-  if (Number.isFinite(exactCount) && exactCount > 0 && parsed.tasks.length !== Math.trunc(exactCount)) {
-    return [];
-  }
   const dedup = new Set();
   const tasks = [];
-  for (let i = 0; i < parsed.tasks.length && tasks.length < max; i += 1) {
-    const normalized = normalizePlannerTaskForCreation(parsed.tasks[i], i);
+  for (let i = 0; i < sourceTasks.length && tasks.length < max; i += 1) {
+    const normalized = normalizePlannerTaskForCreation(sourceTasks[i], i);
     if (!normalized) continue;
     const key = normalized.title.toLowerCase();
     if (dedup.has(key)) continue;
     dedup.add(key);
     tasks.push(normalized);
-  }
-  if (Number.isFinite(exactCount) && exactCount > 0 && tasks.length !== Math.trunc(exactCount)) {
-    return [];
   }
   return tasks;
 }
