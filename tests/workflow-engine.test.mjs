@@ -16355,6 +16355,9 @@ it("action.materialize_planner_tasks accepts scheduled replenishment payloads wi
   const tasks = Array.from({ length: 8 }, (_, index) => ({
     title: `[m] feat(workflow): replenishment task ${index + 1}`,
     description: `Task ${index + 1}`,
+    acceptance_criteria: [`Task ${index + 1} has a deterministic acceptance check`],
+    verification: [`Run targeted verification for task ${index + 1}`],
+    repo_areas: ["workflow"],
   }));
   ctx.setNodeOutput("run-planner", {
     output: JSON.stringify({ tasks }),
@@ -16437,13 +16440,17 @@ it.each([
     },
   };
 
-  await expect(handler.execute(node, ctx, mockEngine)).rejects.toMatchObject({
+  const mismatchError = await handler.execute(node, ctx, mockEngine).catch((error) => error);
+  expect(mismatchError).toBeInstanceOf(Error);
+  expect(mismatchError).toMatchObject({
     retryable: true,
     parsedCount,
-    error: expect.stringMatching(new RegExp(`scheduled replenishment requires exactly 8 tasks, but planner produced ${parsedCount}`, "i")),
+    expectedTaskCount: 8,
+    failureKind: "planner_task_count_mismatch",
+    message: expect.stringMatching(new RegExp(`scheduled replenishment requires exactly 8 tasks, but planner produced ${parsedCount}`, "i")),
   });
-  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(new RegExp(comparator, "i"));
-  await expect(handler.execute(node, ctx, mockEngine)).rejects.toThrow(/Regenerate the planner output with exactly 8 backlog tasks before retrying\./i);
+  expect(mismatchError.message).toMatch(new RegExp(comparator, "i"));
+  expect(mismatchError.message).toMatch(/Regenerate the planner output with exactly 8 backlog tasks before retrying\./i);
   expect(createTask).not.toHaveBeenCalled();
 });
 

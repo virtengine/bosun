@@ -7141,6 +7141,10 @@ registerNodeType("action.materialize_planner_tasks", {
       ctx.log(node.id, message, "error");
       throw error;
     }
+    const materializationLimit =
+      Number.isInteger(exactTaskCount) && exactTaskCount >= 0
+        ? Math.max(1, maxTasks, exactTaskCount)
+        : Math.max(1, maxTasks);
     if (!parsedTasks.length) {
       // Log diagnostic info to help debug planner output format issues
       const outputPreview = outputText.length > 200
@@ -7221,7 +7225,7 @@ registerNodeType("action.materialize_planner_tasks", {
       rankPlannerTaskCandidates(parsedTasks, priorState, rankingConfig),
       plannerFeedback,
     );
-    const limitedRankedTasks = rankedTasks.slice(0, Math.max(1, maxTasks));
+    const limitedRankedTasks = rankedTasks.slice(0, materializationLimit);
 
     const created = [];
     const createdTaskRefs = [];
@@ -7229,7 +7233,7 @@ registerNodeType("action.materialize_planner_tasks", {
     const materializationOutcomes = [];
     const createdAreaCounts = new Map();
     for (const task of limitedRankedTasks) {
-      if (created.length >= maxTasks) break;
+      if (created.length >= materializationLimit) break;
       const baseOutcome = {
         title: task.title,
         impact: task.impact,
