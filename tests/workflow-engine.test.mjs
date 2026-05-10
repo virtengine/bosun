@@ -2737,6 +2737,9 @@ describe("WorkflowEngine - run history details", () => {
               {
                 title: "[m] feat(workflow): resume pending create tasks",
                 description: "Resume from the pending Create Tasks node.",
+                acceptance_criteria: ["Pending Create Tasks nodes resume without rerunning completed planner nodes."],
+                verification: ["Run the workflow resume regression test."],
+                repo_areas: ["workflow"],
               },
             ],
           }),
@@ -2779,6 +2782,7 @@ describe("WorkflowEngine - run history details", () => {
     const initialCtx = await engine.execute(wf.id, {});
     expect(plannerExecutions).toEqual(["run-planner"]);
     expect(initialCtx.getNodeStatus("resume-work")).toBe(NodeStatus.COMPLETED);
+    engine.services.kanban.createTask.mockClear();
 
     const interruptedRunId = "run-planner-create-tasks-resume";
     writeFileSync(
