@@ -8,7 +8,7 @@ import {
   runConfiguredWorkflow,
 } from "./declarative-workflows.mjs";
 import { WorkflowEngine } from "./workflow-engine.mjs";
-import { getTemplate, listTemplates } from "./workflow-templates.mjs";
+import { getTemplate, getTemplateGroup, listTemplates } from "./workflow-templates.mjs";
 import { inspectCustomWorkflowNodePlugins } from "./workflow-nodes.mjs";
 
 function hasFlag(args, ...flags) {
@@ -101,6 +101,25 @@ export function listWorkflowSummaries(config = loadConfig(process.argv)) {
 
 function cloneJson(value) {
   return value == null ? value ?? null : JSON.parse(JSON.stringify(value));
+}
+
+export function getTemplateRunDependencyIds(templateId) {
+  const group = getTemplateGroup(templateId);
+  if (!group || !Array.isArray(group.members)) return [];
+  return group.members.filter((memberId) => memberId && memberId !== templateId);
+}
+
+export function installTemplateRunDependencies(engine, templateId) {
+  if (!engine || typeof engine.save !== "function") return [];
+  const dependencyIds = getTemplateRunDependencyIds(templateId);
+  const installed = [];
+  for (const dependencyId of dependencyIds) {
+    const dependency = getTemplate(dependencyId);
+    if (!dependency) continue;
+    engine.save(cloneJson(dependency));
+    installed.push(dependencyId);
+  }
+  return installed;
 }
 
 function formatConsoleCaptureArg(value) {
@@ -284,6 +303,7 @@ export async function executeWorkflowCommand(args, options = {}) {
         services: options.services || {},
         detectInterruptedRuns: false,
       });
+      installTemplateRunDependencies(engine, templateId);
       engine.on("workflow:status", (event) => {
         statusEvents.push(cloneJson(event));
       });

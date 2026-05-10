@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   executeWorkflowCommand,
+  getTemplateRunDependencyIds,
+  installTemplateRunDependencies,
   listWorkflowSummaries,
   parseWorkflowInput,
 } from "../workflow/workflow-cli.mjs";
@@ -83,6 +85,32 @@ describe("workflow CLI helpers", () => {
     const payload = JSON.parse(stdout[0]);
     expect(payload.some((entry) => entry.id === "template-task-lifecycle")).toBe(true);
     expect(payload.some((entry) => entry.id === "template-backend-agent")).toBe(true);
+  });
+
+  it("resolves required child templates for template-run dispatch targets", () => {
+    expect(getTemplateRunDependencyIds("template-bosun-pr-watchdog")).toEqual(
+      expect.arrayContaining([
+        "template-pr-fix-single",
+        "template-pr-security-fix-single",
+      ]),
+    );
+  });
+
+  it("installs required child templates into template-run engines", () => {
+    const savedIds = [];
+    const installed = installTemplateRunDependencies({
+      save(def) {
+        savedIds.push(def.id);
+      },
+    }, "template-bosun-pr-watchdog");
+
+    expect(installed).toEqual(
+      expect.arrayContaining([
+        "template-pr-fix-single",
+        "template-pr-security-fix-single",
+      ]),
+    );
+    expect(savedIds).toEqual(expect.arrayContaining(installed));
   });
 
   it("dry-runs workflow-engine templates with traced node output", async () => {
