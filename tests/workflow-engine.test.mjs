@@ -893,6 +893,11 @@ describe("WorkflowEngine - loop.for_each", () => {
 
     engine.save(child);
     engine.save(parent);
+    const trackedDispatches = [];
+    engine.trackDispatchedWorkflow = (promise, meta) => {
+      trackedDispatches.push({ promise, meta });
+      return promise;
+    };
     const ctx = await engine.execute(parent.id, {});
     expect(ctx.errors).toEqual([]);
     expect(ctx.getNodeOutput("loop")).toMatchObject({
@@ -903,6 +908,13 @@ describe("WorkflowEngine - loop.for_each", () => {
     expect(ctx.getNodeOutput("loop").results).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ queued: true, mode: "dispatch", workflowId: child.id }),
+      ]),
+    );
+    expect(trackedDispatches).toHaveLength(2);
+    expect(trackedDispatches.map((entry) => entry.meta)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: "loop", workflowId: child.id, index: 0 }),
+        expect.objectContaining({ nodeId: "loop", workflowId: child.id, index: 1 }),
       ]),
     );
 
