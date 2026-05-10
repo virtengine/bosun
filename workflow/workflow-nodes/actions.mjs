@@ -7072,6 +7072,10 @@ registerNodeType("action.materialize_planner_tasks", {
       maxConcurrentRepoAreaTasks: { type: "number", default: 0, description: "Maximum concurrent backlog tasks per repo area (0 disables limit)" },
       applyTaskGraph: { type: "boolean", default: true, description: "Apply parent/dependency graph links from planner output when supported" },
       parentTaskId: { type: "string", description: "Optional existing task ID to use as the parent for top-level planned tasks" },
+      exactTaskCount: { type: "number", description: "Require the planner payload to contain exactly this many tasks before materialization" },
+      exactTaskCountLabel: { type: "string", description: "Operator-facing label for exact task-count guardrails" },
+      exactTaskCountRetryable: { type: "boolean", default: false, description: "Mark exact task-count validation failures as retryable" },
+      exactTaskCountRetryHint: { type: "string", description: "Optional remediation hint appended to exact task-count validation errors" },
     },
   },
   async execute(node, ctx, engine) {
@@ -7122,6 +7126,27 @@ registerNodeType("action.materialize_planner_tasks", {
 
     const plannerTasks = Array.isArray(plannerPayload?.tasks) ? plannerPayload.tasks : null;
     const parsedTasks = extractPlannerTasksFromWorkflowOutput(outputText, Number.MAX_SAFE_INTEGER);
+    const exactTaskCountRaw = ctx.resolve(node.config?.exactTaskCount);
+    const exactTaskCount = Number.isFinite(Number(exactTaskCountRaw)) ? Number(exactTaskCountRaw) : null;
+    const exactTaskCountLabel = String(ctx.resolve(node.config?.exactTaskCountLabel || "planner output")).trim() || "planner output";
+    const exactTaskCountRetryable = ctx.resolve(node.config?.exactTaskCountRetryable) === true;
+    const exactTaskCountRetryHint = String(ctx.resolve(node.config?.exactTaskCountRetryHint || "")).trim();
+    if (Number.isInteger(exactTaskCount) && exactTaskCount >= 0 && parsedTasks.length !== exactTaskCount) {
+      const comparator = parsedTasks.length < exactTaskCount ? "fewer than" : "more than";
+      const retryMessage = exactTaskCountRetryHint ? ` ${exactTaskCountRetryHint}` : "";
+      const message = `${exactTaskCountLabel} requires exactly ${exactTaskCount} tasks, but planner produced ${parsedTasks.length} (${comparator} expected).${retryMessage}`;
+      const error = new Error(message);
+      error.retryable = exactTaskCountRetryable;
+      error.parsedCount = parsedTasks.length;
+      error.expectedTaskCount = exactTaskCount;
+      error.failureKind = "planner_task_count_mismatch";
+      ctx.log(node.id, message, "error");
+      throw error;
+    }
+    const materializationLimit =
+      Number.isInteger(exactTaskCount) && exactTaskCount >= 0
+        ? Math.max(1, maxTasks, exactTaskCount)
+        : Math.max(1, maxTasks);
     if (!parsedTasks.length) {
       // Log diagnostic info to help debug planner output format issues
       const outputPreview = outputText.length > 200
@@ -7217,7 +7242,7 @@ registerNodeType("action.materialize_planner_tasks", {
       rankPlannerTaskCandidates(parsedTasks, priorState, rankingConfig),
       plannerFeedback,
     );
-    const limitedRankedTasks = rankedTasks.slice(0, Math.max(1, maxTasks));
+    const limitedRankedTasks = rankedTasks.slice(0, materializationLimit);
 
     const created = [];
     const createdTaskRefs = [];
@@ -7225,7 +7250,7 @@ registerNodeType("action.materialize_planner_tasks", {
     const materializationOutcomes = [];
     const createdAreaCounts = new Map();
     for (const task of limitedRankedTasks) {
-      if (created.length >= maxTasks) break;
+      if (created.length >= materializationLimit) break;
       const baseOutcome = {
         title: task.title,
         impact: task.impact,
