@@ -18739,38 +18739,3 @@ describe("delegation audit trail hydration", () => {
     ]));
   });
 });
-onEvent).toEqual(expect.objectContaining({ type: "handoff-complete" }));
-    expect(detail?.detail?.data?._workflowDelegationTrail).toHaveLength(2);
-    expect(detail?.delegationTransitionGuards).toMatchObject({
-      "assign:delegate:child-wf:task-1": expect.objectContaining({
-        type: "assign",
-        claimToken: "claim-history",
-      }),
-    });
-    expect(detail?.detail?.data?._delegationTransitionGuards).toMatchObject({
-      "assign:delegate:child-wf:task-1": expect.objectContaining({
-        type: "assign",
-        claimToken: "claim-history",
-      }),
-    });
-
-    const history = engine.getRunHistory(null, 20);
-    expect(history).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        runId,
-        delegationTrail: expect.arrayContaining([
-          expect.objectContaining({ type: "assign" }),
-          expect.objectContaining({ type: "handoff-complete" }),
-        ]),
-        delegationAuditTrail: expect.arrayContaining([
-          expect.objectContaining({ type: "assign" }),
-          expect.objectContaining({ type: "handoff-complete" }),
-        ]),
-        latestDelegationEvent: expect.objectContaining({ type: "handoff-complete" }),
-        delegationTransitionGuards: expect.objectContaining({
-          "assign:delegate:child-wf:task-1": expect.objectContaining({ type: "assign" }),
-        }),
-      }),
-    ]));
-  });
-});
