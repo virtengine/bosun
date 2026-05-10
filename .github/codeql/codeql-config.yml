@@ -1,0 +1,14 @@
+name: bosun-codeql
+
+paths-ignore:
+  - ".bosun/**"
+  - ".cache/**"
+  - "coverage/**"
+  - "dist/**"
+  - "node_modules/**"
+  - "site/ui/demo.html"
+  - "site/ui/vendor/**"
+  - "tmp/**"
+  - "ui/demo.html"
+  - "ui/vendor/**"
+  - "workspace/**"
