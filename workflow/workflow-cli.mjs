@@ -8,7 +8,7 @@ import {
   runConfiguredWorkflow,
 } from "./declarative-workflows.mjs";
 import { WorkflowEngine } from "./workflow-engine.mjs";
-import { getTemplate, listTemplates } from "./workflow-templates.mjs";
+import { getTemplate, getTemplateGroup, listTemplates } from "./workflow-templates.mjs";
 import { inspectCustomWorkflowNodePlugins } from "./workflow-nodes.mjs";
 
 function hasFlag(args, ...flags) {
@@ -103,6 +103,36 @@ function cloneJson(value) {
   return value == null ? value ?? null : JSON.parse(JSON.stringify(value));
 }
 
+export function getTemplateRunDependencyIds(templateId) {
+  const group = getTemplateGroup(templateId);
+  if (!group || !Array.isArray(group.members)) return [];
+  return group.members.filter((memberId) => memberId && memberId !== templateId);
+}
+
+export function installTemplateRunDependencies(engine, templateId) {
+  if (!engine || typeof engine.save !== "function") return [];
+  const dependencyIds = getTemplateRunDependencyIds(templateId);
+  const installed = [];
+  for (const dependencyId of dependencyIds) {
+    const dependency = getTemplate(dependencyId);
+    if (!dependency) continue;
+    engine.save(cloneJson(dependency));
+    installed.push(dependencyId);
+  }
+  return installed;
+}
+
+export async function waitForTemplateRunDispatches(dispatches = []) {
+  const results = [];
+  let index = 0;
+  while (index < dispatches.length) {
+    const batch = dispatches.slice(index);
+    index = dispatches.length;
+    results.push(...await Promise.all(batch));
+  }
+  return results;
+}
+
 function formatConsoleCaptureArg(value) {
   if (typeof value === "string") return value;
   try {
@@ -156,6 +186,7 @@ function buildTemplateRunReport(template, ctx, statusEvents = [], options = {}) 
     logs: Array.isArray(ctx?.logs) ? [...ctx.logs] : [],
     statusEvents: Array.isArray(statusEvents) ? statusEvents.map((entry) => ({ ...entry })) : [],
     engineConsole: Array.isArray(options.engineConsole) ? options.engineConsole.map((entry) => ({ ...entry })) : [],
+    dispatches: Array.isArray(options.dispatches) ? options.dispatches.map((entry) => cloneJson(entry)) : [],
     data: cloneJson(ctx?.data || {}),
     nodes: nodes.map((node) => ({
       id: node?.id || null,
@@ -175,6 +206,11 @@ function formatTemplateRunReport(report = {}) {
   ];
   for (const node of report?.nodes || []) {
     lines.push(`- ${node.id}\t${node.status}\t${node.type}`);
+  }
+  const dispatches = Array.isArray(report?.dispatches) ? report.dispatches : [];
+  if (dispatches.length > 0) {
+    const failed = dispatches.filter((entry) => entry?.status !== "fulfilled" || entry?.success === false).length;
+    lines.push(`dispatches=${dispatches.length} failed=${failed}`);
   }
   const logTail = Array.isArray(report?.logs) ? report.logs.slice(-12) : [];
   for (const entry of logTail) {
@@ -284,6 +320,31 @@ export async function executeWorkflowCommand(args, options = {}) {
         services: options.services || {},
         detectInterruptedRuns: false,
       });
+      installTemplateRunDependencies(engine, templateId);
+      const dispatchedWorkflows = [];
+      engine.trackDispatchedWorkflow = (promise, meta = {}) => {
+        const tracked = Promise.resolve(promise)
+          .then((runCtx) => ({
+            status: "fulfilled",
+            success: !(Array.isArray(runCtx?.errors) && runCtx.errors.length > 0),
+            workflowId: meta?.workflowId || null,
+            nodeId: meta?.nodeId || null,
+            index: Number.isFinite(Number(meta?.index)) ? Number(meta.index) : null,
+            runId: runCtx?.id || null,
+            errors: Array.isArray(runCtx?.errors) ? [...runCtx.errors] : [],
+          }))
+          .catch((error) => ({
+            status: "rejected",
+            success: false,
+            workflowId: meta?.workflowId || null,
+            nodeId: meta?.nodeId || null,
+            index: Number.isFinite(Number(meta?.index)) ? Number(meta.index) : null,
+            runId: null,
+            errors: [error?.message || String(error)],
+          }));
+        dispatchedWorkflows.push(tracked);
+        return tracked;
+      };
       engine.on("workflow:status", (event) => {
         statusEvents.push(cloneJson(event));
       });
@@ -294,9 +355,24 @@ export async function executeWorkflowCommand(args, options = {}) {
           force: true,
         })
       ));
+      const dispatchResults = dryRun ? [] : await waitForTemplateRunDispatches(dispatchedWorkflows);
+      const dispatchFailures = dispatchResults.filter((entry) => entry?.success === false);
+      if (dispatchFailures.length > 0) {
+        if (!Array.isArray(ctx.errors)) ctx.errors = [];
+        for (const failure of dispatchFailures) {
+          const label = failure?.workflowId || "unknown";
+          const index = failure?.index === null || failure?.index === undefined ? "unknown" : failure.index;
+          const detail = Array.isArray(failure?.errors) && failure.errors.length > 0
+            ? failure.errors.join("; ")
+            : "child workflow failed";
+          ctx.errors.push(`Dispatched workflow ${label}[${index}] failed: ${detail}`);
+        }
+        ctx.data._workflowTerminalStatus = "failed";
+      }
       const report = buildTemplateRunReport(template, ctx, statusEvents, {
         dryRun,
         engineConsole: consoleLines,
+        dispatches: dispatchResults,
       });
       if (asJson || options.forceJsonOutput === true) {
         stdout(JSON.stringify(report, null, 2));
