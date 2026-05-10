@@ -999,8 +999,6 @@ export function rankPlannerTaskCandidates(tasks, priorState, rankingConfig) {
     const riskLevel = String(task?.risk || "").trim().toLowerCase();
     const riskPenalty = ({ low: 0, medium: 0.4, high: 0.9, critical: 1.6 })[riskLevel] || 0;
     const baseScore = (impact * 1.15) + (confidence * 0.85) - riskPenalty;
-    const followupSignals = classifyPlannerTaskFollowup(task, recentPrSignals);
-
     const keys = resolvePlannerPatternKeys(task);
     const penalties = keys.map((key) => {
       const prior = priorState?.patterns?.[key];
