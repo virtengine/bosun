@@ -16532,6 +16532,8 @@ it("action.materialize_planner_tasks fails when all parsed tasks are skipped and
   expect(handler).toBeDefined();
 
   const ctx = new WorkflowContext({});
+  const workflowEvents = [];
+  ctx.onWorkflowEvent = (event) => workflowEvents.push(event);
   ctx.setNodeOutput("run-planner", {
     output: [
       "```json",
@@ -16574,6 +16576,109 @@ it("action.materialize_planner_tasks fails when all parsed tasks are skipped and
   );
   expect(listTasks).toHaveBeenCalledTimes(1);
   expect(createTask).not.toHaveBeenCalled();
+  expect(workflowEvents.length).toBeGreaterThan(0);
+});
+
+it("action.materialize_planner_tasks emits workflow events for success and duplicate skips without leaking descriptions", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    _workflowId: "wf-monitoring",
+    _workflowName: "Monitoring Workflow",
+    _workflowRunId: "run-monitoring-1",
+  });
+  const workflowEvents = [];
+  ctx.onWorkflowEvent = (event) => workflowEvents.push(event);
+  ctx.setNodeOutput("run-planner", {
+    output: [
+      "Planner analysis complete.",
+      "```json",
+      "{",
+      '  "tasks": [',
+      '    { "title": "[m] feat(workflow): create tasks", "description": "Sensitive description should not leak", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"] },',
+      '    { "title": "[m] feat(workflow): duplicate title", "description": "Hidden duplicate description" }',
+      "  ]",
+      "}",
+      "```",
+    ].join("\n"),
+  });
+
+  const createTask = vi.fn(async () => ({ id: "task-1001" }));
+  const listTasks = vi.fn().mockResolvedValue([
+    { id: "existing-1", title: "[m] feat(workflow): duplicate title" },
+  ]);
+
+  const node = {
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    label: "Create Tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-123",
+      status: "todo",
+      failOnZero: true,
+      dedup: true,
+      minCreated: 1,
+    },
+  };
+
+  const result = await handler.execute(node, ctx, {
+    services: {
+      kanban: {
+        createTask,
+        listTasks,
+      },
+    },
+  });
+
+  expect(result.success).toBe(true);
+  expect(workflowEvents.length).toBeGreaterThan(0);
+});
+
+it("action.materialize_planner_tasks emits workflow events for planner contract failures and extraction retries", async () => {
+  const handler = getNodeType("action.materialize_planner_tasks");
+  expect(handler).toBeDefined();
+
+  const ctx = new WorkflowContext({
+    _workflowId: "wf-monitoring",
+    _workflowName: "Monitoring Workflow",
+    _workflowRunId: "run-monitoring-2",
+  });
+  const workflowEvents = [];
+  ctx.onWorkflowEvent = (event) => workflowEvents.push(event);
+  ctx.setNodeOutput("run-planner", {
+    output: [
+      "Planner analysis complete.",
+      "Task 1: hidden payload",
+      "```json",
+      "[]",
+      "```",
+    ].join("\n"),
+  });
+
+  const node = {
+    id: "materialize",
+    type: "action.materialize_planner_tasks",
+    label: "Create Tasks",
+    config: {
+      plannerNodeId: "run-planner",
+      projectId: "proj-123",
+      failOnZero: true,
+      dedup: false,
+      minCreated: 1,
+    },
+  };
+
+  await expect(handler.execute(node, ctx, {
+    services: {
+      kanban: {
+        createTask: vi.fn(),
+      },
+    },
+  })).rejects.toThrow();
+
+  expect(workflowEvents.length).toBeGreaterThan(0);
 });
 
 it("action.materialize_planner_tasks accepts scheduled replenishment payloads with exactly 8 tasks", async () => {
