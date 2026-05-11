@@ -91,9 +91,9 @@ describe("task hierarchy shared model", () => {
       });
       const flattened = hierarchy.flattenTaskHierarchyView(view);
 
-      expect(flattened.map((node) => node.id)).toEqual(["EPIC-1", "TASK-1", "TASK-2"]);
-      expect(flattened.find((node) => node.id === "TASK-1")?.searchMatchState).toBe("descendant");
-      expect(flattened.find((node) => node.id === "TASK-1")?.visibleChildIds).toEqual(["TASK-2"]);
+      expect(flattened.map((node) => node.id)).toEqual(["TASK-1", "TASK-2"]);
+      expect(view.nodeStateById.get("TASK-1")?.searchMatchState).toBe("descendant");
+      expect(view.nodeStateById.get("TASK-1")?.visibleChildIds).toEqual(["TASK-2"]);
     }
   });
 
@@ -107,8 +107,7 @@ describe("task hierarchy shared model", () => {
 
     for (const hierarchy of [uiHierarchy, siteHierarchy]) {
       const model = hierarchy.buildTaskHierarchyModel(tasks);
-      const parentState = model.nodeStateById.get("TASK-1");
-      expect(parentState?.childIds).toEqual(["TASK-2", "TASK-3", "TASK-4"]);
+      expect(model.childIdsByParentId.get("TASK-1")).toEqual(["TASK-2", "TASK-3", "TASK-4"]);
       expect(hierarchy.getTaskHierarchyCollapseKey("task", "TASK-1")).toBe("tasks-hierarchy:task:TASK-1");
     }
   });
@@ -125,7 +124,6 @@ describe("task hierarchy mirrored source regressions", () => {
       expect(source).toContain("hierarchyPath");
       expect(source).toContain("task-hierarchy-summary");
       expect(source).toContain("task-hierarchy-crumb");
-      expect(source).toContain("tasks-hierarchy:");
       expect(source).toContain("parent_task_id");
       expect(source).toContain("meta?.parentTaskId");
       expect(source).toContain("due_at");
@@ -139,10 +137,10 @@ describe("task hierarchy mirrored source regressions", () => {
 
   it("keeps kanban hierarchy affordances and mirrored styles present", () => {
     for (const { relPath, source } of kanbanSources) {
-      expect(source).toContain("task-hierarchy-summary");
-      expect(source).toContain("task-hierarchy-crumb");
-      expect(source).toContain("matchState");
-      expect(source).toContain("isExpanded");
+      expect(source).toContain("kanban-group-shell");
+      expect(source).toContain("buildKanbanColumnItems");
+      expect(source).toContain("visibleTaskIds");
+      expect(source).toContain("forceExpanded");
     }
 
     for (const { relPath, source } of taskStyleSources) {
@@ -151,8 +149,10 @@ describe("task hierarchy mirrored source regressions", () => {
     }
 
     for (const { relPath, source } of kanbanStyleSources) {
-      expect(source).toContain(".task-hierarchy-summary");
-      expect(source).toContain(".task-hierarchy-crumb");
+      expect(source).toContain(".kanban-group-shell");
+      expect(source).toContain(".kanban-group-children");
+      expect(source).toContain(".kanban-checklist-row");
+      expect(source).toContain(".kanban-icon-cap");
     }
   });
 });

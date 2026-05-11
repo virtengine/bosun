@@ -405,7 +405,7 @@ export function buildKanbanColumnItems(tasks = [], hierarchyView = null, hierarc
   for (const task of rows) {
     const taskId = String(task?.id || "");
     if (hierarchyView?.visibleTaskIds?.size && !hierarchyView.visibleTaskIds.has(taskId)) continue;
-    const node = hierarchyView?.nodeStateById?.get?.(taskId) || null;
+    const node = nodeStateById.get?.(taskId) || null;
     const parentId = String(node?.meta?.parentTaskId || "");
     if (parentId && hierarchyView?.nodeStateById?.get?.(parentId)?.isParentNode) {
       const parentNode = hierarchyView.nodeStateById.get(parentId);
@@ -419,8 +419,12 @@ export function buildKanbanColumnItems(tasks = [], hierarchyView = null, hierarc
         children: [],
       }));
       if (parentTask?.id) coveredHeaderTaskIds.add(String(parentTask.id));
+      const isDirectMatch = node?.searchMatchState === "direct" || node?.searchMatchState === "self";
       if (taskId === parentId) {
         coveredHeaderTaskIds.add(taskId);
+        continue;
+      }
+      if (hasSearch && parentNode && !isDirectMatch && !parentNode.visibleChildIds?.includes(taskId)) {
         continue;
       }
       groupedTaskIds.add(taskId);
@@ -433,18 +437,24 @@ export function buildKanbanColumnItems(tasks = [], hierarchyView = null, hierarc
     const taskType = getTaskHierarchyTaskType(task, "task");
     if (epicGroup && epicGroup.visibleTaskCount > 1 && taskType !== "epic") {
       const anchorTask = epicGroup.anchorTaskId ? taskById.get(epicGroup.anchorTaskId) : null;
+      const anchorTaskId = String(anchorTask?.id || epicGroup.anchorTaskId || "");
+      const anchorNode = anchorTaskId ? nodeStateById.get?.(anchorTaskId) || null : null;
       const group = ensureGroup(`epic:${epicId}`, () => ({
         key: `epic:${epicId}`,
         kind: "epic",
         parentTask: anchorTask,
-        parentNode: anchorTask ? hierarchyView?.nodeStateById?.get?.(String(anchorTask.id)) || null : null,
+        parentNode: anchorNode,
         epicGroup,
         title: epicGroup.label || epicId,
         children: [],
       }));
       if (anchorTask?.id) coveredHeaderTaskIds.add(String(anchorTask.id));
-      if (anchorTask?.id && taskId === String(anchorTask.id)) {
+      if (anchorTaskId && taskId === anchorTaskId) {
         coveredHeaderTaskIds.add(taskId);
+        continue;
+      }
+      const isDirectMatch = node?.searchMatchState === "direct" || node?.searchMatchState === "self";
+      if (hasSearch && !isDirectMatch && !epicGroup.visibleTaskIds?.includes(taskId)) {
         continue;
       }
       groupedTaskIds.add(taskId);
@@ -479,6 +489,46 @@ export function buildKanbanColumnItems(tasks = [], hierarchyView = null, hierarc
 
   items.sort((left, right) => left.order - right.order);
   return items;
+}
+
+export function groupTasksByStatus(tasks = [], options = {}) {
+  const rows = Array.isArray(tasks) ? tasks.filter((task) => task && typeof task === "object") : [];
+  const statuses = Array.isArray(options?.statuses) && options.statuses.length > 0
+    ? options.statuses.map((status) => String(status || "").trim()).filter(Boolean)
+    : ["todo", "inprogress", "inreview", "done", "blocked", "draft"];
+  const result = Object.create(null);
+  for (const status of statuses) result[status] = [];
+
+  if (options?.hierarchyMode) {
+    const hierarchyModel = buildTaskHierarchyModel(rows);
+    const hierarchyView = deriveTaskHierarchyView(hierarchyModel);
+    for (const status of statuses) {
+      const statusRows = rows.filter((task) => String(task?.status || "").trim() === status);
+      const grouped = buildKanbanColumnItems(statusRows, hierarchyView, hierarchyModel);
+      result[status] = grouped.map((entry) => {
+        if (entry?.kind === "group") {
+          const parentTask = entry.group?.parentTask || null;
+          const childTasks = Array.isArray(entry.group?.children) ? entry.group.children.filter(Boolean) : [];
+          if (parentTask && childTasks.length > 0) {
+            return {
+              ...parentTask,
+              childTasks,
+            };
+          }
+        }
+        return entry?.task || entry;
+      }).filter(Boolean);
+    }
+    return result;
+  }
+
+  for (const task of rows) {
+    const normalizedStatus = String(task?.status || "").trim();
+    if (!normalizedStatus) continue;
+    if (!Array.isArray(result[normalizedStatus])) result[normalizedStatus] = [];
+    result[normalizedStatus].push(task);
+  }
+  return result;
 }
 
 function getTaskTypeBadgeLabel(taskType) {
@@ -1693,4 +1743,3 @@ export function KanbanBoard({ onOpenTask, hasMoreTasks = false, loadingMoreTasks
     </${Box}>
   `;
 }
-
