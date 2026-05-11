@@ -3188,6 +3188,18 @@ function isFlowReviewGateEnabled() {
   return !isFalsyFlag(flowRequireReviewDefault);
 }
 
+function isMonitorMonitorEnabled() {
+  if (isMonitorTestRuntime) return false;
+
+  const explicit =
+    process.env.DEVMODE_MONITOR_MONITOR_ENABLED ??
+    process.env.DEVMODE_AUTO_CODE_FIX_ENABLED;
+  if (explicit !== undefined && String(explicit).trim() !== "") {
+    return !isFalsyFlag(explicit);
+  }
+
+  return false;
+}
 
 function isSelfRestartWatcherEnabled() {
   const devMode = isDevMode();
