@@ -503,9 +503,27 @@ export const BACKEND_AGENT_TEMPLATE = (() => {
   const mainValidation = embedSubWorkflow(VALIDATION_GATE_SUB, "main-");
   const retryValidation = embedSubWorkflow(VALIDATION_GATE_SUB, "retry-");
   const retry2Validation = embedSubWorkflow(VALIDATION_GATE_SUB, "retry2-");
-  const mainPrHandoff = embedSubWorkflow(PR_CHECK_HANDOFF_SUB, "main-");
-  const retryPrHandoff = embedSubWorkflow(PR_CHECK_HANDOFF_SUB, "retry-");
-  const retry2PrHandoff = embedSubWorkflow(PR_CHECK_HANDOFF_SUB, "retry2-");
+  const mainPrHandoff = embedSubWorkflow(PR_CHECK_HANDOFF_SUB, "main-", {
+    nodeOverrides: {
+      "pr-ok": {
+        expression: "Boolean($ctx.getNodeOutput('create-pr')?.prNumber || $ctx.getNodeOutput('create-pr')?.prUrl)",
+      },
+    },
+  });
+  const retryPrHandoff = embedSubWorkflow(PR_CHECK_HANDOFF_SUB, "retry-", {
+    nodeOverrides: {
+      "pr-ok": {
+        expression: "Boolean($ctx.getNodeOutput('create-pr-retry')?.prNumber || $ctx.getNodeOutput('create-pr-retry')?.prUrl)",
+      },
+    },
+  });
+  const retry2PrHandoff = embedSubWorkflow(PR_CHECK_HANDOFF_SUB, "retry2-", {
+    nodeOverrides: {
+      "pr-ok": {
+        expression: "Boolean($ctx.getNodeOutput('create-pr-retry2')?.prNumber || $ctx.getNodeOutput('create-pr-retry2')?.prUrl)",
+      },
+    },
+  });
 
   return {
     id: "template-backend-agent",

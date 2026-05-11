@@ -66,10 +66,13 @@ describe("monitor workflow startup guards", () => {
   it("declares monitor-monitor runtime state before reload-time helpers use it", () => {
     expect(monitorSource).toContain("const monitorMonitor = {");
     expect(monitorSource).toContain("sdkFailures: new Map()");
+    expect(monitorSource).toContain("function isMonitorMonitorEnabled()");
+    expect(monitorSource).toContain("DEVMODE_MONITOR_MONITOR_ENABLED");
+    expect(monitorSource).toContain("DEVMODE_AUTO_CODE_FIX_ENABLED");
     expect(monitorSource).toContain("function refreshMonitorMonitorRuntime()");
     expect(monitorSource).toContain("const previousMonitorRuntime = snapshotMonitorMonitorRuntime();");
     expect(
-      monitorSource.indexOf("const monitorMonitor = {"),
+      monitorSource.indexOf("function isMonitorMonitorEnabled()"),
     ).toBeLessThan(
       monitorSource.indexOf("function refreshMonitorMonitorRuntime()"),
     );

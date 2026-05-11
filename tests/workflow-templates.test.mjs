@@ -701,9 +701,13 @@ describe("workflow-templates", () => {
     const backendRetryGate = backendTemplate.nodes.find((n) => n.id === "retry-pr-ok");
     expect(backendGate?.config?.expression).toContain("prNumber");
     expect(backendGate?.config?.expression).toContain("prUrl");
+    expect(backendGate?.config?.expression).toContain("create-pr");
+    expect(backendGate?.config?.expression).not.toContain("$edge");
     expect(backendGate?.config?.expression).not.toContain("success === true");
     expect(backendRetryGate?.config?.expression).toContain("prNumber");
     expect(backendRetryGate?.config?.expression).toContain("prUrl");
+    expect(backendRetryGate?.config?.expression).toContain("create-pr-retry");
+    expect(backendRetryGate?.config?.expression).not.toContain("$edge");
     expect(backendRetryGate?.config?.expression).not.toContain("success === true");
   });
 

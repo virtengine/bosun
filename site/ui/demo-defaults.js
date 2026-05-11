@@ -7288,7 +7288,7 @@
           "type": "condition.expression",
           "label": "PR Created?",
           "config": {
-            "expression": "Boolean($ctx.getNodeOutput($edge.source)?.prNumber || $ctx.getNodeOutput($edge.source)?.prUrl)"
+            "expression": "Boolean($ctx.getNodeOutput('create-pr')?.prNumber || $ctx.getNodeOutput('create-pr')?.prUrl)"
           },
           "position": {
             "x": 400,
@@ -7531,7 +7531,7 @@
           "type": "condition.expression",
           "label": "PR Created?",
           "config": {
-            "expression": "Boolean($ctx.getNodeOutput($edge.source)?.prNumber || $ctx.getNodeOutput($edge.source)?.prUrl)"
+            "expression": "Boolean($ctx.getNodeOutput('create-pr-retry')?.prNumber || $ctx.getNodeOutput('create-pr-retry')?.prUrl)"
           },
           "position": {
             "x": 400,
@@ -7759,7 +7759,7 @@
           "type": "condition.expression",
           "label": "PR Created?",
           "config": {
-            "expression": "Boolean($ctx.getNodeOutput($edge.source)?.prNumber || $ctx.getNodeOutput($edge.source)?.prUrl)"
+            "expression": "Boolean($ctx.getNodeOutput('create-pr-retry2')?.prNumber || $ctx.getNodeOutput('create-pr-retry2')?.prUrl)"
           },
           "position": {
             "x": 400,
@@ -32953,7 +32953,7 @@
           "type": "condition.expression",
           "label": "PR Created?",
           "config": {
-            "expression": "Boolean($ctx.getNodeOutput($edge.source)?.prNumber || $ctx.getNodeOutput($edge.source)?.prUrl)"
+            "expression": "Boolean($ctx.getNodeOutput('create-pr')?.prNumber || $ctx.getNodeOutput('create-pr')?.prUrl)"
           },
           "position": {
             "x": 400,
@@ -33196,7 +33196,7 @@
           "type": "condition.expression",
           "label": "PR Created?",
           "config": {
-            "expression": "Boolean($ctx.getNodeOutput($edge.source)?.prNumber || $ctx.getNodeOutput($edge.source)?.prUrl)"
+            "expression": "Boolean($ctx.getNodeOutput('create-pr-retry')?.prNumber || $ctx.getNodeOutput('create-pr-retry')?.prUrl)"
           },
           "position": {
             "x": 400,
@@ -33424,7 +33424,7 @@
           "type": "condition.expression",
           "label": "PR Created?",
           "config": {
-            "expression": "Boolean($ctx.getNodeOutput($edge.source)?.prNumber || $ctx.getNodeOutput($edge.source)?.prUrl)"
+            "expression": "Boolean($ctx.getNodeOutput('create-pr-retry2')?.prNumber || $ctx.getNodeOutput('create-pr-retry2')?.prUrl)"
           },
           "position": {
             "x": 400,
