@@ -242,7 +242,8 @@ function normalizeTagInput(input) {
   const seen = new Set();
   const tags = [];
   for (const value of values) {
-    const normalized = String(value || "")
+    const raw = typeof value === "string" ? value : value?.name || value?.label || value?.value || "";
+    const normalized = String(raw || "")
       .trim()
       .toLowerCase();
     if (!normalized || seen.has(normalized) || SYSTEM_TAGS.has(normalized)) continue;
@@ -441,6 +442,8 @@ export function normalizeSubtaskRow(entry, fallbackParentTaskId = "") {
     status: toText(entry.status || entry.state),
     assignee: toText(entry.assignee || entry.owner),
     taskType: normalizeTaskTypeValue(entry?.taskType || entry?.type || entry?.kind || entry?.meta?.taskType || entry?.meta?.type, "subtask"),
+    collapseKey: toText(entry.collapseKey || entry?.meta?.collapseKey),
+    epicCollapseKey: toText(entry.epicCollapseKey || entry?.meta?.epicCollapseKey),
     storyPoints: toText(entry.storyPoints || entry.points),
     epicId: toText(entry.epicId || entry.epic || entry.epic_id || entry?.meta?.epicId),
     dueDate: normalizeTaskDueDateInput(entry),
@@ -484,7 +487,9 @@ function mergeSubtaskLists(...lists) {
 }
 
 export function buildTaskHierarchyPath(task, hierarchyModel = null) {
-  const taskById = hierarchyModel?.taskById || new Map();
+  const taskById = hierarchyModel instanceof Map
+    ? hierarchyModel
+    : (hierarchyModel?.taskById || new Map());
   const path = [];
   const seen = new Set();
   let cursor = task;
