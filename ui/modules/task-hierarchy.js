@@ -144,7 +144,7 @@ export function buildTaskHierarchyModel(tasks = [], options = {}) {
       taskType,
       epicId,
       parentTaskId,
-      collapseKey: getTaskHierarchyCollapseKey("task", id),
+      collapseKey: getTaskHierarchyCollapseKey(taskType, id),
       epicCollapseKey: epicId ? getTaskHierarchyCollapseKey("epic", epicId) : "",
     });
   }
@@ -278,7 +278,7 @@ export function deriveTaskHierarchyView(model, options = {}) {
     }, 0);
     const descendantMatch = visibleChildIds.length > 0;
     const visible = directMatch || descendantMatch;
-    const searchMatchState = directMatch ? "self" : descendantMatch ? "descendant" : "none";
+    const searchMatchState = directMatch ? "direct" : descendantMatch ? "descendant" : "none";
     const state = {
       id,
       task,

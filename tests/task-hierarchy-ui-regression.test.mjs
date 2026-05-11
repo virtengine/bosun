@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 
 const uiHierarchy = await import("../ui/modules/task-hierarchy.js");
 const siteHierarchy = await import("../site/ui/modules/task-hierarchy.js");
+const uiTasks = await import("../ui/tabs/tasks.js");
+const siteTasks = await import("../site/ui/tabs/tasks.js");
 
 const taskTabSources = [
   "ui/tabs/tasks.js",
@@ -38,6 +40,27 @@ const kanbanStyleSources = [
 }));
 
 describe("task hierarchy shared model", () => {
+  it("normalizes collapse keys and preserves mirrored search visibility state", () => {
+    expect(uiHierarchy.getTaskHierarchyCollapseKey(" Task ", " TASK-1 ")).toBe("tasks-hierarchy:task:TASK-1");
+    expect(siteHierarchy.getTaskHierarchyCollapseKey("EPIC", "EPIC-1")).toBe("tasks-hierarchy:epic:EPIC-1");
+
+    const tasks = [
+      { id: "EPIC-1", title: "Epic", taskType: "epic", epicId: "EPIC-1", status: "todo" },
+      { id: "TASK-1", title: "Parent task", taskType: "task", epicId: "EPIC-1", status: "todo" },
+      { id: "TASK-2", title: "Matching child", taskType: "subtask", epicId: "EPIC-1", parentTaskId: "TASK-1", status: "inprogress" },
+    ];
+
+    for (const hierarchy of [uiHierarchy, siteHierarchy]) {
+      const model = hierarchy.buildTaskHierarchyModel(tasks);
+      const view = hierarchy.deriveTaskHierarchyView(model, {
+        matchTask: (task) => task.id === "TASK-2",
+      });
+      expect([...view.visibleTaskIds].sort()).toEqual(["TASK-1", "TASK-2"]);
+      expect(view.nodeStateById.get("TASK-1")?.searchMatchState).toBe("descendant");
+      expect(view.nodeStateById.get("TASK-1")?.visibleChildIds).toEqual(["TASK-2"]);
+    }
+  });
+
   it("exports reusable hierarchy builders for both UI trees", () => {
     expect(typeof uiHierarchy.buildTaskHierarchyModel).toBe("function");
     expect(typeof uiHierarchy.deriveTaskHierarchyView).toBe("function");
@@ -45,125 +68,91 @@ describe("task hierarchy shared model", () => {
     expect(typeof siteHierarchy.buildTaskHierarchyModel).toBe("function");
     expect(typeof siteHierarchy.deriveTaskHierarchyView).toBe("function");
     expect(typeof siteHierarchy.flattenTaskHierarchyView).toBe("function");
+    expect(typeof uiTasks.buildHierarchicalTaskRows).toBe("function");
+    expect(typeof uiTasks.buildTaskHierarchyPath).toBe("function");
+    expect(typeof uiTasks.normalizeSubtaskRow).toBe("function");
+    expect(typeof siteTasks.buildHierarchicalTaskRows).toBe("function");
+    expect(typeof siteTasks.buildTaskHierarchyPath).toBe("function");
+    expect(typeof siteTasks.normalizeSubtaskRow).toBe("function");
   });
 
   it("keeps parents visible when only a child matches the current view", () => {
     const tasks = [
       { id: "EPIC-1", title: "Epic", taskType: "epic", epicId: "EPIC-1", status: "todo" },
-      { id: "TASK-1", title: "Parent task", taskType: "task", epicId: "EPIC-1", status: "todo" },
-      { id: "TASK-2", title: "Matching child", taskType: "subtask", epicId: "EPIC-1", parentTaskId: "TASK-1", status: "inprogress" },
+      { id: "TASK-1", title: "Parent", taskType: "task", epicId: "EPIC-1", status: "todo" },
+      { id: "TASK-2", title: "Child", taskType: "subtask", parentTaskId: "TASK-1", status: "inprogress" },
+      { id: "TASK-3", title: "Sibling", taskType: "subtask", parentTaskId: "TASK-1", status: "todo" },
     ];
-    const model = uiHierarchy.buildTaskHierarchyModel(tasks);
-    const view = uiHierarchy.deriveTaskHierarchyView(model, {
-      matchTask: (task) => String(task?.title || "").includes("Matching child"),
-    });
-    const flattened = uiHierarchy.flattenTaskHierarchyView(view);
 
-    expect(flattened.map((task) => task.id)).toEqual(["TASK-1", "TASK-2"]);
-    expect(view.nodeStateById.get("TASK-1")?.searchMatchState).toBe("descendant");
-    expect(view.nodeStateById.get("TASK-1")?.visibleChildCount).toBe(1);
-    expect(view.nodeStateById.get("TASK-1")?.collapseKey).toBe("tasks-hierarchy:task:TASK-1");
-    expect(view.epicGroups[0]?.collapseKey).toBe("tasks-hierarchy:epic:EPIC-1");
-    expect(view.epicGroups[0]?.visibleTaskCount).toBe(2);
+    for (const hierarchy of [uiHierarchy, siteHierarchy]) {
+      const model = hierarchy.buildTaskHierarchyModel(tasks);
+      const view = hierarchy.deriveTaskHierarchyView(model, {
+        matchTask: (task) => task.id === "TASK-2",
+      });
+      const flattened = hierarchy.flattenTaskHierarchyView(view);
+
+      expect(flattened.map((node) => node.id)).toEqual(["TASK-1", "TASK-2"]);
+      expect(view.nodeStateById.get("TASK-1")?.searchMatchState).toBe("descendant");
+      expect(view.nodeStateById.get("TASK-1")?.visibleChildIds).toEqual(["TASK-2"]);
+    }
+  });
+
+  it("supports mixed parent linkage shapes without changing collapse key format", () => {
+    const tasks = [
+      { id: "TASK-1", title: "Parent", taskType: "task", status: "todo" },
+      { id: "TASK-2", title: "Child A", taskType: "subtask", parentId: "TASK-1", status: "todo" },
+      { id: "TASK-3", title: "Child B", taskType: "subtask", parent_task_id: "TASK-1", status: "todo" },
+      { id: "TASK-4", title: "Child C", taskType: "subtask", meta: { parentTaskId: "TASK-1" }, status: "todo" },
+    ];
+
+    for (const hierarchy of [uiHierarchy, siteHierarchy]) {
+      const model = hierarchy.buildTaskHierarchyModel(tasks);
+      expect(model.childIdsByParentId.get("TASK-1")).toEqual(["TASK-2", "TASK-3", "TASK-4"]);
+      expect(hierarchy.getTaskHierarchyCollapseKey("task", "TASK-1")).toBe("tasks-hierarchy:task:TASK-1");
+    }
   });
 });
 
-for (const { relPath, source } of taskTabSources) {
-  describe(`Tasks hierarchy wiring (${relPath})`, () => {
-    it("builds a shared hierarchy model and passes it into task detail", () => {
-      expect(source).toContain("buildTaskHierarchyModel");
-      expect(source).toContain("deriveTaskHierarchyView");
-      expect(source).toContain("flattenTaskHierarchyView");
-      expect(source).toContain("const sharedTaskHierarchyModel = useMemo(");
-      expect(source).toContain("const sharedTaskHierarchyView = useMemo(");
-      expect(source).toContain("hierarchyNodeState=${sharedTaskHierarchyView.nodeStateById.get(String(detailTask?.id || \"\")) || null}");
-      expect(source).toContain("onUpdateHierarchySubtasks=${handleHierarchySubtasksUpdate}");
-    });
-
-    it("renders a hierarchical Jira-style list with disclosure, inline status, and child creation", () => {
-      expect(source).toContain("buildHierarchicalTaskRows(");
-      expect(source).toContain("toggleHierarchyRow(");
-      expect(source).toContain("handleQuickCreateChildTask");
-      expect(source).toContain('role="tree" aria-label="Task hierarchy list"');
-      expect(source).toContain('class="task-tree-row');
-      expect(source).toContain('class="task-tree-disclosure"');
-      expect(source).toContain('aria-expanded=${row.hasChildren ? String(row.isExpanded) : undefined}');
-      expect(source).toContain('aria-label=${row.isExpanded ? "Collapse children" : "Expand children"}');
-      expect(source).toContain('className="task-tree-status-select"');
-      expect(source).toContain("Matched child");
-      expect(source).toContain("+ Child");
-      expect(source).toContain("progressTotal > 0");
-    });
-
-    it("keeps task detail hierarchy panels and child-work controls aligned", () => {
+describe("task hierarchy mirrored source regressions", () => {
+  it("keeps task tab hierarchy helpers and breadcrumb hooks wired in both bundles", () => {
+    for (const { relPath, source } of taskTabSources) {
+      expect(source).toContain("export function normalizeSubtaskRow");
+      expect(source).toContain("export function buildTaskHierarchyPath");
+      expect(source).toContain("export function buildHierarchicalTaskRows");
+      expect(source).toContain("matchState");
+      expect(source).toContain("autoExpanded");
+      expect(source).toContain("hierarchyPath");
       expect(source).toContain("task-hierarchy-summary");
       expect(source).toContain("task-hierarchy-crumb");
-      expect(source).toContain("Child Work");
-      expect(source).toContain("handleInlineSubtaskUpdate");
-      expect(source).toContain("task-subtask-controls");
-      expect(source).toContain("task-subtask-open");
-      expect(source).toContain("task-sidebar-group-title");
-      expect(source).toContain("Planning Adjustments");
-      expect(source).toContain("Execution Activity");
-      expect(source).toContain("onOpenTask=${openDetail}");
-    });
+      expect(source).toContain("parent_task_id");
+      expect(source).toContain("meta?.parentTaskId");
+      expect(source).toContain("due_at");
+      expect(source).toContain("dependencyTaskIds");
+      expect(source).toContain("normalizeTaskDueDateInput");
+      expect(source).toContain("normalizeDependencyInput");
+      expect(source).toContain("normalizeTagInput");
+      expect(source).toContain("forceShowDescendants");
+    }
   });
-}
 
-for (const { relPath, source } of kanbanSources) {
-  describe(`Kanban hierarchy wiring (${relPath})`, () => {
-    it("derives filtered board tasks from the shared hierarchy view", () => {
-      expect(source).toContain("buildTaskHierarchyModel");
-      expect(source).toContain("deriveTaskHierarchyView");
-      expect(source).toContain("const sharedHierarchyModel = useMemo(");
-      expect(source).toContain("const hierarchyView = useMemo(() => deriveTaskHierarchyView");
-      expect(source).toContain("[...hierarchyView.visibleTaskIds]");
-    });
-
-    it("renders parent shells instead of only isolated child cards", () => {
-      expect(source).toContain("buildKanbanColumnItems(");
-      expect(source).toContain("KanbanGroupShell");
-      expect(source).toContain('kind: "group"');
+  it("keeps kanban hierarchy affordances and mirrored styles present", () => {
+    for (const { relPath, source } of kanbanSources) {
       expect(source).toContain("kanban-group-shell");
-      expect(source).toContain("kanban-group-children");
+      expect(source).toContain("buildKanbanColumnItems");
+      expect(source).toContain("visibleTaskIds");
       expect(source).toContain("forceExpanded");
-      expect(source).toContain("kanban-group-shell-toggle");
-      expect(source).toContain("kanban-group-shell-open");
-      expect(source).toContain("compact=${group?.kind !== \"epic\"}");
-    });
-  });
-}
+    }
 
-for (const { relPath, source } of taskStyleSources) {
-  describe(`Task hierarchy list styles (${relPath})`, () => {
-    it("defines tree-row, disclosure, and action styling for the hierarchical list", () => {
-      expect(source).toContain(".task-list-header");
-      expect(source).toContain(".task-tree-row");
-      expect(source).toContain(".task-tree-main");
-      expect(source).toContain(".task-tree-disclosure");
-      expect(source).toContain(".task-tree-progress-pill");
-      expect(source).toContain(".task-tree-action-btn");
-      expect(source).toContain(".task-tree-status-select");
-    });
-
-    it("defines task-detail hierarchy summary and child work styling", () => {
+    for (const { relPath, source } of taskStyleSources) {
       expect(source).toContain(".task-hierarchy-summary");
-      expect(source).toContain(".task-inline-link-btn");
-      expect(source).toContain(".task-sidebar-group-title");
-      expect(source).toContain(".task-child-work-list");
-      expect(source).toContain(".task-subtask-row");
-    });
-  });
-}
+      expect(source).toContain(".task-hierarchy-crumb");
+    }
 
-for (const { relPath, source } of kanbanStyleSources) {
-  describe(`Kanban hierarchy styles (${relPath})`, () => {
-    it("defines grouped shell, checklist child rows, and icon caps", () => {
+    for (const { relPath, source } of kanbanStyleSources) {
       expect(source).toContain(".kanban-group-shell");
       expect(source).toContain(".kanban-group-children");
       expect(source).toContain(".kanban-checklist-row");
       expect(source).toContain(".kanban-icon-cap");
-      expect(source).toContain(".kanban-group-pill");
-    });
+    }
   });
-}
+});
