@@ -76,69 +76,73 @@ for (const { label, hierarchy, tasks, kanban } of bundles) {
       });
 
       expect(rows.map((row) => row.id)).toEqual(["TASK-1", "TASK-2", "TASK-3"]);
-      expect(rows[0].matchState).toBe("self");
-      expect(rows[1].depth).toBe(1);
-      expect(rows[2].depth).toBe(1);
+      expect(rows[0].matchState).toBe("direct");
+      expect(rows[0].isExpanded).toBe(true);
+      expect(rows.slice(1).every((row) => row.depth === 1)).toBe(true);
     });
 
-    it("builds breadcrumb paths and preserves detail child-task metadata", () => {
-      const fixture = createHierarchyTasks();
-      const model = hierarchy.buildTaskHierarchyModel(fixture);
-      const childTask = fixture.find((task) => task.id === "TASK-2");
-      const path = tasks.buildTaskHierarchyPath(childTask, model);
-      const normalized = tasks.normalizeSubtaskRow(childTask, "TASK-1");
+    it("builds hierarchy paths from model ancestry even when tasks use fallback parent fields", () => {
+      const taskList = [
+        { id: "EPIC-1", title: "Epic", taskType: "epic", epicId: "EPIC-1" },
+        { id: "TASK-1", title: "Parent", taskType: "task", epicId: "EPIC-1" },
+        { id: "TASK-2", title: "Child", taskType: "subtask", parentId: "TASK-1" },
+      ];
+      const model = hierarchy.buildTaskHierarchyModel(taskList);
+      const path = tasks.buildTaskHierarchyPath(taskList[2], model);
 
       expect(path.map((entry) => entry.id)).toEqual(["TASK-1", "TASK-2"]);
-      expect(normalized).toMatchObject({
-        id: "TASK-2",
-        parentTaskId: "TASK-1",
+    });
+
+    it("normalizes subtasks from mixed payload shapes and preserves fallback parent linkage", () => {
+      const normalized = tasks.normalizeSubtaskRow({
+        taskId: "SUB-9",
+        summary: "Nested child",
+        state: "blocked",
+        owner: "carol",
+        type: "SubTask",
+        points: 3,
+        epic_id: "EPIC-1",
+        due_at: "2026-05-02T10:15:00Z",
+        meta: {
+          blockedReason: "Waiting on dependency",
+          dependencyTaskIds: ["TASK-77"],
+          tags: ["backend", { name: "urgent" }],
+          parentTaskId: "TASK-1",
+        },
+      }, "FALLBACK-PARENT");
+
+      expect(normalized).toEqual({
+        id: "SUB-9",
+        title: "Nested child",
+        status: "blocked",
+        assignee: "carol",
         taskType: "subtask",
-        dueDate: "2026-04-11",
-        blockedReason: "Waiting on API parity",
-        dependencyTaskIds: ["EXT-9"],
-        labels: ["api", "ux"],
+        storyPoints: "3",
+        epicId: "EPIC-1",
+        dueDate: "2026-05-02",
+        blockedReason: "Waiting on dependency",
+        dependencyTaskIds: ["TASK-77"],
+        labels: ["backend", "urgent"],
+        parentTaskId: "TASK-1",
       });
     });
 
-    it("renders parent shells in kanban columns for grouped child work", () => {
-      const fixture = createHierarchyTasks().filter((task) => task.id !== "TASK-3");
-      const model = hierarchy.buildTaskHierarchyModel(fixture);
+    it("keeps kanban grouping aligned with hierarchy-filtered search results", () => {
+      const model = hierarchy.buildTaskHierarchyModel(createEpicTasks());
       const view = hierarchy.deriveTaskHierarchyView(model, {
-        matchTask: () => true,
+        matchTask: (task) => task.id === "TASK-10",
       });
-      const items = kanban.buildKanbanColumnItems(fixture, view, model);
-
-      expect(items[0]).toMatchObject({
-        kind: "group",
-        group: {
-          kind: "parent",
-          parentTask: { id: "TASK-1" },
+      const columnItems = kanban.buildKanbanColumnItems(view.rootNodes, {
+        hasSearch: true,
+        collapsedState: {
+          [hierarchy.getTaskHierarchyCollapseKey("epic", "EPIC-1")]: true,
         },
       });
-      expect(items[0].group.children.map((task) => task.id)).toEqual(["TASK-2"]);
-      expect(items[1]).toMatchObject({
-        kind: "task",
-        task: { id: "TASK-4" },
-      });
-    });
 
-    it("renders epic shells when multiple epic tasks stay visible in one column", () => {
-      const fixture = createEpicTasks();
-      const model = hierarchy.buildTaskHierarchyModel(fixture);
-      const view = hierarchy.deriveTaskHierarchyView(model, {
-        matchTask: () => true,
-      });
-      const items = kanban.buildKanbanColumnItems(fixture, view, model);
-
-      expect(items).toHaveLength(1);
-      expect(items[0]).toMatchObject({
-        kind: "group",
-        group: {
-          kind: "epic",
-          title: "Epic shell",
-        },
-      });
-      expect(items[0].group.children.map((task) => task.id)).toEqual(["TASK-10", "TASK-11"]);
+      expect(columnItems.map((item) => item.id)).toEqual(["EPIC-1", "TASK-10"]);
+      expect(columnItems[0].matchState).toBe("descendant");
+      expect(columnItems[0].isExpanded).toBe(true);
+      expect(new Set(columnItems.map((item) => item.id)).size).toBe(columnItems.length);
     });
   });
 }

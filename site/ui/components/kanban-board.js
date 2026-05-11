@@ -402,6 +402,7 @@ export function buildKanbanColumnItems(tasks = [], hierarchyView = null, hierarc
 
   for (const task of rows) {
     const taskId = String(task?.id || "");
+    if (hierarchyView?.visibleTaskIds?.size && !hierarchyView.visibleTaskIds.has(taskId)) continue;
     const node = hierarchyView?.nodeStateById?.get?.(taskId) || null;
     const parentId = String(node?.meta?.parentTaskId || "");
     if (parentId && hierarchyView?.nodeStateById?.get?.(parentId)?.isParentNode) {
@@ -465,6 +466,7 @@ export function buildKanbanColumnItems(tasks = [], hierarchyView = null, hierarc
 
   for (const task of rows) {
     const taskId = String(task?.id || "");
+    if (hierarchyView?.visibleTaskIds?.size && !hierarchyView.visibleTaskIds.has(taskId)) continue;
     if (groupedTaskIds.has(taskId) || coveredHeaderTaskIds.has(taskId)) continue;
     items.push({
       kind: "task",
@@ -1689,5 +1691,4 @@ export function KanbanBoard({ onOpenTask, hasMoreTasks = false, loadingMoreTasks
     </${Box}>
   `;
 }
-
 
