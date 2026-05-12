@@ -6013,6 +6013,60 @@ describeUiServer("ui-server mini app", () => {
     expect(queuedTask.runtimeSnapshot.isLive).toBe(false);
   }, 60000);
 
+  it("dispatches selected fleet tasks through /api/executor/dispatch", async () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), "bosun-ui-fleet-dispatch-"));
+    process.env.TELEGRAM_UI_TUNNEL = "disabled";
+    process.env.EXECUTOR_MODE = "internal";
+    process.env.BOSUN_HOME = isolatedDir;
+    process.env.BOSUN_DIR = isolatedDir;
+    process.env.CODEX_MONITOR_HOME = isolatedDir;
+    process.env.CODEX_MONITOR_DIR = isolatedDir;
+
+    const mod = await import("../server/ui-server.mjs");
+    const taskStore = await import("../task/task-store.mjs");
+    taskStore.loadStore();
+
+    const executeTask = vi.fn(async () => ({ started: true }));
+    mod.injectUiDependencies({
+      getInternalExecutor: () => ({
+        getStatus: () => ({ maxParallel: 4, activeSlots: 0, slots: [] }),
+        executeTask,
+        isPaused: () => false,
+      }),
+    });
+
+    const server = await mod.startTelegramUiServer({
+      port: await getFreePort(),
+      host: "127.0.0.1",
+      skipInstanceLock: true,
+      skipAutoOpen: true,
+    });
+    const port = server.address().port;
+
+    const task = taskStore.addTask({
+      id: "fleet-task-1",
+      title: "Fleet dispatch task",
+      description: "verify fleet dispatch endpoint starts selected task",
+      status: "todo",
+    });
+
+    const dispatched = await fetch(`http://127.0.0.1:${port}/api/executor/dispatch`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ taskId: task.id }),
+    }).then((r) => r.json());
+
+    expect(dispatched.ok).toBe(true);
+    expect(dispatched.started).toBe(true);
+    expect(dispatched.queued).toBe(false);
+    expect(dispatched.taskId).toBe("fleet-task-1");
+    expect(executeTask).toHaveBeenCalledTimes(1);
+    expect(executeTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "fleet-task-1", status: "inprogress" }),
+      expect.objectContaining({ force: false }),
+    );
+  }, 60000);
+
   it("enriches task detail with linked workflow runs for the same taskId", async () => {
     const isolatedDir = mkdtempSync(join(tmpdir(), "bosun-ui-workflow-detail-"));
     const previousRepoRoot = process.env.REPO_ROOT;
@@ -8443,6 +8497,44 @@ describeUiServer("ui-server mini app", () => {
     expect(normalized.raw.attemptCount).toBe("3");
     expect(normalized.raw.self).toBe("[Circular]");
     expect("debug" in normalized.raw).toBe(false);
+  });
+
+  it("ignores low-signal blocked reasons and summarizes failed workflow evidence", async () => {
+    const mod = await import("../server/ui-server.mjs");
+    const blockedContext = await mod._testBuildTaskBlockedContext(
+      {
+        status: "blocked",
+        blockedReason: "ok",
+      },
+      {
+        canStart: { canStart: false, reason: "ok" },
+        workflowRuns: [
+          {
+            runId: "run-pr-handoff-failed",
+            workflowName: "Task Completion Agent",
+            status: "failed",
+            endedAt: "2026-05-12T01:00:00.000Z",
+            meta: {
+              error: "prepush check failed: npm test reported vitest-pool Worker exited unexpectedly; failed to push refs",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(blockedContext.category).toBe("blocked");
+    expect(blockedContext.reason).toBe("");
+    expect(blockedContext.summary).toContain("Latest workflow failure");
+    expect(blockedContext.summary).toContain("prepush check failed");
+    expect(blockedContext.workflowRunEvidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          diagnosticCategory: "workflow_failure",
+          message: expect.stringContaining("failed to push refs"),
+        }),
+      ]),
+    );
+    expect(blockedContext.worktreeFailureCount).toBe(0);
   });
 
   it.skip("scopes /api/project-summary to the active workspace like /api/tasks", async () => {

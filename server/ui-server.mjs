@@ -2892,6 +2892,29 @@ function sanitizeTaskDiagnosticText(value, maxLength = 240) {
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+const LOW_SIGNAL_BLOCKED_REASONS = new Set([
+  "ok",
+  "okay",
+  "success",
+  "succeeded",
+  "passed",
+  "pass",
+  "true",
+  "done",
+  "completed",
+  "complete",
+  "none",
+  "null",
+  "undefined",
+]);
+
+function normalizeBlockedReasonForDisplay(value, maxLength = 280) {
+  const text = sanitizeTaskDiagnosticText(value, maxLength);
+  if (!text) return "";
+  if (LOW_SIGNAL_BLOCKED_REASONS.has(text.toLowerCase())) return "";
+  return text;
+}
+
 const TASK_LOG_DIAGNOSTICS_TAIL_BYTES = 256 * 1024;
 const TASK_LOG_DIAGNOSTICS_CACHE_MS = 5000;
 
@@ -2983,7 +3006,7 @@ function collectTaskWorkflowRunDiagnostics(task, limit = 8) {
       || worktreeFailure?.failureKind
       || "",
     ).trim();
-    const errorText = sanitizeTaskDiagnosticText(
+    const errorText = normalizeBlockedReasonForDisplay(
       worktreeFailure?.error
       || meta?.error
       || meta?.blockedReason
@@ -2991,10 +3014,21 @@ function collectTaskWorkflowRunDiagnostics(task, limit = 8) {
       || "",
       320,
     );
-    const blockedReason = sanitizeTaskDiagnosticText(
-      worktreeFailure?.blockedReason || "",
+    const blockedReason = normalizeBlockedReasonForDisplay(
+      worktreeFailure?.blockedReason
+        || meta?.blockedReason
+        || run?.blockedReason
+        || "",
       280,
     );
+    const status = String(run?.status || "").trim().toLowerCase();
+    const diagnosticText = [
+      failureKind,
+      errorText,
+      blockedReason,
+      run?.summary,
+      run?.message,
+    ].filter(Boolean).join("\n");
     const isWorktreeFailure =
       failureKind === "branch_refresh_conflict"
       || failureKind === "worktree_acquisition_failed"
@@ -3002,17 +3036,29 @@ function collectTaskWorkflowRunDiagnostics(task, limit = 8) {
       || /worktree/i.test(errorText)
       || /refresh conflict/i.test(blockedReason)
       || /managed worktree/i.test(errorText);
-    if (!isWorktreeFailure) continue;
+    const isWorkflowFailure =
+      isWorktreeFailure
+      || ["failed", "blocked", "error", "cancelled", "canceled"].includes(status)
+      || /pre-?pr validation failed/i.test(diagnosticText)
+      || /prepush/i.test(diagnosticText)
+      || /failed to push/i.test(diagnosticText)
+      || /push failed/i.test(diagnosticText)
+      || /create-pr/i.test(diagnosticText)
+      || /retry-pr-ok/i.test(diagnosticText)
+      || /vitest-pool/i.test(diagnosticText)
+      || /Worker exited unexpectedly/i.test(diagnosticText);
+    if (!isWorkflowFailure) continue;
     relevant.push({
       source: "workflow-run",
       runId: String(run?.runId || "").trim() || null,
       workflowId: String(run?.workflowId || "").trim() || null,
       workflowName: String(run?.workflowName || "").trim() || null,
-      message: errorText || blockedReason || "Workflow run recorded a worktree failure.",
+      message: errorText || blockedReason || `Workflow run ${status || "failed"}.`,
       reason: blockedReason || null,
       failureKind: failureKind || null,
       timestamp: run?.endedAt || run?.startedAt || null,
       kind: "workflow-run",
+      diagnosticCategory: isWorktreeFailure ? "worktree_failure" : "workflow_failure",
       retryable: worktreeFailure?.retryable ?? null,
       retryAt: worktreeFailure?.retryAt || null,
       recordedAt: worktreeFailure?.recordedAt || null,
@@ -3121,7 +3167,7 @@ async function buildTaskBlockedContext(task, options = {}) {
     ? options.canStart
     : null;
   const normalizedStatus = normalizeTaskStatusKey(currentTask?.status);
-  const explicitReason = sanitizeTaskDiagnosticText(
+  const explicitReason = normalizeBlockedReasonForDisplay(
     currentTask?.blockedReason
       || currentTask?.meta?.worktreeFailure?.blockedReason
       || currentTask?.meta?.autoRecovery?.error
@@ -3137,7 +3183,7 @@ async function buildTaskBlockedContext(task, options = {}) {
       headline: "This task cannot start because one or more dependencies are not done yet.",
       summary: "Bosun will not dispatch this task until every blocking dependency below is resolved.",
       recommendation: "Complete or unblock the listed dependencies, then dispatch this task again.",
-      reason: explicitReason || sanitizeTaskDiagnosticText(canStart?.reason || ""),
+      reason: explicitReason || normalizeBlockedReasonForDisplay(canStart?.reason || ""),
       workflowRunCount: 0,
       prePrValidationFailureCount: 0,
       worktreeFailureCount: 0,
@@ -3167,6 +3213,7 @@ async function buildTaskBlockedContext(task, options = {}) {
     6,
   );
   const hasPlannerCorruption = /planner payload corrupted/i.test(explicitReason);
+  const latestWorkflowEvidence = workflowRunEvidence[workflowRunEvidence.length - 1] || null;
   const repairArtifacts =
     currentTask?.meta?.worktreeFailure?.repairArtifacts
     && typeof currentTask.meta.worktreeFailure.repairArtifacts === "object"
@@ -3174,7 +3221,7 @@ async function buildTaskBlockedContext(task, options = {}) {
       : null;
   const hasWorktreeFailure =
     Boolean(currentTask?.meta?.worktreeFailure) ||
-    workflowRunEvidence.length > 0 ||
+    workflowRunEvidence.some((entry) => entry?.diagnosticCategory === "worktree_failure") ||
     logDiagnostics.counts.worktreeFailed > 0 ||
     timelineEvidence.some((entry) => /worktree failed/i.test(String(entry?.message || "")));
 
@@ -3204,12 +3251,16 @@ async function buildTaskBlockedContext(task, options = {}) {
   } else if (normalizedStatus === "blocked") {
     category = "blocked";
     headline = "This task is blocked.";
-    summary = explicitReason || "Bosun marked this task as blocked, but the original blocked reason was not persisted.";
+    summary = explicitReason
+      || (latestWorkflowEvidence?.message
+        ? `Latest workflow failure: ${latestWorkflowEvidence.message}`
+        : "Bosun marked this task as blocked, but the original blocked reason was not persisted.");
     recommendation = "Review the recent workflow evidence below. After the underlying issue is fixed, move the task back to todo to clear the block and retry it.";
   } else if (canStart?.canStart === false) {
     category = "start_guard_blocked";
     headline = "This task is currently not startable.";
-    summary = sanitizeTaskDiagnosticText(canStart?.reason || "Bosun start guards rejected dispatch for this task.");
+    summary = normalizeBlockedReasonForDisplay(canStart?.reason || "")
+      || "Bosun start guards rejected dispatch for this task.";
     recommendation = "Resolve the blocking condition below before dispatching the task.";
   } else {
     return null;
@@ -3221,10 +3272,13 @@ async function buildTaskBlockedContext(task, options = {}) {
     headline,
     summary,
     recommendation,
-    reason: explicitReason || sanitizeTaskDiagnosticText(canStart?.reason || ""),
+    reason: explicitReason || normalizeBlockedReasonForDisplay(canStart?.reason || ""),
     workflowRunCount: workflowRuns.length,
     prePrValidationFailureCount: logDiagnostics.counts.prePrValidationFailed,
-    worktreeFailureCount: Math.max(logDiagnostics.counts.worktreeFailed, workflowRunEvidence.length),
+    worktreeFailureCount: Math.max(
+      logDiagnostics.counts.worktreeFailed,
+      workflowRunEvidence.filter((entry) => entry?.diagnosticCategory === "worktree_failure").length,
+    ),
     blockedTransitionCount: logDiagnostics.counts.blockedTransitions,
     createPrFailureCount: logDiagnostics.counts.createPrFailed,
     blockedBy: Array.isArray(canStart?.blockedBy) ? canStart.blockedBy : [],
@@ -3234,6 +3288,10 @@ async function buildTaskBlockedContext(task, options = {}) {
     workflowRunEvidence,
     logEvidence: logDiagnostics.entries,
   };
+}
+
+export async function _testBuildTaskBlockedContext(task, options = {}) {
+  return buildTaskBlockedContext(task, options);
 }
 
 function buildTaskMetaPatch(previousMeta, metadataPatchMeta, options = {}) {
@@ -19899,6 +19957,156 @@ async function handleApi(req, res, url) {
       ok: true,
       data: getFallbackAuthStatus(),
     });
+    return;
+  }
+
+  if (path === "/api/executor/dispatch" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const prompt = String(body?.prompt || "").trim();
+      let taskId = String(body?.taskId || body?.id || "").trim();
+      const sdk = typeof body?.sdk === "string" ? body.sdk.trim() : "";
+      const model = typeof body?.model === "string" ? body.model.trim() : "";
+      const executor = uiDeps.getInternalExecutor?.();
+      if (!executor) {
+        jsonResponse(res, 400, {
+          ok: false,
+          error: "Internal executor not enabled. Set EXECUTOR_MODE=internal.",
+        });
+        return;
+      }
+      if (!taskId && !prompt) {
+        jsonResponse(res, 400, { ok: false, error: "taskId or prompt is required" });
+        return;
+      }
+
+      const adapter = getKanbanAdapter();
+      let task = taskId && typeof adapter.getTask === "function"
+        ? await adapter.getTask(taskId)
+        : null;
+      if (taskId && !task) {
+        jsonResponse(res, 404, { ok: false, error: "Task not found." });
+        return;
+      }
+
+      let createdFromPrompt = false;
+      if (!taskId) {
+        const activeWorkspace = getActiveManagedWorkspace(resolveUiConfigDir());
+        const defaultRepository =
+          activeWorkspace?.activeRepo ||
+          activeWorkspace?.repos?.find((repo) => repo.primary)?.name ||
+          activeWorkspace?.repos?.[0]?.name ||
+          "";
+        const titleLine = prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "Fleet prompt dispatch";
+        const taskData = {
+          title: titleLine.length > 96 ? `${titleLine.slice(0, 93)}...` : titleLine,
+          description: prompt,
+          status: "todo",
+          ...(activeWorkspace?.id ? { workspace: activeWorkspace.id } : {}),
+          ...(defaultRepository ? { repository: defaultRepository } : {}),
+          meta: {
+            ...(activeWorkspace?.id ? { workspace: activeWorkspace.id } : {}),
+            ...(defaultRepository ? { repository: defaultRepository } : {}),
+            source: "fleet-dispatch",
+          },
+        };
+        const createdRaw = await adapter.createTask("", taskData);
+        task = withTaskMetadataTopLevel(createdRaw);
+        taskId = String(task?.id || "").trim();
+        createdFromPrompt = true;
+      }
+
+      const canStart = await evaluateTaskCanStart({
+        taskId,
+        task,
+        adapter,
+        forceStart: body?.force === true || body?.forceStart === true,
+        manualOverride: body?.manualOverride === true || body?.overrideStartGuard === true,
+      });
+      if (!canStart.canStart) {
+        jsonResponse(res, 409, {
+          ok: false,
+          taskId,
+          error: "Task cannot be dispatched",
+          canStart,
+          data: task ? withTaskRuntimeSnapshot(task) : null,
+        });
+        return;
+      }
+
+      const status = executor.getStatus?.() || {};
+      const activeSlots = Array.isArray(status?.slots) ? status.slots : [];
+      const maxParallel = Number(status?.maxParallel || 0);
+      const activeCount = Number(status?.activeSlots || activeSlots.length || 0);
+      const hasFreeSlot = maxParallel <= 0 || activeCount < maxParallel;
+      if (!hasFreeSlot) {
+        const queuedTask = await persistTaskExecutionMeta(adapter, taskId, {
+          queued: true,
+          queueState: "queued",
+          requestedAt: new Date().toISOString(),
+        });
+        jsonResponse(res, 202, {
+          ok: true,
+          taskId,
+          queued: true,
+          started: false,
+          createdFromPrompt,
+          reason: "No free slots",
+          canStart,
+          data: withTaskRuntimeSnapshot(queuedTask || task),
+        });
+        broadcastUiEvent(["tasks", "overview", "executor", "agents"], "invalidate", {
+          reason: "task-queued",
+          taskId,
+        });
+        return;
+      }
+
+      let startedTask = await persistTaskStatusForExecution(adapter, taskId, "inprogress", "api.executor.dispatch") || task;
+      startedTask = await persistTaskExecutionMeta(adapter, taskId, {
+        queued: false,
+        queueState: null,
+      }) || startedTask;
+      applyInternalLifecycleTransition(taskId, "start", {
+        source: "api.executor.dispatch",
+        actor: "ui",
+        force: body?.force === true || body?.forceStart === true || body?.manualOverride === true || body?.overrideStartGuard === true,
+        reason: createdFromPrompt ? "fleet prompt dispatch" : "fleet task dispatch",
+      });
+
+      traceHttpServerAction(req, {
+        route: "/api/executor/dispatch",
+        taskId,
+      }, () => executor.executeTask(startedTask, {
+        ...(sdk ? { sdk } : {}),
+        ...(model ? { model } : {}),
+        force: body?.force === true || body?.forceStart === true || body?.manualOverride === true || body?.overrideStartGuard === true,
+      })).catch((error) => {
+        console.warn(`[telegram-ui] fleet dispatch failed for ${taskId}: ${error.message}`);
+        void persistTaskStatusForExecution(
+          adapter,
+          taskId,
+          resolveFallbackStatusAfterFailedDispatch(task?.status, { started: false }),
+          "api.executor.dispatch.failed",
+        );
+      });
+
+      jsonResponse(res, 200, {
+        ok: true,
+        taskId,
+        queued: false,
+        started: true,
+        createdFromPrompt,
+        canStart,
+        data: withTaskRuntimeSnapshot(startedTask),
+      });
+      broadcastUiEvent(["tasks", "overview", "executor", "agents"], "invalidate", {
+        reason: "task-dispatched",
+        taskId,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
     return;
   }
 

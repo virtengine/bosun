@@ -7438,6 +7438,16 @@ registerNodeType("action.materialize_planner_tasks", {
       }
       if (Array.isArray(task.tags) && task.tags.length > 0) payload.tags = task.tags;
       if (task.baseBranch) payload.baseBranch = task.baseBranch;
+      if (task.sprintId) {
+        payload.sprintId = task.sprintId;
+      }
+      if (task.epicId) {
+        payload.epicId = task.epicId;
+      }
+      if (Array.isArray(task.dependencyTaskIds) && task.dependencyTaskIds.length > 0) {
+        payload.dependencyTaskIds = task.dependencyTaskIds;
+        payload.dependsOn = task.dependencyTaskIds;
+      }
       if (task.draft || String(status || "").trim().toLowerCase() === "draft") {
         payload.draft = true;
       }
@@ -7472,11 +7482,17 @@ registerNodeType("action.materialize_planner_tasks", {
         run_id: String(ctx?.runId || ctx?.data?._runId || "").trim() || null,
         acceptance_criteria: task.acceptanceCriteria,
         verification: task.verification,
+        implementation_steps: Array.isArray(task.implementationSteps) ? task.implementationSteps : [],
+        files: Array.isArray(task.files) ? task.files : [],
+        tests: Array.isArray(task.tests) ? task.tests : [],
+        api_contracts: Array.isArray(task.apiContracts) ? task.apiContracts : [],
         task_key: task.taskKey || null,
         parent_task_key: task.parentTaskKey || null,
         parent_task_id: task.parentTaskId || null,
         depends_on_task_keys: Array.isArray(task.dependencyTaskKeys) ? task.dependencyTaskKeys : [],
         depends_on_task_ids: Array.isArray(task.dependencyTaskIds) ? task.dependencyTaskIds : [],
+        sprint_id: task.sprintId || null,
+        epic_id: task.epicId || null,
         decomposition_kind: task.decompositionKind || null,
         spawn_when: task.spawnWhen || null,
         merge_back_policy: task.mergeBackPolicy || null,

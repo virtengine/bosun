@@ -3445,10 +3445,10 @@ function FleetSessionsPanel({ slots, sessions = [], taskFallbackEntries = [], on
                     onClick=${() => setDetailTab("turns")}
                   >${iconText(":repeat: Turns")}<//>
                 </div>
-                <div class="fleet-session-body" style=${{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingRight: "4px" }}>
+                <div class="fleet-session-body" style=${{ flex: "1 1 auto", minHeight: 0, overflow: "hidden", paddingRight: "4px" }}>
                   ${detailTab === "stream"
                     ? streamSessionId
-                      ? html`<${ChatView} sessionId=${streamSessionId} readOnly=${true} />`
+                      ? html`<${ChatView} sessionId=${streamSessionId} readOnly=${true} embedded=${true} />`
                       : html`
                           <div class="chat-view chat-empty-state">
                             <div class="session-empty-icon">${resolveIcon(":chat:")}</div>

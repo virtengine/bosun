@@ -76,7 +76,7 @@ export const TASK_PLANNER_TEMPLATE = {
     node("materialize-tasks", "action.materialize_planner_tasks", "Create Tasks", {
       plannerNodeId: "run-planner",
       maxTasks: "{{taskCount}}",
-      status: "draft",
+      status: "todo",
       dedup: true,
       failOnZero: true,
       minCreated: 1,
@@ -929,7 +929,8 @@ Structured context:
 
 Rules:
 - Generate at most {{maxFollowupTasks}} tasks
-- Include fields: title, description, implementation_steps, acceptance_criteria, verification, priority, tags, base_branch, impact, confidence, risk, estimated_effort, repo_areas, why_now, kill_criteria
+- Include fields: task_key, title, description, implementation_steps, files, tests, api_contracts, acceptance_criteria, verification, priority, tags, base_branch, impact, confidence, risk, estimated_effort, repo_areas, why_now, kill_criteria
+- Use sprint_id, epic_id, parent_task_key, and depends_on_task_keys when the work belongs in an existing sprint/epic or has DAG ordering
 - Use trend deltas from the summary artifact to justify urgency and avoid parse errors
 - Keep tasks implementation-ready and avoid duplicates
 - Return only JSON`,
@@ -992,6 +993,4 @@ Rules:
     },
   },
 };
-
-
 

@@ -9950,7 +9950,7 @@
           "config": {
             "plannerNodeId": "run-planner",
             "maxTasks": "{{taskCount}}",
-            "status": "draft",
+            "status": "todo",
             "dedup": true,
             "failOnZero": true,
             "minCreated": 1
@@ -10575,7 +10575,7 @@
           "type": "action.run_agent",
           "label": "Build Follow-up Tasks JSON",
           "config": {
-            "prompt": "Convert FOLLOW_UP_ACTION lines below into a single JSON object with shape { \"tasks\": [...] }.\n\nSource:\n{{evaluate-fitness.output}}\n\nStructured context:\n{{fitnessSummaryJson}}\n\nRules:\n- Generate at most {{maxFollowupTasks}} tasks\n- Include fields: title, description, implementation_steps, acceptance_criteria, verification, priority, tags, base_branch, impact, confidence, risk, estimated_effort, repo_areas, why_now, kill_criteria\n- Use trend deltas from the summary artifact to justify urgency and avoid parse errors\n- Keep tasks implementation-ready and avoid duplicates\n- Return only JSON",
+            "prompt": "Convert FOLLOW_UP_ACTION lines below into a single JSON object with shape { \"tasks\": [...] }.\n\nSource:\n{{evaluate-fitness.output}}\n\nStructured context:\n{{fitnessSummaryJson}}\n\nRules:\n- Generate at most {{maxFollowupTasks}} tasks\n- Include fields: task_key, title, description, implementation_steps, files, tests, api_contracts, acceptance_criteria, verification, priority, tags, base_branch, impact, confidence, risk, estimated_effort, repo_areas, why_now, kill_criteria\n- Use sprint_id, epic_id, parent_task_key, and depends_on_task_keys when the work belongs in an existing sprint/epic or has DAG ordering\n- Use trend deltas from the summary artifact to justify urgency and avoid parse errors\n- Keep tasks implementation-ready and avoid duplicates\n- Return only JSON",
             "sdk": "auto",
             "timeoutMs": 300000
           },
@@ -22958,7 +22958,7 @@
       "enabled": true,
       "trigger": "trigger.task_available",
       "variables": {
-        "maxConcurrent": 3,
+        "maxConcurrent": 5,
         "pollStatus": "todo",
         "maxBatchSize": 10,
         "subWorkflow": "template-task-lifecycle",
@@ -35486,7 +35486,7 @@
           "config": {
             "plannerNodeId": "run-planner",
             "maxTasks": "{{taskCount}}",
-            "status": "draft",
+            "status": "todo",
             "dedup": true,
             "failOnZero": true,
             "minCreated": 1
@@ -36069,7 +36069,7 @@
           "type": "action.run_agent",
           "label": "Build Follow-up Tasks JSON",
           "config": {
-            "prompt": "Convert FOLLOW_UP_ACTION lines below into a single JSON object with shape { \"tasks\": [...] }.\n\nSource:\n{{evaluate-fitness.output}}\n\nStructured context:\n{{fitnessSummaryJson}}\n\nRules:\n- Generate at most {{maxFollowupTasks}} tasks\n- Include fields: title, description, implementation_steps, acceptance_criteria, verification, priority, tags, base_branch, impact, confidence, risk, estimated_effort, repo_areas, why_now, kill_criteria\n- Use trend deltas from the summary artifact to justify urgency and avoid parse errors\n- Keep tasks implementation-ready and avoid duplicates\n- Return only JSON",
+            "prompt": "Convert FOLLOW_UP_ACTION lines below into a single JSON object with shape { \"tasks\": [...] }.\n\nSource:\n{{evaluate-fitness.output}}\n\nStructured context:\n{{fitnessSummaryJson}}\n\nRules:\n- Generate at most {{maxFollowupTasks}} tasks\n- Include fields: task_key, title, description, implementation_steps, files, tests, api_contracts, acceptance_criteria, verification, priority, tags, base_branch, impact, confidence, risk, estimated_effort, repo_areas, why_now, kill_criteria\n- Use sprint_id, epic_id, parent_task_key, and depends_on_task_keys when the work belongs in an existing sprint/epic or has DAG ordering\n- Use trend deltas from the summary artifact to justify urgency and avoid parse errors\n- Keep tasks implementation-ready and avoid duplicates\n- Return only JSON",
             "sdk": "auto",
             "timeoutMs": 300000
           },
@@ -47874,7 +47874,7 @@
       "nodeCount": 9,
       "trigger": "trigger.task_available",
       "variables": {
-        "maxConcurrent": 3,
+        "maxConcurrent": 5,
         "pollStatus": "todo",
         "maxBatchSize": 10,
         "subWorkflow": "template-task-lifecycle",

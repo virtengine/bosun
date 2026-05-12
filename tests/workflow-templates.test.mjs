@@ -496,6 +496,7 @@ describe("workflow-templates", () => {
     expect(materialize.type).toBe("action.materialize_planner_tasks");
     expect(materialize.config?.failOnZero).toBe(true);
     expect(materialize.config?.maxTasks).toBe("{{taskCount}}");
+    expect(materialize.config?.status).toBe("todo");
 
     const edgeToMaterialize = planner.edges.find(
       (e) => e.source === "run-planner" && e.target === "materialize-tasks",
@@ -1435,6 +1436,7 @@ describe("workflow setup profiles", () => {
 
     expect(batchProcessorTriggerNode?.type).toBe("trigger.task_available");
     expect(batchPrTriggerNode?.type).toBe("trigger.task_available");
+    expect(batchProcessor?.variables?.maxConcurrent).toBe(5);
   });
 
   it("filters batch task templates to todo backlog tasks before dispatch", () => {

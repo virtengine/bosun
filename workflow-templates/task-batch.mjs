@@ -125,7 +125,7 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
   recommended: true,
   trigger: "trigger.task_available",
   variables: {
-    maxConcurrent: 3,
+    maxConcurrent: 5,
     pollStatus: "todo",
     maxBatchSize: 10,
     subWorkflow: "template-task-lifecycle",

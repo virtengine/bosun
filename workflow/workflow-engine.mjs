@@ -5673,8 +5673,10 @@ export class WorkflowEngine extends EventEmitter {
     if (!this._loaded) this.load();
 
     const triggered = [];
+    const triggeredWorkflowIds = new Set();
     for (const [id, def] of this._workflows) {
       if (def.enabled === false) continue;
+      if (triggeredWorkflowIds.has(id)) continue;
 
       // Find trigger nodes
       const triggerNodes = (def.nodes || []).filter((n) =>
@@ -5734,6 +5736,8 @@ export class WorkflowEngine extends EventEmitter {
           });
           if (shouldFire?.triggered) {
             triggered.push({ workflowId: id, triggeredBy: tNode.id, eventData });
+            triggeredWorkflowIds.add(id);
+            break;
           }
         } catch {
           // Trigger evaluation errors are non-fatal

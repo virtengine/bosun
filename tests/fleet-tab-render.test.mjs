@@ -146,6 +146,16 @@ for (const { relPath, source } of sourceFiles) {
       expect(bodyChunk).toMatch(/detailTab\s*===\s*["']logs["']\s*\?/);
     });
 
+    it("lets the embedded Fleet stream own message scrolling", () => {
+      const bodySection = source.slice(source.indexOf("fleet-session-body"));
+      const bodyChunk = bodySection.slice(0, 1600);
+
+      expect(bodyChunk).toContain('overflow: "hidden"');
+      expect(bodyChunk).not.toContain('overflowY: "auto"');
+      expect(bodyChunk).toContain("embedded=${true}");
+      expect(bodyChunk).toContain("sessionId=${streamSessionId}");
+    });
+
     it("slot card list uses stable keys, not array indices", () => {
       // Slot cards in the "Active Slots" section must use a content-based key
       // (taskId/sessionId) rather than index `i` to prevent stale DOM references

@@ -369,14 +369,22 @@ export const CALIBRATED_MAX_RISK_WITHOUT_HUMAN = "medium";
 export const STRICT_TASK_PLANNER_TASK_COUNT = 8;
 const TASK_PLANNER_REQUIRED_TOP_LEVEL_KEYS = ["tasks"];
 const TASK_PLANNER_REQUIRED_TASK_FIELDS = [
+  "task_key",
   "title",
   "description",
+  "implementation_steps",
+  "files",
+  "tests",
+  "api_contracts",
   "acceptance_criteria",
   "verification",
   "repo_areas",
   "impact",
   "confidence",
   "risk",
+  "estimated_effort",
+  "why_now",
+  "kill_criteria",
 ];
 const TASK_PLANNER_ALLOWED_ESTIMATED_EFFORT = ["small", "medium", "large"];
 const PLANNER_SCORE_MODE_RATIO = "ratio";
@@ -557,10 +565,18 @@ export function normalizePlannerTaskForCreation(task, index, options = {}) {
   const strict = options?.strict === true;
 
   const normalizeStringList = (value) => {
-    if (!Array.isArray(value)) return [];
-    return value
-      .map((entry) => String(entry || "").trim())
-      .filter(Boolean);
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => String(entry || "").trim())
+        .filter(Boolean);
+    }
+    if (typeof value === "string") {
+      return value
+        .split(/\r?\n|,/)
+        .map((entry) => entry.replace(/^[-*]\s+/, "").trim())
+        .filter(Boolean);
+    }
+    return [];
   };
   const normalizeRepoAreas = (value) => {
     const list = normalizeStringList(value);
@@ -590,12 +606,24 @@ export function normalizePlannerTaskForCreation(task, index, options = {}) {
   const lines = [];
   const description = String(task.description || "").trim();
   if (description) lines.push(description);
+  const implementationSteps = strict
+    ? validateStrictPlannerRequiredField("implementation_steps", task.implementation_steps || task.implementationSteps, { type: "array" })
+    : normalizeStringList(task.implementation_steps || task.implementationSteps);
   const acceptanceCriteria = strict
-    ? validateStrictPlannerRequiredField("acceptance_criteria", task.acceptance_criteria, { type: "array" })
-    : normalizeStringList(task.acceptance_criteria);
+    ? validateStrictPlannerRequiredField("acceptance_criteria", task.acceptance_criteria || task.acceptanceCriteria, { type: "array" })
+    : normalizeStringList(task.acceptance_criteria || task.acceptanceCriteria);
   const verification = strict
     ? validateStrictPlannerRequiredField("verification", task.verification, { type: "array" })
     : normalizeStringList(task.verification);
+  const files = strict
+    ? validateStrictPlannerRequiredField("files", task.files || task.file_paths || task.filePaths || task.paths, { type: "array" })
+    : normalizeStringList(task.files || task.file_paths || task.filePaths || task.paths);
+  const tests = strict
+    ? validateStrictPlannerRequiredField("tests", task.tests || task.test_commands || task.testCommands, { type: "array" })
+    : normalizeStringList(task.tests || task.test_commands || task.testCommands);
+  const apiContracts = strict
+    ? validateStrictPlannerRequiredField("api_contracts", task.api_contracts || task.apiContracts, { type: "array" })
+    : normalizeStringList(task.api_contracts || task.apiContracts);
   const repoAreas = normalizeRepoAreas(
     strict
       ? validateStrictPlannerRequiredField("repo_areas", task.repo_areas || task.repoAreas, { type: "array" })
@@ -671,13 +699,18 @@ export function normalizePlannerTaskForCreation(task, index, options = {}) {
     for (const item of items) lines.push(`- ${item}`);
   };
 
-  appendList("Implementation Steps", task.implementation_steps);
+  appendList("Implementation Steps", implementationSteps);
+  appendList("Files", files);
+  appendList("Tests", tests);
+  appendList("API Contracts", apiContracts);
   appendList("Acceptance Criteria", acceptanceCriteria);
   appendList("Verification", verification);
 
   const baseBranch = String(task.base_branch || "").trim();
   const workspace = String(task.workspace || "").trim();
   const repository = String(task.repository || task.repo || "").trim();
+  const sprintId = String(task.sprint_id || task.sprintId || task.sprint || "").trim();
+  const epicId = String(task.epic_id || task.epicId || task.epic || "").trim();
   const repositories = Array.isArray(task.repositories)
     ? task.repositories.map((entry) => String(entry || "").trim()).filter(Boolean)
     : [];
@@ -707,6 +740,10 @@ export function normalizePlannerTaskForCreation(task, index, options = {}) {
     requestedStatus: requestedStatus || null,
     acceptanceCriteria,
     verification,
+    implementationSteps,
+    files,
+    tests,
+    apiContracts,
     repoAreas,
     impact,
     confidence,
@@ -719,6 +756,8 @@ export function normalizePlannerTaskForCreation(task, index, options = {}) {
     parentTaskId,
     dependencyTaskKeys,
     dependencyTaskIds,
+    sprintId: sprintId || null,
+    epicId: epicId || null,
     decompositionKind,
     spawnWhen,
     mergeBackPolicy,
@@ -797,7 +836,7 @@ export function validateStrictTaskPlannerPayload(payload, options = {}) {
       return { ok: false, error: `${taskLabel}.description must be a non-empty string`, code: "invalid_field", taskIndex: i, field: "description" };
     }
 
-    const listFields = ["acceptance_criteria", "verification", "repo_areas"];
+    const listFields = ["implementation_steps", "files", "tests", "api_contracts", "acceptance_criteria", "verification", "repo_areas", "kill_criteria"];
     for (const field of listFields) {
       const value = task[field];
       if (!Array.isArray(value) || value.length === 0 || value.some((entry) => String(entry || "").trim() === "")) {
@@ -1731,6 +1770,9 @@ registerNodeType("agent.run_planner", {
         ].filter(Boolean).join("\n\n")}\n\n`
         : "\n") +
       `Your response MUST be a single fenced JSON block with shape { "tasks": [...] }.\n` +
+      `Each task object MUST include: task_key, title, description, implementation_steps, files, tests, api_contracts, acceptance_criteria, verification, repo_areas, impact, confidence, risk, estimated_effort, why_now, and kill_criteria.\n` +
+      `Use sprint_id and epic_id when the planned work belongs to a sprint or epic. Use parent_task_key and depends_on_task_keys to encode DAG/dependency order between generated tasks.\n` +
+      `Descriptions must be ticket-ready: describe the current problem, exact scope, implementation approach, and user-visible outcome in enough detail for an executor to work without rediscovering intent.\n` +
       `Do NOT include status updates, analysis notes, tool commentary, questions, or prose outside the JSON block.\n` +
       `The downstream system will parse your output as JSON — any extra text will cause task creation to fail.`;
     const promptText = basePrompt

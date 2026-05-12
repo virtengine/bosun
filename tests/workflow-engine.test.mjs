@@ -9897,6 +9897,39 @@ describe("WorkflowEngine trigger evaluation", () => {
     });
   });
 
+  it("evaluateTriggers dispatches a workflow only once when multiple task triggers match", async () => {
+    const wf = makeSimpleWorkflow(
+      [
+        {
+          id: "task-trigger-a",
+          type: "trigger.task_assigned",
+          label: "Task Assigned A",
+          config: { taskPattern: "dispatch" },
+        },
+        {
+          id: "task-trigger-b",
+          type: "trigger.task_assigned",
+          label: "Task Assigned B",
+          config: { taskPattern: "dispatch" },
+        },
+      ],
+      [],
+      { id: "task-assigned-dedup-wf", name: "Task Assigned Dedup Workflow" },
+    );
+    engine.save(wf);
+
+    const hits = await engine.evaluateTriggers("task.assigned", {
+      taskId: "task-123",
+      taskTitle: "Dispatch duplicate guard",
+    });
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      workflowId: "task-assigned-dedup-wf",
+      triggeredBy: "task-trigger-a",
+    });
+  });
+
   it("evaluateScheduleTriggers resolves templated schedule interval from workflow variables", async () => {
     const wf = makeSimpleWorkflow(
       [
@@ -15903,6 +15936,9 @@ it("agent.run_planner appends output requirements to explicit prompts and honors
   expect(sentPrompt).toContain("Analyze reliability gaps in the repo.");
   expect(sentPrompt).toContain("Generate exactly 10 new tasks.");
   expect(sentPrompt).toContain("single fenced JSON block");
+  expect(sentPrompt).toContain("task_key, title, description, implementation_steps, files, tests, api_contracts");
+  expect(sentPrompt).toContain("Use sprint_id and epic_id");
+  expect(sentPrompt).toContain("parent_task_key and depends_on_task_keys");
 });
 
 it("agent.run_planner appends planner feedback context from workflow data", async () => {
@@ -16131,14 +16167,22 @@ it("agent.run_planner fails immediately when planner dependencies are unavailabl
 
 function buildStrictPlannerPayload(taskOverrides = []) {
   const baseTasks = Array.from({ length: 8 }, (_, index) => ({
+    task_key: `workflow-task-${index + 1}`,
     title: `[m] fix(workflow): task ${index + 1}`,
     description: `Description ${index + 1}`,
+    implementation_steps: [`implement${index + 1}`],
+    files: [`workflow/file-${index + 1}.mjs`],
+    tests: [`npm test -- tests/workflow-engine.test.mjs -t task ${index + 1}`],
+    api_contracts: [`contract${index + 1}`],
     acceptance_criteria: [`ac${index + 1}`],
     verification: [`verify${index + 1}`],
     repo_areas: ["workflow"],
     impact: 0.8,
     confidence: 0.7,
     risk: "medium",
+    estimated_effort: "medium",
+    why_now: `why ${index + 1}`,
+    kill_criteria: [`kill${index + 1}`],
   }));
   for (const override of taskOverrides) {
     if (override && typeof override === "object" && Number.isInteger(override.index) && baseTasks[override.index]) {
@@ -16301,23 +16345,39 @@ it("action.materialize_planner_tasks rejects malformed planner tasks before crea
     output: JSON.stringify({
       tasks: [
         {
+          task_key: "valid-planned-task",
           title: "[m] feat(workflow): valid planned task",
           description: "Looks valid but should never be created because another task is malformed.",
+          implementation_steps: ["implement valid task"],
+          files: ["workflow/workflow-nodes/actions.mjs"],
+          tests: ["npm test -- tests/workflow-engine.test.mjs"],
+          api_contracts: ["valid task contract"],
           acceptance_criteria: ["ac1"],
           verification: ["v1"],
           repo_areas: ["workflow"],
           impact: 0.8,
           confidence: 0.7,
           risk: 0.2,
+          estimated_effort: "medium",
+          why_now: "validate strict planner behavior",
+          kill_criteria: ["invalid task blocks materialization"],
         },
         {
+          task_key: "malformed-planned-task",
           title: "[m] feat(workflow): malformed planned task",
           description: "Missing acceptance criteria",
+          implementation_steps: ["implement malformed task"],
+          files: ["workflow/workflow-nodes/actions.mjs"],
+          tests: ["npm test -- tests/workflow-engine.test.mjs"],
+          api_contracts: ["malformed task contract"],
           verification: ["v2"],
           repo_areas: ["workflow"],
           impact: 0.4,
           confidence: 0.5,
           risk: 0.2,
+          estimated_effort: "medium",
+          why_now: "validate strict planner behavior",
+          kill_criteria: ["missing acceptance criteria blocks materialization"],
         },
       ],
     }),
@@ -16759,7 +16819,7 @@ it("action.materialize_planner_tasks emits workflow events for success and dupli
       "```json",
       "{",
       '  "tasks": [',
-      '    { "title": "[m] feat(workflow): create tasks", "description": "Sensitive description should not leak", "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"] },',
+      '    { "task_key": "create-tasks", "title": "[m] feat(workflow): create tasks", "description": "Sensitive description should not leak", "implementation_steps": ["wire materializer"], "files": ["workflow/workflow-nodes/actions.mjs"], "tests": ["npm test -- tests/workflow-engine.test.mjs"], "api_contracts": ["planner tasks include graph metadata"], "acceptance_criteria": ["ac1"], "verification": ["v1"], "repo_areas": ["workflow"], "sprint_id": "sprint-runtime", "epic_id": "epic-planner", "depends_on_task_ids": ["task-parent"] },',
       '    { "title": "[m] feat(workflow): duplicate title", "description": "Hidden duplicate description" }',
       "  ]",
       "}",
@@ -16796,6 +16856,49 @@ it("action.materialize_planner_tasks emits workflow events for success and dupli
   });
 
   expect(result.success).toBe(true);
+  expect(createTask).toHaveBeenCalledTimes(1);
+  expect(createTask).toHaveBeenCalledWith("proj-123", expect.objectContaining({
+    title: "[m] feat(workflow): create tasks",
+    description: [
+      "Sensitive description should not leak",
+      "",
+      "## Implementation Steps",
+      "- wire materializer",
+      "",
+      "## Files",
+      "- workflow/workflow-nodes/actions.mjs",
+      "",
+      "## Tests",
+      "- npm test -- tests/workflow-engine.test.mjs",
+      "",
+      "## API Contracts",
+      "- planner tasks include graph metadata",
+      "",
+      "## Acceptance Criteria",
+      "- ac1",
+      "",
+      "## Verification",
+      "- v1",
+    ].join("\n"),
+    status: "todo",
+    sprintId: "sprint-runtime",
+    epicId: "epic-planner",
+    dependencyTaskIds: ["task-parent"],
+    dependsOn: ["task-parent"],
+    repo_areas: ["workflow"],
+    meta: expect.objectContaining({
+      repo_areas: ["workflow"],
+      planner: expect.objectContaining({
+        repo_areas: ["workflow"],
+        implementation_steps: ["wire materializer"],
+        files: ["workflow/workflow-nodes/actions.mjs"],
+        tests: ["npm test -- tests/workflow-engine.test.mjs"],
+        api_contracts: ["planner tasks include graph metadata"],
+        sprint_id: "sprint-runtime",
+        epic_id: "epic-planner",
+      }),
+    }),
+  }));
   expect(workflowEvents.length).toBeGreaterThan(0);
 });
 
