@@ -1,6 +1,6 @@
 {
   "name": "bosun",
-  "version": "0.43.0",
+  "version": "0.43.1",
   "description": "Bosun Autonomous Engineering — manages AI agent executors with failover, extremely powerful workflow builder, and a massive amount of included default workflow templates for autonomous engineering, creates PRs via GitHub/Jira APIs, and sends Telegram notifications. Supports N executors with weighted distribution, multi-repo projects, and auto-setup.",
   "type": "module",
   "license": "Apache-2.0",
