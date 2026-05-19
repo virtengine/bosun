@@ -550,7 +550,7 @@
     "@toast-ui/editor": "^3.2.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "ajv": "^8.18.0",
-    "dompurify": "^3.4.2",
+    "dompurify": "^3.4.3",
     "es-module-shims": "^2.8.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.1",
