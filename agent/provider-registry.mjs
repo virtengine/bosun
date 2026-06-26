@@ -62,6 +62,7 @@ const NATIVE_PROVIDER_ADAPTERS = new Map([
   ["anthropic-messages", "anthropic-native"],
   ["gemini-generate-content", "gemini-native"],
   ["openrouter", "openai-native"],
+  ["requesty", "openai-native"],
   ["perplexity", "openai-native"],
   ["deepinfra", "openai-native"],
   ["groq", "openai-native"],
@@ -95,7 +96,7 @@ export function normalizeProviderAdapterName(value) {
   if (normalized === "github-copilot") return "copilot-sdk";
   if (normalized === "claude_code" || normalized === "claude-code") return "claude-sdk";
   if (normalized === "google-gemini" || normalized === "gemini" || normalized === "gemini-sdk") return "gemini-sdk";
-  if (["openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius"].includes(normalized)) return "openai-native";
+  if (["openrouter", "requesty", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius"].includes(normalized)) return "openai-native";
   if (normalized === "open-code" || normalized === "opencode" || normalized === "opencode-sdk") return "opencode-sdk";
   if (normalized === "copilot" || normalized === "copilot-sdk") return "copilot-sdk";
   if (normalized === "claude" || normalized === "claude-sdk" || normalized === "anthropic") return "claude-sdk";
