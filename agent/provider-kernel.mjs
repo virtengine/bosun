@@ -49,6 +49,9 @@ function resolveProviderConfigAliases(config = {}) {
     openrouter: providers.openrouter && typeof providers.openrouter === "object"
       ? providers.openrouter
       : {},
+    requesty: providers.requesty && typeof providers.requesty === "object"
+      ? providers.requesty
+      : {},
     perplexity: providers.perplexity && typeof providers.perplexity === "object"
       ? providers.perplexity
       : {},
@@ -120,6 +123,9 @@ export function buildProviderKernelSettings(config = {}) {
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENROUTER_ENABLED", providers.openrouter?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENROUTER_MODEL", providers.openrouter?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_OPENROUTER_BASE_URL", providers.openrouter?.baseUrl || providers.openrouter?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_REQUESTY_ENABLED", providers.requesty?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_REQUESTY_MODEL", providers.requesty?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_REQUESTY_BASE_URL", providers.requesty?.baseUrl || providers.requesty?.endpoint);
   setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_ENABLED", providers.perplexity?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_MODEL", providers.perplexity?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_BASE_URL", providers.perplexity?.baseUrl || providers.perplexity?.endpoint);
@@ -166,6 +172,7 @@ function resolveKernelProviderSettings(config = {}, providerId = "") {
     ollama: providers.ollama,
     "copilot-oauth": providers.copilot,
     openrouter: providers.openrouter,
+    requesty: providers.requesty,
     perplexity: providers.perplexity,
     deepinfra: providers.deepinfra,
     groq: providers.groq,

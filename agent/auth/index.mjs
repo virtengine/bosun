@@ -17,6 +17,7 @@ import { OLLAMA_AUTH_ADAPTER } from "./ollama.mjs";
 import { OPENAI_API_KEY_AUTH_ADAPTER } from "./openai-api-key.mjs";
 import { OPENAI_COMPATIBLE_AUTH_ADAPTER } from "./openai-compatible.mjs";
 import { OPENROUTER_AUTH_ADAPTER } from "./openrouter.mjs";
+import { REQUESTY_AUTH_ADAPTER } from "./requesty.mjs";
 import { PERPLEXITY_AUTH_ADAPTER } from "./perplexity.mjs";
 import { SAMBANOVA_AUTH_ADAPTER } from "./sambanova.mjs";
 import { TOGETHER_AUTH_ADAPTER } from "./together.mjs";
@@ -38,6 +39,7 @@ export {
   OPENAI_API_KEY_AUTH_ADAPTER,
   OPENAI_COMPATIBLE_AUTH_ADAPTER,
   OPENROUTER_AUTH_ADAPTER,
+  REQUESTY_AUTH_ADAPTER,
   PERPLEXITY_AUTH_ADAPTER,
   SAMBANOVA_AUTH_ADAPTER,
   TOGETHER_AUTH_ADAPTER,
@@ -55,6 +57,7 @@ const AUTH_ADAPTER_BY_PROVIDER_ID = Object.freeze({
   "copilot-oauth": COPILOT_OAUTH_AUTH_ADAPTER,
   "gemini-generate-content": GEMINI_API_KEY_AUTH_ADAPTER,
   openrouter: OPENROUTER_AUTH_ADAPTER,
+  requesty: REQUESTY_AUTH_ADAPTER,
   perplexity: PERPLEXITY_AUTH_ADAPTER,
   deepinfra: DEEPINFRA_AUTH_ADAPTER,
   groq: GROQ_AUTH_ADAPTER,
