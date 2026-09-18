@@ -22,6 +22,7 @@ describe("provider driver modules", () => {
       "copilot-oauth",
       "gemini-generate-content",
       "openrouter",
+      "requesty",
       "perplexity",
       "deepinfra",
       "groq",
@@ -32,7 +33,7 @@ describe("provider driver modules", () => {
       "sambanova",
       "nebius",
     ]);
-    expect(listBuiltInProviderDrivers()).toHaveLength(19);
+    expect(listBuiltInProviderDrivers()).toHaveLength(20);
   });
 
   it("keeps auth adapter coverage aligned with the authoritative provider registry set", () => {

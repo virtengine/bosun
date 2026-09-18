@@ -83,6 +83,14 @@ const PROVIDER_CREDENTIAL_BLUEPRINTS = Object.freeze({
       templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
     },
   },
+  requesty: {
+    apiKey: {
+      label: "Requesty API Key",
+      envKeys: ["REQUESTY_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
   perplexity: {
     apiKey: {
       label: "Perplexity API Key",

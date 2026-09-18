@@ -14,6 +14,7 @@ import OPENAI_CODEX_SUBSCRIPTION_PROVIDER from "./openai-codex-subscription.mjs"
 import OPENAI_COMPATIBLE_PROVIDER from "./openai-compatible.mjs";
 import OPENAI_RESPONSES_PROVIDER from "./openai-responses.mjs";
 import OPENROUTER_PROVIDER from "./openrouter.mjs";
+import REQUESTY_PROVIDER from "./requesty.mjs";
 import PERPLEXITY_PROVIDER from "./perplexity.mjs";
 import SAMBANOVA_PROVIDER from "./sambanova.mjs";
 import TOGETHER_PROVIDER from "./together.mjs";
@@ -62,6 +63,7 @@ export {
   OPENAI_COMPATIBLE_PROVIDER,
   OPENAI_RESPONSES_PROVIDER,
   OPENROUTER_PROVIDER,
+  REQUESTY_PROVIDER,
   PERPLEXITY_PROVIDER,
   SAMBANOVA_PROVIDER,
   TOGETHER_PROVIDER,
@@ -79,6 +81,7 @@ export const BUILTIN_PROVIDER_DRIVERS = Object.freeze([
   COPILOT_OAUTH_PROVIDER,
   GEMINI_GENERATE_CONTENT_PROVIDER,
   OPENROUTER_PROVIDER,
+  REQUESTY_PROVIDER,
   PERPLEXITY_PROVIDER,
   DEEPINFRA_PROVIDER,
   GROQ_PROVIDER,
@@ -108,6 +111,8 @@ const LEGACY_PROVIDER_ALIASES = Object.freeze({
   "google-gemini": "gemini-generate-content",
   openrouter: "openrouter",
   "openrouter-api": "openrouter",
+  requesty: "requesty",
+  "requesty-api": "requesty",
   perplexity: "perplexity",
   pplx: "perplexity",
   deepinfra: "deepinfra",

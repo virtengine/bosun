@@ -176,7 +176,7 @@
               "name": { "type": "string" },
               "providerId": {
                 "type": "string",
-                "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"]
+                "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "requesty", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"]
               },
               "enabled": { "type": "boolean", "default": true },
               "weight": {
@@ -1432,7 +1432,7 @@
       "properties": {
         "defaultProvider": {
           "type": "string",
-          "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"],
+          "enum": ["openai-responses", "openai-codex-subscription", "azure-openai-responses", "anthropic-messages", "claude-subscription-shim", "openai-compatible", "ollama", "copilot-oauth", "openrouter", "requesty", "perplexity", "deepinfra", "groq", "together", "xai", "fireworks", "cerebras", "sambanova", "nebius", "gemini-generate-content"],
           "default": "openai-responses"
         },
         "defaultModel": {
@@ -1530,6 +1530,15 @@
           }
         },
         "openrouter": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "defaultModel": { "type": "string" },
+            "baseUrl": { "type": "string" }
+          }
+        },
+        "requesty": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
