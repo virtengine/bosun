@@ -449,14 +449,19 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ESM vendor proxy for MUI/Emotion
+  // ESM vendor: prefer the committed ui/vendor/ bundle first (offline and
+  // deterministic — same resolution order as the production ui-server).
+  // The esm.sh proxy is only a fallback for names with no bundled file.
   if (pathname.startsWith("/vendor/")) {
     const name = pathname.replace(/^\/vendor\//, "");
-    if (ESM_CDN[name]) {
+    const bundledPath = resolve(uiRoot, "vendor", name);
+    const hasBundled = bundledPath.startsWith(uiRoot) && existsSync(bundledPath);
+    if (!hasBundled && ESM_CDN[name]) {
       const served = await serveEsmVendor(res, name);
       if (served) return;
       // Fall through to static file if proxy fails
     }
+    // Bundled file (or proxy miss) falls through to the static-file handler.
   }
 
   if (LOCAL_ESM_PATH_RE.test(pathname)) {

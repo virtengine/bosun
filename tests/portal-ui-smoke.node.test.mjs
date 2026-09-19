@@ -6,17 +6,23 @@ import { createServer } from "node:net";
 import { resolve } from "node:path";
 import test from "node:test";
 import { chromium } from "playwright";
+import { testTimeout } from "./timeout-helper.mjs";
 
 const repoRoot = process.cwd();
 const serverEntry = resolve(repoRoot, "server", "playwright-ui-server.mjs");
 const routerSource = readFileSync(resolve(repoRoot, "ui", "modules", "router.js"), "utf8");
 const requestedEnvPort = process.env.PLAYWRIGHT_UI_PORT ? Number(process.env.PLAYWRIGHT_UI_PORT) : undefined;
 const externalBlockPattern = /(telegram\.org|umami\.is|cloud\.umami|fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.jsdelivr\.net|unpkg\.com)/;
-const ROUTE_NAVIGATION_TIMEOUT_MS = 8000;
-const UI_SETTLE_TIMEOUT_MS = 1000;
+// Linux-baseline timeouts: testTimeout() applies the platform multiplier
+// (see tests/AGENTS.md anti-flake conventions) so CI and Windows runners
+// share the same baseline instead of hard-coded values.
+const ROUTE_NAVIGATION_TIMEOUT_MS = testTimeout(8000);
+const UI_SETTLE_TIMEOUT_MS = testTimeout(1000);
 const ROUTE_SETTLE_EXTRA_MS = 150;
-const ROUTE_ASSERT_TIMEOUT_MS = 12000;
-const UI_QUERY_TIMEOUT_MS = 250;
+const ROUTE_BUDGET_TIMEOUT_MS = testTimeout(60000);
+const UI_QUERY_TIMEOUT_MS = testTimeout(250);
+const APP_MODULE_READY_TIMEOUT_MS = testTimeout(30000);
+const DAG_LOCATOR_TIMEOUT_MS = testTimeout(30000);
 const REPRESENTATIVE_SMOKE_PATHS = [
   "/tasks",
   "/workflows",
@@ -173,6 +179,21 @@ async function waitForUiSettled(page, extraMs = ROUTE_SETTLE_EXTRA_MS) {
   await page.waitForTimeout(extraMs);
 }
 
+// Wait for the production boot path (index.html dynamic import of /app.js)
+// to resolve instead of asserting immediately after the short settle window.
+// index.html records the outcome on window.__bosunAppModuleState, so a slow
+// module graph (cold vendor fetch, loaded CI runner) waits instead of flaking.
+async function waitForAppModule(page, timeoutMs = APP_MODULE_READY_TIMEOUT_MS) {
+  await page.waitForFunction(
+    () => {
+      const state = window.__bosunAppModuleState;
+      return Boolean(state && (state.loaded || state.failed));
+    },
+    { timeout: timeoutMs },
+  ).catch(() => {});
+  return await page.evaluate(() => window.__bosunAppModuleState || {}).catch(() => ({}));
+}
+
 async function withTimeout(label, timeoutMs, work) {
   let timer = null;
   try {
@@ -190,8 +211,10 @@ async function withTimeout(label, timeoutMs, work) {
 }
 
 async function assertTasksDagViewActivated(page) {
-  await page.getByRole("button", { name: /DAG/i }).click();
-  await page.waitForTimeout(1000);
+  const dagButton = page.getByRole("button", { name: /DAG/i });
+  await dagButton.waitFor({ state: "visible", timeout: DAG_LOCATOR_TIMEOUT_MS });
+  await dagButton.click({ timeout: DAG_LOCATOR_TIMEOUT_MS });
+  await page.waitForTimeout(testTimeout(1000));
 
   const bodyText = await page.locator("body").textContent().catch(() => "");
   const text = String(bodyText || "");
@@ -214,13 +237,20 @@ async function verifyRouteLoads(browser, route, baseUrl) {
   page.__smokeBaseUrl = baseUrl;
   const errors = createErrorCollectors(page);
   try {
-    await withTimeout(`route ${route.path}`, ROUTE_ASSERT_TIMEOUT_MS, async () => {
+    await withTimeout(`route ${route.path}`, ROUTE_BUDGET_TIMEOUT_MS, async () => {
       await blockExternals(page);
       await page.goto(`${baseUrl}${route.path}`, {
         waitUntil: "domcontentloaded",
         timeout: ROUTE_NAVIGATION_TIMEOUT_MS,
       });
       await waitForUiSettled(page);
+
+      const moduleState = await waitForAppModule(page);
+      assert.equal(
+        moduleState.loaded === true,
+        true,
+        `App module failed to load on ${route.path} (state=${JSON.stringify(moduleState)}):\n${String((moduleState && moduleState.error) || "")}`,
+      );
 
       const boot = await readBootResult(page);
       const tabErrorText = await readTabErrorText(page);
@@ -303,6 +333,10 @@ async function startPortalServer() {
 
   try {
     await waitForHttpReady(baseUrl);
+    // Prove the server serves the app entry before the first navigation, not
+    // just that the port is open — guards against the readiness race where
+    // the page boots while /app.js (or its vendor graph) is not yet servable.
+    await waitForHttpReady(`${baseUrl}/app.js`);
   } catch (error) {
     serverProcess.kill();
     await waitForChildExit(serverProcess, 3000);
@@ -332,7 +366,7 @@ async function withPortalServer(run) {
   }
 }
 
-test("boots a bounded representative portal route set without JS load failures", { timeout: 120000 }, async () => {
+test("boots a bounded representative portal route set without JS load failures", { timeout: testTimeout(300000) }, async () => {
   await withPortalServer(async ({ baseUrl }) => {
     debugLog("test:boot-routes:start");
     const browser = await chromium.launch({ headless: true });
@@ -347,7 +381,7 @@ test("boots a bounded representative portal route set without JS load failures",
   });
 });
 
-test("catches Tasks DAG subview failures after the route boots", { timeout: 60000 }, async () => {
+test("catches Tasks DAG subview failures after the route boots", { timeout: testTimeout(180000) }, async () => {
   await withPortalServer(async ({ baseUrl }) => {
     debugLog("test:dag:start");
     const browser = await chromium.launch({ headless: true });
@@ -362,6 +396,13 @@ test("catches Tasks DAG subview failures after the route boots", { timeout: 6000
       });
       debugLog("test:dag:tasks-loaded");
       await waitForUiSettled(page);
+
+      const moduleState = await waitForAppModule(page);
+      assert.equal(
+        moduleState.loaded === true,
+        true,
+        `App module failed to load on /tasks (state=${JSON.stringify(moduleState)}):\n${String((moduleState && moduleState.error) || "")}`,
+      );
 
       const boot = await readBootResult(page);
       assert.equal(boot.bootFailed, false, `Boot loader surfaced an error on /tasks:\n${boot.bootText}`);
@@ -383,7 +424,7 @@ test("catches Tasks DAG subview failures after the route boots", { timeout: 6000
   });
 });
 
-test("exposes isolated browser-worker and multimodal fallback APIs for Playwright validation", { timeout: 30000 }, async () => {
+test("exposes isolated browser-worker and multimodal fallback APIs for Playwright validation", { timeout: testTimeout(30000) }, async () => {
   await withPortalServer(async ({ baseUrl }) => {
     const createResponse = await fetch(`${baseUrl}/api/playwright/browser-workers`, {
       method: "POST",
