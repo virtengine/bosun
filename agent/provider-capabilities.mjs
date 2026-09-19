@@ -33,6 +33,8 @@ const LEGACY_PROVIDER_MAP = Object.freeze({
   "google-gemini": "gemini-generate-content",
   openrouter: "openrouter",
   "openrouter-api": "openrouter",
+  requesty: "requesty",
+  "requesty-api": "requesty",
   perplexity: "perplexity",
   pplx: "perplexity",
   deepinfra: "deepinfra",
