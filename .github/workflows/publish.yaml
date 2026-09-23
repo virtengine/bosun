@@ -4,6 +4,11 @@
 #   1. Push to main that changes package.json or source files
 #   2. Manual dispatch with optional version bump / force flag
 #
+# A successful publish also creates the matching git tag (`vX.Y.Z`) and GitHub
+# release, so the npm version, the git tag, and the GitHub release record can
+# never drift apart. Both steps are idempotent: an existing tag or release is
+# left untouched.
+#
 # Prerequisites (one-time setup):
 #   Configure Trusted Publisher on npmjs.com:
 #     Package → Settings → Publishing Access → Add Trusted Publisher
@@ -97,6 +102,11 @@ jobs:
     if: needs.check.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
     environment: npm-publish
+    # Job-level permissions replace the workflow-level block, so both grants
+    # have to be repeated here.
+    permissions:
+      contents: write # push the release tag and create the GitHub release
+      id-token: write # OIDC trusted publishing + npm provenance
     steps:
       - uses: actions/checkout@v4
 
@@ -143,6 +153,33 @@ jobs:
             echo ":alert: Registry shows $PUBLISHED, expected $EXPECTED (may still be propagating)"
           fi
 
+      - name: Tag release and create GitHub release
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check.outputs.local-version }}"
+          TAG="v$VERSION"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo ":play: Tag $TAG already exists — leaving it untouched."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "bosun $VERSION"
+            git push origin "refs/tags/$TAG"
+            echo ":check: Created and pushed tag $TAG."
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo ":play: Release $TAG already exists — leaving it untouched."
+          else
+            gh release create "$TAG" \
+              --title "bosun $TAG" \
+              --generate-notes
+            echo ":check: Created GitHub release $TAG."
+          fi
+
       - name: Summary
         run: |
           echo "## :box: Bosun Publish" >> "$GITHUB_STEP_SUMMARY"
@@ -150,6 +187,7 @@ jobs:
           echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Package | \`bosun\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Version | \`${{ needs.check.outputs.local-version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | \`v${{ needs.check.outputs.local-version }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Previous | \`${{ needs.check.outputs.registry-version }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Dry Run | \`${{ inputs.dry-run || 'false' }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Trigger | \`${{ github.event_name }}\` |" >> "$GITHUB_STEP_SUMMARY"

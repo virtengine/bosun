@@ -322,6 +322,53 @@ bosun --where
 
 ## Troubleshooting
 
+### `bosun` fails with `Cannot find module .../node_modules/bosun/cli.mjs`
+
+The global install is intact — `npm install -g bosun` wrote a complete package to disk. What
+failed is **PATH resolution**. The `bosun` command on your PATH is an npm shim: a small
+script that launches `<prefix>/node_modules/bosun/cli.mjs`. If the PATH entry the shim was
+found through is not an absolute path, the shim resolves `cli.mjs` relative to the wrong
+root and Node reports `MODULE_NOT_FOUND`.
+
+The usual cause is a Windows-style path written into a bash startup file without escaping.
+Bash splits `PATH` on `:`, so the drive letter is cut off:
+
+```bash
+export PATH='C:\nvm4w\nodejs':$PATH   # WRONG
+```
+
+This produces two entries — `C` and `\nvm4w\nodejs`. The second is a *relative* path, so
+under Git Bash it resolves against the shell root (`C:\Program Files\Git`) and Node looks for
+`C:\Program Files\Git\nvm4w\nodejs\node_modules\bosun\cli.mjs`, which does not exist.
+
+Diagnose — any entry printed that is not an absolute path is the bug:
+
+```bash
+which bosun        # Git Bash / macOS / Linux
+where bosun        # Windows cmd
+npm prefix -g      # the real global prefix
+```
+
+Fix it at the source:
+
+- **Windows environment variables** — every entry must be a full path, e.g. `C:\nvm4w\nodejs`.
+  Repair under Settings → System → Environment Variables, then open a **new** shell.
+- **bash startup files** (`~/.bashrc`, `~/.bash_profile`) — use the MSYS form with forward
+  slashes so the drive letter cannot be split:
+
+```bash
+export PATH='/c/nvm4w/nodejs':$PATH
+```
+
+Then verify:
+
+```bash
+bosun --version    # prints the installed version
+bosun --doctor     # config and environment health check
+```
+
+If the shim itself is stale, regenerate it with `npm install -g bosun`.
+
 ### Port already in use
 
 ```bash
