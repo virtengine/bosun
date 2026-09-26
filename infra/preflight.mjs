@@ -8,7 +8,7 @@ import { inspectWorktreeRuntimeSetup } from "../workspace/worktree-setup.mjs";
 const isWindows = process.platform === "win32";
 const MIN_FREE_GB = Number(process.env.BOSUN_MIN_FREE_GB || "10");
 const MIN_FREE_BYTES = MIN_FREE_GB * 1024 * 1024 * 1024;
-const GIT_EDITOR_FIX_COMMAND = "node git-editor-fix.mjs";
+const GIT_EDITOR_FIX_COMMAND = "node git/git-editor-fix.mjs";
 
 function runCommand(command, args, options = {}) {
   try {

@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Root package (the published `bosun` npm package + CLI).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      root-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Electron desktop shell. It has its own manifest/lockfile and is not a
+  # workspace member, so without this entry Dependabot only ever surfaces it
+  # as an incidental "across N directories" group bump.
+  - package-ecosystem: "npm"
+    directory: "/desktop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      desktop-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
