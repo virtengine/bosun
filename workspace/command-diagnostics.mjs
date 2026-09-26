@@ -151,6 +151,41 @@ function normalizeCommandSignature(command = "", args = []) {
   return commandLine.toLowerCase();
 }
 
+const COMPACTED_LIVE_HEADER_REGEX = /\[live-compacted\s+([a-z][a-z-]*)\s*\]/i;
+const TEST_FILE_ANCHOR_REGEX =
+  /(?:^|[\s"'`([{<])(?:[A-Za-z]:)?[^\s"'`)\]}>]*[\\/][^\s"'`)\]}>]*\.(?:test|spec)\.[A-Za-z0-9]+/i;
+const TEST_RUNNER_COMMAND_REGEX = /\b(?:vitest|jest|pytest|mocha|ava|ctest|xunit|nunit|unittest)\b/i;
+const BARE_RERUN_BY_RUNNER = { vitest: "vitest run", jest: "jest" };
+
+function hasTestFileAnchor(text = "") {
+  return TEST_FILE_ANCHOR_REGEX.test(String(text || ""));
+}
+
+/**
+ * Detect a compacted live-excerpt payload that still belongs to the test/vitest
+ * family. `resolveCommandKind` normally keys off a `FAIL <file>` line or a
+ * `Test Files ... failed` summary, but both are *selected lines*: once the
+ * excerpt is trimmed they are gone, leaving only the `[Live-compacted test]`
+ * header (and possibly a retained `.test.`/`.spec.` anchor). Without this the
+ * family falls through to build/build and `suggestedRerun` becomes null.
+ */
+function isCompactedTestExcerpt({ lower = "", commandLine = "", output = "" } = {}) {
+  const headerMatch = COMPACTED_LIVE_HEADER_REGEX.exec(String(lower || ""));
+  const headerFamily = headerMatch ? headerMatch[1] : null;
+  // The header was derived from the raw command by the compaction pass, so it
+  // is authoritative on its own — the anchor may have been trimmed away.
+  if (headerFamily === "test") return true;
+  // An explicit non-test compacted family (build, search, git, ...) is trusted.
+  if (headerFamily) return false;
+  if (!hasTestFileAnchor(`${commandLine}\n${output}`)) return false;
+  return TEST_RUNNER_COMMAND_REGEX.test(String(commandLine || ""));
+}
+
+/** True when the text is a `[Live-compacted <family>]` excerpt from an earlier pass. */
+function isCompactedExcerpt(text = "") {
+  return COMPACTED_LIVE_HEADER_REGEX.test(String(text || ""));
+}
+
 function resolveCommandKind(commandLine = "", output = "") {
   const lower = `${commandLine}\n${output}`.toLowerCase();
   if (/\bdotnet\s+test\b/.test(lower)) return { family: "build", runner: "dotnet-test" };
@@ -174,6 +209,12 @@ function resolveCommandKind(commandLine = "", output = "") {
   const hasPytestCollection = lower.includes("collected ") && lower.includes(" items");
   if (hasPytestFailureLine || hasPytestCollection) {
     return { family: "test", runner: "pytest" };
+  }
+  // A compacted live excerpt for a test-family command loses the FAIL / summary
+  // lines that the checks above rely on, so fall back to the excerpt header and
+  // any retained .test./.spec. anchor before dropping through to build/generic.
+  if (isCompactedTestExcerpt({ lower, commandLine, output })) {
+    return { family: "test", runner: "vitest" };
   }
   if (/\b(?:npm|pnpm|yarn|bun|pip(?:3)?|poetry|composer|bundle)\b/.test(lower)
     && /\b(?:install|add|remove|uninstall|update|upgrade|audit|outdated|dedupe|prune|ci|sync|restore|publish)\b/.test(lower)) {
@@ -538,7 +579,13 @@ export async function analyzeCommandDiagnostic(payload = {}) {
     if (delta.introduced.length) deltaParts.push(`${delta.introduced.length} new`);
   }
   const deltaSummary = deltaParts.join(", ");
-  const suggestedRerun = parsed.rerunCommand || null;
+  let suggestedRerun = parsed.rerunCommand || null;
+  // A compacted test excerpt can lose the FAIL / summary lines the vitest parser
+  // keys off, leaving no concrete target to rerun. Still surface the bare runner
+  // command so a failed test run stays actionable instead of reporting nothing.
+  if (!suggestedRerun && exitCode !== 0 && BARE_RERUN_BY_RUNNER[runner] && isCompactedExcerpt(text)) {
+    suggestedRerun = BARE_RERUN_BY_RUNNER[runner];
+  }
   const hint = deriveHint({ family, runner, text, exitCode, insufficientSignal });
 
   state.records[commandKey] = {

@@ -1368,6 +1368,32 @@ describe("live tool compaction", () => {
     expect(compacted.text).toContain("bosun --tool-log");
   });
 
+  it("keeps vitest rerun guidance when a failed test payload is compacted again", async () => {
+    const cacheModule = await import("../workspace/context-cache.mjs");
+    // The payload a second compaction pass actually sees: the earlier pass already
+    // replaced the raw child output with the `[Live-compacted test]` excerpt, so the
+    // `FAIL <file>` line and the `Test Files ... failed` summary no longer reach the
+    // classifier. It must still yield a `vitest run` rerun hint.
+    const compactedAgain = await cacheModule.compactCommandOutputPayload({
+      command: 'node -e "process.exit(1)"',
+      output: [
+        '[Live-compacted test] node -e "process.exit(1)" -> 223 lines / 6.6K chars, saved ~71% | Full output: bosun --tool-log 123456',
+        "",
+        "Highlights: 1 error line; 2 file or match lines",
+        "",
+        "Top files: tests/runtime/example.test.ts",
+        "",
+        "Selected lines:",
+        ...Array.from({ length: 120 }, (_, i) => `ok helper-${i} ${"x".repeat(16)}`),
+      ].join("\n"),
+      exitCode: 1,
+    });
+
+    expect(compactedAgain.commandDiagnostics?.runner).toBe("vitest");
+    expect(compactedAgain.commandDiagnostics?.suggestedRerun).toContain("vitest run");
+    expect(compactedAgain.text).toContain("Suggested rerun: vitest run");
+  });
+
   it("tracks deltas across repeated similar test runs and surfaces rerun guidance", async () => {
     const cacheModule = await import("../workspace/context-cache.mjs");
     const first = await cacheModule.compactCommandOutputPayload({
