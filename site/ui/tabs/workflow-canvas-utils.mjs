@@ -1,7 +1,7 @@
 import {
   buildWorkflowDraftFlowchart,
   normalizeWorkflowFlowchartMetadata,
-} from "../../lib/workflow-flowchart-utils.mjs";
+} from "../../../lib/workflow-flowchart-utils.mjs";
 
 function deepClone(value) {
   try {

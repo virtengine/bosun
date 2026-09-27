@@ -9,7 +9,7 @@
  *               | { id: number, ok: false, error: string }
  */
 
-import { buildSessionInsights } from "../../lib/session-insights.mjs";
+import { buildSessionInsights } from "../../../lib/session-insights.mjs";
 
 self.onmessage = (event) => {
   const data = event?.data || {};
