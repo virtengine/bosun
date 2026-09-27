@@ -7,7 +7,30 @@
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="color-scheme" content="dark light" />
   <title>Bosun — Task Orchestrator</title>
-  <link rel="icon" href="/favicon.png" type="image/png" />
+  <!-- Establish the shell's mount point BEFORE any stylesheet, import map, or
+       module is resolved, so the shell works at any mount path:
+         - served from the domain root by ui-server (including SPA deep links
+           like /tasks/123, where the document path is NOT the shell directory)
+         - published under /ui/ as static files on GitHub Pages
+       ui-server injects window.__BOSUN_UI_BASE__; without it we fall back to
+       this document's own directory, which is correct for the static host. -->
+  <script>
+    (function () {
+      var hint = window.__BOSUN_UI_BASE__;
+      var base;
+      if (hint) {
+        base = new URL(hint, window.location.origin).href;
+      } else {
+        var path = window.location.pathname;
+        base = new URL(path.replace(/[^/]*$/, ""), window.location.origin).href;
+      }
+      if (!/[\/]$/.test(base)) base += "/";
+      var el = document.createElement("base");
+      el.setAttribute("href", base);
+      document.head.insertBefore(el, document.head.firstChild);
+    })();
+  </script>
+  <link rel="icon" href="favicon.png" type="image/png" />
   <script>
     (function () {
       var supportsImportMaps = !!(window.HTMLScriptElement
@@ -17,7 +40,7 @@
       if (supportsImportMaps) return;
       var shim = document.createElement("script");
       shim.async = true;
-      shim.src = "/vendor/es-module-shims.js";
+      shim.src = "./vendor/es-module-shims.js";
       shim.onerror = function () {
         var fallback = document.createElement("script");
         fallback.async = true;
@@ -42,15 +65,15 @@
     href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Sora:wght@300;400;500;600;700&display=swap"
     rel="stylesheet" />
   <!-- Critical CSS: loaded as parallel <link> tags instead of @import waterfall -->
-  <link rel="stylesheet" href="/styles/variables.css" />
-  <link rel="stylesheet" href="/styles/base.css" />
-  <link rel="stylesheet" href="/styles/layout.css" />
-  <link rel="stylesheet" href="/styles/components.css" />
-  <link rel="stylesheet" href="/styles/animations.css" />
-  <link rel="stylesheet" href="/styles/workspace-switcher.css" />
-  <link rel="stylesheet" href="/styles.css" />
-  <link rel="stylesheet" href="/styles/kanban.css" />
-  <link rel="stylesheet" href="/styles/sessions.css" />
+  <link rel="stylesheet" href="styles/variables.css" />
+  <link rel="stylesheet" href="styles/base.css" />
+  <link rel="stylesheet" href="styles/layout.css" />
+  <link rel="stylesheet" href="styles/components.css" />
+  <link rel="stylesheet" href="styles/animations.css" />
+  <link rel="stylesheet" href="styles/workspace-switcher.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles/kanban.css" />
+  <link rel="stylesheet" href="styles/sessions.css" />
   <!-- Apply stored colour theme before paint to prevent flash -->
   <script>
     try {
@@ -64,45 +87,48 @@
     } catch (e) { }
   </script>
   <!-- Import map: ensures all modules share a single Preact instance.
-       Primary source: /vendor/ (served from local node_modules — works offline/LAN).
+       Primary source: ./vendor/ — bundled in ui/vendor/ and mirrored into
+       site/ui/vendor/, so the shell is mount-path independent (works served
+       from the domain root by ui-server AND published under /ui/ on Pages).
+       Relative specifiers are resolved against this document's base URL.
        If a vendor file is missing (first run before npm install), the server
        transparently redirects to esm.sh. The importmap-fallback below is a
        last-resort CDN backup if the whole server-side vendor route fails. -->
   <script type="importmap">
   {
     "imports": {
-      "preact":                  "/vendor/preact.js",
-      "preact/hooks":            "/vendor/preact-hooks.js",
-      "preact/compat":           "/vendor/preact-compat.js",
-      "htm":                     "/vendor/htm.js",
-      "@preact/signals-core":    "/vendor/preact-signals-core.js",
-      "@preact/signals":         "/vendor/preact-signals.js",
-      "react":                   "/vendor/preact-compat.js",
-      "react-dom":               "/vendor/preact-compat.js",
-      "react-dom/client":        "/vendor/preact-compat.js",
-      "react/jsx-runtime":       "/vendor/preact-jsx-runtime.js",
-      "@mui/material":           "/vendor/mui-material.js",
-      "@emotion/react":          "/vendor/emotion-react.js",
-      "@emotion/styled":         "/vendor/emotion-styled.js"
+      "preact":                  "./vendor/preact.js",
+      "preact/hooks":            "./vendor/preact-hooks.js",
+      "preact/compat":           "./vendor/preact-compat.js",
+      "htm":                     "./vendor/htm.js",
+      "@preact/signals-core":    "./vendor/preact-signals-core.js",
+      "@preact/signals":         "./vendor/preact-signals.js",
+      "react":                   "./vendor/preact-compat.js",
+      "react-dom":               "./vendor/preact-compat.js",
+      "react-dom/client":        "./vendor/preact-compat.js",
+      "react/jsx-runtime":       "./vendor/preact-jsx-runtime.js",
+      "@mui/material":           "./vendor/mui-material.js",
+      "@emotion/react":          "./vendor/emotion-react.js",
+      "@emotion/styled":         "./vendor/emotion-styled.js"
     }
   }
   </script>
   <script type="application/json" id="importmap-shim-data">
   {
     "imports": {
-      "preact":                  "/vendor/preact.js",
-      "preact/hooks":            "/vendor/preact-hooks.js",
-      "preact/compat":           "/vendor/preact-compat.js",
-      "htm":                     "/vendor/htm.js",
-      "@preact/signals-core":    "/vendor/preact-signals-core.js",
-      "@preact/signals":         "/vendor/preact-signals.js",
-      "react":                   "/vendor/preact-compat.js",
-      "react-dom":               "/vendor/preact-compat.js",
-      "react-dom/client":        "/vendor/preact-compat.js",
-      "react/jsx-runtime":       "/vendor/preact-jsx-runtime.js",
-      "@mui/material":           "/vendor/mui-material.js",
-      "@emotion/react":          "/vendor/emotion-react.js",
-      "@emotion/styled":         "/vendor/emotion-styled.js"
+      "preact":                  "./vendor/preact.js",
+      "preact/hooks":            "./vendor/preact-hooks.js",
+      "preact/compat":           "./vendor/preact-compat.js",
+      "htm":                     "./vendor/htm.js",
+      "@preact/signals-core":    "./vendor/preact-signals-core.js",
+      "@preact/signals":         "./vendor/preact-signals.js",
+      "react":                   "./vendor/preact-compat.js",
+      "react-dom":               "./vendor/preact-compat.js",
+      "react-dom/client":        "./vendor/preact-compat.js",
+      "react/jsx-runtime":       "./vendor/preact-jsx-runtime.js",
+      "@mui/material":           "./vendor/mui-material.js",
+      "@emotion/react":          "./vendor/emotion-react.js",
+      "@emotion/styled":         "./vendor/emotion-styled.js"
     }
   }
   </script>
@@ -129,10 +155,10 @@
       "react":                   "https://cdn.jsdelivr.net/npm/preact@10.25.4/compat/+esm",
       "react-dom":               "https://cdn.jsdelivr.net/npm/preact@10.25.4/compat/+esm",
       "react-dom/client":        "https://cdn.jsdelivr.net/npm/preact@10.25.4/compat/+esm",
-      "react/jsx-runtime":       "/vendor/preact-jsx-runtime.js",
-      "@mui/material":           "/vendor/mui-material.js",
-      "@emotion/react":          "/vendor/emotion-react.js",
-      "@emotion/styled":         "/vendor/emotion-styled.js"
+      "react/jsx-runtime":       "./vendor/preact-jsx-runtime.js",
+      "@mui/material":           "./vendor/mui-material.js",
+      "@emotion/react":          "./vendor/emotion-react.js",
+      "@emotion/styled":         "./vendor/emotion-styled.js"
     }
   }
   </script>
@@ -280,7 +306,9 @@
     };
   </script>
   <script type="module">
-    import(new URL("/app.js", window.location.origin).href)
+    // Resolve app.js relative to this document so the shell works at any mount
+    // path: origin root via ui-server, or /ui/ when published to GitHub Pages.
+    import(new URL("./app.js", document.baseURI).href)
       .then(() => {
         if (window.__bosunAppModuleState) {
           window.__bosunAppModuleState.loaded = true;

@@ -29,6 +29,7 @@ import {
 } from "./opencode-providers.mjs";
 import { resolveOpencodeBinary, describeOpencodeBinary } from "./opencode-binary.mjs";
 import { warnOnOpencodeSdkMismatch } from "./opencode-sdk-compat.mjs";
+import { formatOpencodeResult } from "./opencode-result.mjs";
 import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
 import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
@@ -832,22 +833,19 @@ export async function execOpencodePrompt(userMessage, options = {}) {
         }
         await sseForwardingPromise.catch(() => {});
 
-        // Extract text response from result
+        // Extract the response. formatOpencodeResult() reports agent errors
+        // instead of collapsing them into "no text output".
         const info = result?.data?.info || result?.info || {};
-        const parts =
-          result?.data?.parts ||
-          result?.parts ||
-          (Array.isArray(info.parts) ? info.parts : []);
-
-        const textParts = parts
-          .filter((p) => p?.type === "text" && typeof p.text === "string")
-          .map((p) => p.text.trim())
-          .filter(Boolean);
-
-        const finalResponse =
-          textParts.join("\n") ||
-          (typeof info.content === "string" ? info.content.trim() : "") ||
-          "(Agent completed with no text output)";
+        const parts = result?.data?.parts || result?.parts || [];
+        const finalResponse = formatOpencodeResult(result);
+        if (process.env.OPENCODE_DEBUG_SHAPE) {
+          console.log(
+            `[opencode-shell:debug] parts=${Array.isArray(parts) ? parts.length : 0} ` +
+              `types=${JSON.stringify((Array.isArray(parts) ? parts : []).map((p) => p?.type))} ` +
+              `dataKeys=${Object.keys(result?.data || {}).join(",")} topKeys=${Object.keys(result || {}).join(",")} ` +
+              `infoKeys=${Object.keys(info).join(",")} error=${info.error ? JSON.stringify(info.error).slice(0, 300) : "none"}`,
+          );
+        }
 
         // Track turn count
         turnCount++;

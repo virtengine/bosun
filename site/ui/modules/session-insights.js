@@ -13,7 +13,7 @@
  * synchronous path so a worker failure can never blank the inspector rail.
  */
 
-import { buildSessionInsights, formatCompactCount } from "../../../lib/session-insights.mjs";
+import { buildSessionInsights, formatCompactCount } from "../../lib/session-insights.mjs";
 
 export { buildSessionInsights, formatCompactCount };
 
