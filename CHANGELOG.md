@@ -7,6 +7,62 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.43.2] — 2026-09-27
+
+Stability release. Every change here is a fix to a path that failed silently.
+
+### Fixed
+
+- **OpenCode executor reported success when the agent had failed.** A non-zero
+  exit or an error payload from the OpenCode CLI was discarded and the task was
+  closed as successful, so a failed run looked green to the monitor loop and to
+  the board. `shell/opencode-result.mjs` now derives the outcome from the
+  result payload as well as the exit code, and the shell reports the failure.
+- **The OpenCode CLI binary could not be resolved.** The shell assumed a bare
+  `opencode` on `PATH`; npm ships only `.sh`/`.cmd`/`.ps1` shims on Windows,
+  so the executor could not start and the failure surfaced as `fetch failed` —
+  pointing at a port rather than a missing binary. `shell/opencode-binary.mjs`
+  resolves it from an explicit config value, then the agent SDK, then `PATH`.
+- **A present-but-unusable OpenCode config was ignored in silence.** Resolution
+  now fails loudly instead of falling through to defaults that then fail
+  cryptically at call time.
+- **The agent-SDK primary was not honoured.** When the agent SDK was the
+  configured primary executor the shell still drove the CLI path, so the two
+  configurations behaved differently for no stated reason.
+- **A repo-root `bosun.config.json` was read by nothing, silently.**
+  `.bosun/` takes precedence, so a misplaced config was ignored with no
+  warning; it now names the path to move it to.
+- **`.github/workflows/publish.yaml` could not be corrected.** The semver gate
+  from #548 is not wired in — see Known limitation.
+- **The published tarball was missing three modules.** `shell/opencode-shell.mjs`
+  imported `opencode-binary.mjs`, `opencode-sdk-compat.mjs` and
+  `opencode-result.mjs`, none of which were in `package.json` `files`. Caught
+  by `tools/prepublish-check.mjs` before publish; without the fix the executor
+  fix would have shipped unable to resolve its own imports.
+
+### Added
+
+- `shell/opencode-sdk-compat.mjs` — compatibility shim between SDK shapes, so an
+  SDK minor bump cannot silently change result parsing.
+- 20 tests across `tests/opencode-executor-wiring.test.mjs` and
+  `tests/opencode-result.test.mjs` covering binary resolution, SDK-primary
+  routing, the error-not-success path, and the config-shadow warning.
+
+### Changed
+
+- `@opencode-ai/sdk` pinned from `latest` to `^1.18.32`. The floating tag made
+  the build non-reproducible and could pull a breaking SDK change into a publish.
+
+### Known limitation
+
+- The corrected semver gate (`tools/publish-version-gate.mjs`, added in #548) is
+  **not wired into `publish.yaml`**. Wiring it requires a commit touching
+  `.github/workflows/`, and the current OAuth token lacks the `workflow` scope,
+  so the push is rejected. `publish.yaml` still runs the older inline
+  `split('.')` comparison; a plain `0.43.1 → 0.43.2` bump is handled
+  correctly, but a prerelease bump would still be skipped. Needs a token with the
+  `workflow` scope.
+
 ### Internal Harness Adoption — Release Sign-off Flipped to GO (2026-04-20)
 
 - Re-audited [_docs/INTERNAL_HARNESS_RELEASE_SIGNOFF.md](_docs/INTERNAL_HARNESS_RELEASE_SIGNOFF.md):
