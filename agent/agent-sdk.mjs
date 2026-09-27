@@ -242,12 +242,21 @@ export function resolveCodexSdkInstall(options = {}) {
   return null;
 }
 
-export function parseAgentSdkConfig(toml) {
+export function parseAgentSdkConfig(toml, options = {}) {
   const agentSection = parseTomlSection(toml, "[agent_sdk]");
   const capsSection = parseTomlSection(toml, "[agent_sdk.capabilities]");
 
   const primaryRaw = parseTomlString(parseTomlValue(agentSection, "primary"));
-  const primary = normalizePrimary(primaryRaw || DEFAULT_PRIMARY);
+  // config.toml is the only durable record of the primary SDK, so an absent
+  // [agent_sdk] block used to force DEFAULT_PRIMARY ("codex") and silently
+  // disable every other executor — including opencode, whose shell refuses to
+  // run when the primary is not "opencode". Fall back to what the operator
+  // actually asked for (PRIMARY_AGENT / bosun config primaryAgent) before
+  // defaulting, so configuring opencode in bosun.config.json is sufficient.
+  const fallbackPrimary = normalizePrimary(
+    options.fallbackPrimaryRaw || DEFAULT_PRIMARY,
+  );
+  const primary = normalizePrimary(primaryRaw || fallbackPrimary);
   const defaults =
     DEFAULT_CAPABILITIES_BY_PRIMARY[primary] || DEFAULT_CAPABILITIES;
 
@@ -267,7 +276,11 @@ export function parseAgentSdkConfig(toml) {
   return {
     primary,
     capabilities,
-    source: agentSection ? "config.toml" : "defaults",
+    source: agentSection
+      ? "config.toml"
+      : primaryRaw || !options.fallbackPrimaryRaw
+        ? "defaults"
+        : "env-fallback",
     raw: {
       primary: primaryRaw,
       capabilities: parsedCaps,
@@ -275,10 +288,28 @@ export function parseAgentSdkConfig(toml) {
   };
 }
 
-export function resolveAgentSdkConfig({ reload = false } = {}) {
+/**
+ * Best-effort read of the operator's requested primary SDK from the environment
+ * (PRIMARY_AGENT / PRIMARY_AGENT_SDK, the same vars config.mjs honours). Returns
+ * "" when unset or unrecognized so the caller keeps DEFAULT_PRIMARY.
+ */
+function readEnvPrimaryFallback(env = process.env) {
+  const raw = String(
+    env?.PRIMARY_AGENT || env?.PRIMARY_AGENT_SDK || "",
+  ).trim();
+  if (!raw) return "";
+  // Accept both the executor key ("opencode") and the SDK spelling
+  // ("opencode-sdk"); normalizePrimary rejects anything unsupported.
+  const candidate = raw.toLowerCase().replace(/-sdk$/, "").replace(/-cli$/, "");
+  return SUPPORTED_PRIMARY.has(candidate) ? candidate : "";
+}
+
+export function resolveAgentSdkConfig({ reload = false, env } = {}) {
   if (cachedConfig && !reload) return cachedConfig;
   const toml = readCodexConfig();
-  cachedConfig = parseAgentSdkConfig(toml || "");
+  cachedConfig = parseAgentSdkConfig(toml || "", {
+    fallbackPrimaryRaw: readEnvPrimaryFallback(env || process.env),
+  });
   return cachedConfig;
 }
 
