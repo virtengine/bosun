@@ -448,7 +448,34 @@ function loadConfigFile(configDir) {
         `         cp ${examplePath} ${resolve(configDir, "bosun.config.json")}`,
     );
   }
+  warnOnShadowedConfigFile(configDir);
   return { path: null, data: null };
+}
+
+/**
+ * Warn when a config file or .env sits in the REPO ROOT while the config
+ * directory resolved to `.bosun/`.
+ *
+ * resolveConfigDir() prefers `<repo>/.bosun` whenever it exists, so a
+ * `bosun.config.json` written to the repo root is read by nothing — and it is
+ * read by nothing SILENTLY: the harness/provider blocks simply come back empty,
+ * which looks exactly like a misconfigured system rather than a misplaced file.
+ * This cost a full debugging cycle, so name both paths when we see it.
+ */
+function warnOnShadowedConfigFile(configDir) {
+  const repoRoot = dirname(configDir);
+  if (resolve(repoRoot) === resolve(configDir)) return;
+  if (!repoRoot) return;
+  const shadowed = [...CONFIG_FILES, ".env"].filter((name) =>
+    existsSync(resolve(repoRoot, name)),
+  );
+  if (shadowed.length === 0) return;
+  console.warn(
+    `[config] IGNORED: ${shadowed.join(", ")} found in the repo root, but this ` +
+      `run reads its config from ${configDir}.\n` +
+      `[config] Move ${shadowed[0]} to ${resolve(configDir, shadowed[0])}, or set ` +
+      `BOSUN_CONFIG_PATH to point at the file you want.`,
+  );
 }
 
 export function readConfigDocument(repoRoot) {

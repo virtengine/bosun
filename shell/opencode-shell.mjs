@@ -15,7 +15,7 @@
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveAgentSdkConfig } from "../agent/agent-sdk.mjs";
 import { resolveRepoRoot } from "../config/repo-root.mjs";
@@ -27,6 +27,8 @@ import {
 import {
   discoverProviders,
 } from "./opencode-providers.mjs";
+import { resolveOpencodeBinary, describeOpencodeBinary } from "./opencode-binary.mjs";
+import { warnOnOpencodeSdkMismatch } from "./opencode-sdk-compat.mjs";
 import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
 import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
@@ -155,6 +157,20 @@ function resolveTimeoutMs() {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
 }
 
+/**
+ * Put the directory holding *binary* at the front of PATH, so a bare-name spawn
+ * of its basename resolves to it. Returns PATH unchanged when there is nothing
+ * useful to prepend (a bare "opencode" with no directory).
+ */
+function prependToPath(binary, env = process.env) {
+  if (!binary || !isAbsolute(binary)) return env.PATH || "";
+  const dir = dirname(binary);
+  const current = env.PATH || "";
+  if (!current) return dir;
+  const parts = current.split(delimiter);
+  return parts.includes(dir) ? current : `${dir}${delimiter}${current}`;
+}
+
 // ── SDK Loading ───────────────────────────────────────────────────────────────
 
 /**
@@ -222,17 +238,40 @@ async function ensureServerStarted(executorOverrides = null) {
   }
 
   try {
-    const { createOpencode } = sdk;
-    const result = await createOpencode({
-      hostname: "127.0.0.1",
-      port,
-      timeout: 10_000,
-      config: Object.keys(configOverride).length ? configOverride : undefined,
-    });
+    // The SDK hardcodes `spawn("opencode")` against `...process.env` (it takes
+    // no env override), and on Windows that bare name is not executable: npm
+    // ships only .sh/.cmd/.ps1 shims, so the spawn ENOENTs and the attach
+    // fallback below then reports a misleading "fetch failed". Prepending the
+    // RESOLVED BINARY'S OWN DIRECTORY to the real process PATH is what makes the
+    // SDK's spawn land on a runnable image — cross-spawn then finds the .exe
+    // ahead of the shim. The mutation is scoped to this function and restored
+    // immediately after the spawn resolves.
+    const resolvedBinary = resolveOpencodeBinary({ reload: true });
+    const originalPath = process.env.PATH;
+    if (resolvedBinary && isAbsolute(resolvedBinary)) {
+      process.env.PATH = prependToPath(resolvedBinary, process.env);
+    }
+
+    let result;
+    try {
+      const { createOpencode } = sdk;
+      result = await createOpencode({
+        hostname: "127.0.0.1",
+        port,
+        // The Go server needs a beat to bind on a cold Windows box; the old
+        // 10s ceiling turned a slow-but-fine start into a spawn timeout.
+        timeout: 30_000,
+        config: Object.keys(configOverride).length ? configOverride : undefined,
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
 
     _client = result.client;
     _server = result.server;
     _serverReady = true;
+    console.log(`[opencode-shell] binary: ${resolvedBinary || "opencode (PATH)"}`);
 
     // Register cleanup on normal process exit
     process.once("exit", () => {
@@ -246,9 +285,20 @@ async function ensureServerStarted(executorOverrides = null) {
     console.log(`[opencode-shell] server started (port ${port})`);
     return true;
   } catch (startErr) {
-    // If server already running, try client-only attach
+    // If server already running, try client-only attach. Report the RESOLVED
+    // BINARY here: a spawn failure is almost always "that path isn't
+    // executable", and the old message ("fetch failed" from the attach below)
+    // sent operators looking for a port problem instead. A banner mismatch
+    // between the CLI and the SDK is the other cause of a start timeout, and
+    // it names neither version in the SDK's own error.
+    const binaryInfo = describeOpencodeBinary();
     console.warn(
       `[opencode-shell] createOpencode() failed: ${startErr.message} — trying client-only attach`,
+    );
+    await warnOnOpencodeSdkMismatch();
+    console.warn(
+      `[opencode-shell] resolved binary: ${binaryInfo.path} (${binaryInfo.source}) on ${binaryInfo.platform}` +
+        `${process.env.OPENCODE_BIN ? "" : " — set OPENCODE_BIN to override"}`,
     );
     try {
       const { createOpencodeClient } = sdk;
@@ -258,7 +308,8 @@ async function ensureServerStarted(executorOverrides = null) {
       return true;
     } catch (attachErr) {
       console.error(
-        `[opencode-shell] client-only attach also failed: ${attachErr.message}`,
+        `[opencode-shell] no server on port ${port} and it could not be started ` +
+          `(${startErr.message}); client-only attach also failed: ${attachErr.message}`,
       );
       return false;
     }
@@ -569,6 +620,13 @@ export async function execOpencodePrompt(userMessage, options = {}) {
     agentSdk.primary !== "opencode" &&
     !shouldBypassAgentSdkPrimaryGuard(expectedPrimary)
   ) {
+    // Name the remediation, not just the symptom: the operator's most likely
+    // cause is an absent/incorrect [agent_sdk] block in ~/.codex/config.toml.
+    console.warn(
+      `[opencode-shell] OpenCode executor disabled: agent SDK primary is "${agentSdk.primary}" ` +
+        `(source: ${agentSdk.source}). Set [agent_sdk] primary = "opencode" in ~/.codex/config.toml, ` +
+        `or set PRIMARY_AGENT=opencode-sdk, to enable it.`,
+    );
     return {
       finalResponse: `:close: Agent SDK set to "${agentSdk.primary}" — OpenCode disabled.`,
       items: [],
