@@ -71,6 +71,15 @@ incident in this repository's history.
    governs publishing governs tagging with it. A draft release is cheap; a published
    one is not (it fires watcher notifications, webhooks, and moves the public
    `Latest` marker).
+
+   **Verified caveat (2026-09-27): nothing in GitHub mechanically enforces this.**
+   `npm-publish` exists as an environment but carries **zero** protection rules —
+   no required reviewers, no wait timer — and branch protection on `main` requires
+   only the `Build + Tests` status check. The single act that gates a publish is
+   therefore *the merge to `main`*, which then fires `publish.yaml` automatically
+   because `package.json` changed. There is no second confirmation. Treat landing
+   anything on `main` with a bumped `package.json` as the publish approval itself,
+   and note that `develop -> main` is the standing PR that performs it.
 4. **npm is hands-off for agents.** Do not `npm publish`, `npm unpublish`,
    `npm deprecate`, or `npm dist-tag add/rm` without explicit human approval.
    Published versions cannot be cleanly removed once they are out.
@@ -87,17 +96,49 @@ incident in this repository's history.
 
 ## Known drift, documented rather than silently fixed
 
-As of 2026-09-27 these npm versions have **no** git tag and **no** GitHub release:
+The full three-way picture, reproducible with the command in
+[Verifying a release](#verifying-a-release):
 
-| npm version | Published | Note |
+| Class | Members | Meaning |
 |---|---|---|
-| `0.42.5` | 2026-03-24 | Tag existed and was deleted; see rule 5. |
-| `0.42.6` | 2026-03-27 | Widest gap — sits between the newest published release `v0.42.4` and npm `latest`. |
-| `0.43.0` | 2026-05-10 | Superseded by `0.43.1` within 48h; its changes are covered by the `v0.43.1` notes. |
+| npm version, **no** tag, **no** release | `0.42.5`, `0.42.6`, `0.43.0` (recent); ~107 older versions from `0.26.3`–`0.41.10` | Published to npm without ever being tagged. Normal for this package's history. |
+| Tag **and** release, **no** npm version | `v0.42.3` | Released on GitHub but never published to npm. |
+| Tag, **no** release | `v0.36.29`, `v0.40.6` | Tagged and on npm, but no GitHub release was created. |
+| Tag, no release, not a version | `v` | Legacy; see the tag-convention table above. |
 
-`v0.42.3` has a GitHub release but no corresponding npm version — the mirror-image
-asymmetry. None of this is repaired retroactively without an explicit decision, per
-rule 6.
+So the invariant "every npm version has a tag and a release" does **not** hold
+repo-wide and never has — it holds only for the versions published **after** PR
+#533 added the post-publish tag/release step. The three recent gaps above are the
+ones worth a human decision because they sit after the newest release (`v0.42.4`).
+
+**Decided 2026-09-27: no retroactive backfill.** None of these are repaired
+retroactively, per rule 6. Recorded reasoning follows so the decision is not
+re-litigated from scratch.
+
+### Operator decisions on the historical record
+
+On **2026-09-27 10:39Z** the operator (jonathan) directed, in the `#bosun` channel:
+
+> No need to fix, just continue with task completion - instead of fixing an old
+> tag/broken changelog link lets push further to get BOSUN stable and release a
+> stable 0.43.2 instead?
+
+Read against the two open items of the day, that is an explicit **decline** of both
+historical repairs:
+
+| Item | Disposition |
+|---|---|
+| Restore the deleted `v0.42.5` tag | **DECLINED.** Not restored. The tag object survives locally and the exact restore is `git push origin 1aa14b71:refs/tags/v0.42.5` — reversible if the owner reverses the call. |
+| "Broken" changelog link on published `v0.43.1` | **DECLINED, and the premise was wrong.** `compare/v...v0.43.1` returns HTTP **200**, not 404 (`v` points at `136a15dd`, an ancestor of `v0.43.1`). The real defect is only that the auto-generated range is narrow (789 commits vs 1105 for `v0.42.4...v0.43.1`), driven by `--generate-notes` picking the bare `v` tag as its base. The published body was left untouched. |
+| Backfill tags for `0.42.5` / `0.42.6` / `0.43.0` | **DECLINED**, per rule 6 and the direction above. |
+| Document the tag convention | **ACTIONED** — this file. |
+
+The forward-looking fix for the narrow range is *not* editing release bodies: it is
+that `--generate-notes` will keep choosing the legacy `v` tag as its compare base
+for any future release cut from a branch where `v` is an ancestor. The durable fix
+is to stop `v` being the nearest tagged ancestor — a decision this file records but
+does not take.
+
 
 ## Release checklist
 
