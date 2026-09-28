@@ -134,6 +134,7 @@
     "sentinel": "node telegram/telegram-sentinel.mjs",
     "sentinel:stop": "node -e \"import('./telegram/telegram-sentinel.mjs').then(m => m.stopSentinel())\"",
     "sentinel:status": "node -e \"import('./telegram/telegram-sentinel.mjs').then(m => console.log(JSON.stringify(m.getSentinelStatus(), null, 2)))\"",
+    "release:drift": "node tools/release-drift.mjs",
     "smoke:packed-cli": "node tools/packed-cli-smoke.mjs",
     "prepush:check": "node tools/prepublish-check.mjs && npm run syntax:check && npm run prompt:lint && npm run smoke:packed-cli && npm run test:all",
     "prepublishOnly": "node tools/prepublish-check.mjs && npm run smoke:packed-cli",

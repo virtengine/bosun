@@ -166,6 +166,45 @@ pass `--notes-start-tag "v$PREV"` to `gh release create` in `publish.yaml` (the 
 touching any tag.
 
 
+## Automated drift check
+
+The invariant above used to be enforced by nothing that runs. `npm run release:drift`
+(`tools/release-drift.mjs`) closes that gap: it compares package.json, the tags on
+`origin`, the GitHub releases, and the npm `latest` dist-tag, and fails when they
+disagree.
+
+```bash
+npm run release:drift          # human-readable report
+node tools/release-drift.mjs --json
+```
+
+Exit codes are the contract:
+
+| Exit | Meaning |
+|---|---|
+| `0` | all four records agree (informational findings only) |
+| `1` | drift detected — reconcile per this document; do **not** publish or delete anything to "fix" it |
+| `2` | a probe failed — the verdict is UNKNOWN, never "clean" |
+
+Exit `2` is deliberate and is the whole point of the module. A registry that cannot
+be reached hides exactly the drift this check exists to find, so an unreachable npm
+or GitHub API is an error, never a silent pass. On Windows the npm probe invokes
+`npm-cli.js` through the running node rather than `execFile("npm")`, because npm is
+a shim script there and `CreateProcessW` rejects it with `EINVAL`.
+
+Two `info` findings can print on a clean repo, which is why a real repo reports
+CLEAN while still printing lines: `tag-without-release` (`v0.36.29`, `v0.40.6` — the
+documented historical tail) and `release-staged` (the normal state of `develop`
+between a version cut and its publish). Everything else the module emits is an
+`error`. Do not hand-maintain that list here — the severity of each code is decided
+in `tools/release-drift.mjs`, and `npm test -- tests/release-drift.test.mjs` is what
+pins it. "A manifest ahead of npm is informational, not drift" is a decision, not an
+oversight: `develop` carries the next version before its publish.
+
+An override such as `--npm-version` replaces that record's probe outright, so the
+command can be exercised offline. It is a real override, not a display flag: the
+verdict is computed against the value you pass.
+
 ## Release checklist
 
 - [ ] `node -p "require('./package.json').version"` is the intended version and is
