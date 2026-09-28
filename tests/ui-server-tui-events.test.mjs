@@ -7,6 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureTestRuntimeSandbox } from "../infra/test-runtime.mjs";
 import { resolveTuiAuthToken, TUI_EVENT_SCHEMAS } from "../infra/tui-bridge.mjs";
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
+
+// This suite's first action in every test is a dynamic import of server/ui-server.mjs,
+// and its teardown opens a real WS + HTTP server. Measured on a Windows host via the
+// phase probe: the import alone is 0.9-2.9s, and the full test body 2.6-8.4s over 30
+// runs with a cold transform cache. The two sibling tests carry the same 20s baseline;
+// the session-API test used to carry 10s and sat at up to 84% of budget.
+const SLOW_SESSION_API_TEST_TIMEOUT_MS = testTimeout(20_000);
 
 function waitFor(condition, { timeoutMs = 3000, intervalMs = 25 } = {}) {
   return new Promise((resolve, reject) => {
@@ -325,5 +333,5 @@ describe("ui-server TUI websocket bridge", () => {
     expect(validateSessions(snapshot.payload), JSON.stringify(validateSessions.errors || [])).toBe(true);
 
     ws.close();
-  }, 10000);
+  }, SLOW_SESSION_API_TEST_TIMEOUT_MS);
 });
