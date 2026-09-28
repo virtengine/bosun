@@ -89,10 +89,11 @@ incident in this repository's history.
    the card it was working, while the underlying question was still unanswered.
    The commit survived, so the tag was restorable — but a tag on a commit that was
    later garbage-collected would not have been.
-6. **Do not tag retroactively without a human decision.** Several npm versions
-   (`0.42.5`, `0.42.6`, `0.43.0`) were published without a corresponding tag.
-   Backfilling them is a judgement call about the historical record, not a
-   mechanical fix.
+6. **Do not tag retroactively without a human decision.** Three npm versions
+   (`0.42.5`, `0.42.6`, `0.43.0`) have no tag on `origin`, and they got that way two
+   different ways: `0.42.5` *was* tagged and the tag was deleted (see rule 5), while
+   `0.42.6` and `0.43.0` were never tagged at all. Backfilling any of them is a
+   judgement call about the historical record, not a mechanical fix.
 
 ## Known drift, documented rather than silently fixed
 
@@ -101,15 +102,24 @@ The full three-way picture, reproducible with the command in
 
 | Class | Members | Meaning |
 |---|---|---|
-| npm version, **no** tag, **no** release | `0.42.5`, `0.42.6`, `0.43.0` (recent); ~107 older versions from `0.26.3`–`0.41.10` | Published to npm without ever being tagged. Normal for this package's history. |
+| npm version, **no** tag, **no** release | `0.42.5`, `0.42.6`, `0.43.0` (recent); ~107 older versions from `0.26.3`–`0.41.10` | No tag **or** release survives on `origin` for any of these — but the three recent members do **not** share a cause, so read this cell per member. `0.42.5` **was** tagged; its tag was deleted from `origin` on 2026-09-24 (rule 5) and the tag object survives locally, so its correct entry is "tag existed and was deleted". `0.42.6` and `0.43.0` were never tagged at all: `0.42.6` is the widest gap (between the newest published release `v0.42.4` and npm `latest`), and `0.43.0` was superseded by `0.43.1` within 48h, so its changes are covered by the `v0.43.1` notes. The older ~107 sit in the same observable state; they are not individually adjudicated here. |
 | Tag **and** release, **no** npm version | `v0.42.3` | Released on GitHub but never published to npm. |
 | Tag, **no** release | `v0.36.29`, `v0.40.6` | Tagged and on npm, but no GitHub release was created. |
 | Tag, no release, not a version | `v` | Legacy; see the tag-convention table above. |
 
 So the invariant "every npm version has a tag and a release" does **not** hold
-repo-wide and never has — it holds only for the versions published **after** PR
-#533 added the post-publish tag/release step. The three recent gaps above are the
-ones worth a human decision because they sit after the newest release (`v0.42.4`).
+repo-wide and never has. Six versions do satisfy all three legs — `0.37.0`,
+`0.42.0`, `0.42.1`, `0.42.2`, `0.42.4`, `0.43.1` — but they are the manual era, not
+evidence of automation: every one of the six tags and all six releases predate the
+step PR #533 added on 2026-09-23, `0.37.0`/`0.42.0` even use un-prefixed tags, and
+each release is stamped at its own tag's timestamp (the newest, `v0.43.1`, carries
+its tagger stamp to the second — 2026-09-18T14:09:51Z, five days before #533
+existed). That step, which was meant to enforce the invariant going forward, has
+**never executed**: zero npm versions have been published since it merged — the last
+publish of any version is `0.43.1` on 2026-05-12 — so there has never been anything
+for it to tag, and every `Publish to npm` job since is `skipped`. The invariant is
+currently enforced by nothing at all. The three recent gaps above are the ones worth
+a human decision because they sit after the newest release (`v0.42.4`).
 
 **Decided 2026-09-27: no retroactive backfill.** None of these are repaired
 retroactively, per rule 6. Recorded reasoning follows so the decision is not
@@ -123,8 +133,9 @@ On **2026-09-27 10:39Z** the operator (jonathan) directed, in the `#bosun` chann
 > tag/broken changelog link lets push further to get BOSUN stable and release a
 > stable 0.43.2 instead?
 
-Read against the two open items of the day, that is an explicit **decline** of both
-historical repairs:
+Read against the two open items of the day, that is a **clear decline** of both
+historical repairs — the message names both items, rules out fixing them, and
+redirects to a 0.43.2 release instead:
 
 | Item | Disposition |
 |---|---|
@@ -133,11 +144,26 @@ historical repairs:
 | Backfill tags for `0.42.5` / `0.42.6` / `0.43.0` | **DECLINED**, per rule 6 and the direction above. |
 | Document the tag convention | **ACTIONED** — this file. |
 
-The forward-looking fix for the narrow range is *not* editing release bodies: it is
-that `--generate-notes` will keep choosing the legacy `v` tag as its compare base
-for any future release cut from a branch where `v` is an ancestor. The durable fix
-is to stop `v` being the nearest tagged ancestor — a decision this file records but
-does not take.
+The tags and releases recorded in this document were all created before the
+`gh release create` step existed in CI — `git log -S 'gh release create' --
+.github/workflows/publish.yaml` returns exactly one commit, #533 on 2026-09-23 — so
+none of them are evidence that the automation works. Its first real test will be
+the next publish.
+
+The forward-looking fix for the narrow range is *not* editing release bodies. That
+789-commit range was a one-off: it was produced while `v0.43.1` was the release
+being created, so `v0.43.1` did not yet exist and the bare `v` tag was the nearest
+tagged ancestor. That condition is already gone — `v0.43.1` now descends from `v`
+and is an ancestor of any future release, and GitHub picks it as the base. Probed
+live on 2026-09-28 with `gh api -X POST repos/virtengine/bosun/releases/generate-notes
+-f tag_name=v0.43.2 -f target_commitish=main`, the generated body ends
+`compare/v0.43.1...v0.43.2`. No structural change is needed or permitted: making `v`
+stop being the nearest tagged ancestor would mean rewriting, moving, or deleting it,
+which hard rule 1 and the tag table above both forbid. If an explicit base is wanted
+anyway, take the rule-compliant route and name it in CI rather than in history —
+pass `--notes-start-tag "v$PREV"` to `gh release create` in `publish.yaml` (the REST
+`previous_tag_name` parameter does the same), which pins the compare base without
+touching any tag.
 
 
 ## Release checklist
@@ -162,5 +188,5 @@ gh release list --limit 10                          # release present, not a dra
 gh api repos/virtengine/bosun/releases/latest --jq .tag_name
 ```
 
-All four must name the same version. If they do not, stop and reconcile — do not
+All five must name the same version. If they do not, stop and reconcile — do not
 "fix" it by publishing or by deleting anything.
