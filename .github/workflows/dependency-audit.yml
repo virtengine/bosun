@@ -1,0 +1,62 @@
+name: "Dependency Audit"
+
+# Dedicated, dependency-only gate.
+#
+# Why this is NOT just a job added to ci.yaml:
+# ci.yaml gates on `branches: [main]` for both push and pull_request, but every
+# Bosun change lands on `develop` first (two-tier merge model). Confirmed on
+# real PRs: #543/#544/#545 (base=develop) produced no "Build + Tests" run,
+# while #541 (base=main) did. A job added to ci.yaml alone would therefore
+# never evaluate the develop-based PRs where drift accumulates.
+# This workflow triggers on BOTH `develop` and `main`.
+#
+# Why `desktop/` is audited explicitly:
+# the Electron shell has its own package.json/package-lock.json and is NOT a
+# workspace member of the root manifest, so a root-only audit is blind to it.
+# All 22 open high-severity dependabot alerts live in desktop/package-lock.json.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    # Weekly drift watch: catches advisories published against an unchanged
+    # lockfile, which no pull_request trigger can see.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm-audit:
+    name: "npm audit (root + desktop)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts --no-audit
+
+      - name: Audit root manifest
+        run: npm audit --audit-level=high
+
+      - name: Install desktop dependencies
+        run: npm ci --ignore-scripts --no-audit
+        working-directory: desktop
+
+      - name: Audit desktop manifest
+        run: npm audit --audit-level=high
+        working-directory: desktop

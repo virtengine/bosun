@@ -171,7 +171,7 @@ If preflight reports an interactive git editor such as `code --wait`, `vim`, or 
 Run this from the repo root to switch the local repo config to a non-interactive editor:
 
 ```bash
-node git-editor-fix.mjs
+node git/git-editor-fix.mjs
 ```
 
 Preflight checks both `GIT_EDITOR` and `git config --get core.editor`. No warning is shown when `core.editor` is already non-interactive, for example `:`.

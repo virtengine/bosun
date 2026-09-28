@@ -156,9 +156,39 @@ describe("preflight interactive git editor warnings", () => {
     expect(result.ok).toBe(true);
     expect(warning).toBeDefined();
     expect(`${warning.title}\n${warning.message}`).toMatch(
-      /node git-editor-fix\.mjs/i,
+      /node git\/git-editor-fix\.mjs/i,
     );
     expect(`${warning.title}\n${warning.message}`).toMatch(/code --wait/i);
+  });
+
+  it("suggests a fix command whose script actually exists in the repo", async () => {
+    // Regression guard: the suggestion used to read `node git-editor-fix.mjs`
+    // while the file lives at `git/git-editor-fix.mjs`, so the printed one-line
+    // fix failed with MODULE_NOT_FOUND. `node:fs` is mocked in this suite, so
+    // resolve the real filesystem and the real repo root here.
+    const actualFs = await vi.importActual("node:fs");
+    const path = await vi.importActual("node:path");
+    const { fileURLToPath } = await vi.importActual("node:url");
+
+    spawnSyncMock.mockImplementation(
+      createSpawnMock({
+        coreEditor: "code --wait",
+      }),
+    );
+
+    const result = runPreflightChecks({ repoRoot: process.cwd() });
+    const warning = getInteractiveEditorWarning(result);
+    const message = `${warning.title}\n${warning.message}`;
+
+    const suggestion = message.match(/node\s+(\S+\.mjs)/);
+    expect(suggestion).not.toBeNull();
+
+    const repoRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+    );
+    const suggestedScript = path.resolve(repoRoot, suggestion[1]);
+    expect(actualFs.existsSync(suggestedScript)).toBe(true);
   });
 
   it("warns when GIT_EDITOR is interactive even when core.editor is safe", () => {
@@ -175,7 +205,7 @@ describe("preflight interactive git editor warnings", () => {
     expect(result.ok).toBe(true);
     expect(warning).toBeDefined();
     expect(`${warning.title}\n${warning.message}`).toMatch(
-      /node git-editor-fix\.mjs/i,
+      /node git\/git-editor-fix\.mjs/i,
     );
     expect(`${warning.title}\n${warning.message}`).toMatch(/vim/i);
   });
@@ -206,7 +236,7 @@ describe("preflight interactive git editor warnings", () => {
 
     expect(report).toContain("Warnings:");
     expect(report).toMatch(/interactive git editor/i);
-    expect(report).toContain("node git-editor-fix.mjs");
+    expect(report).toContain("node git/git-editor-fix.mjs");
   });
 
   it("fails when worktree runtime setup is incomplete", () => {

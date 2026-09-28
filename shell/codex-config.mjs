@@ -51,12 +51,25 @@ const RECOMMENDED_STREAM_IDLE_TIMEOUT_MS = 3_600_000; // 60 minutes
 const AGENT_SDK_HEADER = "[agent_sdk]";
 const AGENT_SDK_CAPS_HEADER = "[agent_sdk.capabilities]";
 
+/**
+ * Primary SDKs an [agent_sdk] block may name. Mirrors SUPPORTED_PRIMARY in
+ * agent/agent-sdk.mjs (the reader); keep the two in step — a primary written
+ * here that the reader rejects would silently resolve back to "codex".
+ */
+const SUPPORTED_PRIMARY_SDKS = new Set([
+  "codex",
+  "copilot",
+  "claude",
+  "opencode",
+  "gemini",
+]);
+
 const AGENTS_HEADER = "[agents]";
 const DEFAULT_AGENT_MAX_THREADS = 12;
 
 /**
  * Build the default [agent_sdk] TOML block.
- * @param {string} [primary="codex"]  The primary SDK: "codex", "copilot", or "claude"
+ * @param {string} [primary="codex"]  The primary SDK; one of SUPPORTED_PRIMARY_SDKS
  * @returns {string}
  */
 function buildDefaultAgentSdkBlock(primary = "codex") {
@@ -64,6 +77,9 @@ function buildDefaultAgentSdkBlock(primary = "codex") {
     codex:   { steering: true,  subagents: true,  vscodeTools: false },
     copilot: { steering: false, subagents: true,  vscodeTools: true  },
     claude:  { steering: false, subagents: true,  vscodeTools: false },
+    // Both support live steering and subagents through their own SDKs.
+    opencode: { steering: true, subagents: true, vscodeTools: false },
+    gemini:  { steering: false, subagents: true,  vscodeTools: false },
   };
   const c = caps[primary] || caps.codex;
   return [
@@ -71,7 +87,7 @@ function buildDefaultAgentSdkBlock(primary = "codex") {
     "# ── Agent SDK selection (added by bosun) ──",
     AGENT_SDK_HEADER,
     "# Primary agent SDK used for in-process automation.",
-    '# Supported: "codex", "copilot", "claude"',
+    `# Supported: ${[...SUPPORTED_PRIMARY_SDKS].map((k) => `"${k}"`).join(", ")}`,
     `primary = "${primary}"`,
     "# Max concurrent agent threads per Codex session.",
     `max_threads = ${DEFAULT_AGENT_MAX_THREADS}`,
@@ -1495,6 +1511,13 @@ function normalizePrimarySdkName(primarySdk, env) {
   const rawPrimary = String(primarySdk || env.PRIMARY_AGENT || "codex")
     .trim()
     .toLowerCase();
+  // Order matters: check the SDK-suffixed spellings before the substring tests
+  // below, and accept every primary agent-sdk.mjs knows about. Previously only
+  // copilot/claude/codex were recognised, so PRIMARY_AGENT=opencode-sdk was
+  // rewritten to "codex" and wrote an [agent_sdk] block that disabled the very
+  // executor the operator had selected.
+  const normalized = rawPrimary.replace(/-sdk$/, "").replace(/-cli$/, "");
+  if (SUPPORTED_PRIMARY_SDKS.has(normalized)) return normalized;
   if (rawPrimary === "copilot" || rawPrimary.includes("copilot")) return "copilot";
   if (rawPrimary === "claude" || rawPrimary.includes("claude")) return "claude";
   if (rawPrimary === "codex" || rawPrimary.includes("codex")) return "codex";
