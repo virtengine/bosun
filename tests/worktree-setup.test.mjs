@@ -9,8 +9,18 @@ import {
 import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sanitizeGitEnv } from "../git/git-safety.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
+
+// Every test in this file shells out to git to build and sync a real worktree, so it is
+// IO-bound and load-sensitive rather than CPU-bound. Measured on this Windows host:
+// individually the tests take 4.1-11.2s against vitest's global 15000ms default, and the
+// slowest ("clears stale branch-only overlay state…") sat at 74.5% of budget even when run
+// alone. Under the pre-push hook's parallel "fast" project it exceeded the 15s default
+// outright and failed the whole push. Raise it through the repo's platform-aware helper:
+// Windows gets headroom, Linux (where CI runs) keeps the 15s baseline.
+vi.setConfig({ testTimeout: testTimeout(15_000) });
 
 import {
   ensureWorktreeRuntimeSetup,
