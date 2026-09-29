@@ -78,22 +78,32 @@ jobs:
           LOCAL=$(node -p "require('./package.json').version")
           echo "local-version=$LOCAL" >> "$GITHUB_OUTPUT"
 
-          REGISTRY=$(npm view bosun version 2>/dev/null || echo "0.0.0")
-          echo "registry-version=$REGISTRY" >> "$GITHUB_OUTPUT"
+          # A failed lookup must NOT become a version. The inline comparison this
+          # replaces fell back to "0.0.0", which every released version exceeds, so
+          # a dropped connection turned into a publish attempt at an unchanged
+          # version. Pass the failure through as the gate's "unknown" sentinel and
+          # let tools/publish-version-gate.mjs fail closed.
+          REGISTRY=$(npm view bosun version 2>/dev/null || echo "")
+          echo "registry-version=${REGISTRY:-unknown}" >> "$GITHUB_OUTPUT"
 
-          DOMINATED=$(node -e "
-            const [a, b] = ['$LOCAL', '$REGISTRY'].map(v => v.split('.').map(Number));
-            const newer = a[0] > b[0] || (a[0] === b[0] && a[1] > b[1]) || (a[0] === b[0] && a[1] === b[1] && a[2] > b[2]);
-            console.log(newer ? 'true' : 'false');
-          ")
+          # Single decision point. The module owns semver precedence (including
+          # prereleases, which the old Number()-per-component compare mis-ordered:
+          # "0.43.2-beta.1" put NaN in the patch slot, so every comparison was
+          # false and a legitimate bump silently skipped the release).
+          # No `|| true`: the gate exits 0 for BOTH publish and skip, and non-zero
+          # only when it is broken, so its exit status stays a usable error signal.
+          DECISION=$(node tools/publish-version-gate.mjs \
+            "$LOCAL" "${REGISTRY:-unknown}" "${{ inputs.force }}")
+          echo "$DECISION"
 
-          FORCE="${{ inputs.force }}"
-          if [ "$DOMINATED" = "true" ] || [ "$FORCE" = "true" ]; then
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-            echo ":box: Will publish: $LOCAL (registry: $REGISTRY)"
+          SHOULD_PUBLISH=$(node -p "JSON.parse(process.argv[1]).shouldPublish" "$DECISION")
+          REASON=$(node -p "JSON.parse(process.argv[1]).reason" "$DECISION")
+          echo "should-publish=$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
+
+          if [ "$SHOULD_PUBLISH" = "true" ]; then
+            echo ":box: Will publish: $LOCAL (registry: ${REGISTRY:-unknown})"
           else
-            echo "should-publish=false" >> "$GITHUB_OUTPUT"
-            echo ":play: Skipping: $LOCAL is not newer than $REGISTRY"
+            echo ":play: Skipping: $REASON"
           fi
 
   publish:
