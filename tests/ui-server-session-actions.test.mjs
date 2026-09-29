@@ -1,5 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
+
+vi.setConfig({
+  testTimeout: testTimeout(15_000),
+  hookTimeout: testTimeout(10_000),
+});
 
 const ENV_KEYS = [
   "BOSUN_ENV_NO_OVERRIDE",
