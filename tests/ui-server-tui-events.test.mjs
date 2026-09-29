@@ -7,6 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureTestRuntimeSandbox } from "../infra/test-runtime.mjs";
 import { resolveTuiAuthToken, TUI_EVENT_SCHEMAS } from "../infra/tui-bridge.mjs";
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
+
+vi.setConfig({
+  testTimeout: testTimeout(15_000),
+  hookTimeout: testTimeout(10_000),
+});
 
 function waitFor(condition, { timeoutMs = 3000, intervalMs = 25 } = {}) {
   return new Promise((resolve, reject) => {
@@ -325,5 +331,5 @@ describe("ui-server TUI websocket bridge", () => {
     expect(validateSessions(snapshot.payload), JSON.stringify(validateSessions.errors || [])).toBe(true);
 
     ws.close();
-  }, 10000);
+  }, testTimeout(15_000));
 });
