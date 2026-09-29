@@ -9,8 +9,25 @@ import {
 import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sanitizeGitEnv } from "../git/git-safety.mjs";
+import { testTimeout } from "./timeout-helper.mjs";
+
+// Every case here builds two real git repos, commits into them, and drives
+// ensureWorktreeRuntimeSetup — i.e. it is git-subprocess-bound, not CPU-bound.
+// Measured on a Windows host with 22 registered worktrees (2026-09-29):
+//   - one `git` subprocess costs min 103 ms / median 204 ms / max 1503 ms
+//     (bare `git --version`, idle host);
+//   - with ~60 concurrent node processes on the same host the per-subprocess
+//     cost rises to roughly 500-2500 ms, and each case issues 20+ of them;
+//   - the slowest case ("clears stale branch-only overlay state…") took
+//     78.5 s under moderate load and 106-119 s under heavy load.
+// vitest's 15 s default therefore cannot hold: this suite failed 9/15 cases at
+// that budget on a clean `origin/develop` checkout, which makes the pre-push
+// hook fail and pushes everyone onto `git push --no-verify`.
+// The 60 s Linux baseline keeps CI (fast runners) honest while leaving the
+// Windows multiplier (5x -> 300 s) enough headroom for a loaded host.
+vi.setConfig({ testTimeout: testTimeout(60_000) });
 
 import {
   ensureWorktreeRuntimeSetup,

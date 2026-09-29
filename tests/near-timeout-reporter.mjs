@@ -6,6 +6,17 @@
  * At end-of-run, prints a summary of all at-risk tests sorted by utilization.
  *
  * Configure threshold via BOSUN_TEST_TIMEOUT_WARN_PCT (default 75).
+ *
+ * Vitest major-version contract: vitest 4 calls `onTestRunEnd(testModules, …)`.
+ * The vitest <=3 hook was `onFinished(files)`, and vitest 4 dropped it from the
+ * reporter interface — a reporter that only implements `onFinished` is loaded
+ * and configured without error but NEVER CALLED, so it silently reports nothing.
+ * That is how this guardrail was dead while still appearing in `reporters:`.
+ * Both hook names are implemented below and share one collection path, so the
+ * reporter keeps working across the vitest 3 -> 4 boundary. Two other vitest 4
+ * shape details are handled: each entry is a TestModule whose file Task lives on
+ * `.task` (not the module itself), and an empty `tasks` array is truthy, so the
+ * "has children" test must check length rather than existence.
  */
 
 const WARN_PCT = (() => {
@@ -13,22 +24,38 @@ const WARN_PCT = (() => {
   return Number.isFinite(env) && env > 0 && env < 100 ? env : 75;
 })();
 
+/** Fallback when a task carries no effective timeout (the vitest default is
+ *  5000 ms, but this project sets higher platform defaults — underestimate on
+ *  purpose: a wrong low denominator over-reports, which is the safe direction
+ *  for a warning). */
+const DEFAULT_TIMEOUT_MS = 5000;
+
+function hasChildTasks(task) {
+  return Array.isArray(task?.tasks) && task.tasks.length > 0;
+}
+
 export default class NearTimeoutReporter {
   constructor() {
     this._atRisk = [];
   }
 
-  onFinished(files) {
-    if (!files) return;
-    for (const file of files) {
-      this._collectFromTasks(file.tasks);
-      if (file.tasks) {
-        for (const suite of file.tasks) {
-          if (suite.tasks) this._collectFromTasks(suite.tasks);
-        }
-      }
+  // vitest 4 entry point.
+  onTestRunEnd(testModules) {
+    for (const testModule of testModules ?? []) {
+      // A TestModule carries its file Task on `.task`; tolerate a raw task too.
+      this._collectFromTasks([testModule?.task ?? testModule]);
     }
+    this._report();
+  }
 
+  // vitest <=3 entry point, kept so the reporter degrades gracefully rather
+  // than silently doing nothing if the runner is downgraded.
+  onFinished(files) {
+    this._collectFromTasks(files ?? []);
+    this._report();
+  }
+
+  _report() {
     if (this._atRisk.length === 0) return;
 
     this._atRisk.sort((a, b) => b.pct - a.pct);
@@ -51,8 +78,9 @@ export default class NearTimeoutReporter {
   _collectFromTasks(tasks) {
     if (!tasks) return;
     for (const task of tasks) {
-      // Recurse into nested describes
-      if (task.tasks) {
+      if (!task) continue;
+      // Recurse into suites; `tasks: []` must not terminate collection.
+      if (hasChildTasks(task)) {
         this._collectFromTasks(task.tasks);
         continue;
       }
@@ -61,7 +89,7 @@ export default class NearTimeoutReporter {
       if (typeof durationMs !== "number") continue;
 
       // Vitest stores the effective timeout on task.timeout
-      const timeoutMs = task.timeout ?? 5000;
+      const timeoutMs = task.timeout ?? DEFAULT_TIMEOUT_MS;
       const pct = Math.round((durationMs / timeoutMs) * 100);
       if (pct >= WARN_PCT) {
         const name = this._taskPath(task);
