@@ -9,6 +9,11 @@ import { resolveTuiAuthToken, TUI_EVENT_SCHEMAS } from "../infra/tui-bridge.mjs"
 import { skipLocallyForSpeed } from "./test-speed-gates.mjs";
 import { testTimeout } from "./timeout-helper.mjs";
 
+vi.setConfig({
+  testTimeout: testTimeout(15_000),
+  hookTimeout: testTimeout(10_000),
+});
+
 // This suite's first action in every test is a dynamic import of server/ui-server.mjs,
 // and its teardown opens a real WS + HTTP server. Measured on a Windows host via the
 // phase probe: the import alone is 0.9-2.9s, and the full test body 2.6-8.4s over 30
