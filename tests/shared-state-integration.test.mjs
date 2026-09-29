@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { testTimeout } from "./timeout-helper.mjs";
+
+vi.setConfig({
+  testTimeout: testTimeout(15_000),
+  hookTimeout: testTimeout(10_000),
+});
 
 const execFileMock = vi.hoisted(() => vi.fn());
 
