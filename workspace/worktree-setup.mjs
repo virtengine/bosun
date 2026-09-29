@@ -168,28 +168,109 @@ function ensureGitHooksPath(worktreePath) {
   };
 }
 
-function isTrackedGitPath(worktreePath, relativePath) {
-  const result = spawnSync("git", ["ls-files", "--error-unmatch", "--", relativePath], {
-    cwd: worktreePath,
-    encoding: "utf8",
-    timeout: 5_000,
-    windowsHide: true,
-    env: sanitizeGitEnv(),
-  });
-  return result.status === 0;
+// A `git` subprocess costs ~250 ms on Windows (measured: bare `git --version`
+// median 272 ms on this host). Worktree setup validated dozens of overlay paths
+// with one `ls-files` spawn per path, which dominated setup time and made the
+// guarding suite un-runnable. Batch the same question into as few spawns as
+// possible: `git ls-files -v` answers trackedness AND the skip-worktree flag for
+// a whole path list at once, and silently omits paths that are not tracked.
+const GIT_PATH_BATCH_SIZE = 200;
+
+function normalizeGitRelativePath(relativePath) {
+  return String(relativePath || "").trim().replace(/\\/g, "/");
 }
 
-function getGitTrackedPathFlag(worktreePath, relativePath) {
-  const result = spawnSync("git", ["ls-files", "-v", "--", relativePath], {
-    cwd: worktreePath,
-    encoding: "utf8",
-    timeout: 5_000,
-    windowsHide: true,
-    env: sanitizeGitEnv(),
-  });
-  if (result.status !== 0) return "";
-  const line = String(result.stdout || "").trim();
-  return line ? line.charAt(0) : "";
+function chunkGitPaths(relativePaths = []) {
+  const unique = Array.from(
+    new Set(
+      (Array.isArray(relativePaths) ? relativePaths : [])
+        .map(normalizeGitRelativePath)
+        .filter(Boolean),
+    ),
+  );
+  const chunks = [];
+  for (let index = 0; index < unique.length; index += GIT_PATH_BATCH_SIZE) {
+    chunks.push(unique.slice(index, index + GIT_PATH_BATCH_SIZE));
+  }
+  return chunks;
+}
+
+/**
+ * Batched replacement for the former per-path `isTrackedGitPath` +
+ * `getGitTrackedPathFlag` pair.
+ *
+ * Returns a Map of repo-relative path -> `git ls-files -v` flag character
+ * ("H" = cached, "S" = skip-worktree, ...). Paths absent from the Map are not
+ * tracked, which is exactly what `isTrackedGitPath` reported per path.
+ */
+function getGitTrackedPathFlags(worktreePath, relativePaths = []) {
+  const flags = new Map();
+  for (const chunk of chunkGitPaths(relativePaths)) {
+    const result = spawnSync("git", ["ls-files", "-v", "-z", "--", ...chunk], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+      env: sanitizeGitEnv(),
+    });
+    if (result.status !== 0) continue;
+    for (const entry of String(result.stdout || "").split("\0")) {
+      if (!entry) continue;
+      const flag = entry.charAt(0);
+      const relativePath = normalizeGitRelativePath(entry.slice(2));
+      if (relativePath) flags.set(relativePath, flag);
+    }
+  }
+  return flags;
+}
+
+/**
+ * Run a batched `git update-index` over `relativePaths`, falling back to one
+ * subprocess per path when the batch fails so per-path error attribution (and
+ * the existing fail-closed behaviour) is preserved. `git update-index` aborts
+ * with "fatal: Unable to mark file <path>" if any path is untracked, so callers
+ * pass only paths the batch probe reported as tracked.
+ */
+function runBatchedUpdateIndex(worktreePath, flagArg, relativePaths = []) {
+  const normalizedPaths = Array.from(
+    new Set(
+      (Array.isArray(relativePaths) ? relativePaths : [])
+        .map(normalizeGitRelativePath)
+        .filter(Boolean),
+    ),
+  );
+  if (normalizedPaths.length === 0) return { ok: true, failedPaths: [] };
+
+  const runOne = (chunk) =>
+    spawnSync("git", ["update-index", flagArg, "--", ...chunk], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+      env: sanitizeGitEnv(),
+    });
+
+  const failedPaths = [];
+  const errors = new Map();
+  for (const chunk of chunkGitPaths(normalizedPaths)) {
+    if (runOne(chunk).status === 0) continue;
+
+    // Retry path-by-path so the caller can report exactly which path failed.
+    // Continue through later chunks too: one bad path must not leave unrelated
+    // tracked runtime files partially updated after this function returns.
+    for (const relativePath of chunk) {
+      const result = runOne([relativePath]);
+      if (result.status !== 0) {
+        failedPaths.push(relativePath);
+        errors.set(
+          relativePath,
+          String(result.stderr || result.stdout || "").trim()
+            || `git update-index ${flagArg} failed`,
+        );
+      }
+    }
+  }
+  return { ok: failedPaths.length === 0, failedPaths, errors };
 }
 
 function clearTrackedRuntimeSetupFilesSkipWorktree(worktreePath, expectedFiles = []) {
@@ -202,30 +283,33 @@ function clearTrackedRuntimeSetupFilesSkipWorktree(worktreePath, expectedFiles =
   );
   const clearedFiles = [];
   const errors = [];
-
+  const trackedFlags = getGitTrackedPathFlags(worktreePath, relativePaths);
+  const toClear = [];
   for (const relativePath of relativePaths) {
-    if (!isTrackedGitPath(worktreePath, relativePath)) {
+    const trackedFlag = trackedFlags.get(normalizeGitRelativePath(relativePath));
+    // Only paths currently marked skip-worktree need clearing.
+    if (!trackedFlag || trackedFlag.toUpperCase() !== "S") {
       continue;
     }
-    const trackedFlag = getGitTrackedPathFlag(worktreePath, relativePath);
-    if (trackedFlag.toUpperCase() !== "S") {
-      continue;
-    }
-    const result = spawnSync("git", ["update-index", "--no-skip-worktree", "--", relativePath], {
-      cwd: worktreePath,
-      encoding: "utf8",
-      timeout: 5_000,
-      windowsHide: true,
-      env: sanitizeGitEnv(),
-    });
-    if (result.status === 0) {
+    toClear.push(relativePath);
+  }
+  const cleared = runBatchedUpdateIndex(worktreePath, "--no-skip-worktree", toClear);
+  if (cleared.ok) {
+    clearedFiles.push(...toClear);
+  } else {
+    // `runBatchedUpdateIndex` already retried path-by-path; anything that did
+    // succeed on the retry is not a failure, so report only the real ones.
+    const failed = new Set(cleared.failedPaths.map(normalizeGitRelativePath));
+    for (const relativePath of toClear) {
+      if (failed.has(normalizeGitRelativePath(relativePath))) continue;
       clearedFiles.push(relativePath);
-      continue;
     }
-    errors.push({
-      relativePath,
-      error: String(result.stderr || result.stdout || "").trim() || "git update-index --no-skip-worktree failed",
-    });
+    for (const relativePath of cleared.failedPaths) {
+      errors.push({
+        relativePath,
+        error: cleared.errors?.get(relativePath) || "git update-index --no-skip-worktree failed",
+      });
+    }
   }
 
   return {
@@ -245,27 +329,30 @@ function markTrackedRuntimeSetupFilesSkipWorktree(worktreePath, expectedFiles = 
   const skippedFiles = [];
   const untrackedFiles = [];
   const errors = [];
-
+  const trackedFlags = getGitTrackedPathFlags(worktreePath, relativePaths);
+  const toMark = [];
   for (const relativePath of relativePaths) {
-    if (!isTrackedGitPath(worktreePath, relativePath)) {
+    if (!trackedFlags.has(normalizeGitRelativePath(relativePath))) {
       untrackedFiles.push(relativePath);
       continue;
     }
-    const result = spawnSync("git", ["update-index", "--skip-worktree", "--", relativePath], {
-      cwd: worktreePath,
-      encoding: "utf8",
-      timeout: 5_000,
-      windowsHide: true,
-      env: sanitizeGitEnv(),
-    });
-    if (result.status === 0) {
+    toMark.push(relativePath);
+  }
+  const marked = runBatchedUpdateIndex(worktreePath, "--skip-worktree", toMark);
+  if (marked.ok) {
+    skippedFiles.push(...toMark);
+  } else {
+    const failed = new Set(marked.failedPaths.map(normalizeGitRelativePath));
+    for (const relativePath of toMark) {
+      if (failed.has(normalizeGitRelativePath(relativePath))) continue;
       skippedFiles.push(relativePath);
-      continue;
     }
-    errors.push({
-      relativePath,
-      error: String(result.stderr || result.stdout || "").trim() || "git update-index --skip-worktree failed",
-    });
+    for (const relativePath of marked.failedPaths) {
+      errors.push({
+        relativePath,
+        error: marked.errors?.get(relativePath) || "git update-index --skip-worktree failed",
+      });
+    }
   }
 
   return {
@@ -286,7 +373,10 @@ function ignoreUntrackedRuntimeSetupFiles(worktreePath, expectedFiles = []) {
   const ignoredFiles = [];
   const alreadyIgnoredFiles = [];
   const errors = [];
-  const untrackedFiles = relativePaths.filter((relativePath) => !isTrackedGitPath(worktreePath, relativePath));
+  const trackedFlags = getGitTrackedPathFlags(worktreePath, relativePaths);
+  const untrackedFiles = relativePaths.filter(
+    (relativePath) => !trackedFlags.has(normalizeGitRelativePath(relativePath)),
+  );
   if (untrackedFiles.length === 0) {
     return { ignoredFiles, alreadyIgnoredFiles, errors };
   }
@@ -403,9 +493,10 @@ function restoreTrackedOverlayFilesThatStillMirrorSource(repoRoot, worktreePath,
   const restoredFiles = [];
   const preservedFiles = [];
   const errors = [];
+  const trackedFlags = getGitTrackedPathFlags(worktreePath, relativePaths);
 
   for (const relativePath of relativePaths) {
-    if (!isTrackedGitPath(worktreePath, relativePath)) {
+    if (!trackedFlags.has(normalizeGitRelativePath(relativePath))) {
       continue;
     }
     const sourcePath = resolve(repoRoot, relativePath);
@@ -464,9 +555,10 @@ function removeUntrackedOverlayFilesThatStillMirrorSource(repoRoot, worktreePath
   );
   const removedFiles = [];
   const preservedFiles = [];
+  const trackedFlags = getGitTrackedPathFlags(worktreePath, relativePaths);
 
   for (const relativePath of relativePaths) {
-    if (isTrackedGitPath(worktreePath, relativePath)) {
+    if (trackedFlags.has(normalizeGitRelativePath(relativePath))) {
       continue;
     }
     const sourcePath = resolve(repoRoot, relativePath);
