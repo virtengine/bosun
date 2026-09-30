@@ -150,25 +150,26 @@ jobs:
         if: ${{ inputs.dry-run }}
         run: npm publish --access public --dry-run
 
-      - name: Verify publication
-        if: ${{ !inputs.dry-run }}
-        run: |
-          echo ":clock: Waiting for registry propagation..."
-          sleep 10
-          PUBLISHED=$(npm view bosun version 2>/dev/null || echo "NOT_FOUND")
-          EXPECTED="${{ needs.check.outputs.local-version }}"
-          if [ "$PUBLISHED" = "$EXPECTED" ]; then
-            echo ":check: Successfully published bosun@$PUBLISHED"
-          else
-            echo ":alert: Registry shows $PUBLISHED, expected $EXPECTED (may still be propagating)"
-          fi
-
       - name: Tag release and create GitHub release
         if: ${{ !inputs.dry-run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ needs.check.outputs.local-version }}"
+
+          # The tag is a published, effectively-immutable ref, and it is built by
+          # concatenating a value that reached this step through a shell
+          # expression. The gate (tools/publish-version-gate.mjs) already refuses
+          # an unparseable local version, including under force — but `npm publish
+          # --dry-run` does not: it accepts `v0.44.0` (rc=0), which this
+          # concatenation would have turned into the remote tag `vv0.44.0`. So the
+          # last point before the ref is created re-checks the shape itself rather
+          # than trusting that every path into this step passed the gate.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::local version '$VERSION' is not \`MAJOR.MINOR.PATCH[-pre]\`; refusing to create tag 'v$VERSION'"
+            exit 1
+          fi
+
           TAG="v$VERSION"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
@@ -188,6 +189,51 @@ jobs:
               --title "bosun $TAG" \
               --generate-notes
             echo ":check: Created GitHub release $TAG."
+          fi
+
+      # Ordering is load-bearing, and the reason is the trap this step used to
+      # sit on the wrong side of. `npm publish` is the one irreversible action
+      # here and it has already happened by now, so a registry mismatch must NOT
+      # be allowed to abort the job before the tag and the GitHub release exist
+      # — that would leave npm ahead of its own release record, which is exactly
+      # the drift the workflow header promises cannot happen. So the tag and the
+      # release record are created first, and this step then measures the
+      # registry and FAILS LOUDLY if it disagrees.
+      #
+      # It previously ran BEFORE the tag/release step and only echoed
+      # ":alert: Registry shows X, expected Y" on a mismatch, exiting 0 — so the
+      # single step that measures the workflow's core invariant could not fail.
+      - name: Verify publication
+        if: ${{ !inputs.dry-run }}
+        id: verify
+        env:
+          EXPECTED_VERSION: ${{ needs.check.outputs.local-version }}
+        run: |
+          echo ":clock: Waiting for registry propagation..."
+          # Bounded retry: a publish that succeeded is often visible in seconds,
+          # but the registry's read replica can lag. Retrying here is safe because
+          # the tag and release records already exist — a late registry is a
+          # reportable event, not a reason to create refs.
+          PUBLISHED="NOT_FOUND"
+          for attempt in 1 2 3 4 5 6; do
+            sleep 10
+            PUBLISHED=$(npm view bosun version 2>/dev/null || echo "NOT_FOUND")
+            if [ "$PUBLISHED" = "$EXPECTED_VERSION" ]; then
+              break
+            fi
+            echo ":hourglass: attempt $attempt/6: registry shows $PUBLISHED, expected $EXPECTED_VERSION"
+          done
+
+          if [ "$PUBLISHED" = "$EXPECTED_VERSION" ]; then
+            echo ":check: Successfully published bosun@$PUBLISHED"
+            echo "registry version verified: $PUBLISHED" >> "$GITHUB_OUTPUT"
+          else
+            # A real non-zero exit. The tag and the GitHub release for
+            # $EXPECTED_VERSION already exist, so this failure is legible: the
+            # run is red, and re-running the publish job is safe (both the tag
+            # and the release step are idempotent and leave existing refs alone).
+            echo "::error::Registry shows $PUBLISHED after 6 attempts, expected $EXPECTED_VERSION. bosun@$EXPECTED_VERSION was not observed on npm even though tag v$EXPECTED_VERSION and its release record were created. This is real npm/tag/release drift — see RELEASE.md before deleting anything."
+            exit 1
           fi
 
       - name: Summary

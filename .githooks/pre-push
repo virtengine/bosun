@@ -76,6 +76,11 @@ ADJACENCY_MAP=(
   "vitest.config.mjs|vitest-runner"
   "tests/setup.mjs|vitest-runner|ui-server*|workflow-engine*|task-store*|kanban-adapter*"
   "tests/harness-surface-clients.test.mjs|harness-surface-clients*"
+  # The publish path is guarded by tests that EXECUTE the workflow's own run:
+  # bodies, so a change to .github/workflows/publish.yaml, the version gate or
+  # the drift tool must re-run them. Without this entry the pre-push hook never
+  # picks them up, and the guards only ever run in the full suite.
+  ".github/workflows/publish.yaml|publish-workflow-guards*|publish-version-gate*|release-drift*"
   ".githooks/pre-push|prepublish-check|vitest-runner"
   "workflow/|workflow-*|workflow-task-lifecycle*|workflow-write-file-encoding*|workflow-pipeline-primitives*|workflow-research-evidence-sidecar*|manual-flows*|mcp-workflow-adapter*|bosun-native-workflow-nodes*|meeting-workflow*|run-evaluator*|state-ledger-sqlite*|webhook-gateway*|credential-store*|cron-scheduler*"
   "workflow-templates/|workflow-templates*|workflow-new-templates*|workflow-engine*|manual-flows*"
