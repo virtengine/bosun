@@ -289,7 +289,8 @@ export default function SettingsScreen({ configDir, config = {}, onConfigReload 
     }
   };
 
-  useInput((input, key) => {
+  const inputHandlerRef = React.useRef(null);
+  inputHandlerRef.current = (input, key) => {
     if (editingPath) {
       if (key.escape) {
         setEditingPath("");
@@ -342,7 +343,9 @@ export default function SettingsScreen({ configDir, config = {}, onConfigReload 
     if (input === " " && activeField.type === "boolean") {
       saveField(activeField, !Boolean(source.value));
     }
-  });
+  };
+  const dispatchInput = React.useCallback((input, key) => inputHandlerRef.current?.(input, key), []);
+  useInput(dispatchInput);
 
   return html`
     <${Box} flexDirection="column">
