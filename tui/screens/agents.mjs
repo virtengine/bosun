@@ -726,8 +726,8 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     }
   }, [resolvedHost, resolvedPort, selectedSession, wsBridge]);
 
-  const loadDetail = React.useCallback(async () => {
-    if (!selectedSession?.id) return;
+  const loadDetail = React.useCallback(async ({ clearStatus = true } = {}) => {
+    if (!selectedSession?.id) return false;
     try {
       const payload = await fetchJson(
         resolvedHost,
@@ -737,9 +737,11 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
         wsBridge,
       );
       setDetailView(payload);
-      setStatusLine("");
+      if (clearStatus) setStatusLine("");
+      return true;
     } catch (error) {
       setStatusLine(error.message || String(error));
+      return false;
     }
   }, [resolvedHost, resolvedPort, selectedSession, wsBridge]);
 
@@ -785,7 +787,8 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
       setStatusLine("Steer sent ✓");
       setSteerMode(false);
       setSteerValue("");
-      await loadDetail();
+      const refreshed = await loadDetail({ clearStatus: false });
+      if (!refreshed) return;
     } catch (error) {
       setStatusLine(error.message || String(error));
     }
@@ -901,7 +904,8 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     }
   }, [harnessDetailView, harnessNudgeValue, loadHarnessDetail, refreshData, resolvedHost, resolvedPort, selectedHarnessRun, wsBridge]);
 
-  useInput((input, key) => {
+  const inputHandlerRef = React.useRef(null);
+  inputHandlerRef.current = (input, key) => {
     if (confirmKill) {
       if (input === "y" || input === "Y") {
         void runAction("kill");
@@ -1100,9 +1104,9 @@ export default function AgentsScreen({ wsBridge, host = "127.0.0.1", port = 3080
     if (key.escape) {
       closeModal();
     }
-  }, {
-    isActive: true,
-  });
+  };
+  const dispatchInput = React.useCallback((input, key) => inputHandlerRef.current?.(input, key), []);
+  useInput(dispatchInput, { isActive: true });
 
   const eventWidth = Math.max(12, terminalColumns - FIXED_TABLE_WIDTH);
   const backoffMessageWidth = Math.max(20, terminalColumns - 34);
