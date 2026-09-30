@@ -540,7 +540,7 @@
     "@anthropic-ai/claude-agent-sdk": "latest",
     "@babel/runtime": "^7.29.2",
     "@github/copilot-sdk": "latest",
-    "@google/genai": "^1.44.0",
+    "@google/genai": "^2.24.0",
     "@jridgewell/sourcemap-codec": "^1.6.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/agents": "^0.18.0",
