@@ -99,6 +99,17 @@ export function compareVersions(a, b) {
  * when the registry could not be reached. An unknown registry STOPS the gate:
  * without `force`, a network failure must not turn into a publish attempt.
  *
+ * `force` is the workflow_dispatch input documented as "Force publish even if
+ * version unchanged", so it may only override stops that are about *comparison*
+ * — an unknown/unparseable registry, or a version that is not newer. It may NOT
+ * override a stop that is about the *local version being unparseable*: the
+ * publish job builds the release tag as a bare `TAG="v$VERSION"` concatenation,
+ * so a local version of `v0.44.0` produced the remote tag `vv0.44.0` and a
+ * local version of `0.44` produced `v0.44`. `npm publish` does not catch either
+ * (verified: `npm publish --dry-run` accepts `v0.44.0`, rc=0), so nothing
+ * between this gate and `git tag` would refuse the typo. `forceable: false` is
+ * how a stop states that.
+ *
  * Returns { shouldPublish, reason, localVersion, registryVersion }.
  */
 export function decidePublish({ localVersion, registryVersion, force = false }) {
@@ -106,12 +117,35 @@ export function decidePublish({ localVersion, registryVersion, force = false }) 
     ? UNKNOWN_REGISTRY_VERSION
     : registryVersion;
 
-  const stop = (reason) => ({
-    shouldPublish: force,
-    reason: force ? `${reason} — proceeding anyway because force was requested` : reason,
-    localVersion,
-    registryVersion: registry,
-  });
+  const stop = (reason, { forceable = true } = {}) => {
+    const overriding = forceable && force;
+    return {
+      shouldPublish: overriding,
+      reason: overriding
+        ? `${reason} — proceeding anyway because force was requested`
+        : forceable || !force
+          ? reason
+          : `${reason} — force does NOT override this; the release tag is built from this value`,
+      localVersion,
+      registryVersion: registry,
+    };
+  };
+
+  // The LOCAL version is checked first, deliberately. It is the only input
+  // this module cannot let past: the publish job turns it into a git tag with a
+  // bare `TAG="v$VERSION"` concatenation, and `npm publish --dry-run` accepts
+  // `v0.44.0` (verified, rc=0), so nothing downstream refuses the typo. If this
+  // check sat after the registry checks, then `force: true` + an unreachable
+  // registry + a junk local version would stop on the forceable
+  // unknown-registry reason and publish anyway — the same `vv0.44.0` remote tag
+  // the ordering was meant to prevent. The registry stops stay forceable
+  // (that is what the input is documented for); this one is not.
+  if (!parseVersion(localVersion)) {
+    return stop(
+      `local package.json version is unparseable (${JSON.stringify(localVersion)})`,
+      { forceable: false },
+    );
+  }
 
   if (registry === UNKNOWN_REGISTRY_VERSION) {
     return stop(
@@ -123,12 +157,6 @@ export function decidePublish({ localVersion, registryVersion, force = false }) 
   if (!parsedRegistry) {
     return stop(
       `registry returned an unparseable version (${JSON.stringify(registry)}); refusing to publish on a guess`,
-    );
-  }
-
-  if (!parseVersion(localVersion)) {
-    return stop(
-      `local package.json version is unparseable (${JSON.stringify(localVersion)})`,
     );
   }
 

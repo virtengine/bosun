@@ -102,12 +102,42 @@ export function compareVersions(a, b) {
   return comparePrerelease(left.prerelease, right.prerelease);
 }
 
-/** Normalise a tag name to its version, or null if it is not a version tag. */
+/**
+ * Normalise a tag name to its version, or null if it is not a version tag.
+ *
+ * Only `vX.Y.Z` is a release tag. A bare `X.Y.Z` (the two live strays `0.37.0`
+ * and `0.42.0`) is a MALFORMED tag: returning null for it made it invisible in
+ * BOTH directions — `tag-without-release` skipped it, and the summary's
+ * `/^v\d/` filter hid it from the report — so the tool that exists to find
+ * tag/release disagreement could not see that two of its own tags are
+ * malformed. `classifyTagName` keeps the "is it a release tag?" decision and
+ * this helper stays the "normalise if it is" one.
+ */
 function versionFromTag(tag) {
   if (typeof tag !== "string" || !tag.startsWith("v")) return null;
   const parsed = parseVersion(tag);
   if (!parsed) return null;
   return `${parsed.major}.${parsed.minor}.${parsed.patch}`;
+}
+
+/**
+ * Classify a tag name into the three cases the report has to keep distinct:
+ *   - `release`  : `vX.Y.Z[-pre]` — a tag this repo's workflow creates.
+ *   - `malformed`: looks like a version but is not in release form
+ *                  (`0.37.0`, `0.42.0`, `v`, `1.2`, `v1.2.3.4`). Reported at
+ *                  info level: a stray malformed tag is worth seeing, and it is
+ *                  not evidence that npm, the tag and the release record
+ *                  disagree, so it must never fail the gate.
+ *   - `other`    : not a version at all (`latest`, `nightly`, work tags).
+ */
+export function classifyTagName(tag) {
+  if (typeof tag !== "string" || tag.trim() === "") return "other";
+  if (versionFromTag(tag) !== null) return "release";
+  // A tag that is *nearly* a version is more likely a typo'd release tag than
+  // an intentional work tag, so it is surfaced. The shape is deliberately
+  // loose (any digit, any punctuation) — the point is to see it, not to accept
+  // it; `malformed` never becomes a version anywhere in this module.
+  return /\d/.test(tag) ? "malformed" : "other";
 }
 
 /**
@@ -175,10 +205,27 @@ export function classifyReleaseState(state) {
   // (v0.36.29, v0.40.6) — worth reporting, not worth failing the build.
   const releasedTags = new Set(releases.map((r) => r.tag_name));
   for (const tag of tags) {
-    if (versionFromTag(tag) === null) continue; // legacy `v`, un-prefixed, etc.
+    if (classifyTagName(tag) !== "release") continue; // malformed/other: see below
     if (!releasedTags.has(tag)) {
       info("tag-without-release", `tag ${tag} has no GitHub release`);
     }
+  }
+
+  // --- Malformed release-shaped tags. The two live strays are `0.37.0` and
+  // `0.42.0`: a version without the `v` prefix, each of which HAS a matching
+  // GitHub release (also unprefixed), so they disagree with nothing — but they
+  // are the exact stray-tag class a release tool exists to surface, and until
+  // this finding existed they were invisible to it. Info, never error: a
+  // malformed tag is a hygiene defect, not evidence that npm, the tags and the
+  // release records have drifted apart. Deleting a published tag is a human
+  // decision (see RELEASE.md) — this reports, it does not remediate.
+  for (const tag of tags) {
+    if (classifyTagName(tag) !== "malformed") continue;
+    info(
+      "malformed-tag",
+      `tag ${tag} is not a \`vX.Y.Z\` release tag; it is ignored by every version ` +
+        "comparison here, so it can never report or cause drift",
+    );
   }
 
   // --- npm vs the newest published release record. This is the headline
@@ -350,12 +397,32 @@ export async function collectReleaseState(options = {}) {
 
 function formatReport(result, state) {
   const lines = [];
+  // The summary used a `/^v\d/` filter, which made the malformed tags invisible
+  // in the one line a human is most likely to read. Report the same three
+  // buckets `classifyTagName` uses, and say so, rather than filtering silently.
+  const bucket = (name) => {
+    if (!Array.isArray(state.tags)) return String(state.tags);
+    return state.tags.filter((t) => classifyTagName(t) === name).join(", ") || "(none)";
+  };
+  const releaseBuckets = Array.isArray(state.releases)
+    ? state.releases.map((r) => r.tag_name)
+    : null;
+
   lines.push("bosun release drift");
   lines.push("");
   lines.push(`  package.json      ${state.manifest}`);
-  lines.push(`  git tags (v*)     ${Array.isArray(state.tags) ? state.tags.filter((t) => /^v\d/.test(t)).join(", ") || "(none)" : state.tags}`);
-  lines.push(`  newest release    ${Array.isArray(state.releases) ? [...state.releases.map((r) => r.tag_name)].filter((t) => /^v\d/.test(t)).join(", ") || "(none)" : state.releases}`);
   lines.push(`  npm latest        ${state.npmVersion}`);
+  lines.push(`  release tags      ${bucket("release")}`);
+  lines.push(`  malformed tags    ${bucket("malformed")}`);
+  lines.push(
+    `  non-version tags  ${bucket("other")}` +
+      `   (ignored — not version-shaped; shown for completeness)`,
+  );
+  lines.push(
+    `  release records   ${releaseBuckets === null
+      ? String(state.releases)
+      : releaseBuckets.join(", ") || "(none)"}`,
+  );
   lines.push("");
   if (result.findings.length === 0) {
     lines.push("  DRIFT: none — all records agree.");

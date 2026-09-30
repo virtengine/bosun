@@ -161,6 +161,50 @@ describe("decidePublish", () => {
     expect(forced.reason).toMatch(/force was requested/);
   });
 
+  // The unparseable-local-version stop is NOT forceable. `force` is documented
+  // as "Force publish even if version unchanged" — a comparison concern — but
+  // the stop helper applied it to every reason, so `force: true` also waved
+  // through a local version the workflow would then concatenate into a tag:
+  //   localVersion "v0.44.0" -> TAG="vv0.44.0"   (verified: npm publish --dry-run
+  //   localVersion "0.44"    -> TAG="v0.44"        ACCEPTS v0.44.0, rc=0)
+  // so nothing between the gate and `git tag` refused the typo, and the
+  // resulting remote tag is published and effectively immutable.
+  it.each([
+    ["v0.44.0", "the double-v typo that produced a vv-prefixed remote tag"],
+    ["0.44", "a version missing its patch component"],
+    ["bogus", "a non-version string"],
+    ["", "an empty version"],
+    ["0.43.1 0.43.2", "two versions concatenated"],
+  ])("never lets force publish an unparseable local version %j (%s)", (localVersion) => {
+    const d = decidePublish({ localVersion, registryVersion: "0.43.2", force: true });
+    expect(d.shouldPublish, `localVersion=${JSON.stringify(localVersion)}`).toBe(false);
+    expect(d.reason).toMatch(/unparseable/);
+    expect(d.reason).toMatch(/force does NOT override/);
+  });
+
+  it("still lets force override an unknown registry, so the pin at the suite's neighbours holds", () => {
+    // Counter-test: the fix must not over-tighten. force MAY override a
+    // registry-comparison stop — that is the documented purpose of the input.
+    const d = decidePublish({
+      localVersion: "0.43.2",
+      registryVersion: UNKNOWN_REGISTRY_VERSION,
+      force: true,
+    });
+    expect(d.shouldPublish).toBe(true);
+  });
+
+  it("prefers the unparseable-local reason over the unknown-registry one when both apply", () => {
+    // With force, an unknown registry and a junk local version: the operator
+    // must be told the thing that actually blocks the tag, not the network.
+    const d = decidePublish({
+      localVersion: "v0.44.0",
+      registryVersion: UNKNOWN_REGISTRY_VERSION,
+      force: true,
+    });
+    expect(d.shouldPublish).toBe(false);
+    expect(d.reason).toMatch(/unparseable/);
+  });
+
   it("matches the real package.json version on this checkout", () => {
     const pkg = JSON.parse(
       readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
@@ -200,5 +244,16 @@ describe("CLI entry point", () => {
     // The exact case the old inline gate got wrong (it silently skipped).
     const out = JSON.parse(run(["0.43.2-beta.1", "0.43.1", "false"]));
     expect(out.shouldPublish).toBe(true);
+  });
+
+  it("refuses an unparseable local version over the CLI even with force=true", () => {
+    // The workflow shells out with `"${{ inputs.force }}"`, so this is the
+    // exact argument vector a `force: true` dispatch produces for the typo
+    // that used to reach `git tag` and create `vv0.44.0` on origin.
+    for (const bad of ["v0.44.0", "0.44", "bogus"]) {
+      const out = JSON.parse(run([bad, "0.43.2", "true"]));
+      expect(out.shouldPublish, `localVersion=${JSON.stringify(bad)}`).toBe(false);
+      expect(out.reason).toMatch(/unparseable/);
+    }
   });
 });
