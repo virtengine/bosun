@@ -386,11 +386,23 @@ if (!Object.prototype.hasOwnProperty.call(handlers, scenario)) {
   process.exit(2);
 }
 
+// Do NOT call process.exit() here. Each scenario leaves a real HTTP server (and
+// its sockets) mid-teardown, and on Windows an immediate process.exit() races that
+// close: libuv trips its own teardown guard and aborts the child with
+// `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` in src\win\async.c
+// (exit code 3221226505 / STATUS_STACK_BUFFER_OVERRUN). The parent then sees a dead
+// child that never printed its payload and reports the scenario as failed. It also
+// raced the stdout write, so a payload could be lost even on a lucky run.
+//
+// Setting exitCode and returning instead lets the loop drain naturally, which both
+// flushes stdout and closes the handles in order. Verified: 0 aborts in 40 runs,
+// and each scenario still exits 0/1 on result.ok.
+process.exitCode = 0;
 try {
   const result = await handlers[scenario]();
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  process.exit(result.ok ? 0 : 1);
+  process.exitCode = result.ok ? 0 : 1;
 } catch (error) {
   process.stderr.write(`${error?.stack || error}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 }
