@@ -29,7 +29,12 @@ describe("vendored DOMPurify floor", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(
-      new RegExp(`below required floor ${DOMPURIFY_MIN_VERSION.replace(/\./g, "\\.")}`),
+      // Escape every regex metacharacter, not just the dots: CodeQL's
+      // "Incomplete string escaping or encoding" (js/incomplete-sanitization)
+      // flags a hand-rolled `replace(/\./g)` because it leaves backslashes and
+      // the rest of the metacharacter set unescaped. This is the same idiom used
+      // by config/repo-config.mjs:escapeRegex and workflow-canvas-utils.mjs.
+      new RegExp(`below required floor ${DOMPURIFY_MIN_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
     );
   });
 
