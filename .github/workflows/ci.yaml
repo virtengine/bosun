@@ -1,10 +1,22 @@
 name: "CI"
 
+# Why both branches are listed:
+# The estate uses a two-tier merge model (ESTATE standing rule 1) — every
+# change lands on `develop` first via PR, and `develop` is promoted to `main`
+# by the standing integration PR. Gating only on `main` therefore left every
+# develop-based PR with no build/test coverage at all: the only checks that
+# fired on such a PR were `Attach Bosun marker` and `npm audit (root + desktop)`.
+# Measured on PR #569 (merged as 70a4d373) and PR #580 — base `develop`, two
+# checks, no `Build + Tests`.
+#
+# `push: develop` is deliberate too: it proves the merged tip of `develop`
+# itself, rather than only each PR head, so a bad merge cannot slip a red
+# `develop` in behind green per-PR runs.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
