@@ -1,12 +1,18 @@
 name: CodeQL
 
+# Why both branches are listed:
+# The estate merges into `develop` first (ESTATE standing rule 1), so gating only
+# on `main` meant no develop-based PR ever got a PR-level SAST scan. The weekly
+# `schedule` still runs, but it only reports on whatever `main` was that Monday.
 on:
   push:
     branches:
       - main
+      - develop
   pull_request:
     branches:
       - main
+      - develop
   schedule:
     - cron: "27 3 * * 1"
 
