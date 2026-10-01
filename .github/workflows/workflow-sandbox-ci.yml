@@ -28,7 +28,11 @@ name: "🧪 Workflow Sandbox CI"
 
 on:
   push:
-    branches: ["main", "feat/**", "fix/**", "refactor/**"]
+    # `develop` added alongside `main`: the estate merges into `develop` first
+    # (ESTATE standing rule 1), so this workflow — the project's own flake
+    # detector — was dark on every develop-based PR. Same two-branch shape
+    # ci.yaml got in #582 and dependency-audit.yml already uses.
+    branches: ["main", "develop", "feat/**", "fix/**", "refactor/**"]
     paths:
       - "infra/**"
       - "task/**"
@@ -41,7 +45,7 @@ on:
       - "tests/sandbox/**"
       - ".github/workflows/workflow-sandbox-ci.yml"
   pull_request:
-    branches: ["main"]
+    branches: ["main", "develop"]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:

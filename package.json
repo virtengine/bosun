@@ -108,6 +108,7 @@
     "desktop:install": "npm -C desktop install",
     "desktop:dist": "npm -C desktop run dist",
     "build": "node tools/vendor-sync.mjs && npm run demo-defaults:sync && npm run demo-ui:sync",
+    "build:vendor-mui": "node tools/build-vendor-mui.mjs",
     "build:docs": "node tools/build-docs.mjs",
     "site:serve": "node tools/site-serve.mjs",
     "shared-workspaces": "node workspace/shared-workspace-cli.mjs",
@@ -140,6 +141,8 @@
     "prepublishOnly": "node tools/prepublish-check.mjs && npm run smoke:packed-cli",
     "vendorsync": "node tools/vendor-sync.mjs",
     "vendor:sync": "node tools/vendor-sync.mjs",
+    "check:vendored-dompurify": "node tools/check-vendored-dompurify.mjs",
+    "build:vendor-toastui": "node tools/build-vendor-toastui.mjs",
     "native:build": "node tools/native-rust.mjs build",
     "native:test": "node tools/native-rust.mjs test",
     "native:check": "node tools/native-rust.mjs check",
@@ -537,9 +540,9 @@
     "workspace/worktree-setup.mjs"
   ],
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "latest",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.44",
     "@babel/runtime": "^7.29.2",
-    "@github/copilot-sdk": "latest",
+    "@github/copilot-sdk": "^0.1.32",
     "@google/genai": "^2.24.0",
     "@jridgewell/sourcemap-codec": "^1.6.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -577,6 +580,7 @@
     "@emotion/styled": "^11.14.1",
     "@mui/material": "^9.4.0",
     "@playwright/test": "^1.63.0",
+    "esbuild": "^0.28.2",
     "playwright": "^1.58.2",
     "vitest": "^4.1.11"
   },
@@ -590,6 +594,9 @@
     "gaxios": "7.1.4",
     "@hono/node-server": "^1.19.15",
     "@protobufjs/utf8": "^1.1.2",
-    "qs": "^6.16.0"
+    "qs": "^6.16.0",
+    "@toast-ui/editor": {
+      "dompurify": "3.4.16"
+    }
   }
 }

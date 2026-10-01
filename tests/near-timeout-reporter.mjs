@@ -97,8 +97,14 @@ export default class NearTimeoutReporter {
       const durationMs = task.result?.duration;
       if (typeof durationMs !== "number") continue;
 
-      // Vitest stores the effective timeout on task.timeout
+      // Vitest stores the effective timeout on task.timeout.
       const timeoutMs = task.timeout ?? DEFAULT_TIMEOUT_MS;
+      // Vitest encodes "no timeout" as 0, not undefined, so the `??` above does
+      // not catch it. A 0 denominator yields Infinity% — the entry sorts to the
+      // very top of the warning and reports a test with no budget at all as the
+      // most at-risk in the run. Such a test cannot flake on a budget it does not
+      // have, so skip it (also covers NaN / negative values).
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) continue;
       const pct = Math.round((durationMs / timeoutMs) * 100);
       if (pct >= WARN_PCT) {
         const name = this._taskPath(task);

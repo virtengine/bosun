@@ -94,13 +94,21 @@ ADJACENCY_MAP=(
   "telegram/|telegram-*|harness-surface-integration*|whatsapp-*|weekly-agent-work-report*|harness-surface-clients*"
   "voice/|voice-*|mic-*|native-call*"
   "tui/|tui-*|harness-surface-integration*|task-*|tui-events*|tui-bridge*|ui-server-tui-events*|harness-surface-clients*"
-  "ui/|ui-*|tui-*|stream-timeline*|workflow-canvas-utils*|static-relative*|mui-theme*|tab-swipe*|session-theme*|session-history*|demo-*|fleet-tab*|portal-ui-smoke*|harness-surface-clients*"
+  "ui/|ui-*|tui-*|stream-timeline*|workflow-canvas-utils*|static-relative*|mui-theme*|tab-swipe*|session-theme*|session-history*|demo-*|fleet-tab*|portal-ui-smoke*|harness-surface-clients*|build-vendor-mui*"
   "site/|ui-*|stream-timeline*|static-relative*|demo-*|portal-ui-smoke*"
   "server/|ui-server*|harness-surface-integration*|setup-web*|bosun-mcp-server*|tunnel-*|ui-realtime*|presence*|portal-ui-smoke*|guardrails*|harness-surface-clients*"
   "github/|github-*|hook-profiles*"
   "git/|git-*|branch-*|diff-stats*|conflict-*"
   "shell/|*-shell*|codex-shell*|gemini-shell*|opencode-shell*|shell-session-compat*|sdk-shell*|continue-detection*"
-  "tools/|apply-pr-suggestions*|demo-defaults-sync*|sync-demo-ui*|prepublish-check*|vitest-runner*|release-drift*|publish-version-gate*"
+  # The vendored Toast UI bundle embeds DOMPurify, which no dependabot alert can
+  # see. Changing the bundle or the floor/gate tools must re-run the floor test,
+  # otherwise a re-vendored 2.x bundle reaches main unchecked.
+  "ui/assets/|vendor-dompurify-floor*|ui-*"
+  "site/ui/assets/|vendor-dompurify-floor*|ui-*"
+  "tools/dompurify-floor.mjs|vendor-dompurify-floor*"
+  "tools/check-vendored-dompurify.mjs|vendor-dompurify-floor*"
+  "tools/build-vendor-toastui.mjs|vendor-dompurify-floor*"
+  "tools/|apply-pr-suggestions*|demo-defaults-sync*|sync-demo-ui*|prepublish-check*|vitest-runner*|release-drift*|publish-version-gate*|vendor-dompurify-floor*|build-vendor-mui*"
   "plugins/|windows-desktop-mcp-server*"
   "lib/|logger*|log-tail*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*|hot-path-runtime*"
   # Top-level runtime files that don't live in a subdirectory.

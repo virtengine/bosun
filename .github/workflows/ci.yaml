@@ -1,10 +1,22 @@
 name: "CI"
 
+# Why both branches are listed:
+# The estate uses a two-tier merge model (ESTATE standing rule 1) — every
+# change lands on `develop` first via PR, and `develop` is promoted to `main`
+# by the standing integration PR. Gating only on `main` therefore left every
+# develop-based PR with no build/test coverage at all: the only checks that
+# fired on such a PR were `Attach Bosun marker` and `npm audit (root + desktop)`.
+# Measured on PR #569 (merged as 70a4d373) and PR #580 — base `develop`, two
+# checks, no `Build + Tests`.
+#
+# `push: develop` is deliberate too: it proves the merged tip of `develop`
+# itself, rather than only each PR head, so a bad merge cannot slip a red
+# `develop` in behind green per-PR runs.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
@@ -34,6 +46,12 @@ jobs:
       - name: Prepublish check (files array + import validation)
         run: node tools/prepublish-check.mjs
 
+      # Vendored bundles are invisible to dependabot (they appear in no
+      # manifest), so a re-vendored bundle carrying an old DOMPurify would
+      # never raise an alert. This gate is the only channel that can see it.
+      - name: Vendored DOMPurify floor gate
+        run: node tools/check-vendored-dompurify.mjs
+
       - name: Prompt lint
         run: npm run prompt:lint
 
@@ -42,6 +60,12 @@ jobs:
 
       - name: Run build
         run: npm run build
+
+      # The MUI/emotion bundles under ui/vendor and site/ui/vendor are committed
+      # build artifacts. Regenerate them into a scratch dir and fail on any
+      # drift, so a committed bundle can never contradict its own generator.
+      - name: MUI vendor bundle freshness
+        run: node tools/build-vendor-mui.mjs --check
 
       - name: Audit conformity gate
         if: ${{ vars.BOSUN_AUDIT_CI == '1' }}
