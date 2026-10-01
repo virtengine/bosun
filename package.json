@@ -108,6 +108,7 @@
     "desktop:install": "npm -C desktop install",
     "desktop:dist": "npm -C desktop run dist",
     "build": "node tools/vendor-sync.mjs && npm run demo-defaults:sync && npm run demo-ui:sync",
+    "build:vendor-mui": "node tools/build-vendor-mui.mjs",
     "build:docs": "node tools/build-docs.mjs",
     "site:serve": "node tools/site-serve.mjs",
     "shared-workspaces": "node workspace/shared-workspace-cli.mjs",
@@ -577,6 +578,7 @@
     "@emotion/styled": "^11.14.1",
     "@mui/material": "^9.4.0",
     "@playwright/test": "^1.63.0",
+    "esbuild": "^0.28.2",
     "playwright": "^1.58.2",
     "vitest": "^4.1.11"
   },

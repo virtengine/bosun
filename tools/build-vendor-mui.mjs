@@ -1,13 +1,15 @@
 import { build } from 'esbuild';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, copyFileSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const VENDOR_DIR = resolve(ROOT, 'ui', 'vendor');
+const SITE_VENDOR_DIR = resolve(ROOT, 'site', 'ui', 'vendor');
 
 mkdirSync(VENDOR_DIR, { recursive: true });
+mkdirSync(SITE_VENDOR_DIR, { recursive: true });
 
 // Shared externals — resolved at runtime via the page import-map
 const EXTERNALS = ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client'];
@@ -22,10 +24,6 @@ const sharedOpts = {
   external: EXTERNALS,
   define: {
     'process.env.NODE_ENV': '"production"',
-  },
-  alias: {
-    '@mui/system': '@mui/system/esm',
-    '@mui/utils': '@mui/utils/esm'
   },
   // Suppress "Could not resolve …" warnings for optional/peer deps
   logLevel: 'warning',
@@ -77,4 +75,7 @@ if (!ok) {
   console.error('\n[build-vendor-mui] Some bundles failed — portal MUI may not work.');
   process.exit(1);
 }
-console.log('\n[build-vendor-mui] All MUI vendor bundles ready.');
+for (const { outfile } of entries) {
+  copyFileSync(outfile, resolve(SITE_VENDOR_DIR, basename(outfile)));
+}
+console.log('\n[build-vendor-mui] All MUI vendor bundles ready in ui/vendor and site/ui/vendor.');
