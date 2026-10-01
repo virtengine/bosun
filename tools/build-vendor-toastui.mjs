@@ -74,8 +74,15 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 
-/** Upstream tag that corresponds to @toast-ui/editor 3.2.2. */
-export const TOASTUI_TAG = "v3.2.2";
+/**
+ * Upstream tag that corresponds to @toast-ui/editor 3.2.2.
+ *
+ * NOTE the tag shape: nhn/tui.editor tags each package in the monorepo as
+ * `editor@<version>`, not `v<version>`. There is no `v3.2.2` tag upstream, so a
+ * `v`-prefixed value makes `git clone --branch` fail outright and turns the gate's
+ * documented remediation command into a dead end.
+ */
+export const TOASTUI_TAG = "editor@3.2.2";
 export const TOASTUI_REPO = "https://github.com/nhn/tui.editor.git";
 export const BUNDLE_RELATIVE_PATH = "assets/toastui-editor-all.min.js";
 
@@ -84,6 +91,41 @@ export const BUNDLE_TARGETS = [
   resolve(ROOT, "ui", "assets", "toastui-editor-all.min.js"),
   resolve(ROOT, "site", "ui", "assets", "toastui-editor-all.min.js"),
 ];
+
+/**
+ * How to invoke npm for the upstream dependency install.
+ *
+ * `npm` cannot simply be spawned by name here. On Windows the PATH entry is a
+ * `npm.cmd` shim: execFileSync without a shell dies with ENOENT, and with a
+ * shell it dies with EINVAL. So we drive npm's own JS entrypoint with the same
+ * `process.execPath` already used for rollup and webpack, resolving it in order:
+ *
+ *   1. `npm_execpath` — set whenever this script runs under `npm run`, and
+ *      already an absolute path to npm's cli bundle.
+ *   2. `node_modules/npm/bin/npm-cli.js` next to the running node binary —
+ *      correct when the script is run as plain `node tools/...`, including on
+ *      this repo's Windows hosts.
+ *   3. A plain `npm` on PATH through a shell — the POSIX fallback, kept last
+ *      because it is the only option that depends on the caller's PATH.
+ */
+const NPM_CLI_CANDIDATES = [
+  process.env.npm_execpath,
+  join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+];
+
+function resolveNpmInvocation() {
+  for (const candidate of NPM_CLI_CANDIDATES) {
+    if (candidate && existsSync(candidate)) {
+      return { command: process.execPath, args: [candidate], shell: false };
+    }
+  }
+  return { command: "npm", args: [], shell: true };
+}
+
+const NPM_INVOCATION = resolveNpmInvocation();
+export const NPM_COMMAND = NPM_INVOCATION.command;
+export const NPM_ARGS_INSTALL = [...NPM_INVOCATION.args, "install", "--no-audit", "--no-fund"];
+export const NPM_USES_SHELL = NPM_INVOCATION.shell;
 
 function log(message) {
   process.stdout.write(`[build-vendor-toastui] ${message}\n`);
@@ -98,9 +140,29 @@ export function buildFromUpstream() {
   const workdir = mkdtempSync(join(tmpdir(), "bosun-tui-editor-"));
   try {
     log(`cloning ${TOASTUI_REPO} @ ${TOASTUI_TAG}`);
-    execFileSync("git", ["clone", "--depth", "1", "--branch", TOASTUI_TAG, TOASTUI_REPO, workdir], {
-      stdio: "inherit",
-    });
+    // -c core.autocrlf=false / core.eol=lf keeps the checkout byte-faithful to
+    // upstream. Without it a Windows clone rewrites line endings to CRLF and the
+    // upstream prettier lint in the build then fails on 258 files — a failure
+    // that looks like a build problem but is purely a checkout problem.
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.eol=lf",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        TOASTUI_TAG,
+        TOASTUI_REPO,
+        workdir,
+      ],
+      {
+        stdio: "inherit",
+      },
+    );
 
     // Force the 3.x line over the hard "^2.3.3" pin in apps/editor/package.json.
     const pkgPath = join(workdir, "package.json");
@@ -117,9 +179,10 @@ export function buildFromUpstream() {
       });
 
     log("installing upstream dependencies (npm install picks up the override)");
-    execFileSync("npm", ["install", "--no-audit", "--no-fund"], {
+    execFileSync(NPM_COMMAND, NPM_ARGS_INSTALL, {
       cwd: workdir,
       stdio: "inherit",
+      shell: NPM_USES_SHELL,
     });
 
     // The editor build imports @toast-ui/toastmark's ESM output, which does not

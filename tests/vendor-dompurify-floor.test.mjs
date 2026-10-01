@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { BUNDLE_TARGETS } from "../tools/build-vendor-toastui.mjs";
+import { BUNDLE_TARGETS, TOASTUI_TAG } from "../tools/build-vendor-toastui.mjs";
 import {
   DOMPURIFY_MIN_VERSION,
   DOMPURIFY_VERSION,
@@ -56,6 +56,17 @@ describe("vendored DOMPurify floor", () => {
         "fixture.js",
       ).ok,
     ).toBe(false);
+  });
+});
+
+describe("regeneration inputs", () => {
+  // The gate prints `npm run build:vendor-toastui` as its remediation command, so
+  // the regeneration path must actually be runnable. nhn/tui.editor tags each
+  // package in the monorepo as `editor@<version>`; there is no `v<version>` tag,
+  // and a wrong tag makes `git clone --branch` fail before npm ever runs.
+  it("pins an upstream tag that exists in nhn/tui.editor", () => {
+    expect(TOASTUI_TAG).toBe("editor@3.2.2");
+    expect(TOASTUI_TAG).not.toMatch(/^v\d/);
   });
 });
 
