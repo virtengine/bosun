@@ -36,11 +36,14 @@
  *     1. clone the tag into a temp dir
  *     2. add `"overrides": { "dompurify": "<DOMPURIFY_VERSION>" }` to its root
  *        package.json so the 3.x line wins over the hard ^2.3.3 pin
- *     3. build libs/toastmark (rollup) — the editor build imports its ESM
+ *     3. npm install, then FORCE the 3.x line into the resolved tree and assert
+ *        it — the `overrides` entry alone is a silent no-op against the
+ *        lockfile upstream commits (see forceDompurifyVersion)
+ *     4. build libs/toastmark (rollup) — the editor build imports its ESM
  *        output and fails outright without it
- *     4. build apps/editor with `webpack build --env minify`, producing
+ *     5. build apps/editor with `webpack build --env minify`, producing
  *        dist/cdn/toastui-editor-all.min.js
- *     5. verify the floor, then install into ui/assets/ and site/ui/assets/
+ *     6. verify the floor, then install into ui/assets/ and site/ui/assets/
  *
  *   --from <path> skips the clone and build and installs an already-built
  *   bundle. This is the mode used in CI-adjacent refreshes and for verifying
@@ -57,6 +60,7 @@ import {
   copyFileSync,
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -66,6 +70,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  compareVersions,
   DOMPURIFY_MIN_VERSION,
   DOMPURIFY_VERSION,
   inspectDompurifyBundle,
@@ -131,6 +136,140 @@ function log(message) {
   process.stdout.write(`[build-vendor-toastui] ${message}\n`);
 }
 
+/** Directory listing that yields nothing on an unreadable dir instead of throwing. */
+function safeReaddir(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read the version of every dompurify actually installed in a node_modules tree.
+ *
+ * Walks the tree for every `dompurify` directory and reads its package.json, so
+ * both the hoisted copy and any nested copy (e.g.
+ * `@toast-ui/editor/node_modules/dompurify`) are seen. Webpack resolves the
+ * nested copy first, so a green root version with a live nested 2.x still ships
+ * 2.x — both must be reported.
+ *
+ * @param {string} root repository root (the worktree being installed into)
+ * @returns {Array<{path: string, version: string|null}>}
+ */
+export function readInstalledDompurifyVersions(root) {
+  const nodeModules = join(root, "node_modules");
+  if (!existsSync(nodeModules)) return [];
+
+  const found = [];
+  const stack = [nodeModules];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const entry of safeReaddir(dir)) {
+      if (!entry.isDirectory()) continue;
+      const full = join(dir, entry.name);
+      if (entry.name === "dompurify") {
+        let version = null;
+        try {
+          version = JSON.parse(readFileSync(join(full, "package.json"), "utf8")).version ?? null;
+        } catch {
+          version = null;
+        }
+        found.push({ path: full, version });
+        continue;
+      }
+      // Descend into scope dirs and into node_modules dirs so nested copies
+      // (`@scope/pkg/node_modules/dompurify`) are reachable. Walking every
+      // package dir in a 2400-package upstream tree would be needlessly slow, so
+      // scope contents are expanded to their member packages and nowhere else.
+      if (entry.name.startsWith("@")) {
+        for (const member of safeReaddir(full)) {
+          if (member.isDirectory()) stack.push(join(full, member.name));
+        }
+      } else if (entry.name === "node_modules") {
+        stack.push(full);
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Default installer used by `forceDompurifyVersion`: a direct, `--no-save`
+ * install of the 3.x line into the upstream worktree.
+ *
+ * `--no-save` is deliberate — it must not rewrite the lockfile we deliberately
+ * kept for toolchain reproducibility, and it must not be undone by a later
+ * `npm install` in the same tree.
+ */
+function defaultDompurifyInstall(workdir, version) {
+  execFileSync(NPM_COMMAND, [...NPM_ARGS_INSTALL, "--no-save", `dompurify@${version}`], {
+    cwd: workdir,
+    stdio: "inherit",
+    shell: NPM_USES_SHELL,
+  });
+}
+
+/**
+ * Force dompurify >= the floor into an already-installed upstream worktree.
+ *
+ * WHY A ROOT `overrides` ENTRY IS NOT ENOUGH
+ * ------------------------------------------
+ * nhn/tui.editor at `editor@3.2.2` commits a package-lock.json that pins
+ * `node_modules/dompurify` to 2.3.3, and its root package record has no
+ * `overrides` key. npm does not apply a newly-added root `overrides` entry
+ * against a lockfile that predates it, so writing `overrides.dompurify` into
+ * the upstream package.json is silently a no-op: `npm install` completes
+ * successfully, reports nothing, and leaves 2.3.3 installed. Measured against
+ * seven install variants (bare override, scoped override, `--package-lock-only`,
+ * seeding packages[""].overrides, seeding plus dropping the stale entry), only
+ * deleting the lockfile produced 3.x — and deleting it floats upstream's own
+ * lint toolchain, after which upstream's source fails with 158 eslint errors.
+ *
+ * So we keep the lockfile (toolchain reproducibility is load-bearing) and force
+ * the 3.x line in on top with a direct `--no-save` install, then delete the
+ * nested `@toast-ui/editor/node_modules/dompurify` copy that webpack resolves
+ * ahead of the hoisted one.
+ *
+ * The resolved tree is then asserted here, so a silently-defeated override fails
+ * at its source instead of 40 seconds later inside the bundle floor check.
+ *
+ * @param {string} workdir installed upstream worktree to correct in place
+ * @param {{install?: Function, log?: Function}} [deps] injectable for tests
+ * @returns {Array<{path: string, version: string|null}>} every dompurify left
+ */
+export function forceDompurifyVersion(
+  workdir,
+  { install = defaultDompurifyInstall, log: logger = log } = {},
+) {
+  install(workdir, DOMPURIFY_VERSION);
+  rmSync(join(workdir, "node_modules", "@toast-ui", "editor", "node_modules", "dompurify"), {
+    recursive: true,
+    force: true,
+  });
+
+  const installed = readInstalledDompurifyVersions(workdir);
+  if (installed.length === 0) {
+    throw new Error("no dompurify found in the upstream tree after forcing the override");
+  }
+  const bad = installed.filter(
+    (entry) => !entry.version || compareVersions(entry.version, DOMPURIFY_MIN_VERSION) < 0,
+  );
+  if (bad.length > 0) {
+    throw new Error(
+      `dompurify ${DOMPURIFY_VERSION} was forced but the resolved tree still carries ` +
+        `${bad.map((entry) => `${entry.version ?? "unknown"} at ${entry.path}`).join(", ")} ` +
+        `(floor ${DOMPURIFY_MIN_VERSION}). Upstream committed a lockfile that npm will not ` +
+        `re-resolve against a new root overrides entry, so the 3.x line must be installed ` +
+        `directly. Refusing to build a bundle from this tree.`,
+    );
+  }
+  logger(
+    `dompurify in tree: ${installed.map((entry) => entry.version).join(", ")}, nested copy removed`,
+  );
+  return installed;
+}
+
 /**
  * Build the upstream bundle from source with dompurify 3.x forced.
  *
@@ -178,12 +317,20 @@ export function buildFromUpstream() {
         env: { ...process.env, WEBPACK_BUILD: "true" },
       });
 
-    log("installing upstream dependencies (npm install picks up the override)");
+    log("installing upstream dependencies (npm install)");
     execFileSync(NPM_COMMAND, NPM_ARGS_INSTALL, {
       cwd: workdir,
       stdio: "inherit",
       shell: NPM_USES_SHELL,
     });
+
+    // The root `overrides` entry written above is NOT sufficient on its own:
+    // upstream commits a lockfile that predates it, so npm keeps 2.3.3. See
+    // forceDompurifyVersion() for the measurements. Assert the resolved tree
+    // before the 40s build so a defeated override fails here, not at the floor
+    // check with a confusing "2.3.3 is below floor" message.
+    log("forcing dompurify 3.x into the upstream tree");
+    forceDompurifyVersion(workdir);
 
     // The editor build imports @toast-ui/toastmark's ESM output, which does not
     // exist in a fresh clone. Build it first or webpack fails to resolve it.
