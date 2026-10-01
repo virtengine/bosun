@@ -10,7 +10,7 @@ export const DOMPURIFY_VERSION = "3.4.16";
 const LICENSE_VERSION = /@license DOMPurify (\d+\.\d+\.\d+)/g;
 const RUNTIME_VERSION = /\b[\w$]+\.version\s*=\s*["'](\d+\.\d+\.\d+)["']\s*,\s*[\w$]+\.removed\s*=\s*\[\]/g;
 
-function compareVersions(left, right) {
+export function compareVersions(left, right) {
   const a = left.split(".").map(Number);
   const b = right.split(".").map(Number);
   for (let i = 0; i < 3; i += 1) {
