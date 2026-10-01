@@ -540,9 +540,9 @@
     "workspace/worktree-setup.mjs"
   ],
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "latest",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.44",
     "@babel/runtime": "^7.29.2",
-    "@github/copilot-sdk": "latest",
+    "@github/copilot-sdk": "^0.1.32",
     "@google/genai": "^2.24.0",
     "@jridgewell/sourcemap-codec": "^1.6.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
