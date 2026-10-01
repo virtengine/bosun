@@ -13,12 +13,17 @@
 
 name: Codacy Security Scan
 
+# Why both branches are listed:
+# Same defect ci.yaml had before #582 — the estate merges into `develop` first
+# (ESTATE standing rule 1), so a `branches: [main]`-only trigger left every
+# develop-based PR with no PR-level scan at all. The weekly `schedule` below
+# still runs, but it only reports on whatever `main` happened to be that Monday.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
     # The branches below must be a subset of the branches above
-    branches: [main]
+    branches: [main, develop]
   schedule:
     - cron: '25 18 * * 1'
 
