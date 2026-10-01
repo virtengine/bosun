@@ -119,6 +119,40 @@ describe("near-timeout reporter", () => {
     expect(out).toContain("outer > inner");
   });
 
+  it("treats a test with no timeout budget (timeout: 0) as not at risk", () => {
+    // Vitest encodes "no timeout" as `timeout: 0`, not undefined, so a `??` guard
+    // lets 0 through as the denominator and yields Infinity% — which sorts the
+    // entry to the top of the warning as the most at-risk test in the run.
+    // A test without a budget cannot flake on one, so it must be skipped.
+    const out = captureLog(() => {
+      const reporter = new NearTimeoutReporter();
+      reporter.onTestRunEnd([
+        testModule("sample.test.mjs", [
+          { name: "no budget", result: { state: "pass", duration: 413 }, timeout: 0 },
+        ]),
+      ]);
+    });
+
+    expect(out).toBe("");
+  });
+
+  it("skips only the zero-timeout test when a sibling has a real budget", () => {
+    const out = captureLog(() => {
+      const reporter = new NearTimeoutReporter();
+      reporter.onTestRunEnd([
+        testModule("sample.test.mjs", [
+          { name: "no budget", result: { state: "pass", duration: 413 }, timeout: 0 },
+          { name: "at risk", result: { state: "pass", duration: 9000 }, timeout: 10000 },
+        ]),
+      ]);
+    });
+
+    expect(out).toContain("90%");
+    expect(out).toContain("at risk");
+    expect(out).not.toContain("no budget");
+    expect(out).not.toContain("Infinity");
+  });
+
   it("survives an empty or missing run", () => {
     const out = captureLog(() => {
       const reporter = new NearTimeoutReporter();
