@@ -61,6 +61,12 @@ jobs:
       - name: Run build
         run: npm run build
 
+      # The MUI/emotion bundles under ui/vendor and site/ui/vendor are committed
+      # build artifacts. Regenerate them into a scratch dir and fail on any
+      # drift, so a committed bundle can never contradict its own generator.
+      - name: MUI vendor bundle freshness
+        run: node tools/build-vendor-mui.mjs --check
+
       - name: Audit conformity gate
         if: ${{ vars.BOSUN_AUDIT_CI == '1' }}
         run: npm run audit:ci
