@@ -34,6 +34,12 @@ jobs:
       - name: Prepublish check (files array + import validation)
         run: node tools/prepublish-check.mjs
 
+      # Vendored bundles are invisible to dependabot (they appear in no
+      # manifest), so a re-vendored bundle carrying an old DOMPurify would
+      # never raise an alert. This gate is the only channel that can see it.
+      - name: Vendored DOMPurify floor gate
+        run: node tools/check-vendored-dompurify.mjs
+
       - name: Prompt lint
         run: npm run prompt:lint
 
