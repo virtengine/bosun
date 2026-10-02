@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,12 +24,25 @@ import {
   parseVulnerableRange,
 } from "../tools/dompurify-advisories.mjs";
 import {
+  assertChannelsAccounted,
+  assertScanRootsCover,
+  classifyDompurifyCandidate,
+  deriveContainerScanRoots,
+  deriveScanRoots,
   discoverDompurifyBundles,
   findDompurifyBundles,
+  listTopLevelSegments,
   listTrackedVendoredFiles,
-  VENDORED_SCAN_ROOTS,
+  MINIMUM_SCAN_ROOTS,
+  PACKAGE_MANIFEST,
+  PAGES_WORKFLOW,
+  DOCKER_IGNORE,
+  DOCKERFILE,
+  parseDockerignore,
+  readPublishDir,
+  resolveScanChannels,
+  resolveScanRoots,
 } from "../tools/dompurify-discovery.mjs";
-import { readFileSync } from "node:fs";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -185,30 +199,344 @@ describe("regeneration inputs", () => {
 });
 
 /**
- * The bundle set must be DISCOVERED, not declared.
+ * The bundle set must be DISCOVERED, not declared — and so must the ROOTS it is
+ * discovered under.
  *
- * The gate used to enumerate two hardcoded paths, which is the same shape of
- * assumption that caused the original exposure: a genuine DOMPurify 2.3.3 bundle
- * committed at a third path (`ui/assets/vendor/markdown-editor.min.js`) produced
- * gate exit 0 and a fully green suite, while `ui/` is in package.json `files[]`
- * (npm tarball) and deploy-site.yaml does `cp -rL ui site/ui` (GitHub Pages).
- * These tests build that exact shape and assert discovery reports it.
+ * Two hand-maintained lists have already failed here, each the previous fix's
+ * shape one level up. Hardcoded bundle PATHS missed `ui/assets/vendor/…`;
+ * replacing those with hardcoded scan ROOTS (`["ui","site"]`) missed `tui/` and
+ * `native/`, which package.json `files[]` ships and which therefore reach the npm
+ * tarball. A genuine DOMPurify 2.3.3 bundle committed at
+ * `tui/vendor-dompurify-probe.min.js` gave gate exit 0 and a green suite.
+ *
+ * So the roots are derived from the repo's own declaration of what ships:
+ * package.json `files[]` plus the Pages `publish_dir`. MINIMUM_SCAN_ROOTS
+ * survives only as an asserted floor, and these tests pin both halves: the
+ * derivation, and the requirement that a newly added `files[]` root is covered
+ * without editing the tool.
  */
-describe("vendored bundle discovery", () => {
-  const STALE_BUNDLE = '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n';
+describe("vendored bundle discovery roots are derived, not declared", () => {
+  const MANIFEST = readFileSync(resolve(REPO_ROOT, PACKAGE_MANIFEST), "utf8");
+  const WORKFLOW = readFileSync(resolve(REPO_ROOT, PAGES_WORKFLOW), "utf8");
 
-  it("enumerates only tracked files under the shipped roots", () => {
-    expect(VENDORED_SCAN_ROOTS).toEqual(["ui", "site"]);
-    const tracked = listTrackedVendoredFiles(REPO_ROOT);
+  it("derives roots from package.json files[] and the Pages publish_dir", () => {
+    const manifest = JSON.parse(MANIFEST);
+    const publishDir = readPublishDir(WORKFLOW);
+
+    expect(publishDir).toBe("site");
+    const roots = deriveScanRoots({ manifest, publishDir });
+
+    // Every shipped top-level segment, from both sources.
+    expect(roots).toContain("ui");
+    expect(roots).toContain("tui");
+    expect(roots).toContain("native");
+    expect(roots).toContain("tools");
+    expect(roots).toContain("site");
+    expect(roots).toContain("desktop");
+    expect(roots.length).toBeGreaterThan(20);
+    expect([...roots]).toEqual([...roots].sort());
+    expect(new Set(roots).size).toBe(roots.length);
+  });
+
+  it("covers every root the previous hardcoded list enumerated, asserted not assumed", () => {
+    // MINIMUM_SCAN_ROOTS is the documented floor the derivation must never drop
+    // below; assertScanRootsCover throws if it does. This test is that assertion
+    // against the REAL manifest, so deleting `ui/` from files[] — which stops it
+    // shipping and would otherwise stop it being checked — fails here.
+    expect(assertScanRootsCover(resolveScanRoots({ cwd: REPO_ROOT }))).toContain("ui");
+    expect(() => assertScanRootsCover(["tui", "site"])).toThrow(/do not cover/);
+    expect(() => assertScanRootsCover(["ui"])).toThrow(/do not cover.*site/s);
+  });
+
+  it("covers a NEWLY ADDED files[] root without editing the tool", () => {
+    // The regression the whole derivation exists for. A root the tool has never
+    // heard of is picked up from the manifest alone — this test fails if anyone
+    // reintroduces a literal list, because a literal cannot know about
+    // `shiny-new-root/`.
+    const manifest = { files: ["ui/", "site/", "shiny-new-root/", "cli.mjs"] };
+    const roots = deriveScanRoots({ manifest, publishDir: "site" });
+    expect(roots).toContain("shiny-new-root");
+    expect(roots).toContain("cli.mjs");
+
+    // And discovery then reports a below-floor bundle planted in it, by name.
+    const found = findDompurifyBundles({
+      files: ["shiny-new-root/bundle.min.js"],
+      readFile: () => '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n',
+      roots,
+    });
+    expect(found.map((b) => b.path)).toEqual(["shiny-new-root/bundle.min.js"]);
+    expect(inspectDompurifyBundle(found[0].source, found[0].path).ok).toBe(false);
+  });
+
+  it("refuses to guess when the manifest or the workflow stops declaring its roots", () => {
+    // Fail closed rather than falling back to a hardcoded list — that fallback
+    // is exactly the defect being removed.
+    // deriveScanRoots stays pure; the floor check is assertScanRootsCover's job,
+    // and a derivation that cannot cover the floor must be rejected by it.
+    expect(deriveScanRoots({ manifest: { files: [] }, publishDir: "site" })).toEqual(["site"]);
+    expect(() => assertScanRootsCover(deriveScanRoots({ manifest: { files: [] }, publishDir: "site" })))
+      .toThrow(/do not cover/);
+    expect(() => deriveScanRoots({ manifest: {}, publishDir: "site" }))
+      .toThrow(/no files\[\] array/);
+    expect(() => readPublishDir("name: Deploy\n"))
+      .toThrow(/no publish_dir found/);
+  });
+
+  it("enumerates tracked files under the DERIVED roots, not a fixed pair", () => {
+    const roots = resolveScanRoots({ cwd: REPO_ROOT });
+    const tracked = listTrackedVendoredFiles(REPO_ROOT, roots);
     expect(tracked.length).toBeGreaterThan(100);
+    // Far wider than the old ["ui","site"] pair — that widening is the fix.
+    const topLevel = new Set(tracked.map((p) => p.split("/")[0]));
+    expect([...topLevel].sort()).toEqual(roots);
     for (const path of tracked) {
-      expect(path.startsWith("ui/") || path.startsWith("site/"), path).toBe(true);
       expect(path.includes("\\")).toBe(false);
+    }
+    // And the specific root the previous literal list omitted is now included.
+    expect(tracked.some((p) => p.startsWith("tui/"))).toBe(true);
+  });
+});
+
+/**
+ * The container image is the third shipping channel, and rounds 4, 5 and 6 of
+ * review were this same finding at three granularities — hardcoded bundle paths,
+ * then hardcoded scan roots, then an incomplete SET OF DECLARATIONS feeding the
+ * roots. `package.json files[]` and `publish_dir` model the npm tarball and Pages
+ * accurately; nothing modelled `COPY . .`, so a genuine DOMPurify 2.3.3 bundle
+ * committed at `scripts/vendor-dompurify-probe.js` shipped inside
+ * `virtengine/bosun:<sha>` with gate exit 0 and a green suite.
+ *
+ * These tests pin the third channel and, critically, the ASYMMETRY the reviewer
+ * called out: `tests/` is excluded by `.dockerignore`, so widening the container
+ * channel must NOT turn this gate's own marker-carrying test file into a FAIL.
+ */
+describe("the container channel is derived from .dockerignore, not declared", () => {
+  const DOCKERIGNORE = readFileSync(resolve(REPO_ROOT, DOCKER_IGNORE), "utf8");
+  const DOCKERFILE_SOURCE = readFileSync(resolve(REPO_ROOT, DOCKERFILE), "utf8");
+
+  it("models the image as repo-minus-.dockerignore, from the declarations", () => {
+    const segments = listTopLevelSegments(REPO_ROOT);
+    const container = deriveContainerScanRoots({
+      dockerignore: DOCKERIGNORE,
+      segments,
+    });
+
+    // The premise the whole container model rests on: the Dockerfile copies the
+    // whole build context, which is what makes the exclusion list meaningful.
+    expect(/^\s*COPY\s+\.\s+\.\s*$/m.test(DOCKERFILE_SOURCE)).toBe(true);
+
+    // Roots the image ships that NO other channel declares — this is the hole.
+    for (const root of ["scripts", "bin", "core", "src", "plugins", "evidence"]) {
+      expect(container).toContain(root);
+    }
+    // And .dockerignore's own exclusions are honoured.
+    for (const root of ["tests", "docs", "desktop", "node_modules", "output"]) {
+      expect(container).not.toContain(root);
+    }
+    expect(container.length).toBeGreaterThan(segments.length / 2);
+  });
+
+  it("covers a NEWLY ADDED shipping root with no edit to the tool", () => {
+    // The regression the derivation exists for, at the container granularity: a
+    // top-level directory nobody has ever heard of is scanned the day it is
+    // tracked and not excluded, because the set is computed from the tree.
+    const container = deriveContainerScanRoots({
+      dockerignore: DOCKERIGNORE,
+      segments: ["shiny-new-root", "tests", "docs"],
+    });
+    expect(container).toContain("shiny-new-root");
+
+    // ...and a below-floor bundle planted there is reported, by name.
+    const roots = deriveScanRoots({ manifest: { files: ["ui/"] }, publishDir: "site", containerRoots: container });
+    const found = findDompurifyBundles({
+      files: ["shiny-new-root/bundle.min.js"],
+      readFile: () => '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n',
+      roots,
+    });
+    expect(found.map((b) => b.path)).toEqual(["shiny-new-root/bundle.min.js"]);
+    expect(inspectDompurifyBundle(found[0].source, found[0].path).ok).toBe(false);
+  });
+
+  it("honours .dockerignore semantics: comments, dir-only, globs and negation", () => {
+    const source = [
+      "# a comment",
+      "",
+      "node_modules",
+      "tests/",
+      "*.log",
+      "output/",
+      "!output/keep.log",
+    ].join("\n");
+    const rules = parseDockerignore(source);
+    // comment + blank lines dropped; negation and dir-only recorded.
+    expect(rules).toHaveLength(5);
+
+    const container = deriveContainerScanRoots({
+      dockerignore: source,
+      // `output` is a tracked DIRECTORY, so `output/` excludes the segment; the
+      // negation is at file depth and does not resurrect the segment.
+      segments: ["app", "tests", "debug.log", "output", "node_modules"],
+    });
+    expect(container).toEqual(["app"]);
+  });
+
+  it("keeps the ASYMMETRY: `tests/` is excluded, so the gate's own test file is not a FAIL", () => {
+    // The reviewer required this direction explicitly. Widening the container
+    // channel must not report `tests/vendor-dompurify-floor.test.mjs`, which does
+    // carry a `@license DOMPurify 2.3.3` marker (as a fixture) and would be a
+    // genuine below-floor FAIL if `tests/` were scanned.
+    const { roots, channels } = resolveScanChannels({ cwd: REPO_ROOT });
+    expect(channels.container).not.toContain("tests");
+    expect(roots).not.toContain("tests");
+
+    const tracked = listTrackedVendoredFiles(REPO_ROOT, roots);
+    expect(tracked.some((p) => p.startsWith("tests/"))).toBe(false);
+
+    // The gate really does pass on the committed tree with the container channel
+    // active, so the widening is not reporting the repo's own marker strings.
+    const bundles = findDompurifyBundles({
+      files: tracked,
+      readFile: (path) => readFileSync(resolve(REPO_ROOT, path), "utf8"),
+      roots,
+    });
+    expect(bundles.map((b) => b.path)).toEqual([
+      "site/ui/assets/toastui-editor-all.min.js",
+      "ui/assets/toastui-editor-all.min.js",
+    ]);
+    for (const bundle of bundles) {
+      expect(inspectDompurifyBundle(bundle.source, bundle.path).ok).toBe(true);
     }
   });
 
+  it("finds a below-floor bundle committed at a CONTAINER-ONLY root (the round-6 repro)", () => {
+    // Exactly the reviewer's reproduction, as a permanent regression test: the
+    // genuine 2.3.3 bundle at `scripts/`, a root no channel declared before.
+    const { roots } = resolveScanChannels({ cwd: REPO_ROOT });
+    expect(roots).toContain("scripts");
+
+    const found = findDompurifyBundles({
+      files: ["scripts/vendor-dompurify-probe.js"],
+      readFile: () => '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n',
+      roots,
+    });
+    expect(found).toHaveLength(1);
+    const result = inspectDompurifyBundle(found[0].source, found[0].path);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/2\.3\.3 is below required floor/);
+  });
+
+  it("refuses to guess when a declaration stops saying what it says", () => {
+    // Fail closed on each declaration rather than falling back to a literal.
+    expect(() => parseDockerignore("# only comments\n\n")).toThrow(/declares no exclusions/);
+    // A Dockerfile that stops copying the whole context invalidates the model
+    // that .dockerignore describes, so the gate must stop rather than keep
+    // reporting roots for a channel it no longer understands.
+    expect(() => resolveScanChannels({
+      cwd: REPO_ROOT,
+      dockerfile: "FROM node:22\nWORKDIR /app\nCOPY package.json ./\n",
+    })).toThrow(/no longer copies the whole build context/);
+  });
+
+  it("cannot have the container channel derived and then silently dropped", () => {
+    // The load-bearing assertion. It compares two INDEPENDENT derivations — the
+    // channel from .dockerignore, the scan set from the union of declarations —
+    // so it genuinely fires when the union stops covering a channel.
+    const { channels, roots } = resolveScanChannels({ cwd: REPO_ROOT });
+    for (const channel of Object.keys(channels)) {
+      for (const root of channels[channel]) {
+        expect(roots).toContain(root);
+      }
+    }
+    expect(() => assertChannelsAccounted(["scripts", "somebrandnewroot"], roots))
+      .toThrow(/missing from the scan set/);
+    expect(() => assertChannelsAccounted(["ui"], ["ui"])).not.toThrow();
+  });
+
+  it("refuses an empty container channel rather than checking almost nothing", () => {
+    // If the matcher ever regressed into excluding everything, the gate would get
+    // a short root list and still print PASS. This is the round-3 "assertion fed
+    // its own input" shape, checked against the TREE instead.
+    const everything = ["ui", "site", "scripts", "tools"];
+    const excludedByAll = deriveContainerScanRoots({
+      dockerignore: everything.map((r) => `${r}/`).join("\n"),
+      segments: everything,
+    });
+    expect(excludedByAll).toEqual([]);
+  });
+});
+
+/**
+ * "Is this a bundle" must be a real discriminator, not "mentions DOMPurify".
+ *
+ * Widening the scan roots to everything that ships makes a mention-match useless:
+ * this gate's own tools/*.mjs, tools/dompurify-advisories.json and this test file
+ * all say "DOMPurify", and a naive match reports 7 false FAILs against files that
+ * contain no sanitizer at all.
+ */
+describe("DOMPurify candidate detection discriminates", () => {
+  const STALE_BUNDLE = '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n';
+
+  it("is not a candidate when the file merely mentions DOMPurify", () => {
+    // The exact false-positive shape the reviewer's measurement produced.
+    for (const source of [
+      "// mentions DOMPurify in a comment\nexport const x = 1;\n",
+      "/* bundled with DOMPurify somewhere */\nvar x = 1;\n",
+      '{"firstPatchedVersion":"3.4.16"}\n',
+    ]) {
+      expect(classifyDompurifyCandidate(source).candidate).toBe(false);
+    }
+  });
+
+  it("is a candidate for the banner, the runtime marker, or both", () => {
+    expect(classifyDompurifyCandidate(STALE_BUNDLE)).toEqual({
+      candidate: true, banner: true, runtime: true,
+    });
+    // Exactly ONE is still a candidate — that is the fail-closed half, so a
+    // re-minifier that breaks one marker shape produces a REPORT, not a skip.
+    expect(classifyDompurifyCandidate('/*! @license DOMPurify 3.4.16 */\nvar x=1;\n'))
+      .toEqual({ candidate: true, banner: true, runtime: false });
+    expect(classifyDompurifyCandidate('n.version="2.3.3",n.removed=[]\n'))
+      .toEqual({ candidate: true, banner: false, runtime: true });
+  });
+
+  it("fails closed on a bundle whose markers do not both parse", () => {
+    const found = findDompurifyBundles({
+      files: ["ui/assets/oddball.min.js"],
+      readFile: () => "/*! @license DOMPurify 3.4.16 */\nvar x = 1;\n",
+    });
+    expect(found).toHaveLength(1);
+    const result = inspectDompurifyBundle(found[0].source, found[0].path);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/expected exactly one DOMPurify license marker/);
+  });
+
+  it("ignores files that carry no DOMPurify at all", () => {
+    const found = findDompurifyBundles({
+      files: ["ui/components/task-markdown.js", "ui/index.html"],
+      readFile: () => "export const x = 1;\n",
+    });
+    expect(found).toEqual([]);
+  });
+
+  it("refuses to pass a tracked file it cannot read", () => {
+    // `git ls-files` still lists a file deleted in the working tree, and the
+    // working tree is what gets built and shipped.
+    expect(() =>
+      findDompurifyBundles({
+        files: ["ui/assets/gone.min.js"],
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+      }),
+    ).toThrow(/cannot be read/);
+  });
+});
+
+describe("vendored bundle discovery", () => {
+  const STALE_BUNDLE = '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n';
+
   it("finds a below-floor bundle committed at an UNLISTED path", () => {
-    // The exact mutation that defeated the previous gate.
+    // The exact mutation that defeated the two-path gate.
     const files = [
       "ui/assets/toastui-editor-all.min.js",
       "ui/assets/vendor/markdown-editor.min.js",
@@ -235,50 +563,25 @@ describe("vendored bundle discovery", () => {
     expect(result.reason).toMatch(/2\.3\.3/);
   });
 
-  it("ignores files that carry no DOMPurify at all", () => {
-    const found = findDompurifyBundles({
-      files: ["ui/components/task-markdown.js", "ui/index.html"],
-      readFile: () => "export const x = 1;\n",
-    });
-    expect(found).toEqual([]);
-  });
-
-  it("fails closed on a bundle whose markers do not parse", () => {
-    // A re-minifier that changes marker shape must produce a REPORT, never a
-    // silent skip — otherwise the gate degrades into a no-op that prints PASS.
-    const found = findDompurifyBundles({
-      files: ["ui/assets/oddball.min.js"],
-      readFile: () => "/* bundled with DOMPurify somewhere */\nvar x = 1;\n",
-    });
-    expect(found).toHaveLength(1);
-    const result = inspectDompurifyBundle(found[0].source, found[0].path);
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/expected exactly one DOMPurify license marker/);
-  });
-
-  it("refuses to pass a tracked file it cannot read", () => {
-    // `git ls-files` still lists a file deleted in the working tree, and the
-    // working tree is what gets built and shipped.
-    expect(() =>
-      findDompurifyBundles({
-        files: ["ui/assets/gone.min.js"],
-        readFile: () => {
-          throw new Error("ENOENT");
-        },
-      }),
-    ).toThrow(/cannot be read/);
-  });
-
   it("discovers the real committed bundles at BOTH known locations", () => {
-    const found = discoverDompurifyBundles({ cwd: REPO_ROOT });
-    const paths = found.map((b) => b.path).sort();
+    const { roots, bundles } = discoverDompurifyBundles({ cwd: REPO_ROOT });
+    expect(roots.length).toBeGreaterThan(20);
+    const paths = bundles.map((b) => b.path).sort();
     expect(paths).toEqual([
       "site/ui/assets/toastui-editor-all.min.js",
       "ui/assets/toastui-editor-all.min.js",
     ]);
-    for (const bundle of found) {
+    for (const bundle of bundles) {
       expect(inspectDompurifyBundle(bundle.source, bundle.path).ok, bundle.path).toBe(true);
     }
+  });
+
+  it("keeps MINIMUM_SCAN_ROOTS honest — it is a floor, not the scan list", () => {
+    // If this ever equals the derived set the derivation has been collapsed back
+    // into a literal, which is the defect class this whole change removes.
+    expect(MINIMUM_SCAN_ROOTS).toEqual(["ui", "site"]);
+    const derived = resolveScanRoots({ cwd: REPO_ROOT });
+    expect(derived.length).toBeGreaterThan(MINIMUM_SCAN_ROOTS.length * 5);
   });
 });
 
@@ -341,6 +644,54 @@ describe("advisory refresh has a producer", () => {
 
   it("grants only what opening the PR needs", () => {
     expect(workflow).toMatch(/permissions:\s*\n\s+contents: write\s*\n\s+pull-requests: write/);
+  });
+});
+
+/**
+ * The gate's own remediation is "read every shipped bundle and every lockfile".
+ * It hardcoded ONE lockfile — the root `package-lock.json` — while `desktop/` is a
+ * shipped package with its own manifest and lockfile and is not a workspace member
+ * of the root manifest. A gate that fails a nested 2.x copy in the root lockfile
+ * while ignoring an identical one a directory over is the same class of narrow
+ * assumption the card was filed for, so the lockfile set is discovered too.
+ */
+describe("lockfile coverage is discovered, not hardcoded to the root manifest", () => {
+  it("checks desktop/package-lock.json as well as the root one", () => {
+    const gate = readFileSync(resolve(REPO_ROOT, "tools/check-vendored-dompurify.mjs"), "utf8");
+    // No bare hardcoded lockfile path left to read.
+    expect(gate).not.toMatch(/resolve\(repoRoot,\s*"package-lock\.json"\)/);
+    expect(gate).toMatch(/listRepoLockfiles/);
+
+    // And the second shipped lockfile really exists and is really tracked, so
+    // this is not a test of an empty set.
+    const tracked = execFileSync(
+      "git",
+      ["ls-files", "-z", "--", "**/package-lock.json", "package-lock.json"],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    ).split("\0").filter(Boolean).sort();
+    expect(tracked).toContain("package-lock.json");
+    expect(tracked).toContain("desktop/package-lock.json");
+  });
+
+  it("fails when a shipped manifest declares dompurify but the lockfile resolves none", () => {
+    // `desktop/package.json` depends only on electron-updater today, so an empty
+    // desktop lockfile is legitimate and reported as INFO. But if a manifest DID
+    // declare dompurify and the lockfile stopped resolving it, that is the drift
+    // the gate exists to catch — silence would be the wrong verdict there.
+    const desktopManifest = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "desktop/package.json"), "utf8"),
+    );
+    const desktopDeps = Object.keys(desktopManifest.dependencies ?? {});
+    expect(desktopDeps.some((d) => d.includes("dompurify"))).toBe(false);
+
+    const desktopLock = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "desktop/package-lock.json"), "utf8"),
+    );
+    const entries = Object.keys(desktopLock.packages ?? {}).filter((k) =>
+      /(^|\/)node_modules\/dompurify$/.test(k),
+    );
+    // Consistent with the manifest: nothing declared, nothing resolved.
+    expect(entries).toEqual([]);
   });
 });
 

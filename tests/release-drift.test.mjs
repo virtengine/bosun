@@ -61,21 +61,26 @@ describe("classifyReleaseState — the clean case", () => {
   });
 
   it("ignores legacy non-version tags rather than reporting them", () => {
-    // `v` and `0.37.0` are the documented legacy tags: one is not a version at
-    // all, the other has no `v` prefix.
+    // `v` and `0.37.0` are the documented legacy tags: one is the bare release
+    // prefix, the other has no `v` prefix.
     //
     // CORRECTED by this change: `0.37.0` is now reported, as `malformed-tag`
     // info. It is a stray malformed release tag — exactly what this tool exists
     // to surface — so asserting it produces NO finding was asserting the blind
-    // spot. `v` (no version shape at all) stays silent, and neither tag may
-    // ever be escalated to `tag-without-release`, which would fail the gate for
-    // a tag that disagrees with nothing.
+    // spot. `v` is reported too, for the same reason (it is release-shaped: it
+    // is the pipeline's own literal prefix). Neither may ever be escalated to
+    // `tag-without-release`, which would fail the gate for a tag that disagrees
+    // with nothing.
     const result = classifyReleaseState(
       cleanState({ tags: ["v", "0.37.0", ...cleanState().tags] }),
     );
     expect(codes(result)).not.toContain("tag-without-release");
     expect(codes(result)).toContain("malformed-tag");
-    expect(result.findings.map((f) => f.severity)).toEqual(["info"]);
+    // Both legacy refs are now reported, so the finding count is 2 — asserted
+    // as "every finding is info" plus "one per tag", not as a frozen length,
+    // so this stays a behaviour contract rather than a change-detector.
+    expect(result.findings.every((f) => f.severity === "info")).toBe(true);
+    expect(result.findings).toHaveLength(2);
     // Info-only, so the gate's verdict is unchanged: this is hygiene, not drift.
     expect(result.exitCode).toBe(0);
     expect(result.ok).toBe(true);
@@ -98,9 +103,70 @@ describe("classifyTagName", () => {
   });
 
   it("treats a non-version-shaped tag as other, not as drift", () => {
-    for (const tag of ["latest", "nightly", "checkpoint/x", "v", ""]) {
+    // `v` moved OUT of this list by the change that classifies a bare release
+    // prefix as `malformed`: it IS release-shaped (the pipeline's own literal
+    // prefix), and `other` is skipped by both consumer loops, so listing it
+    // here would keep asserting the blind spot.
+    for (const tag of ["latest", "nightly", "checkpoint/x", ""]) {
       expect(classifyTagName(tag), tag).toBe("other");
     }
+  });
+
+  it("classifies a bare `v` as malformed, not other", () => {
+    // The real ref: `refs/tags/v` existed on origin until a human deleted it on
+    // 2026-09-29. It has no digit, so the loose /\d/ test cannot reach it, and
+    // "other" is skipped by BOTH consumer loops — so before this change the tag
+    // the tool exists to surface produced no finding at all.
+    expect(classifyTagName("v")).toBe("malformed");
+    // Surrounding whitespace must not smuggle it back into "other".
+    expect(classifyTagName(" v ")).toBe("malformed");
+  });
+
+  it("still separates a real release tag from a bare prefix", () => {
+    // The change must not widen into an acceptance path: `v0.43.2` is a release
+    // tag, and a version that merely STARTS with v is not malformed.
+    expect(classifyTagName("v0.43.2")).toBe("release");
+    expect(classifyTagName("v1.2.3-beta.1")).toBe("release");
+  });
+});
+
+describe("classifyReleaseState — a bare `v` is surfaced by name (R2)", () => {
+  it("names the bare `v` in a malformed-tag finding", () => {
+    // The whole point of the finding is that a human can read WHICH ref to fix,
+    // so this asserts the tag NAME appears — asserting `ok === true` or the
+    // absence of an error is the defect, not the guard. Replay the exact
+    // pre-2026-09-29 remote state in which `v` coexisted with v0.43.1.
+    const result = classifyReleaseState(
+      cleanState({ tags: ["v", "0.37.0", "0.42.0", ...cleanState().tags] }),
+    );
+    // The finding text names the ref as `tag <name> is not ...`, so the token
+    // after "tag" IS the ref verbatim. Assert on that exact token — the point
+    // is that a human can read WHICH ref to fix, not how the sentence is worded.
+    const named = result.findings
+      .filter((f) => f.code === "malformed-tag")
+      .map((f) => f.detail.split(" ")[1])
+      .sort();
+    expect(named).toEqual(["0.37.0", "0.42.0", "v"]);
+    const bare = result.findings.find(
+      (f) => f.code === "malformed-tag" && f.detail.split(" ")[1] === "v",
+    );
+    expect(bare, "the finding must name the bare prefix, not just count one").toBeTruthy();
+  });
+
+  it("keeps a bare `v` as info, never as a gate failure or an ordering input", () => {
+    // Same reasoning as the unprefixed strays: hygiene, not drift, and it must
+    // never participate in a version comparison (which would raise a false
+    // error against npm) nor be escalated to tag-without-release.
+    const result = classifyReleaseState(
+      cleanState({ tags: ["v", ...cleanState().tags] }),
+    );
+    expect(codes(result)).toContain("malformed-tag");
+    expect(codes(result)).not.toContain("tag-without-release");
+    expect(codes(result)).not.toContain("npm-ahead-of-release-record");
+    expect(codes(result)).not.toContain("release-record-ahead-of-npm");
+    expect(result.exitCode).toBe(0);
+    expect(result.ok).toBe(true);
+    expect(result.findings.map((f) => f.severity)).toEqual(["info"]);
   });
 });
 
