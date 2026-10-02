@@ -52,6 +52,14 @@ const SEVERITY_INFO = "info";
 export const DEFAULT_REPO = "virtengine/bosun";
 
 /**
+ * The release-tag prefix this repo's pipeline concatenates onto a version to
+ * build a tag name (`commit-tag` and `gh release create` both do `"v" + version`,
+ * see workflow-templates/ci-cd.mjs). Named once so `versionFromTag` and
+ * `classifyTagName` cannot drift apart on what "a release tag" means.
+ */
+const RELEASE_TAG_PREFIX = "v";
+
+/**
  * Parse a version, tolerating a leading `v` (tags carry it, npm does not).
  * Returns null for anything that is not `[v]MAJOR.MINOR.PATCH[-pre]`, so junk
  * is surfaced as a finding rather than coerced into an ordering.
@@ -114,7 +122,7 @@ export function compareVersions(a, b) {
  * this helper stays the "normalise if it is" one.
  */
 function versionFromTag(tag) {
-  if (typeof tag !== "string" || !tag.startsWith("v")) return null;
+  if (typeof tag !== "string" || !tag.startsWith(RELEASE_TAG_PREFIX)) return null;
   const parsed = parseVersion(tag);
   if (!parsed) return null;
   return `${parsed.major}.${parsed.minor}.${parsed.patch}`;
@@ -127,12 +135,25 @@ function versionFromTag(tag) {
  *                  (`0.37.0`, `0.42.0`, `v`, `1.2`, `v1.2.3.4`). Reported at
  *                  info level: a stray malformed tag is worth seeing, and it is
  *                  not evidence that npm, the tag and the release record
- *                  disagree, so it must never fail the gate.
+ *                  disagree, so it must never fail the gate. `v` is in this
+ *                  bucket, not `other` — see the branch below.
  *   - `other`    : not a version at all (`latest`, `nightly`, work tags).
  */
 export function classifyTagName(tag) {
   if (typeof tag !== "string" || tag.trim() === "") return "other";
   if (versionFromTag(tag) !== null) return "release";
+  // A bare `v` — the release prefix with the version missing — is MALFORMED,
+  // not "other". It is the exact ref this repo's own release pipeline creates
+  // when version resolution yields "": `commit-tag` and `gh release create`
+  // both build the name by concatenating `"v" + version` (see
+  // workflow-templates/ci-cd.mjs), and that produced `refs/tags/v` on the real
+  // remote, which a human had to delete by hand on 2026-09-29. Classifying it
+  // "other" made the gate blind to the one ref it most needed to see: `other`
+  // is skipped by BOTH the `tag-without-release` loop (:208) and the
+  // `malformed-tag` loop (:223), so the tag that this tool exists to surface
+  // produced NO finding at all. A prefix-only tag carries no digit, so the
+  // digit test below cannot reach it.
+  if (tag.trim() === RELEASE_TAG_PREFIX) return "malformed";
   // A tag that is *nearly* a version is more likely a typo'd release tag than
   // an intentional work tag, so it is surfaced. The shape is deliberately
   // loose (any digit, any punctuation) — the point is to see it, not to accept
