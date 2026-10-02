@@ -111,13 +111,47 @@ export const RELEASE_PIPELINE_TEMPLATE = {
 
     node("read-version", "action.run_command", "Read New Version", {
       command: "node -p \"require('./package.json').version\"",
+      // Without this a corrupt package.json (or a missing node) exits non-zero
+      // with empty stdout and the run CONTINUES — `set-version` then resolves
+      // `version` to "" and the pipeline happily tags `v`.
+      failOnError: true,
     }, { x: 400, y: 310 }),
 
     node("set-version", "action.set_variable", "Set Version Variable", {
       key: "version",
-      value: "(() => String($ctx.getNodeOutput('read-version')?.output || '').trim())()",
+      // Trim, and drop a leading "v" so a v-prefixed manifest yields `v0.44.0`
+      // rather than the double-prefixed `vv0.44.0`. Everything else is left
+      // alone and refused by the gate below rather than silently repaired.
+      value: "(() => String($ctx.getNodeOutput('read-version')?.output || '').trim().replace(/^v/, ''))()",
       isExpression: true,
     }, { x: 400, y: 380 }),
+
+    // The gate. `commit-tag` builds the remote tag by concatenation
+    // (`"v" + version`) and `gh release create v{{version}}` repeats it, so a
+    // blank or malformed version becomes a real, permanent, malformed tag —
+    // the exact `v` tag that has to be deleted by hand on the remote today.
+    // `npm publish` does not catch it (it accepts `v0.44.0`, rc=0), so this
+    // node is the only thing on the path that can refuse.
+    //
+    // It is a `condition.expression` that THROWS rather than one that returns
+    // false: a false result would simply take the "no" branch and let the run
+    // finish in a state that looks successful. Throwing fails the node, which
+    // halts the run before the commit/tag/push node is ever reached.
+    node("validate-version", "condition.expression", "Validate Version", {
+      expression: `(() => {
+  const v = String({{version}} ?? "").trim();
+  const strict = /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$/;
+  if (!strict.test(v)) {
+    throw new Error(
+      "Refusing to release: resolved version " + JSON.stringify(v) +
+      " is not strict semver (MAJOR.MINOR.PATCH[-prerelease][+build]). " +
+      "The release tag is built from this value, so publishing now would push " +
+      JSON.stringify("v" + v) + ". Fix package.json and re-run."
+    );
+  }
+  return true;
+})()`,
+    }, { x: 400, y: 450 }),
 
     node("generate-changelog", "action.run_agent", "Generate Changelog", {
       prompt: `# Generate Changelog Entry
@@ -134,24 +168,24 @@ Write the entry to CHANGELOG.md under a new version heading.
 Commit the result with message "docs: update changelog for vX.Y.Z".`,
       sdk: "auto",
       timeoutMs: 600000,
-    }, { x: 400, y: 440 }),
+    }, { x: 400, y: 520 }),
 
     node("build", "validation.build", "Build", {
       command: "npm run build",
       zeroWarnings: true,
-    }, { x: 400, y: 570 }),
+    }, { x: 400, y: 640 }),
 
     node("test", "validation.tests", "Run Tests", {
       command: "npm test",
-    }, { x: 400, y: 700 }),
+    }, { x: 400, y: 760 }),
 
     node("test-passed", "condition.expression", "Tests Passed?", {
       expression: "$ctx.getNodeOutput('test')?.passed === true",
-    }, { x: 400, y: 830, outputs: ["yes", "no"] }),
+    }, { x: 400, y: 880, outputs: ["yes", "no"] }),
 
     node("should-publish", "condition.expression", "Publish To npm?", {
       expression: "Boolean($data?.publishToNpm)",
-    }, { x: 250, y: 1030, outputs: ["yes", "no"] }),
+    }, { x: 250, y: 1080, outputs: ["yes", "no"] }),
 
     node("commit-tag", "action.git_operations", "Commit & Tag", {
       operations: [
@@ -184,7 +218,8 @@ Commit the result with message "docs: update changelog for vX.Y.Z".`,
     edge("trigger", "bump-version"),
     edge("bump-version", "read-version"),
     edge("read-version", "set-version"),
-    edge("set-version", "generate-changelog"),
+    edge("set-version", "validate-version"),
+    edge("validate-version", "generate-changelog"),
     edge("generate-changelog", "build"),
     edge("build", "test"),
     edge("test", "test-passed"),
