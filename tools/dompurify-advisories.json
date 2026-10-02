@@ -1,0 +1,371 @@
+{
+  "generatedAt": "2026-10-02T00:05:55Z",
+  "source": "gh api \"/advisories?ecosystem=npm&affects=dompurify&per_page=100\"",
+  "regenerateWith": "npm run refresh:dompurify-advisories",
+  "advisories": [
+    {
+      "ghsaId": "GHSA-chqj-j4fh-rw7m",
+      "severity": "medium",
+      "publishedAt": "2020-08-28T21:25:11Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-chqj-j4fh-rw7m",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 2.0.3",
+          "firstPatchedVersion": "2.0.3"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-mjjq-c88q-qhr6",
+      "severity": "critical",
+      "publishedAt": "2020-09-03T21:22:00Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-mjjq-c88q-qhr6",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 2.0.7",
+          "firstPatchedVersion": "2.0.7"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-63q7-h895-m982",
+      "severity": "medium",
+      "publishedAt": "2020-12-18T22:51:40Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-63q7-h895-m982",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 2.0.17",
+          "firstPatchedVersion": "2.0.17"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-8hgg-xxm5-3873",
+      "severity": "medium",
+      "publishedAt": "2023-11-14T21:30:51Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-8hgg-xxm5-3873",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 1.0.11",
+          "firstPatchedVersion": "1.0.11"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-mmhx-hmjr-r674",
+      "severity": "high",
+      "publishedAt": "2024-09-16T20:34:26Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-mmhx-hmjr-r674",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 2.5.4",
+          "firstPatchedVersion": "2.5.4"
+        },
+        {
+          "vulnerableVersionRange": ">= 3.0.0, < 3.1.3",
+          "firstPatchedVersion": "3.1.3"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-gx9m-whjm-85jf",
+      "severity": "high",
+      "publishedAt": "2024-10-11T17:27:29Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-gx9m-whjm-85jf",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 2.5.0",
+          "firstPatchedVersion": "2.5.0"
+        },
+        {
+          "vulnerableVersionRange": ">= 3.0.0, < 3.1.3",
+          "firstPatchedVersion": "3.1.3"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-p3vf-v8qc-cwcr",
+      "severity": "critical",
+      "publishedAt": "2024-10-31T14:23:34Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-p3vf-v8qc-cwcr",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 2.4.2",
+          "firstPatchedVersion": "2.4.2"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-vhxf-7vqr-mrjg",
+      "severity": "medium",
+      "publishedAt": "2025-02-14T09:31:22Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-vhxf-7vqr-mrjg",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 3.2.4",
+          "firstPatchedVersion": "3.2.4"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-v2wj-7wpq-c8vv",
+      "severity": "medium",
+      "publishedAt": "2026-03-03T18:31:33Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-v2wj-7wpq-c8vv",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 3.1.3, <= 3.3.1",
+          "firstPatchedVersion": "3.3.2"
+        },
+        {
+          "vulnerableVersionRange": ">= 2.5.3, <= 2.5.8",
+          "firstPatchedVersion": "2.5.9"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-v8jm-5vwx-cfxm",
+      "severity": "medium",
+      "publishedAt": "2026-03-03T18:31:33Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-v8jm-5vwx-cfxm",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 3.1.3, < 3.2.7",
+          "firstPatchedVersion": "3.2.7"
+        },
+        {
+          "vulnerableVersionRange": ">= 2.5.3, <= 2.5.8",
+          "firstPatchedVersion": null
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-h8r8-wccr-v5f2",
+      "severity": "medium",
+      "publishedAt": "2026-03-27T20:41:29Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-h8r8-wccr-v5f2",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 3.3.2",
+          "firstPatchedVersion": "3.3.2"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-cj63-jhhr-wcxv",
+      "severity": "medium",
+      "publishedAt": "2026-04-03T03:45:08Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-cj63-jhhr-wcxv",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.3.1",
+          "firstPatchedVersion": "3.3.2"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-cjmm-f4jc-qw8r",
+      "severity": "medium",
+      "publishedAt": "2026-04-03T03:46:07Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-cjmm-f4jc-qw8r",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.3.1",
+          "firstPatchedVersion": "3.3.2"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-39q2-94rc-95cp",
+      "severity": "medium",
+      "publishedAt": "2026-04-16T00:46:35Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-39q2-94rc-95cp",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.3.3",
+          "firstPatchedVersion": "3.4.0"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-v9jr-rg53-9pgp",
+      "severity": "medium",
+      "publishedAt": "2026-04-22T17:31:32Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-v9jr-rg53-9pgp",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 3.0.1, < 3.4.0",
+          "firstPatchedVersion": "3.4.0"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-crv5-9vww-q3g8",
+      "severity": "medium",
+      "publishedAt": "2026-04-22T17:32:54Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-crv5-9vww-q3g8",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 1.0.10, < 3.4.0",
+          "firstPatchedVersion": "3.4.0"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-h7mw-gpvr-xq4m",
+      "severity": "medium",
+      "publishedAt": "2026-04-22T17:34:17Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-h7mw-gpvr-xq4m",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 3.4.0",
+          "firstPatchedVersion": "3.4.0"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-87xg-pxx2-7hvx",
+      "severity": "high",
+      "publishedAt": "2026-06-01T14:07:29Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-87xg-pxx2-7hvx",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "= 3.4.4",
+          "firstPatchedVersion": "3.4.5"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-r47g-fvhr-h676",
+      "severity": "medium",
+      "publishedAt": "2026-06-15T19:53:05Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-r47g-fvhr-h676",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.5",
+          "firstPatchedVersion": "3.4.6"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-hpcv-96wg-7vj8",
+      "severity": "medium",
+      "publishedAt": "2026-06-15T19:56:35Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-hpcv-96wg-7vj8",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.5",
+          "firstPatchedVersion": "3.4.6"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-76mc-f452-cxcm",
+      "severity": "medium",
+      "publishedAt": "2026-06-15T19:59:09Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-76mc-f452-cxcm",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 3.4.7",
+          "firstPatchedVersion": "3.4.7"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-x4vx-rjvf-j5p4",
+      "severity": "low",
+      "publishedAt": "2026-06-15T20:00:02Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-x4vx-rjvf-j5p4",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.6",
+          "firstPatchedVersion": null
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-rp9w-3fw7-7cwq",
+      "severity": "medium",
+      "publishedAt": "2026-06-15T20:01:45Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-rp9w-3fw7-7cwq",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.6",
+          "firstPatchedVersion": "3.4.7"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-gvmj-g25r-r7wr",
+      "severity": "low",
+      "publishedAt": "2026-06-15T20:02:40Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-gvmj-g25r-r7wr",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 3.0.0, <= 3.4.7",
+          "firstPatchedVersion": "3.4.8"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-vxr8-fq34-vvx9",
+      "severity": "low",
+      "publishedAt": "2026-06-15T20:12:53Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-vxr8-fq34-vvx9",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "< 3.4.9",
+          "firstPatchedVersion": "3.4.9"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-cmwh-pvxp-8882",
+      "severity": "medium",
+      "publishedAt": "2026-06-18T14:27:37Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-cmwh-pvxp-8882",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.10",
+          "firstPatchedVersion": "3.4.11"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-c2j3-45gr-mqc4",
+      "severity": "low",
+      "publishedAt": "2026-07-21T19:41:07Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-c2j3-45gr-mqc4",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.11",
+          "firstPatchedVersion": "3.4.12"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-55q2-fjhq-7xh7",
+      "severity": "medium",
+      "publishedAt": "2026-08-07T15:30:47Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-55q2-fjhq-7xh7",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.12",
+          "firstPatchedVersion": "3.4.13"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-p98j-92pf-mc4p",
+      "severity": "low",
+      "publishedAt": "2026-09-30T15:37:57Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-p98j-92pf-mc4p",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 3.4.13, <= 3.4.15",
+          "firstPatchedVersion": "3.4.16"
+        }
+      ]
+    }
+  ]
+}

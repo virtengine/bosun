@@ -29,6 +29,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BUNDLE_TARGETS } from "./build-vendor-toastui.mjs";
+import { ADVISORY_DATA_PATH, loadAdvisoryData } from "./dompurify-advisories.mjs";
 import { DOMPURIFY_MIN_VERSION, inspectDompurifyBundle } from "./dompurify-floor.mjs";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -93,6 +94,31 @@ try {
   }
 } catch (error) {
   fail(`${lockfilePath}: cannot read lockfile: ${error.message}`);
+}
+
+// ── Advisory data provenance ────────────────────────────────────────────────
+// The floor above is only as good as the advisory snapshot behind it, and nothing
+// else in this repo re-checks that snapshot. So the gate states its own age and
+// fails if the data is older than the staleness window: a year-old advisory list
+// is an open gate that still reports PASS.
+const ADVISORY_STALENESS_DAYS = 90;
+try {
+  const data = loadAdvisoryData();
+  const ageDays = Math.floor((Date.now() - Date.parse(data.generatedAt)) / 86_400_000);
+  if (!Number.isFinite(ageDays) || ageDays > ADVISORY_STALENESS_DAYS) {
+    fail(
+      `${ADVISORY_DATA_PATH}: advisory data is ${ageDays} days old `
+        + `(generated ${data.generatedAt}); it must be under ${ADVISORY_STALENESS_DAYS}. `
+        + "Refresh with: npm run refresh:dompurify-advisories",
+    );
+  } else {
+    process.stdout.write(
+      `PASS ${ADVISORY_DATA_PATH}: ${data.advisories.length} advisories, `
+        + `generated ${data.generatedAt} (${ageDays} days old)\n`,
+    );
+  }
+} catch (error) {
+  fail(`${ADVISORY_DATA_PATH}: cannot read advisory data: ${error.message}`);
 }
 
 if (failed) {
