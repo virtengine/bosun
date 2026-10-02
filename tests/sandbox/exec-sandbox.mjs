@@ -328,6 +328,12 @@ export function createExecSandbox(scenario = {}) {
     }
     if (/worktree list/.test(c))  return "1\n";
     if (/worktree prune/.test(c)) return "1\n";
+    // The release pipeline reads the new version with
+    // `node -p "require('./package.json').version"`. The generic "0\n" fallback
+    // below made `set-version` resolve to "0", which the template's
+    // validate-version gate correctly refuses -- so the mock, not the gate, is
+    // what turned the release-pipeline suites red.
+    if (/package\.json/i.test(c) && /\.version/.test(c)) return "1.2.3\n";
     return "0\n";
   }
 
