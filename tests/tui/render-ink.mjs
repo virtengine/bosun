@@ -87,19 +87,19 @@ export async function renderInk(element, options = {}) {
       return stripAnsi(buffer).replace(/\r/g, "");
     },
     // Writes to a PassThrough are buffered and delivered asynchronously, so a fixed
-  // sleep after the write races React's effect flush and loses the keystroke. Wait for
-  // the chunk to actually be readable by ink (i.e. consumed) instead of guessing.
-  async press(chars, waitMs = 40) {
-    stdin.write(chars);
-    const settleDeadline = Date.now() + waitMs;
-    while (Date.now() < settleDeadline) {
-      await delay(5);
-      // Once ink has drained the buffer there is nothing left to dispatch; a short
-      // tail lets React commit the resulting state change before we return.
-      if (stdin.readableLength === 0) break;
-    }
-    await delay(5);
-  },
+        // sleep after the write races React's effect flush and loses the keystroke. Wait
+        // for the chunk to actually be consumed by ink instead of guessing.
+        async press(chars, waitMs = 40) {
+          stdin.write(chars);
+          const settleDeadline = Date.now() + waitMs;
+          while (Date.now() < settleDeadline) {
+            await delay(5);
+            // Once ink has drained the buffer there is nothing left to dispatch; a short
+            // tail lets React commit the resulting state change before we return.
+            if (stdin.readableLength === 0) break;
+          }
+          await delay(5);
+        },
     async unmount(waitMs = 20) {
       app.unmount();
       await delay(waitMs);
