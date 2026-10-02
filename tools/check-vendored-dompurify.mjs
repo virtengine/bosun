@@ -111,9 +111,10 @@ if (!lockfileOnly) {
         }),
       }
     : (() => {
-        const { roots, bundles } = discoverDompurifyBundles({ cwd: repoRoot });
+        const { roots, bundles, channels } = discoverDompurifyBundles({ cwd: repoRoot });
         return {
           roots,
+          channels,
           bundles: bundles.map((bundle) => ({
             ...bundle,
             absolute: resolve(repoRoot, bundle.path),
@@ -128,10 +129,18 @@ if (!lockfileOnly) {
         + "gate has nothing to check. Rebuild with: npm run build:vendor-toastui",
     );
   } else {
+    // Name every channel and its own root count, not just the union's total, so a
+    // coverage change is visible in CI output instead of having to be inferred.
+    const { npm: npmRoots = [], pages = [], container = [] } = discovered.channels ?? {};
     process.stdout.write(
-      `INFO derived ${discovered.roots.length} shipped scan root(s) from `
-        + `package.json files[] + deploy-site.yaml publish_dir\n`
-        + `INFO discovered ${discovered.bundles.length} committed bundle(s) carrying DOMPurify\n`,
+      "INFO derived shipped scan roots from 3 declarations: "
+        + `package.json files[] (${npmRoots.length}), `
+        + `deploy-site.yaml publish_dir (${pages.length}: ${pages.join(", ")}), `
+        + `.dockerignore (container, ${container.length} of the tracked tree) `
+        + `= ${discovered.roots.length} unioned\n`,
+    );
+    process.stdout.write(
+      `INFO discovered ${discovered.bundles.length} committed bundle(s) carrying DOMPurify\n`,
     );
   }
 
