@@ -22,6 +22,12 @@ import {
   deriveAdvisoryFloor,
   parseVulnerableRange,
 } from "../tools/dompurify-advisories.mjs";
+import {
+  discoverDompurifyBundles,
+  findDompurifyBundles,
+  listTrackedVendoredFiles,
+  VENDORED_SCAN_ROOTS,
+} from "../tools/dompurify-discovery.mjs";
 import { readFileSync } from "node:fs";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -178,8 +184,109 @@ describe("regeneration inputs", () => {
   });
 });
 
+/**
+ * The bundle set must be DISCOVERED, not declared.
+ *
+ * The gate used to enumerate two hardcoded paths, which is the same shape of
+ * assumption that caused the original exposure: a genuine DOMPurify 2.3.3 bundle
+ * committed at a third path (`ui/assets/vendor/markdown-editor.min.js`) produced
+ * gate exit 0 and a fully green suite, while `ui/` is in package.json `files[]`
+ * (npm tarball) and deploy-site.yaml does `cp -rL ui site/ui` (GitHub Pages).
+ * These tests build that exact shape and assert discovery reports it.
+ */
+describe("vendored bundle discovery", () => {
+  const STALE_BUNDLE = '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n';
+
+  it("enumerates only tracked files under the shipped roots", () => {
+    expect(VENDORED_SCAN_ROOTS).toEqual(["ui", "site"]);
+    const tracked = listTrackedVendoredFiles(REPO_ROOT);
+    expect(tracked.length).toBeGreaterThan(100);
+    for (const path of tracked) {
+      expect(path.startsWith("ui/") || path.startsWith("site/"), path).toBe(true);
+      expect(path.includes("\\")).toBe(false);
+    }
+  });
+
+  it("finds a below-floor bundle committed at an UNLISTED path", () => {
+    // The exact mutation that defeated the previous gate.
+    const files = [
+      "ui/assets/toastui-editor-all.min.js",
+      "ui/assets/vendor/markdown-editor.min.js",
+      "site/ui/assets/toastui-editor-all.min.js",
+    ];
+    const contents = {
+      "ui/assets/toastui-editor-all.min.js": STALE_BUNDLE.replace(/2\.3\.3/g, DOMPURIFY_VERSION),
+      "ui/assets/vendor/markdown-editor.min.js": STALE_BUNDLE,
+      "site/ui/assets/toastui-editor-all.min.js": STALE_BUNDLE.replace(/2\.3\.3/g, DOMPURIFY_VERSION),
+    };
+    const found = findDompurifyBundles({ files, readFile: (p) => contents[p] });
+
+    expect(found.map((b) => b.path)).toEqual([
+      "site/ui/assets/toastui-editor-all.min.js",
+      "ui/assets/toastui-editor-all.min.js",
+      "ui/assets/vendor/markdown-editor.min.js",
+    ]);
+
+    // And the floor check then fails THAT path by name — discovery is not just
+    // enumeration, it feeds the same below-floor verdict the gate reports.
+    const stale = found.find((b) => b.path.includes("vendor/"));
+    const result = inspectDompurifyBundle(stale.source, stale.path);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/2\.3\.3/);
+  });
+
+  it("ignores files that carry no DOMPurify at all", () => {
+    const found = findDompurifyBundles({
+      files: ["ui/components/task-markdown.js", "ui/index.html"],
+      readFile: () => "export const x = 1;\n",
+    });
+    expect(found).toEqual([]);
+  });
+
+  it("fails closed on a bundle whose markers do not parse", () => {
+    // A re-minifier that changes marker shape must produce a REPORT, never a
+    // silent skip — otherwise the gate degrades into a no-op that prints PASS.
+    const found = findDompurifyBundles({
+      files: ["ui/assets/oddball.min.js"],
+      readFile: () => "/* bundled with DOMPurify somewhere */\nvar x = 1;\n",
+    });
+    expect(found).toHaveLength(1);
+    const result = inspectDompurifyBundle(found[0].source, found[0].path);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/expected exactly one DOMPurify license marker/);
+  });
+
+  it("refuses to pass a tracked file it cannot read", () => {
+    // `git ls-files` still lists a file deleted in the working tree, and the
+    // working tree is what gets built and shipped.
+    expect(() =>
+      findDompurifyBundles({
+        files: ["ui/assets/gone.min.js"],
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+      }),
+    ).toThrow(/cannot be read/);
+  });
+
+  it("discovers the real committed bundles at BOTH known locations", () => {
+    const found = discoverDompurifyBundles({ cwd: REPO_ROOT });
+    const paths = found.map((b) => b.path).sort();
+    expect(paths).toEqual([
+      "site/ui/assets/toastui-editor-all.min.js",
+      "ui/assets/toastui-editor-all.min.js",
+    ]);
+    for (const bundle of found) {
+      expect(inspectDompurifyBundle(bundle.source, bundle.path).ok, bundle.path).toBe(true);
+    }
+  });
+});
+
 describe("committed vendored bundles", () => {
-  it("covers every committed bundle location", () => {
+  it("keeps the canonical pair the rebuild script writes", () => {
+    // BUNDLE_TARGETS is still checked BY the gate as an additional byte-identity
+    // assertion (drift protection between ui/ and site/ui/). Discovery is
+    // additive, not a replacement: dropping this pair would silently lose it.
     expect(BUNDLE_TARGETS.map((p) => p.replace(REPO_ROOT, "").replace(/\\/g, "/"))).toEqual([
       "/ui/assets/toastui-editor-all.min.js",
       "/site/ui/assets/toastui-editor-all.min.js",
@@ -201,6 +308,39 @@ describe("committed vendored bundles", () => {
   it("keeps ui/ and site/ui byte-identical so Pages ships what the gate checked", () => {
     const [ui, site] = BUNDLE_TARGETS.map((p) => readFileSync(p));
     expect(Buffer.compare(ui, site)).toBe(0);
+  });
+});
+
+describe("advisory refresh has a producer", () => {
+  // The gate hard-fails once the advisory snapshot passes its 90-day staleness
+  // window (2026-12-31 for the committed data). With no scheduled producer that
+  // is a guaranteed red build on a date nobody is watching, so the workflow that
+  // refreshes it is asserted here rather than left to a reviewer's grep.
+  const workflow = readFileSync(resolve(REPO_ROOT, ".github/workflows/dependency-audit.yml"), "utf8");
+
+  it("refreshes on the weekly schedule, not on every push", () => {
+    expect(workflow).toMatch(/schedule:/);
+    expect(workflow).toMatch(/cron:/);
+    expect(workflow).toMatch(/dompurify-advisory-refresh:/);
+    expect(workflow).toMatch(/github\.event_name == 'schedule'/);
+  });
+
+  it("runs the refresh command the module's error message tells operators to run", () => {
+    expect(workflow).toMatch(/refresh:dompurify-advisories/);
+  });
+
+  it("opens a pull request instead of merging unattended", () => {
+    expect(workflow).toMatch(/gh pr create/);
+    expect(workflow).toMatch(/--base develop/);
+    // The dangerous shapes: an auto-merge or a push straight to develop.
+    expect(workflow).not.toMatch(/gh pr merge/);
+    expect(workflow).not.toMatch(/--auto-merge/);
+    expect(workflow).not.toMatch(/git push[^\\n]*\bdevelop\b/);
+    expect(workflow).toMatch(/never auto-merged/i);
+  });
+
+  it("grants only what opening the PR needs", () => {
+    expect(workflow).toMatch(/permissions:\s*\n\s+contents: write\s*\n\s+pull-requests: write/);
   });
 });
 
