@@ -60,3 +60,93 @@ jobs:
       - name: Audit desktop manifest
         run: npm audit --audit-level=high
         working-directory: desktop
+
+  # Why this job exists: tools/check-vendored-dompurify.mjs hard-fails once
+  # tools/dompurify-advisories.json passes its 90-day staleness window, so the
+  # refresh needs a producer or the repo gets a guaranteed red build on a date
+  # nobody is watching. It runs on the same weekly schedule as the audit above,
+  # because it is the same drift: an advisory published against unchanged bytes.
+  #
+  # It OPENS A PULL REQUEST and stops there. It must never auto-merge:
+  # DOMPURIFY_VERSION in tools/dompurify-floor.mjs is a build input that has to
+  # move in lockstep with a real `npm run build:vendor-toastui` rebuild, and that
+  # module throws at import when the literal falls below the derived floor. So the
+  # refreshed data is a human/bot decision point, not an unattended merge.
+  dompurify-advisory-refresh:
+    name: "DOMPurify advisory refresh (opens a PR)"
+    # Schedule-only on purpose: this workflow also runs on every push and PR to
+    # develop, and a refresh that opened a PR per push would bury real ones.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts --no-audit
+
+      - name: Refresh advisory data
+        id: refresh
+        env:
+          # The refresh script drives the GitHub Advisory API through `gh api`.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          npm run refresh:dompurify-advisories
+          if git diff --quiet -- tools/dompurify-advisories.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Advisory data is unchanged; no PR needed."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- tools/dompurify-advisories.json
+          fi
+
+      - name: Report the derived floor
+        id: floor
+        if: steps.refresh.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          node -e '
+            import("./tools/dompurify-floor.mjs")
+              .then((m) => console.log(m.DOMPURIFY_MIN_VERSION))
+              .catch((error) => { console.log(`floor-unavailable: ${error.message}`); });
+          ' | tee floor.txt
+          echo "value=$(cat floor.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Open a pull request (never auto-merged)
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="chore/dompurify-advisories-$(date -u +%Y%m%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add tools/dompurify-advisories.json
+          git commit -m "chore(deps): refresh DOMPurify advisory data"
+          git push --force-with-lease origin "$branch"
+          gh pr create \
+            --base develop \
+            --head "$branch" \
+            --title "chore(deps): refresh DOMPurify advisory data" \
+            --body "Scheduled refresh of \`tools/dompurify-advisories.json\` from the GitHub Advisory Database, produced by \`npm run refresh:dompurify-advisories\` in \`.github/workflows/dependency-audit.yml\`.
+
+          Derived advisory floor: \`${{ steps.floor.outputs.value }}\`
+
+          **Do not merge this as a data-only change.** \`tools/dompurify-floor.mjs\` throws at import when \`DOMPURIFY_VERSION\` falls below the derived floor, so if the floor moved the bundle must be rebuilt:
+
+          1. \`npm run build:vendor-toastui\` (regenerates both committed bundle locations)
+          2. bump \`DOMPURIFY_VERSION\` in \`tools/dompurify-floor.mjs\` in lockstep
+          3. \`npx vitest run tests/vendor-dompurify-floor.test.mjs\` — the pinned literal there must be re-derived too
+          4. \`node tools/check-vendored-dompurify.mjs\`
+
+          If the floor did NOT move, the refreshed snapshot alone is a legitimate merge after the gate passes."
