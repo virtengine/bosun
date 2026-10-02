@@ -437,6 +437,12 @@ function ensureExperimentalNodeTypes() {
       return { ok: true, command: text };
     }
     if (/git describe --tags --abbrev=0/i.test(text)) return "v0.0.0";
+    // `read-version` runs `node -p "require('./package.json').version"`, so the
+    // mock must return a real version. Returning the generic "ok" made the
+    // release pipeline resolve `version` to "ok" and build the tag `vok` — the
+    // fixture was feeding the pipeline the exact malformed-version case its
+    // gate exists to refuse, and the e2e run asserted a clean context anyway.
+    if (/require\([^)]*package\.json[^)]*\)\.version/i.test(text)) return "0.44.0";
     if (/gh pr list --state merged/i.test(text)) {
       return JSON.stringify([
         {
