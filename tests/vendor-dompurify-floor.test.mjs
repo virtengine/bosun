@@ -24,19 +24,25 @@ import {
   parseVulnerableRange,
 } from "../tools/dompurify-advisories.mjs";
 import {
+  assertChannelsAccounted,
   assertScanRootsCover,
   classifyDompurifyCandidate,
+  deriveContainerScanRoots,
   deriveScanRoots,
   discoverDompurifyBundles,
   findDompurifyBundles,
+  listTopLevelSegments,
   listTrackedVendoredFiles,
   MINIMUM_SCAN_ROOTS,
   PACKAGE_MANIFEST,
   PAGES_WORKFLOW,
+  DOCKER_IGNORE,
+  DOCKERFILE,
+  parseDockerignore,
   readPublishDir,
+  resolveScanChannels,
   resolveScanRoots,
 } from "../tools/dompurify-discovery.mjs";
-import { readFileSync } from "node:fs";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -288,6 +294,174 @@ describe("vendored bundle discovery roots are derived, not declared", () => {
     }
     // And the specific root the previous literal list omitted is now included.
     expect(tracked.some((p) => p.startsWith("tui/"))).toBe(true);
+  });
+});
+
+/**
+ * The container image is the third shipping channel, and rounds 4, 5 and 6 of
+ * review were this same finding at three granularities — hardcoded bundle paths,
+ * then hardcoded scan roots, then an incomplete SET OF DECLARATIONS feeding the
+ * roots. `package.json files[]` and `publish_dir` model the npm tarball and Pages
+ * accurately; nothing modelled `COPY . .`, so a genuine DOMPurify 2.3.3 bundle
+ * committed at `scripts/vendor-dompurify-probe.js` shipped inside
+ * `virtengine/bosun:<sha>` with gate exit 0 and a green suite.
+ *
+ * These tests pin the third channel and, critically, the ASYMMETRY the reviewer
+ * called out: `tests/` is excluded by `.dockerignore`, so widening the container
+ * channel must NOT turn this gate's own marker-carrying test file into a FAIL.
+ */
+describe("the container channel is derived from .dockerignore, not declared", () => {
+  const DOCKERIGNORE = readFileSync(resolve(REPO_ROOT, DOCKER_IGNORE), "utf8");
+  const DOCKERFILE_SOURCE = readFileSync(resolve(REPO_ROOT, DOCKERFILE), "utf8");
+
+  it("models the image as repo-minus-.dockerignore, from the declarations", () => {
+    const segments = listTopLevelSegments(REPO_ROOT);
+    const container = deriveContainerScanRoots({
+      dockerignore: DOCKERIGNORE,
+      segments,
+    });
+
+    // The premise the whole container model rests on: the Dockerfile copies the
+    // whole build context, which is what makes the exclusion list meaningful.
+    expect(/^\s*COPY\s+\.\s+\.\s*$/m.test(DOCKERFILE_SOURCE)).toBe(true);
+
+    // Roots the image ships that NO other channel declares — this is the hole.
+    for (const root of ["scripts", "bin", "core", "src", "plugins", "evidence"]) {
+      expect(container).toContain(root);
+    }
+    // And .dockerignore's own exclusions are honoured.
+    for (const root of ["tests", "docs", "desktop", "node_modules", "output"]) {
+      expect(container).not.toContain(root);
+    }
+    expect(container.length).toBeGreaterThan(segments.length / 2);
+  });
+
+  it("covers a NEWLY ADDED shipping root with no edit to the tool", () => {
+    // The regression the derivation exists for, at the container granularity: a
+    // top-level directory nobody has ever heard of is scanned the day it is
+    // tracked and not excluded, because the set is computed from the tree.
+    const container = deriveContainerScanRoots({
+      dockerignore: DOCKERIGNORE,
+      segments: ["shiny-new-root", "tests", "docs"],
+    });
+    expect(container).toContain("shiny-new-root");
+
+    // ...and a below-floor bundle planted there is reported, by name.
+    const roots = deriveScanRoots({ manifest: { files: ["ui/"] }, publishDir: "site", containerRoots: container });
+    const found = findDompurifyBundles({
+      files: ["shiny-new-root/bundle.min.js"],
+      readFile: () => '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n',
+      roots,
+    });
+    expect(found.map((b) => b.path)).toEqual(["shiny-new-root/bundle.min.js"]);
+    expect(inspectDompurifyBundle(found[0].source, found[0].path).ok).toBe(false);
+  });
+
+  it("honours .dockerignore semantics: comments, dir-only, globs and negation", () => {
+    const source = [
+      "# a comment",
+      "",
+      "node_modules",
+      "tests/",
+      "*.log",
+      "output/",
+      "!output/keep.log",
+    ].join("\n");
+    const rules = parseDockerignore(source);
+    // comment + blank lines dropped; negation and dir-only recorded.
+    expect(rules).toHaveLength(5);
+
+    const container = deriveContainerScanRoots({
+      dockerignore: source,
+      // `output` is a tracked DIRECTORY, so `output/` excludes the segment; the
+      // negation is at file depth and does not resurrect the segment.
+      segments: ["app", "tests", "debug.log", "output", "node_modules"],
+    });
+    expect(container).toEqual(["app"]);
+  });
+
+  it("keeps the ASYMMETRY: `tests/` is excluded, so the gate's own test file is not a FAIL", () => {
+    // The reviewer required this direction explicitly. Widening the container
+    // channel must not report `tests/vendor-dompurify-floor.test.mjs`, which does
+    // carry a `@license DOMPurify 2.3.3` marker (as a fixture) and would be a
+    // genuine below-floor FAIL if `tests/` were scanned.
+    const { roots, channels } = resolveScanChannels({ cwd: REPO_ROOT });
+    expect(channels.container).not.toContain("tests");
+    expect(roots).not.toContain("tests");
+
+    const tracked = listTrackedVendoredFiles(REPO_ROOT, roots);
+    expect(tracked.some((p) => p.startsWith("tests/"))).toBe(false);
+
+    // The gate really does pass on the committed tree with the container channel
+    // active, so the widening is not reporting the repo's own marker strings.
+    const bundles = findDompurifyBundles({
+      files: tracked,
+      readFile: (path) => readFileSync(resolve(REPO_ROOT, path), "utf8"),
+      roots,
+    });
+    expect(bundles.map((b) => b.path)).toEqual([
+      "site/ui/assets/toastui-editor-all.min.js",
+      "ui/assets/toastui-editor-all.min.js",
+    ]);
+    for (const bundle of bundles) {
+      expect(inspectDompurifyBundle(bundle.source, bundle.path).ok).toBe(true);
+    }
+  });
+
+  it("finds a below-floor bundle committed at a CONTAINER-ONLY root (the round-6 repro)", () => {
+    // Exactly the reviewer's reproduction, as a permanent regression test: the
+    // genuine 2.3.3 bundle at `scripts/`, a root no channel declared before.
+    const { roots } = resolveScanChannels({ cwd: REPO_ROOT });
+    expect(roots).toContain("scripts");
+
+    const found = findDompurifyBundles({
+      files: ["scripts/vendor-dompurify-probe.js"],
+      readFile: () => '/*! @license DOMPurify 2.3.3 | (c) Cure53 */\nn.version="2.3.3",n.removed=[]\n',
+      roots,
+    });
+    expect(found).toHaveLength(1);
+    const result = inspectDompurifyBundle(found[0].source, found[0].path);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/2\.3\.3 is below required floor/);
+  });
+
+  it("refuses to guess when a declaration stops saying what it says", () => {
+    // Fail closed on each declaration rather than falling back to a literal.
+    expect(() => parseDockerignore("# only comments\n\n")).toThrow(/declares no exclusions/);
+    // A Dockerfile that stops copying the whole context invalidates the model
+    // that .dockerignore describes, so the gate must stop rather than keep
+    // reporting roots for a channel it no longer understands.
+    expect(() => resolveScanChannels({
+      cwd: REPO_ROOT,
+      dockerfile: "FROM node:22\nWORKDIR /app\nCOPY package.json ./\n",
+    })).toThrow(/no longer copies the whole build context/);
+  });
+
+  it("cannot have the container channel derived and then silently dropped", () => {
+    // The load-bearing assertion. It compares two INDEPENDENT derivations — the
+    // channel from .dockerignore, the scan set from the union of declarations —
+    // so it genuinely fires when the union stops covering a channel.
+    const { channels, roots } = resolveScanChannels({ cwd: REPO_ROOT });
+    for (const channel of Object.keys(channels)) {
+      for (const root of channels[channel]) {
+        expect(roots).toContain(root);
+      }
+    }
+    expect(() => assertChannelsAccounted(["scripts", "somebrandnewroot"], roots))
+      .toThrow(/missing from the scan set/);
+    expect(() => assertChannelsAccounted(["ui"], ["ui"])).not.toThrow();
+  });
+
+  it("refuses an empty container channel rather than checking almost nothing", () => {
+    // If the matcher ever regressed into excluding everything, the gate would get
+    // a short root list and still print PASS. This is the round-3 "assertion fed
+    // its own input" shape, checked against the TREE instead.
+    const everything = ["ui", "site", "scripts", "tools"];
+    const excludedByAll = deriveContainerScanRoots({
+      dockerignore: everything.map((r) => `${r}/`).join("\n"),
+      segments: everything,
+    });
+    expect(excludedByAll).toEqual([]);
   });
 });
 

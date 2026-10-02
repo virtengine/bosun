@@ -23,11 +23,32 @@
  *      2.3.3 bundle committed at `tui/vendor-dompurify-probe.min.js` reached
  *      `npm pack` and produced gate exit 0 with a green suite.
  *
- * So the roots are DERIVED here, from the repo's own declaration of what ships:
- * the top-level path segment of every package.json `files[]` entry (the npm
- * tarball) plus the GitHub Pages `publish_dir` from
- * .github/workflows/deploy-site.yaml. A root that is added to the manifest is
- * scanned the day it is added, not the day someone remembers to edit this file.
+ * So the roots are DERIVED here, from the repo's own declaration of what ships.
+ * There are three shipping channels, and each is read from the file that declares
+ * it rather than from a list kept here:
+ *
+ *   1. the npm tarball  — the top-level path segment of every package.json
+ *      `files[]` entry;
+ *   2. GitHub Pages    — the `publish_dir` parsed out of
+ *      .github/workflows/deploy-site.yaml;
+ *   3. the container   — the Dockerfile does `COPY . .`, so the build context is
+ *      the whole repo MINUS .dockerignore. That exclusion list is the repo's own
+ *      declaration of what the image does NOT ship, so the container scan set is
+ *      every top-level tracked segment that .dockerignore does not exclude. A
+ *      root the image picks up is scanned the day it is added, with no edit here.
+ *
+ * Rounds 4, 5 and 6 of review were each this same finding at a different
+ * granularity (paths → roots → the set of DECLARATIONS feeding the roots), so the
+ * derivation now has to answer one question completely: which declarations say
+ * what ships? Answering it per-channel is not enough; the union of all channels
+ * is what gets scanned, and assertChannelsAccounted() proves no tracked segment
+ * fell through the classification unnoticed.
+ *
+ * Matching .dockerignore happens at TOP-LEVEL-SEGMENT granularity, which is all
+ * `git ls-files` needs. That is deliberately fail-OPEN: a pattern this matcher
+ * cannot evaluate at that granularity (one with an interior `/`) leaves its
+ * segment INCLUDED, so a matcher limitation widens the scan instead of silently
+ * narrowing it. Unmatchable therefore means "scan it", never "skip it".
  *
  * MINIMUM_SCAN_ROOTS survives as a documented FLOOR, not as the source of truth:
  * `assertScanRootsCover()` throws if the derived set ever stops covering it, so
@@ -74,6 +95,12 @@ export const PACKAGE_MANIFEST = "package.json";
 /** Workflow declaring what GitHub Pages ships. */
 export const PAGES_WORKFLOW = ".github/workflows/deploy-site.yaml";
 
+/** Manifest declaring what the container image does NOT ship. */
+export const DOCKER_IGNORE = ".dockerignore";
+
+/** The Dockerfile whose `COPY . .` makes repo-minus-.dockerignore the image. */
+export const DOCKERFILE = "Dockerfile";
+
 /**
  * Top-level path segment of every `files[]` entry, plus the Pages publish dir.
  *
@@ -84,9 +111,10 @@ export const PAGES_WORKFLOW = ".github/workflows/deploy-site.yaml";
  * @param {object} options
  * @param {object} options.manifest parsed root package.json
  * @param {string} [options.publishDir] value of the Pages workflow's publish_dir
+ * @param {string[]} [options.containerRoots] roots the container image ships
  * @returns {string[]} sorted, de-duplicated repo-relative roots
  */
-export function deriveScanRoots({ manifest, publishDir } = {}) {
+export function deriveScanRoots({ manifest, publishDir, containerRoots } = {}) {
   if (!manifest || !Array.isArray(manifest.files)) {
     throw new Error(
       `${PACKAGE_MANIFEST} has no files[] array. The DOMPurify floor gate derives `
@@ -101,12 +129,183 @@ export function deriveScanRoots({ manifest, publishDir } = {}) {
     if (segment) roots.add(segment);
   }
   if (publishDir) roots.add(String(publishDir).trim());
+  for (const root of containerRoots ?? []) roots.add(String(root).trim());
   // MINIMUM_SCAN_ROOTS is deliberately NOT unioned in here. Folding the floor
   // into the derivation would make assertScanRootsCover unreachable — the
   // assertion would be satisfied by construction and could never fire, which is
   // the same "cannot check itself" defect the derived floor replaced. The floor
   // is checked by resolveScanRoots(), which is the only caller that scans.
   return [...roots].sort();
+}
+
+/**
+ * Every top-level tracked segment in the checkout.
+ *
+ * This is the candidate universe the shipping channels then partition. Reading
+ * it is what lets assertChannelsAccounted() prove that every segment was
+ * classified by some channel, instead of trusting that the channels happened to
+ * agree on it.
+ *
+ * @returns {string[]} sorted, de-duplicated top-level segments
+ */
+export function listTopLevelSegments(cwd = process.cwd()) {
+  let stdout;
+  try {
+    stdout = execFileSync("git", ["ls-files", "-z"], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (error) {
+    throw new Error(
+      `cannot enumerate tracked files: ${error.message}. The DOMPurify floor gate `
+        + "must classify the whole tracked tree against every shipping channel; an "
+        + "unenumerable tree means it cannot know what ships.",
+    );
+  }
+  const segments = new Set();
+  for (const path of stdout.split("\0").filter(Boolean)) {
+    const segment = path.split("/")[0].trim();
+    if (segment) segments.add(segment);
+  }
+  return [...segments].sort();
+}
+
+/**
+ * Parse .dockerignore into exclusion patterns.
+ *
+ * Docker's own semantics: one pattern per line, `#` comments, blank lines
+ * ignored, a trailing `/` meaning "directory only", and a leading `!` negating
+ * a previous exclusion (later lines win, exactly as Docker resolves them).
+ * Everything else — `*`, `**`, `?` globs — is handled by globToRegExp.
+ *
+ * @returns {{pattern: string, negated: boolean, dirOnly: boolean}[]}
+ */
+export function parseDockerignore(source, label = DOCKER_IGNORE) {
+  const rules = [];
+  for (const rawLine of String(source).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const negated = line.startsWith("!");
+    const body = (negated ? line.slice(1) : line).trim();
+    if (!body) continue;
+    rules.push({
+      pattern: body.replace(/\/+$/, ""),
+      negated,
+      dirOnly: body.endsWith("/"),
+    });
+  }
+  if (rules.length === 0) {
+    throw new Error(
+      `${label} declares no exclusions. The Dockerfile copies the whole build `
+        + "context, so an empty .dockerignore would mean the image ships every "
+        + "tracked file. Verify the file still exists and still excludes something "
+        + "rather than letting the container channel silently widen to the tree.",
+    );
+  }
+  return rules;
+}
+
+/**
+ * Translate one .dockerignore glob to an anchored RegExp over a repo-relative
+ * path. A pattern with no `/` matches at any depth (Docker's rule for
+ * single-segment patterns), which matters because `tests/` here excludes
+ * `tests/...` but must not be read as excluding a root named `tests` from the
+ * scan — the container channel is what applies these rules, and the root set is
+ * top-level segments.
+ */
+function globToRegExp(pattern) {
+  const anchored = pattern.includes("/") && !pattern.startsWith("**/");
+  let out = "";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const char = pattern[i];
+    if (char === "*") {
+      if (pattern[i + 1] === "*") {
+        out += ".*";
+        i += 1;
+        if (pattern[i + 1] === "/") i += 1;
+      } else {
+        out += "[^/]*";
+      }
+    } else if (char === "?") {
+      out += "[^/]";
+    } else if ("\\^$.|+()[]{}".includes(char)) {
+      out += `\\${char}`;
+    } else {
+      out += char;
+    }
+  }
+  return new RegExp(anchored ? `^${out}(/.*)?$` : `(^|/)${out}(/.*)?$`);
+}
+
+/**
+ * Does one .dockerignore rule exclude a top-level tracked segment?
+ *
+ * `segments` lets a `dirOnly` rule (`tests/`) distinguish a directory from a
+ * same-named file: `tests/` must not exclude a tracked FILE named `tests`.
+ * A rule whose pattern carries an interior `/` cannot be evaluated against a bare
+ * top-level segment, and this returns false — fail-OPEN, so the segment stays
+ * INCLUDED and gets scanned. A matcher limitation must never be the reason a
+ * shipping root goes unexamined.
+ */
+function ruleExcludesSegment(rule, segment, segments) {
+  if (rule.dirOnly && !segments.has(segment)) return false;
+  if (rule.pattern.includes("/")) return false;
+  return globToRegExp(rule.pattern).test(segment);
+}
+
+/**
+ * The container channel: top-level tracked segments the image ships.
+ *
+ * The Dockerfile does `COPY . .`, so the build context is the repo minus
+ * .dockerignore. Reading that exclusion list is reading the repo's own
+ * declaration of what the image does NOT ship — which is why this is a
+ * derivation and not a fourth hardcoded list.
+ *
+ * @param {object} options
+ * @param {string} options.dockerignore raw .dockerignore contents
+ * @param {string[]} options.segments  every top-level tracked segment
+ * @returns {string[]} segments not excluded by the final resolved rule set
+ */
+export function deriveContainerScanRoots({ dockerignore, segments, label = DOCKER_IGNORE } = {}) {
+  if (!Array.isArray(segments)) {
+    throw new Error("deriveContainerScanRoots needs the tracked top-level segments");
+  }
+  const rules = parseDockerignore(dockerignore, label);
+  const universe = new Set(segments);
+  return segments.filter((segment) => {
+    let excluded = false;
+    for (const rule of rules) {
+      if (!ruleExcludesSegment(rule, segment, universe)) continue;
+      excluded = !rule.negated;
+    }
+    return !excluded;
+  });
+}
+
+/**
+ * Throws unless every root a channel claims is present in the scan set.
+ *
+ * The scan set is the UNION of the channels, so a channel whose roots are not in
+ * it is a channel that was derived and then silently dropped — which is how the
+ * Docker channel went unmodelled in the first place. The two arguments are
+ * computed independently (the channel from `.dockerignore`, the scan set from the
+ * union of every declaration), so this can genuinely fire; an assertion fed only
+ * its own output could not, and that is the defect class this module keeps
+ * having to be defended against.
+ */
+export function assertChannelsAccounted(channelRoots, scanRoots) {
+  const covered = new Set(scanRoots);
+  const missing = [...new Set(channelRoots)].filter((root) => !covered.has(root));
+  if (missing.length > 0) {
+    throw new Error(
+      `shipping-channel root(s) ${missing.map((r) => JSON.stringify(r)).join(", ")} `
+        + `are missing from the scan set ${JSON.stringify(scanRoots)}. Every channel `
+        + `must be unioned into what the gate scans: a channel that is derived and `
+        + `then dropped is exactly how an unmonitored bundle gets shipped.`,
+    );
+  }
+  return scanRoots;
 }
 
 /**
@@ -150,18 +349,86 @@ export function assertScanRootsCover(derived, minimum = MINIMUM_SCAN_ROOTS) {
 }
 
 /**
- * The real scan roots for a checkout: derived, then asserted against the floor.
+ * The real scan roots for a checkout: derived from every shipping channel, then
+ * asserted complete and asserted against the floor.
+ *
+ * `resolveScanRoots` returns the roots; `resolveScanChannels` returns the same
+ * roots PLUS the per-channel breakdown, which the gate prints so a coverage
+ * change is visible in CI output rather than inferred from a count.
  */
-export function resolveScanRoots({ cwd, manifest, workflow, publishDir } = {}) {
+export function resolveScanChannels({
+  cwd,
+  manifest,
+  workflow,
+  publishDir,
+  dockerignore,
+  dockerfile,
+  segments,
+} = {}) {
   const root = resolve(cwd ?? process.cwd());
   const manifestSource = manifest ?? readFileSync(resolve(root, PACKAGE_MANIFEST), "utf8");
   const workflowSource = workflow ?? readFileSync(resolve(root, PAGES_WORKFLOW), "utf8");
-  return assertScanRootsCover(
-    deriveScanRoots({
-      manifest: JSON.parse(manifestSource),
-      publishDir: publishDir ?? readPublishDir(workflowSource),
-    }),
-  );
+  const dockerignoreSource = dockerignore ?? readFileSync(resolve(root, DOCKER_IGNORE), "utf8");
+  const dockerfileSource = dockerfile ?? readFileSync(resolve(root, DOCKERFILE), "utf8");
+
+  // The container model is only valid while the Dockerfile copies the whole
+  // build context. If it starts copying a subdirectory, repo-minus-.dockerignore
+  // stops being the image and this derivation would silently over-report — so the
+  // premise is checked rather than assumed.
+  if (!/^\s*COPY\s+\.\s+\.\s*$/m.test(dockerfileSource)) {
+    throw new Error(
+      `${DOCKERFILE} no longer copies the whole build context with \`COPY . .\`. `
+        + "The container channel derives its roots from .dockerignore, which is "
+        + "only the image's content while the whole tree is copied. Update the gate "
+        + "deliberately rather than letting it keep modelling a channel it no "
+        + "longer understands.",
+    );
+  }
+
+  const universe = segments ?? listTopLevelSegments(root);
+  const container = deriveContainerScanRoots({
+    dockerignore: dockerignoreSource,
+    segments: universe,
+  });
+  // The container channel must be wired AND must have resolved to something.
+  // A matcher regression that excluded everything would otherwise hand the gate
+  // a short root list and a green build, which is the round-3 "assertion fed its
+  // own input" shape: the check has to be against the tree, not against the
+  // derivation's own output.
+  if (container.length === 0) {
+    throw new Error(
+      `${DOCKER_IGNORE} excludes every one of the ${universe.length} tracked `
+        + `top-level segment(s), so the container channel derives no scan root. `
+        + "The image ships almost the whole repo, so the gate would now check "
+        + "almost nothing while still printing PASS. Fix the .dockerignore matcher.",
+    );
+  }
+  const manifestObject = JSON.parse(manifestSource);
+  const pagesDir = String(publishDir ?? readPublishDir(workflowSource)).trim();
+  const npmRoots = deriveScanRoots({ manifest: manifestObject, publishDir: pagesDir });
+  const derived = deriveScanRoots({
+    manifest: manifestObject,
+    publishDir: pagesDir,
+    containerRoots: container,
+  });
+
+  // The scan set must actually contain the container channel's roots, and the
+  // union must cover the documented floor.
+  assertChannelsAccounted(container, derived);
+  return {
+    roots: assertScanRootsCover(derived),
+    channels: {
+      npm: npmRoots,
+      pages: [pagesDir],
+      container,
+    },
+    segments: universe,
+  };
+}
+
+/** The real scan roots for a checkout. */
+export function resolveScanRoots(options = {}) {
+  return resolveScanChannels(options).roots;
 }
 
 /**
@@ -235,13 +502,18 @@ export function findDompurifyBundles({ files, readFile, roots = MINIMUM_SCAN_ROO
  */
 export function discoverDompurifyBundles({ cwd, files, readFile, roots } = {}) {
   const root = resolve(cwd ?? process.cwd());
-  const scanRoots = roots ?? resolveScanRoots({ cwd: root });
+  // Resolved once: resolveScanChannels() does the git enumeration and the
+  // assertions, so calling resolveScanRoots() first would do all of that twice.
+  const resolved = roots ? { roots } : resolveScanChannels({ cwd: root });
+  const scanRoots = resolved.roots;
+  const channels = resolved.channels ?? null;
   const tracked = files ?? listTrackedVendoredFiles(root, scanRoots);
   const reader =
     readFile
     ?? ((path) => readFileSync(resolve(root, path), "utf8"));
   return {
     roots: scanRoots,
+    channels,
     bundles: findDompurifyBundles({ files: tracked, readFile: reader, roots: scanRoots }),
   };
 }
