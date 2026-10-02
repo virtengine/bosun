@@ -31,16 +31,30 @@ export default function CommandPalette({ actions = [], visible = false, onClose,
     setSelectedIndex(0);
   }, [visible]);
 
-  useInput((input, key) => {
-    if (!visible) return;
+  // Ink 6's useInput re-subscribes its stdin listener whenever the handler identity
+  // changes (the handler is in the effect deps), so an inline arrow resubscribes on
+  // every render and drops keystrokes that land in the gap. Keep the handler identity
+  // stable and read the live query/selection through a ref.
+  const liveRef = React.useRef({ ranked, selectedIndex, visible, onClose, onExecute });
+  liveRef.current = { ranked, selectedIndex, visible, onClose, onExecute };
+
+  const handlePaletteInput = React.useCallback((input, key) => {
+    const {
+      ranked: liveRanked,
+      selectedIndex: liveIndex,
+      visible: liveVisible,
+      onClose: liveOnClose,
+      onExecute: liveOnExecute,
+    } = liveRef.current;
+    if (!liveVisible) return;
 
     if (key.escape) {
-      onClose?.();
+      liveOnClose?.();
       return;
     }
     if (key.return) {
-      const selected = ranked[selectedIndex];
-      if (selected) onExecute?.(selected);
+      const selected = liveRanked[liveIndex];
+      if (selected) liveOnExecute?.(selected);
       return;
     }
     if (key.upArrow) {
@@ -48,7 +62,7 @@ export default function CommandPalette({ actions = [], visible = false, onClose,
       return;
     }
     if (key.downArrow) {
-      setSelectedIndex((current) => Math.min(Math.max(0, ranked.length - 1), current + 1));
+      setSelectedIndex((current) => Math.min(Math.max(0, liveRanked.length - 1), current + 1));
       return;
     }
     if (key.backspace || key.delete) {
@@ -58,7 +72,9 @@ export default function CommandPalette({ actions = [], visible = false, onClose,
     if (input && !key.ctrl && !key.meta) {
       setQuery((current) => `${current}${input}`);
     }
-  }, { isActive: visible });
+  }, []);
+
+  useInput(handlePaletteInput, { isActive: visible });
 
   if (!visible) return null;
 

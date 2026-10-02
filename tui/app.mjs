@@ -6,6 +6,7 @@ const React = ReactModule.default ?? ReactModule;
 const useCallback = ReactModule.useCallback ?? React.useCallback;
 const useEffect = ReactModule.useEffect ?? React.useEffect;
 const useMemo = ReactModule.useMemo ?? React.useMemo;
+const useRef = ReactModule.useRef ?? React.useRef;
 const useState = ReactModule.useState ?? React.useState;
 const Box = ink.Box ?? ink.default?.Box;
 const Text = ink.Text ?? ink.default?.Text;
@@ -506,18 +507,38 @@ export default function App({
     setScreen((current) => getNextScreenForInput(current, input));
   }, [exit, helpOpen, maxHelpScrollOffset, screen]);
 
-  useInput((input, key) => {
-    if (connectionSetupOpen) return;
-    if (paletteOpen) return;
-    if (screenInputLocked && !helpOpen) {
+  // Ink 6's useInput re-subscribes its stdin listener whenever the handler identity
+  // changes (the handler is in the effect deps). Passing an inline arrow therefore
+  // unsubscribes/resubscribes on every render, and any keystroke that lands in that
+  // window is dropped. Keep the handler identity stable (useCallback with no deps)
+  // and read the live values through a ref, so the listener is registered exactly
+  // once and always dispatches against current state. Same pattern as
+  // tui/screens/agents.mjs and ui/tui/SettingsScreen.js.
+  const appInputStateRef = useRef(null);
+  appInputStateRef.current = {
+    connectionSetupOpen,
+    paletteOpen,
+    screenInputLocked,
+    helpOpen,
+    handleInput,
+  };
+
+  const dispatchAppInput = useCallback((input, key) => {
+    const state = appInputStateRef.current;
+    if (!state) return;
+    if (state.connectionSetupOpen) return;
+    if (state.paletteOpen) return;
+    if (state.screenInputLocked && !state.helpOpen) {
       if (isCtrlPaletteShortcut(input, key)) {
         setPaletteOpen(true);
         return;
       }
       if (input !== "?") return;
     }
-    handleInput(input, key);
-  });
+    state.handleInput(input, key);
+  }, []);
+
+  useInput(dispatchAppInput);
 
   const ScreenComponent = SCREENS[screen] || StatusScreen;
   const screenStats = stats;

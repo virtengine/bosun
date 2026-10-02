@@ -50,6 +50,16 @@ export async function renderInk(element, options = {}) {
     debug: true,
   });
 
+  // Ink registers its stdin listener from a useEffect, so a keystroke written before
+  // that effect has run is never dispatched. Wait for the listener to be attached
+  // instead of sleeping a fixed 40ms, so the first press is never dropped.
+  const rawModeWaitMs = options.rawModeWaitMs ?? 250;
+  const rawModeDeadline = Date.now() + rawModeWaitMs;
+  while (Date.now() < rawModeDeadline) {
+    if (stdin.listenerCount("readable") > 0) break;
+    await delay(5);
+  }
+
   await delay(options.waitMs ?? 40);
 
   return {
@@ -76,10 +86,20 @@ export async function renderInk(element, options = {}) {
       }
       return stripAnsi(buffer).replace(/\r/g, "");
     },
-    async press(chars, waitMs = 40) {
-      stdin.write(chars);
-      await delay(waitMs);
-    },
+    // Writes to a PassThrough are buffered and delivered asynchronously, so a fixed
+        // sleep after the write races React's effect flush and loses the keystroke. Wait
+        // for the chunk to actually be consumed by ink instead of guessing.
+        async press(chars, waitMs = 40) {
+          stdin.write(chars);
+          const settleDeadline = Date.now() + waitMs;
+          while (Date.now() < settleDeadline) {
+            await delay(5);
+            // Once ink has drained the buffer there is nothing left to dispatch; a short
+            // tail lets React commit the resulting state change before we return.
+            if (stdin.readableLength === 0) break;
+          }
+          await delay(5);
+        },
     async unmount(waitMs = 20) {
       app.unmount();
       await delay(waitMs);
