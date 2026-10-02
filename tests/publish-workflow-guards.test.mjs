@@ -2,7 +2,30 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import { testTimeout } from "./timeout-helper.mjs";
+
+/**
+ * Every test here runs the real `publish.yaml` step body under bash, so the
+ * cost is the step's OWN subprocess count, measured rather than assumed:
+ *
+ *   empty 6-iteration loop          283ms
+ *   one PATH-stub spawn             831ms   <- `#!/usr/bin/env bash` shebang
+ *                                             resolution + fork on Windows
+ *   the same spawn inside `$( )`   +129ms   <- command substitution forks
+ *
+ * The verify step's worst case is 6 `npm view` + 6 `sleep` = 12 stub spawns,
+ * i.e. ~12s of genuine work on Windows and far less on a Linux runner. The
+ * 15s global default was therefore under budget by roughly the multiplier the
+ * platform actually costs — which is what made these two tests fail on
+ * Windows while passing on CI, not a defect in the workflow being tested.
+ *
+ * `testTimeout()` states the LINUX baseline and applies the platform
+ * multiplier, per tests/AGENTS.md. These tests were the one file in the suite
+ * still on the bare global default.
+ */
+vi.setConfig({ testTimeout: testTimeout(15_000) });
 
 /**
  * These tests EXECUTE the shell from `.github/workflows/publish.yaml`.
