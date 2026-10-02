@@ -142,6 +142,7 @@
     "vendorsync": "node tools/vendor-sync.mjs",
     "vendor:sync": "node tools/vendor-sync.mjs",
     "check:vendored-dompurify": "node tools/check-vendored-dompurify.mjs",
+    "refresh:dompurify-advisories": "node tools/refresh-dompurify-advisories.mjs",
     "build:vendor-toastui": "node tools/build-vendor-toastui.mjs",
     "native:build": "node tools/native-rust.mjs build",
     "native:test": "node tools/native-rust.mjs test",
