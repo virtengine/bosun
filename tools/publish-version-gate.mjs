@@ -41,10 +41,21 @@ export function parseVersion(value) {
   if (typeof value !== "string") return null;
   const match = SEMVER.exec(value.trim());
   if (!match) return null;
+  // A component above 2^53-1 is not representable as an exact JS number, so
+  // `Number()` would collapse DISTINCT versions onto the same value (Infinity
+  // - Infinity === 0) and `compareVersions` would report two different
+  // versions as EQUAL — a silent skip, the exact failure class this module
+  // exists to eliminate. Reject at parse time instead of comparing wrong.
+  const parts = [];
+  for (let i = 1; i <= 3; i += 1) {
+    const n = Number(match[i]);
+    if (!Number.isSafeInteger(n)) return null;
+    parts.push(n);
+  }
   return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3]),
+    major: parts[0],
+    minor: parts[1],
+    patch: parts[2],
     prerelease: match[4] === undefined ? [] : match[4].split("."),
     build: match[5] ?? "",
   };
@@ -65,8 +76,12 @@ function comparePrerelease(a, b) {
     const leftNumeric = /^\d+$/.test(left);
     const rightNumeric = /^\d+$/.test(right);
     if (leftNumeric && rightNumeric) {
-      const diff = Number(left) - Number(right);
-      if (diff !== 0) return diff < 0 ? -1 : 1;
+      // BigInt, not Number: a numeric identifier past 2^53-1 (e.g. a long
+      // -beta counter) overflows to Infinity and `Infinity - Infinity` is NaN,
+      // so two different counters would not compare equal. BigInt is exact.
+      const leftBig = BigInt(left);
+      const rightBig = BigInt(right);
+      if (leftBig !== rightBig) return leftBig < rightBig ? -1 : 1;
       continue;
     }
     // Numeric identifiers always have lower precedence than alphanumeric.
