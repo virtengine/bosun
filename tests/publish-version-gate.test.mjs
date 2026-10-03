@@ -112,9 +112,27 @@ describe("compareVersions", () => {
   });
 
   it("orders prerelease numeric identifiers past 2^53 exactly", () => {
-    // A long -beta counter also overflows Number(); BigInt keeps it exact.
-    const hi = `1.0.0-beta.${"9".repeat(25)}`;
-    const lo = `1.0.0-beta.${"8".repeat(25)}`;
+    // The pair below is the one that actually collides under Number(): these are
+    // DISTINCT strings that both map to the double 9007199254740992, so pre-BigInt
+    // code returned 0 in BOTH directions (semver requires 1 and -1). A merely
+    // "long" counter (e.g. 25 digits) does NOT exercise this — 25 digits are
+    // exactly representable — which is why these literals are spelled out.
+    const hi = `1.0.0-beta.9007199254740993`;
+    const lo = `1.0.0-beta.9007199254740992`;
+    // Prove the inputs really are the collision case, so this test cannot silently
+    // decay back into testing nothing.
+    expect(Number("9007199254740993")).toBe(Number("9007199254740992"));
+    expect(compareVersions(hi, lo)).toBe(1);
+    expect(compareVersions(lo, hi)).toBe(-1);
+    expect(compareVersions(hi, hi)).toBe(0);
+  });
+
+  it("orders absurdly long prerelease numeric identifiers without overflowing", () => {
+    // >308 digits coerces to Infinity under Number(); BigInt stays exact and
+    // comparison must not throw.
+    const hi = `1.0.0-beta.${"9".repeat(1000)}`;
+    const lo = `1.0.0-beta.${"8".repeat(1000)}`;
+    expect(Number.isFinite(Number("9".repeat(1000)))).toBe(false);
     expect(compareVersions(hi, lo)).toBe(1);
     expect(compareVersions(lo, hi)).toBe(-1);
     expect(compareVersions(hi, hi)).toBe(0);
