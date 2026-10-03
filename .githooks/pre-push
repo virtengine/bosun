@@ -108,6 +108,10 @@ ADJACENCY_MAP=(
   "tools/dompurify-floor.mjs|vendor-dompurify-floor*"
   "tools/check-vendored-dompurify.mjs|vendor-dompurify-floor*"
   "tools/build-vendor-toastui.mjs|vendor-dompurify-floor*"
+  # The stale-branch classifier decides whether a merged PR's branch is dead
+  # weight or holds work nobody landed. A wrong verdict is how a superseded
+  # branch gets re-landed, so its suite must run whenever the tool changes.
+  "tools/stale-branch-report.mjs|stale-branch-report*"
   "tools/|apply-pr-suggestions*|demo-defaults-sync*|sync-demo-ui*|prepublish-check*|vitest-runner*|release-drift*|publish-version-gate*|vendor-dompurify-floor*|build-vendor-mui*"
   "plugins/|windows-desktop-mcp-server*"
   "lib/|logger*|log-tail*|utils*|library-*|error-detector*|context-*|codebase-audit*|repo-map*|state-ledger-sqlite*|hot-path-runtime*"
