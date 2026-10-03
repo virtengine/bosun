@@ -159,12 +159,22 @@ jobs:
 
           # The tag is a published, effectively-immutable ref, and it is built by
           # concatenating a value that reached this step through a shell
-          # expression. The gate (tools/publish-version-gate.mjs) already refuses
-          # an unparseable local version, including under force — but `npm publish
-          # --dry-run` does not: it accepts `v0.44.0` (rc=0), which this
-          # concatenation would have turned into the remote tag `vv0.44.0`. So the
-          # last point before the ref is created re-checks the shape itself rather
-          # than trusting that every path into this step passed the gate.
+          # expression. The gate (tools/publish-version-gate.mjs) refuses an
+          # unparseable local version — including under force, which cannot
+          # override that stop (`forceable: false`, reason "force does NOT
+          # override this") — but `npm publish --dry-run` does not: it accepts
+          # `v0.44.0` (rc=0), which this concatenation would have turned into the
+          # remote tag `vv0.44.0`. So the last point before the ref is created
+          # re-checks the shape itself rather than trusting that every path into
+          # this step passed the gate.
+          #
+          # Note this guard is NOT identical to the gate's notion of valid. The
+          # gate ACCEPTS build metadata (`0.44.0+build` is legal semver and will
+          # publish); this grep REFUSES it, so such a version publishes to npm but
+          # stops here before the tag. That is deliberate — a tag carries the bare
+          # version, and stripping `+build` here would create a tag that does not
+          # match the published version. Keep the two rules separate; do not
+          # "simplify" this by trusting the gate alone.
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error::local version '$VERSION' is not \`MAJOR.MINOR.PATCH[-pre]\`; refusing to create tag 'v$VERSION'"
             exit 1
