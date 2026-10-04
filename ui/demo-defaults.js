@@ -4604,7 +4604,7 @@
           "type": "action.run_command",
           "label": "Get Last Tag",
           "config": {
-            "command": "git describe --tags --abbrev=0 2>/dev/null || echo '{{releasePrefix}}0.0.0'"
+            "command": "git describe --tags --abbrev=0 --match '{{releasePrefix}}[0-9]*' 2>/dev/null || echo '{{releasePrefix}}0.0.0'"
           },
           "position": {
             "x": 400,
@@ -4635,7 +4635,7 @@
           "type": "action.run_command",
           "label": "Get Commit Log",
           "config": {
-            "command": "git log $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~50)..HEAD --oneline --no-merges"
+            "command": "LAST_TAG=\"$(git describe --tags --abbrev=0 --match '{{releasePrefix}}[0-9]*' 2>/dev/null)\"; git log \"${LAST_TAG:-HEAD~50}..HEAD\" --oneline --no-merges"
           },
           "position": {
             "x": 400,
@@ -9107,7 +9107,7 @@
           "type": "action.run_agent",
           "label": "Generate Changelog",
           "config": {
-            "prompt": "# Generate Changelog Entry\n\nRead the git log since the last tag:\n```\ngit log $(git describe --tags --abbrev=0)..HEAD --oneline\n```\n\nGroup commits into categories (Features, Fixes, Refactors, Docs, etc.)\nfollowing the Keep a Changelog format.\n\nWrite the entry to CHANGELOG.md under a new version heading.\nCommit the result with message \"docs: update changelog for vX.Y.Z\".",
+            "prompt": "# Generate Changelog Entry\n\nRead the git log since the last RELEASE tag:\n```\nLAST_TAG=\"$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)\"; git log \"${LAST_TAG:-HEAD~50}..HEAD\" --oneline\n```\n\nNote the `--match 'v[0-9]*'`: it is load-bearing, not decoration. An unconstrained\n`git describe --tags` returns the nearest reachable tag of ANY name, so a stray\nnon-semver tag (a bare `v`, an unprefixed `0.42.0`) would be read as the last release\nand this changelog would cover the wrong range. Keep the `${LAST_TAG:-HEAD~50}`\nfallback — `git describe` exits 128 when `--match` selects nothing.\n\nGroup commits into categories (Features, Fixes, Refactors, Docs, etc.)\nfollowing the Keep a Changelog format.\n\nWrite the entry to CHANGELOG.md under a new version heading.\nCommit the result with message \"docs: update changelog for vX.Y.Z\".",
             "sdk": "auto",
             "timeoutMs": 600000
           },
@@ -30464,7 +30464,7 @@
           "type": "action.run_command",
           "label": "Get Last Tag",
           "config": {
-            "command": "git describe --tags --abbrev=0 2>/dev/null || echo '{{releasePrefix}}0.0.0'"
+            "command": "git describe --tags --abbrev=0 --match '{{releasePrefix}}[0-9]*' 2>/dev/null || echo '{{releasePrefix}}0.0.0'"
           },
           "position": {
             "x": 400,
@@ -30495,7 +30495,7 @@
           "type": "action.run_command",
           "label": "Get Commit Log",
           "config": {
-            "command": "git log $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~50)..HEAD --oneline --no-merges"
+            "command": "LAST_TAG=\"$(git describe --tags --abbrev=0 --match '{{releasePrefix}}[0-9]*' 2>/dev/null)\"; git log \"${LAST_TAG:-HEAD~50}..HEAD\" --oneline --no-merges"
           },
           "position": {
             "x": 400,
@@ -34726,7 +34726,7 @@
           "type": "action.run_agent",
           "label": "Generate Changelog",
           "config": {
-            "prompt": "# Generate Changelog Entry\n\nRead the git log since the last tag:\n```\ngit log $(git describe --tags --abbrev=0)..HEAD --oneline\n```\n\nGroup commits into categories (Features, Fixes, Refactors, Docs, etc.)\nfollowing the Keep a Changelog format.\n\nWrite the entry to CHANGELOG.md under a new version heading.\nCommit the result with message \"docs: update changelog for vX.Y.Z\".",
+            "prompt": "# Generate Changelog Entry\n\nRead the git log since the last RELEASE tag:\n```\nLAST_TAG=\"$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)\"; git log \"${LAST_TAG:-HEAD~50}..HEAD\" --oneline\n```\n\nNote the `--match 'v[0-9]*'`: it is load-bearing, not decoration. An unconstrained\n`git describe --tags` returns the nearest reachable tag of ANY name, so a stray\nnon-semver tag (a bare `v`, an unprefixed `0.42.0`) would be read as the last release\nand this changelog would cover the wrong range. Keep the `${LAST_TAG:-HEAD~50}`\nfallback — `git describe` exits 128 when `--match` selects nothing.\n\nGroup commits into categories (Features, Fixes, Refactors, Docs, etc.)\nfollowing the Keep a Changelog format.\n\nWrite the entry to CHANGELOG.md under a new version heading.\nCommit the result with message \"docs: update changelog for vX.Y.Z\".",
             "sdk": "auto",
             "timeoutMs": 600000
           },

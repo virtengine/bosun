@@ -87,3 +87,6 @@ native/**/target/
 .bosun-monitor/*.txt
 .bosun-monitor/*.log
 *.txt
+
+# Local throwaway probe/verification scripts (discovery red-runs, flake measurements)
+.probe/
