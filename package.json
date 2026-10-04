@@ -567,7 +567,7 @@
     "figures": "^6.1.0",
     "hono": "^4.13.9",
     "htm": "3.1.1",
-    "ink": "6.0.0",
+    "ink": "7.1.1",
     "ink-text-input": "^6.0.0",
     "preact": "10.29.8",
     "qrcode-terminal": "^0.12.0",
