@@ -73,7 +73,8 @@ ADJACENCY_MAP=(
   "pnpm-lock.yaml|prepublish-check|vitest-runner"
   "yarn.lock|prepublish-check|vitest-runner"
   "npm-shrinkwrap.json|prepublish-check|vitest-runner"
-  "vitest.config.mjs|vitest-runner"
+  "vitest.config.mjs|vitest-runner|vitest-full-suite-discovery"
+  "tools/vitest-full-suite.mjs|vitest-runner|vitest-full-suite-discovery"
   "tests/setup.mjs|vitest-runner|ui-server*|workflow-engine*|task-store*|kanban-adapter*"
   "tests/harness-surface-clients.test.mjs|harness-surface-clients*"
   # The publish path is guarded by tests that EXECUTE the workflow's own run:

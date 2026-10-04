@@ -1,5 +1,5 @@
 import { readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { findPackageRoot, runVitest, shouldSkipVitestForBlockedChildSpawn } from "./vitest-runner.mjs";
@@ -73,15 +73,32 @@ function parseCsvEnv(value) {
     .filter(Boolean);
 }
 
-function listVitestSuiteFiles({ startDir = process.cwd() } = {}) {
+function isVitestSuiteFile(relativePath) {
+  return relativePath.endsWith(".test.mjs") && !relativePath.endsWith(".node.test.mjs");
+}
+
+// Vitest CLI positional filters are SUBSTRING matches, not exact paths: passing
+// `tests/smoke.test.mjs` also matches `tests/tui/bosun-tui-smoke.test.mjs`. Discovery
+// therefore has to be recursive, or a suite directory added later (tests/tui/*) is
+// silently invisible to `npm test`. See tests/vitest-full-suite-discovery.test.mjs.
+export function listVitestSuiteFiles({ startDir = process.cwd() } = {}) {
   const packageRoot = findPackageRoot({ startDir }) || startDir;
   const testsDir = resolve(packageRoot, "tests");
-  return readdirSync(testsDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name)
-    .filter((name) => name.endsWith(".test.mjs") && !name.endsWith(".node.test.mjs"))
-    .map((name) => `tests/${name}`)
-    .sort();
+  const discovered = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const relativePath = relative(packageRoot, entryPath).split(sep).join("/");
+      if (isVitestSuiteFile(relativePath)) discovered.push(relativePath);
+    }
+  };
+  walk(testsDir);
+  return discovered.sort();
 }
 
 function resolveHeavySuites(allSuites) {
