@@ -156,10 +156,16 @@ export const RELEASE_PIPELINE_TEMPLATE = {
     node("generate-changelog", "action.run_agent", "Generate Changelog", {
       prompt: `# Generate Changelog Entry
 
-Read the git log since the last tag:
+Read the git log since the last RELEASE tag:
 \`\`\`
-git log $(git describe --tags --abbrev=0)..HEAD --oneline
+LAST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)"; git log "\${LAST_TAG:-HEAD~50}..HEAD" --oneline
 \`\`\`
+
+Note the \`--match 'v[0-9]*'\`: it is load-bearing, not decoration. An unconstrained
+\`git describe --tags\` returns the nearest reachable tag of ANY name, so a stray
+non-semver tag (a bare \`v\`, an unprefixed \`0.42.0\`) would be read as the last release
+and this changelog would cover the wrong range. Keep the \`\${LAST_TAG:-HEAD~50}\`
+fallback — \`git describe\` exits 128 when \`--match\` selects nothing.
 
 Group commits into categories (Features, Fixes, Refactors, Docs, etc.)
 following the Keep a Changelog format.

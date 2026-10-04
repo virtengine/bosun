@@ -838,7 +838,12 @@ export const RELEASE_DRAFTER_TEMPLATE = {
     }, { x: 400, y: 50 }),
 
     node("get-last-tag", "action.run_command", "Get Last Tag", {
-      command: "git describe --tags --abbrev=0 2>/dev/null || echo '{{releasePrefix}}0.0.0'",
+      // --match is load-bearing: an unconstrained `git describe --tags` returns the
+      // NEAREST reachable tag of ANY name, so a stray non-semver tag (a bare `v`,
+      // an unprefixed `0.42.0`) becomes the "last release" and the release notes
+      // are then built from the wrong range. The `|| echo` fallback covers the
+      // no-matching-tag case (git exits 128 when --match selects nothing).
+      command: "git describe --tags --abbrev=0 --match '{{releasePrefix}}[0-9]*' 2>/dev/null || echo '{{releasePrefix}}0.0.0'",
     }, { x: 400, y: 180 }),
 
     node("list-prs", "action.run_command", "List Merged PRs", {
@@ -847,7 +852,7 @@ export const RELEASE_DRAFTER_TEMPLATE = {
     }, { x: 400, y: 310 }),
 
     node("get-commits", "action.run_command", "Get Commit Log", {
-      command: "git log $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~50)..HEAD --oneline --no-merges",
+      command: "LAST_TAG=\"$(git describe --tags --abbrev=0 --match '{{releasePrefix}}[0-9]*' 2>/dev/null)\"; git log \"${LAST_TAG:-HEAD~50}..HEAD\" --oneline --no-merges",
     }, { x: 400, y: 440 }),
 
     node("draft-notes", "action.run_agent", "Draft Release Notes", {
