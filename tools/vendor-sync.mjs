@@ -28,7 +28,7 @@
 
 import { createRequire } from "node:module";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { resolve, dirname, join, relative, sep } from "node:path";
+import { resolve, dirname, join, relative, sep, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import https from "node:https";
@@ -136,6 +136,177 @@ function resolveFromNodeModules(specifier) {
   return null;
 }
 
+/** 'preact/hooks/dist/hooks.module.js' → 'preact'; '@preact/signals/dist/x.js' → '@preact/signals'. */
+export function packageNameOf(specifier) {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+}
+
+/** Read the version declared by an installed package's own package.json, or null. */
+function readInstalledVersion(pkgDir) {
+  try {
+    return JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).version ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the directory of the package that `specifier` resolves into.
+ *
+ * Reuses the resolution in resolveFromNodeModules() so the directory reported
+ * here is the one holding the bytes the sync would actually copy — not some
+ * other copy of the same package hoisted elsewhere in the tree.
+ *
+ * The directory is derived from the package name rather than by walking up to
+ * the nearest package.json, because that heuristic gets both of preact's
+ * manifest shapes wrong:
+ *   - preact ships NESTED package.json files: preact/hooks/ is a private
+ *     sub-package stamped 0.1.0 and preact/compat/ one stamped 4.0.0. Stopping at
+ *     the nearest manifest reports preact@0.1.0 and then "fails closed" against a
+ *     perfectly correct npm-ci tree.
+ *   - a SCOPED package sits two levels under node_modules, so a single-level
+ *     parent check lands on node_modules/@preact rather than on the package.
+ * Taking the INNERMOST node_modules ancestor of the resolved file and appending
+ * the package name is correct for scoped names, nested manifests, and the nested
+ * node_modules of an unsatisfiable-hoist tree alike.
+ */
+function installedPackageDir(specifier, pkgName) {
+  const localPath = resolveFromNodeModules(specifier);
+  if (!localPath) return null;
+
+  let dir = dirname(localPath);
+  while (dir !== dirname(dir)) {
+    if (basename(dir) === "node_modules") {
+      const candidate = join(dir, ...pkgName.split("/"));
+      return existsSync(join(candidate, "package.json")) ? candidate : null;
+    }
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * Prove that the node_modules tree the sync is about to read is the tree
+ * package-lock.json pins — or refuse to.
+ *
+ * Why this exists: a fresh git worktree's node_modules is frequently produced by
+ * `npm install` rather than `npm ci` (and sometimes copied in wholesale), so a
+ * transitively-floating package — @preact/signals-core is one, since package.json
+ * only pins @preact/signals — can sit at a version the lockfile never chose. The
+ * byte comparison then reports the COMMITTED bundle as stale, and the obvious
+ * "fix" is to regenerate and commit those bytes. That lands a bundle inconsistent
+ * with package-lock.json, and the next `npm ci` regenerates the pinned bytes, so
+ * the same guard reds again with the roles reversed and now no explanation.
+ *
+ * Two conditions are treated as "cannot verify" and both fail closed:
+ *   - node_modules/.package-lock.json is absent  → not an npm-ci tree, so nothing
+ *     here can attest the tree matches the lockfile.
+ *   - that hidden lockfile disagrees with package-lock.json on a vended entry
+ *     → the tree provably is not the pinned one.
+ *
+ * Returns { packages: { <manifest file>: { pkg, pinned, installed, attested } } }
+ * for every vended entry.
+ */
+export function inspectVendedInstall({ root = ROOT } = {}) {
+  let pinnedTree;
+  try {
+    pinnedTree = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+  } catch (err) {
+    throw new Error(`vendor-sync: cannot read package-lock.json in ${root}: ${err.message}`);
+  }
+
+  const hiddenLockPath = join(root, "node_modules", ".package-lock.json");
+  let hiddenTree = null;
+  let hiddenLockPresent = true;
+  try {
+    hiddenTree = JSON.parse(readFileSync(hiddenLockPath, "utf8"));
+  } catch {
+    hiddenLockPresent = false;
+  }
+
+  /** The lockfile pin for `pkgName`, following nested node_modules if hoisting put it there. */
+  const pinFor = (pkgName) => {
+    const direct = pinnedTree.packages?.[`node_modules/${pkgName}`];
+    if (direct?.version) return direct.version;
+    const suffix = `node_modules/${pkgName}`;
+    const nested = Object.keys(pinnedTree.packages ?? {}).filter(
+      (path) => path.endsWith(`/${suffix}`) && pinnedTree.packages[path].version,
+    );
+    return nested.length === 1 ? pinnedTree.packages[nested[0]].version : null;
+  };
+
+  const hiddenVersionFor = (pkgName) => hiddenTree?.packages?.[`node_modules/${pkgName}`]?.version ?? null;
+
+  // Keyed by manifest FILE, not package name: three entries (preact.js,
+  // preact-hooks.js, preact-compat.js) all resolve inside the one `preact`
+  // package, so a package-keyed map would drop all but the last of them.
+  const result = {};
+  for (const entry of VENDOR_MANIFEST) {
+    const pkgName = packageNameOf(entry.specifier);
+    const pkgDir = installedPackageDir(entry.specifier, pkgName);
+    const pinned = pinFor(pkgName);
+    const hidden = hiddenVersionFor(pkgName);
+    result[entry.name] = {
+      pkg: pkgName,
+      pinned,
+      installed: pkgDir ? readInstalledVersion(pkgDir) : null,
+      // Attested only by an npm-ci tree that AGREES with package-lock.json. The
+      // hidden lockfile existing is not enough: an `npm install` run that resolved
+      // against a newer registry writes one too, and one that then disagrees with
+      // the pin is proof the tree is not the pinned one.
+      attested: hidden !== null && pinned !== null && hidden === pinned,
+    };
+  }
+  return { packages: result, hiddenLockPresent };
+}
+
+/**
+ * Statuses that mean "this entry's freshness could not be judged", as opposed to
+ * a verdict on the committed bytes. The report and the tests both branch on this.
+ */
+export const UNVERIFIABLE_STATUS = "install-unverifiable";
+
+/**
+ * Fold the install attestation into compareVendorFiles() records.
+ *
+ * An entry whose installed package is not the pinned one gets UNVERIFIABLE_STATUS
+ * with the pin and the installed version attached, so the caller reports a lockfile
+ * drift rather than a byte delta. Everything the tree does attest is left alone —
+ * the byte comparison is still meaningful for those entries.
+ */
+export function applyInstallAttestation(records, install) {
+  const byFile = new Map(Object.entries(install.packages ?? {}));
+
+  return records.map((record) => {
+    const info = byFile.get(record.name);
+
+    // Attestation is judged BEFORE any existing status, including "unvended".
+    // An entry skipped by the generator arrives here already labelled "unvended"
+    // (compareVendorFiles saw no expected bytes because nothing was written), so
+    // checking the status first would let an unverifiable tree report itself as
+    // merely "not installed" — the confusing, harmless-looking verdict this whole
+    // guard exists to replace.
+    //
+    // Fail closed whenever the entry's tree cannot be proven to be the pinned one:
+    // no info at all, no attestation, or a version that disagrees with the pin.
+    if (!info || !info.attested || !info.installed || !info.pinned || info.installed !== info.pinned) {
+      // The byte counts are DROPPED, not just re-labelled. A caller that falls
+      // through to its default branch on any status it does not recognise would
+      // otherwise render "5292 bytes committed vs 5533 bytes generated" — the
+      // exact artifact-staleness reading this whole path exists to prevent.
+      const { committedBytes, expectedBytes, ...rest } = record;
+      return { ...rest, status: UNVERIFIABLE_STATUS, ...(info ?? {}) };
+    }
+
+    // Attested: whatever compareVendorFiles said is meaningful. In particular an
+    // entry still reported "unvended" here is genuinely absent from an
+    // npm-ci tree that matches the lockfile, which is a different and correct
+    // thing to say.
+    return { ...record, attested: true };
+  });
+}
+
 function fetchUrl(url, redirects = 5) {
   return new Promise((resolve, reject) => {
     if (redirects <= 0) {
@@ -194,11 +365,32 @@ function rewriteEsmShImports(src) {
  * whenever upstream moved and green whenever it did not. Offline is stricter and
  * deterministic — see checkVendorSyncFreshness().
  */
-export async function syncVendorFiles({ silent = false, outDir = VENDOR_DIR, allowNetwork = true } = {}) {
+export async function syncVendorFiles({ silent = false, outDir = VENDOR_DIR, allowNetwork = true, root = ROOT } = {}) {
   mkdirSync(outDir, { recursive: true });
 
   const log = silent ? () => {} : (...a) => console.log("[vendor-sync]", ...a);
   const warn = (...a) => console.warn("[vendor-sync] WARN:", ...a);
+
+  // Attest node_modules against package-lock.json BEFORE writing anything out of
+  // it. This is the write-side half of the guard: `--check` only reports drift
+  // after the fact, but postinstall (postinstall.mjs) and `npm run prepare` both
+  // call this function in WRITE mode, and on an off-lockfile tree that is what
+  // actually overwrites the committed bundles. Refusing here means the bad bytes
+  // are never produced, rather than produced-then-explained.
+  //
+  // An unattested entry is skipped outright and its destination file is left
+  // alone — no node_modules copy, and no CDN fallback either. Fetching the pinned
+  // URL would produce defensible bytes, but it would also let a merely-drifted
+  // local tree silently pull vendor content from a third party during postinstall.
+  // Leaving the committed file untouched is the strictly safer outcome: it is
+  // already the lockfile-correct artifact, and the run that mattered (npm ci in
+  // CI) attests cleanly.
+  let attest = null;
+  try {
+    attest = inspectVendedInstall({ root }).packages;
+  } catch (err) {
+    warn(`could not attest node_modules against package-lock.json: ${err.message}`);
+  }
 
   const results = [];
 
@@ -206,6 +398,23 @@ export async function syncVendorFiles({ silent = false, outDir = VENDOR_DIR, all
     const destPath = resolve(outDir, entry.name);
 
     // ── 1. Try node_modules ──────────────────────────────────────────────────
+    const info = attest?.[entry.name];
+    if (info && !info.attested) {
+      // The reason must be stated precisely. When the versions agree but the tree
+      // is still unattested (no .package-lock.json), the tree is simply not
+      // provable — saying "X is not the pin (X)" would read as a contradiction.
+      const why = !info.pinned
+        ? `${info.pkg} is not pinned by package-lock.json`
+        : info.installed && info.installed !== info.pinned
+          ? `${info.pkg}@${info.installed} is not the package-lock.json pin (${info.pinned})`
+          : "cannot attest this tree: package-lock.json pins " +
+            `${info.pkg}@${info.pinned}, but node_modules has no .package-lock.json ` +
+            "to prove the installed tree matches it";
+      warn(`skipping node_modules for ${entry.name}: ${why} — copying it would write an off-lockfile bundle`);
+      results.push({ name: entry.name, source: null, reason: "install-unverifiable" });
+      continue;
+    }
+
     const localPath = resolveFromNodeModules(entry.specifier);
     if (localPath && existsSync(localPath)) {
       try {
@@ -305,23 +514,40 @@ export function compareVendorFiles({ builtDir, committedDir }) {
  * `ui/vendor` and leaves the mirror stale is exactly the skew that would
  * otherwise go unnoticed.
  */
-export async function checkVendorSyncFreshness({ committedDir } = {}) {
+export async function checkVendorSyncFreshness({ committedDir, root = ROOT, install } = {}) {
   const roots = committedDir ? [committedDir] : [VENDOR_DIR, SITE_VENDOR_DIR];
+  const installReport = install ?? inspectVendedInstall({ root });
 
   const scratch = mkdtempSync(join(tmpdir(), "bosun-vendor-sync-check-"));
   try {
     const builtDir = join(scratch, "ui", "vendor");
     const { results } = await syncVendorFiles({ silent: true, outDir: builtDir, allowNetwork: false });
 
-    // An entry the generator could not resolve offline has no expected bytes.
-    // Surface it as such rather than letting it read as fresh.
-    const unvended = new Set(results.filter((r) => r.source === null).map((r) => r.name));
+    // `source: null` means one of two very different things, and conflating them is
+    // what makes the guard lie:
+    //   - the package is genuinely ABSENT from node_modules ("unvended"), so there
+    //     are no expected bytes to compare;
+    //   - the generator SKIPPED the package because it could not attest the tree
+    //     against the lockfile. The bytes exist and may well be correct — the tree
+    //     is what is unverifiable. Reporting this as "unvended" both drops the
+    //     entry's name and routes it past applyInstallAttestation(), so --check
+    //     fell through to "run npm run build and commit", which is the exact
+    //     misreading this attestation exists to prevent.
+    const unvended = new Set(
+      results.filter((r) => r.source === null && r.reason !== "install-unverifiable").map((r) => r.name),
+    );
 
-    return roots.flatMap((root) =>
-      compareVendorFiles({ builtDir, committedDir: root }).map((record) => ({
-        ...(unvended.has(record.name) ? { status: "unvended" } : record),
-        root: relative(ROOT, root).split(sep).join("/"),
-      })),
+    return roots.flatMap((committedRoot) =>
+      applyInstallAttestation(
+        compareVendorFiles({ builtDir, committedDir: committedRoot }).map((record) => ({
+          // NOTE: always spread `record` first. Replacing it outright drops `name`,
+          // which is what rendered these as a literal "ui/vendor/undefined".
+          ...record,
+          ...(unvended.has(record.name) ? { status: "unvended" } : null),
+          root: relative(ROOT, committedRoot).split(sep).join("/"),
+        })),
+        installReport,
+      ),
     );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -340,10 +566,28 @@ function reportDrift(records) {
       detail = "not committed";
     } else if (record.status === "unvended") {
       detail = "not installed in node_modules — cannot verify offline";
+    } else if (record.status === UNVERIFIABLE_STATUS) {
+      // Never say "out of date" here: the committed bytes may be exactly right
+      // and it is the local node_modules that is off-lockfile.
+      detail = record.installed && record.pinned && record.installed !== record.pinned
+        ? `node_modules has ${record.pkg}@${record.installed} but package-lock.json pins ${record.pinned}`
+        : record.attested === false && record.pinned
+          ? `cannot attest node_modules: package-lock.json pins ${record.pkg}@${record.pinned}`
+          : "cannot attest node_modules against package-lock.json";
     } else {
       detail = `${record.committedBytes} bytes committed vs ${record.expectedBytes} bytes generated`;
     }
     console.error(`  ✗ ${record.root}/${record.name} — ${detail}`);
+  }
+  if (drifted.some((r) => r.status === UNVERIFIABLE_STATUS)) {
+    console.error(
+      "\n[vendor-sync] REFUSING to call these files stale: node_modules does not match package-lock.json,\n" +
+        "[vendor-sync] so a byte delta here is local tree drift, NOT artifact staleness.\n" +
+        "[vendor-sync] Run `npm ci` in this checkout and re-run. Do NOT regenerate and commit\n" +
+        "[vendor-sync] vendor files from an off-lockfile node_modules — that lands a bundle that the\n" +
+        "[vendor-sync] next `npm ci` will contradict.",
+    );
+    return;
   }
   console.error(
     "\n[vendor-sync] Committed vendor files are out of date with tools/vendor-sync.mjs.\n" +

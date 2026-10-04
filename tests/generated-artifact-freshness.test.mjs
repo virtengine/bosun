@@ -4,7 +4,14 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { VENDOR_MANIFEST, checkVendorSyncFreshness, compareVendorFiles } from "../tools/vendor-sync.mjs";
+import {
+  UNVERIFIABLE_STATUS,
+  VENDOR_MANIFEST,
+  applyInstallAttestation,
+  checkVendorSyncFreshness,
+  compareVendorFiles,
+  inspectVendedInstall,
+} from "../tools/vendor-sync.mjs";
 import { checkDemoDefaultsFreshness } from "../tools/generate-demo-defaults.mjs";
 import { checkDemoUiFreshness, compareMirror } from "../tools/sync-demo-ui.mjs";
 import { testTimeout } from "./timeout-helper.mjs";
@@ -141,6 +148,239 @@ describe("compareVendorFiles", () => {
       rmSync(scratch, { recursive: true, force: true });
     }
   }, testTimeout(20_000));
+});
+
+/**
+ * Build a throwaway root that exercises the LOCKFILE side of the attestation:
+ * a package-lock.json pinning `pinnedVersion` plus, optionally, the hidden
+ * node_modules/.package-lock.json that only an install tree writes.
+ *
+ * This fixture deliberately does NOT control the `installed` field.
+ * inspectVendedInstall resolves specifiers against the real repo's node_modules,
+ * so `installed` always reflects the checkout the suite is running in. The pins
+ * are what a fixture can vary, and the version-drift path is covered end-to-end
+ * against the real tree by the `--check` guard tests below.
+ */
+function makeLockFixture({ pinnedVersion, hiddenLock }) {
+  const scratch = mkdtempSync(join(tmpdir(), "bosun-vendor-sync-install-"));
+  const pkgName = "@preact/signals-core";
+
+  mkdirSync(join(scratch, "node_modules", ...pkgName.split("/")), { recursive: true });
+  writeFileSync(
+    join(scratch, "package-lock.json"),
+    JSON.stringify({ packages: { [`node_modules/${pkgName}`]: { version: pinnedVersion } } }),
+  );
+  if (hiddenLock) {
+    writeFileSync(
+      join(scratch, "node_modules", ".package-lock.json"),
+      JSON.stringify({ packages: { [`node_modules/${pkgName}`]: { version: hiddenLock } } }),
+    );
+  }
+
+  return { scratch, pkgName };
+}
+
+describe("node_modules lockfile attestation", () => {
+  it("marks every vended entry unvended-verifiable when node_modules has no .package-lock.json", () => {
+    // The exact shape of the failure in the card: a fresh worktree populated by
+    // `npm install`, so there is no hidden lockfile and nothing attests the tree.
+    const { scratch } = makeLockFixture({ pinnedVersion: "1.13.0" });
+    try {
+      const report = inspectVendedInstall({ root: scratch });
+
+      expect(report.hiddenLockPresent).toBe(false);
+      for (const info of Object.values(report.packages)) {
+        expect(info.attested, "no hidden lockfile means nothing attests the tree").toBe(false);
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to attest when the hidden lockfile disagrees with the package-lock pin", () => {
+    // The subtle case the card's fix must NOT miss: a hidden lockfile DOES exist
+    // (npm install writes one), but it records 1.14.4 while package-lock.json pins
+    // 1.13.0. Treating "the file exists" as attestation would wave this through.
+    const drifted = makeLockFixture({ pinnedVersion: "1.13.0", hiddenLock: "1.14.4" });
+    // Agreement: what an npm ci tree actually looks like.
+    const agreed = makeLockFixture({ pinnedVersion: "1.13.0", hiddenLock: "1.13.0" });
+    const signalEntry = "preact-signals-core.js";
+    try {
+      const driftedInfo = inspectVendedInstall({ root: drifted.scratch }).packages[signalEntry];
+      expect(driftedInfo.pinned).toBe("1.13.0");
+      expect(driftedInfo.attested).toBe(false);
+
+      expect(inspectVendedInstall({ root: agreed.scratch }).packages[signalEntry].attested).toBe(true);
+    } finally {
+      rmSync(drifted.scratch, { recursive: true, force: true });
+      rmSync(agreed.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to attest a package the lockfile does not pin at all", () => {
+    // A package absent from package-lock.json cannot be attested by it, however
+    // present it is in node_modules — there is no pin to agree with.
+    const { scratch } = makeLockFixture({ pinnedVersion: "1.13.0" });
+    try {
+      // htm is installed in the real tree but this fixture pins only signals-core,
+      // so `pinned` is null for it.
+      const report = inspectVendedInstall({ root: scratch });
+
+      expect(report.packages["htm.js"].pinned).toBeNull();
+      expect(report.packages["htm.js"].attested).toBe(false);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("converts a byte delta into a lockfile-drift verdict, not 'differs'", () => {
+    // The load-bearing assertion. Without it the guard says "committed file is
+    // stale, run npm run build", and the obvious fix lands an off-lockfile bundle.
+    const record = {
+      name: "preact-signals-core.js",
+      status: "differs",
+      expectedBytes: 5533,
+      committedBytes: 5292,
+      root: "ui/vendor",
+    };
+    const install = {
+      packages: {
+        "preact-signals-core.js": {
+          pkg: "@preact/signals-core",
+          pinned: "1.13.0",
+          installed: "1.14.4",
+          attested: false,
+        },
+      },
+    };
+
+    const [result] = applyInstallAttestation([record], install);
+
+    expect(result.status).toBe(UNVERIFIABLE_STATUS);
+    expect(result.status).not.toBe("differs");
+    // The pin and the installed version must survive, so the report can name both.
+    expect(result.pinned).toBe("1.13.0");
+    expect(result.installed).toBe("1.14.4");
+    // ...and the raw byte counts must NOT, or a caller could still render them as
+    // an artifact-staleness message.
+    expect(result.committedBytes).toBeUndefined();
+    expect(result.expectedBytes).toBeUndefined();
+  });
+
+  it("leaves a genuinely drifted file reported as 'differs' when the tree is attested", () => {
+    // The fail-closed path must not swallow real staleness: with an npm-ci tree
+    // that matches the lockfile, a byte delta IS artifact staleness.
+    const install = {
+      packages: {
+        "preact-signals-core.js": {
+          pkg: "@preact/signals-core",
+          pinned: "1.13.0",
+          installed: "1.13.0",
+          attested: true,
+        },
+      },
+    };
+
+    const [result] = applyInstallAttestation(
+      [{ name: "preact-signals-core.js", status: "differs", expectedBytes: 5292, committedBytes: 5291 }],
+      install,
+    );
+
+    expect(result.status).toBe("differs");
+    expect(result.expectedBytes).toBe(5292);
+  });
+
+  it("keeps the entry NAME when overriding a status, and never leaves it undefined", () => {
+    // Regression: the `unvended` override used to REPLACE the record
+    // (`cond ? { status: "unvended" } : record`), dropping `name` — so a drifted
+    // tree rendered as a literal "ui/vendor/undefined", hiding which file was
+    // implicated. The override must be additive.
+    const record = { name: "preact-signals-core.js", status: "differs", expectedBytes: 5533, committedBytes: 5292 };
+    const install = {
+      packages: {
+        "preact-signals-core.js": {
+          pkg: "@preact/signals-core",
+          pinned: "1.13.0",
+          installed: "1.14.4",
+          attested: false,
+        },
+      },
+    };
+
+    const [result] = applyInstallAttestation([record], install);
+
+    expect(result.name).toBe("preact-signals-core.js");
+    expect(result.root).toBeUndefined();
+  });
+
+  it("does not let an already-'unvended' record hide an unverifiable tree", () => {
+    // Regression, and the reason the guard lied end-to-end: an entry the generator
+    // SKIPPED arrives from compareVendorFiles with status "unvended" (no expected
+    // bytes were written). applyInstallAttestation used to early-return on that
+    // status, so an unverifiable node_modules reported itself as merely "not
+    // installed" and --check fell through to "run npm run build and commit" — the
+    // exact misreading this card exists to prevent.
+    const install = {
+      packages: {
+        "preact.js": { pkg: "preact", pinned: "10.29.8", installed: "10.29.8", attested: false },
+      },
+    };
+    const skipped = { name: "preact.js", status: "unvended", expectedBytes: 0, committedBytes: 5292 };
+
+    const [result] = applyInstallAttestation([skipped], install);
+
+    expect(result.status).toBe(UNVERIFIABLE_STATUS);
+    expect(result.status).not.toBe("unvended");
+    expect(result.committedBytes).toBeUndefined();
+  });
+
+  it("still reports a genuinely unvended entry as unvended on an attested tree", () => {
+    // The counterpart, so the reordering above cannot swallow a real absence: with
+    // a verified npm-ci tree, "not installed" is still the accurate verdict.
+    // Keyed by MANIFEST FILE name, matching how inspectVendedInstall keys its report
+    // — not by package name. Keying by "htm" here would find no entry, which fails
+    // closed for a reason unrelated to what this test is checking.
+    const install = {
+      packages: { "htm.js": { pkg: "htm", pinned: "3.1.1", installed: "3.1.1", attested: true } },
+    };
+    const [result] = applyInstallAttestation(
+      [{ name: "htm.js", status: "unvended", expectedBytes: 0, committedBytes: 100 }],
+      install,
+    );
+
+    expect(result.status).toBe("unvended");
+    expect(result.attested).toBe(true);
+  });
+
+  it("`--check` names the lockfile drift instead of a byte delta, and tells you not to regenerate", () => {
+    // End-to-end on the reporting layer: the guidance in the card is that a human
+    // reads this message and decides whether to regenerate. It must not read as
+    // "the committed bundle is stale".
+    const scratch = mkdtempSync(join(tmpdir(), "bosun-vendor-sync-report-"));
+    const vendorDir = join(scratch, "ui", "vendor");
+    mkdirSync(vendorDir, { recursive: true });
+    for (const { name } of VENDOR_MANIFEST) {
+      copyInto(vendorDir, name, VENDOR_DIR);
+    }
+
+    try {
+      const records = applyInstallAttestation(
+        compareVendorFiles({ builtDir: vendorDir, committedDir: vendorDir }).map((r) => ({ ...r, root: "ui/vendor" })),
+        {
+          packages: Object.fromEntries(
+            VENDOR_MANIFEST.map(({ name }) => [
+              name,
+              { pkg: "preact", pinned: "10.25.4", installed: "10.26.0", attested: false },
+            ]),
+          ),
+        },
+      );
+
+      expect(records.map((r) => r.status)).toEqual(VENDOR_MANIFEST.map(() => UNVERIFIABLE_STATUS));
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("demo-defaults freshness guard", () => {
