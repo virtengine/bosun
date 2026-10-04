@@ -8988,8 +8988,8 @@
         "changelog",
         "version"
       ],
-      "nodeCount": 14,
-      "edgeCount": 14,
+      "nodeCount": 15,
+      "edgeCount": 15,
       "recommended": true,
       "enabled": true,
       "trigger": "trigger.manual",
@@ -9059,7 +9059,8 @@
           "type": "action.run_command",
           "label": "Read New Version",
           "config": {
-            "command": "node -p \"require('./package.json').version\""
+            "command": "node -p \"require('./package.json').version\"",
+            "failOnError": true
           },
           "position": {
             "x": 400,
@@ -9075,12 +9076,27 @@
           "label": "Set Version Variable",
           "config": {
             "key": "version",
-            "value": "(() => String($ctx.getNodeOutput('read-version')?.output || '').trim())()",
+            "value": "(() => String($ctx.getNodeOutput('read-version')?.output || '').trim().replace(/^v/, ''))()",
             "isExpression": true
           },
           "position": {
             "x": 400,
             "y": 380
+          },
+          "outputs": [
+            "default"
+          ]
+        },
+        {
+          "id": "validate-version",
+          "type": "condition.expression",
+          "label": "Validate Version",
+          "config": {
+            "expression": "(() => {\n  const v = String({{version}} ?? \"\").trim();\n  const strict = /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$/;\n  if (!strict.test(v)) {\n    throw new Error(\n      \"Refusing to release: resolved version \" + JSON.stringify(v) +\n      \" is not strict semver (MAJOR.MINOR.PATCH[-prerelease][+build]). \" +\n      \"The release tag is built from this value, so publishing now would push \" +\n      JSON.stringify(\"v\" + v) + \". Fix package.json and re-run.\"\n    );\n  }\n  return true;\n})()"
+          },
+          "position": {
+            "x": 400,
+            "y": 450
           },
           "outputs": [
             "default"
@@ -9097,7 +9113,7 @@
           },
           "position": {
             "x": 400,
-            "y": 440
+            "y": 520
           },
           "outputs": [
             "default"
@@ -9113,7 +9129,7 @@
           },
           "position": {
             "x": 400,
-            "y": 570
+            "y": 640
           },
           "outputs": [
             "default"
@@ -9128,7 +9144,7 @@
           },
           "position": {
             "x": 400,
-            "y": 700
+            "y": 760
           },
           "outputs": [
             "default"
@@ -9143,7 +9159,7 @@
           },
           "position": {
             "x": 400,
-            "y": 830
+            "y": 880
           },
           "outputs": [
             "yes",
@@ -9159,7 +9175,7 @@
           },
           "position": {
             "x": 250,
-            "y": 1030
+            "y": 1080
           },
           "outputs": [
             "yes",
@@ -9283,8 +9299,14 @@
           "sourcePort": "default"
         },
         {
-          "id": "set-version->generate-changelog",
+          "id": "set-version->validate-version",
           "source": "set-version",
+          "target": "validate-version",
+          "sourcePort": "default"
+        },
+        {
+          "id": "validate-version->generate-changelog",
+          "source": "validate-version",
           "target": "generate-changelog",
           "sourcePort": "default"
         },
@@ -34613,7 +34635,7 @@
       "description": "End-to-end release automation: version bump, changelog generation, build, test, npm publish, GitHub release creation, and team notification. Triggered manually or on a schedule for regular release cadences.",
       "category": "ci-cd",
       "enabled": true,
-      "nodeCount": 14,
+      "nodeCount": 15,
       "trigger": "trigger.manual",
       "variables": {
         "bumpType": "patch",
@@ -34656,7 +34678,8 @@
           "type": "action.run_command",
           "label": "Read New Version",
           "config": {
-            "command": "node -p \"require('./package.json').version\""
+            "command": "node -p \"require('./package.json').version\"",
+            "failOnError": true
           },
           "position": {
             "x": 400,
@@ -34672,12 +34695,27 @@
           "label": "Set Version Variable",
           "config": {
             "key": "version",
-            "value": "(() => String($ctx.getNodeOutput('read-version')?.output || '').trim())()",
+            "value": "(() => String($ctx.getNodeOutput('read-version')?.output || '').trim().replace(/^v/, ''))()",
             "isExpression": true
           },
           "position": {
             "x": 400,
             "y": 380
+          },
+          "outputs": [
+            "default"
+          ]
+        },
+        {
+          "id": "validate-version",
+          "type": "condition.expression",
+          "label": "Validate Version",
+          "config": {
+            "expression": "(() => {\n  const v = String({{version}} ?? \"\").trim();\n  const strict = /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$/;\n  if (!strict.test(v)) {\n    throw new Error(\n      \"Refusing to release: resolved version \" + JSON.stringify(v) +\n      \" is not strict semver (MAJOR.MINOR.PATCH[-prerelease][+build]). \" +\n      \"The release tag is built from this value, so publishing now would push \" +\n      JSON.stringify(\"v\" + v) + \". Fix package.json and re-run.\"\n    );\n  }\n  return true;\n})()"
+          },
+          "position": {
+            "x": 400,
+            "y": 450
           },
           "outputs": [
             "default"
@@ -34694,7 +34732,7 @@
           },
           "position": {
             "x": 400,
-            "y": 440
+            "y": 520
           },
           "outputs": [
             "default"
@@ -34710,7 +34748,7 @@
           },
           "position": {
             "x": 400,
-            "y": 570
+            "y": 640
           },
           "outputs": [
             "default"
@@ -34725,7 +34763,7 @@
           },
           "position": {
             "x": 400,
-            "y": 700
+            "y": 760
           },
           "outputs": [
             "default"
@@ -34740,7 +34778,7 @@
           },
           "position": {
             "x": 400,
-            "y": 830
+            "y": 880
           },
           "outputs": [
             "yes",
@@ -34756,7 +34794,7 @@
           },
           "position": {
             "x": 250,
-            "y": 1030
+            "y": 1080
           },
           "outputs": [
             "yes",
@@ -34880,8 +34918,14 @@
           "sourcePort": "default"
         },
         {
-          "id": "set-version->generate-changelog",
+          "id": "set-version->validate-version",
           "source": "set-version",
+          "target": "validate-version",
+          "sourcePort": "default"
+        },
+        {
+          "id": "validate-version->generate-changelog",
+          "source": "validate-version",
           "target": "generate-changelog",
           "sourcePort": "default"
         },
