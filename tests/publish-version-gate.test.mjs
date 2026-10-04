@@ -93,6 +93,50 @@ describe("compareVersions", () => {
     expect(compareVersions("0.43.1", "0.0.0-beta.x")).toBe(1);
     expect(compareVersions("0.43.1", "0.0.0-beta")).toBe(1);
   });
+
+  it("never reports two distinct >2^53 components as equal", () => {
+    // Number() coerces both components to Infinity, so the comparison used to
+    // return 0 ("equal") and decidePublish reported a SILENT SKIP — the exact
+    // observable symptom the gate exists to eliminate.
+    const a = `${"9".repeat(400)}.0.0`;
+    const b = `${"8".repeat(400)}.0.0`;
+    // Fail-LOUD, not silently equal: both directions must refuse to order them.
+    expect(() => compareVersions(a, b)).toThrow(TypeError);
+    expect(() => compareVersions(b, a)).toThrow(TypeError);
+    // Same in the minor and patch slots.
+    expect(() => compareVersions(`1.${"9".repeat(400)}.0`, `1.${"8".repeat(400)}.0`)).toThrow(TypeError);
+    expect(() => compareVersions(`1.0.${"9".repeat(400)}`, `1.0.${"8".repeat(400)}`)).toThrow(TypeError);
+    // The boundary itself is still accepted — only unrepresentable input fails.
+    expect(compareVersions("9007199254740991.0.0", "9007199254740990.0.0")).toBe(1);
+    expect(compareVersions("0.43.1", "0.43.1")).toBe(0);
+  });
+
+  it("orders prerelease numeric identifiers past 2^53 exactly", () => {
+    // The pair below is the one that actually collides under Number(): these are
+    // DISTINCT strings that both map to the double 9007199254740992, so pre-BigInt
+    // code returned 0 in BOTH directions (semver requires 1 and -1). A merely
+    // "long" counter (e.g. 25 digits) does NOT exercise this — 25 digits are
+    // exactly representable — which is why these literals are spelled out.
+    const hi = `1.0.0-beta.9007199254740993`;
+    const lo = `1.0.0-beta.9007199254740992`;
+    // Prove the inputs really are the collision case, so this test cannot silently
+    // decay back into testing nothing.
+    expect(Number("9007199254740993")).toBe(Number("9007199254740992"));
+    expect(compareVersions(hi, lo)).toBe(1);
+    expect(compareVersions(lo, hi)).toBe(-1);
+    expect(compareVersions(hi, hi)).toBe(0);
+  });
+
+  it("orders absurdly long prerelease numeric identifiers without overflowing", () => {
+    // >308 digits coerces to Infinity under Number(); BigInt stays exact and
+    // comparison must not throw.
+    const hi = `1.0.0-beta.${"9".repeat(1000)}`;
+    const lo = `1.0.0-beta.${"8".repeat(1000)}`;
+    expect(Number.isFinite(Number("9".repeat(1000)))).toBe(false);
+    expect(compareVersions(hi, lo)).toBe(1);
+    expect(compareVersions(lo, hi)).toBe(-1);
+    expect(compareVersions(hi, hi)).toBe(0);
+  });
 });
 
 describe("decidePublish", () => {
@@ -104,6 +148,18 @@ describe("decidePublish", () => {
   it("publishes when local is strictly newer", () => {
     const d = decidePublish({ localVersion: "0.43.2", registryVersion: "0.43.1" });
     expect(d.shouldPublish).toBe(true);
+  });
+
+  it("stops loudly on an unrepresentable local version instead of silently skipping", () => {
+    // Before the parse-time guard this returned shouldPublish=false with
+    // reason "... is not newer than registry ..." — a silent skip of a version
+    // that WAS newer. It must now read as the unparseable-version stop it is.
+    const d = decidePublish({
+      localVersion: `${"9".repeat(400)}.0.0`,
+      registryVersion: `${"8".repeat(400)}.0.0`,
+    });
+    expect(d.shouldPublish).toBe(false);
+    expect(d.reason).toMatch(/unparseable/);
   });
 
   it("never republishes when the registry is unreachable", () => {

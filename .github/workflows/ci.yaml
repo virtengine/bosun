@@ -67,6 +67,29 @@ jobs:
       - name: MUI vendor bundle freshness
         run: node tools/build-vendor-mui.mjs --check
 
+      # The preact/htm/signals/es-module-shims bundles under ui/vendor are
+      # committed copies of node_modules bytes. They drift silently whenever a
+      # dependency is bumped without re-vendoring, so re-resolve them into a
+      # scratch dir and fail on any drift. Independent of the MUI gate above:
+      # neither generator writes the other's files, so a failure in one must
+      # never mask the other.
+      - name: Vendor sync freshness
+        run: node tools/vendor-sync.mjs --check
+
+      # demo-defaults.js is generated from workflow-templates/ and skill bodies,
+      # some of which are committed with CRLF. The generator normalises EOLs, so
+      # the artifact is a pure function of the committed sources and this gate
+      # cannot go red merely because a contributor has core.autocrlf set.
+      - name: Demo defaults freshness
+        run: node tools/generate-demo-defaults.mjs --check
+
+      # site/ui/ mirrors ui/ for every file sync-demo-ui.mjs copies (all of
+      # ROOT_FILES + ROOT_DIRS). The three HTML pages and demo-defaults.js are
+      # not mirrored and are owned by the gates above. Catches a half-run sync
+      # and an orphan left behind after a source deletion.
+      - name: Demo UI mirror freshness
+        run: node tools/sync-demo-ui.mjs --check
+
       - name: Audit conformity gate
         if: ${{ vars.BOSUN_AUDIT_CI == '1' }}
         run: npm run audit:ci

@@ -17,16 +17,26 @@
  *   - `npm install`  (via postinstall.mjs)
  *   - `npm run prepare` (before npm pack / npm publish)
  *   - `npx bosun vendor-sync` (manual refresh)
+ *
+ * `--check` (the CI freshness guard) re-runs the SAME resolution into a scratch
+ * directory and diffs it against both committed roots. `ui/vendor/` is the only
+ * directory this tool writes; `site/ui/vendor/` is a verbatim mirror of it written
+ * by tools/sync-demo-ui.mjs, so the guard checks both to catch a half-regenerated
+ * mirror. Shape follows tools/build-vendor-mui.mjs (PR #586) — keep the two guards
+ * independent so neither can mask the other.
  */
 
 import { createRequire } from "node:module";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { resolve, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import https from "node:https";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const VENDOR_DIR = resolve(__dirname, "..", "ui", "vendor");
+export const ROOT = resolve(__dirname, "..");
+export const VENDOR_DIR = resolve(ROOT, "ui", "vendor");
+export const SITE_VENDOR_DIR = resolve(ROOT, "site", "ui", "vendor");
 const _require = createRequire(import.meta.url);
 
 // ── Vendor manifest ───────────────────────────────────────────────────────────
@@ -36,7 +46,7 @@ const _require = createRequire(import.meta.url);
 // import bare specifiers (preact/hooks → 'preact'), the importmap in demo.html
 // and index.html re-routes those to the local vendor files — so the node_modules
 // copy (which uses bare specifiers internally) also works in the browser.
-const VENDOR_MANIFEST = [
+export const VENDOR_MANIFEST = [
   {
     name: "preact.js",
     specifier: "preact/dist/preact.module.js",
@@ -170,8 +180,22 @@ function rewriteEsmShImports(src) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-export async function syncVendorFiles({ silent = false } = {}) {
-  mkdirSync(VENDOR_DIR, { recursive: true });
+/**
+ * Resolve every manifest entry into `outDir`.
+ *
+ * The destination directory is a parameter so the freshness guard can run the
+ * exact production resolution (node_modules first, upstream download as fallback)
+ * into a scratch directory instead of the committed tree. Because the resolution
+ * logic is shared, the guard exercises the real generator rather than a
+ * reimplementation that could drift from it.
+ *
+ * Network access is disabled in `--check`: a download-fallback byte would depend
+ * on a third-party CDN's current output, so a guard that fetched would be red
+ * whenever upstream moved and green whenever it did not. Offline is stricter and
+ * deterministic — see checkVendorSyncFreshness().
+ */
+export async function syncVendorFiles({ silent = false, outDir = VENDOR_DIR, allowNetwork = true } = {}) {
+  mkdirSync(outDir, { recursive: true });
 
   const log = silent ? () => {} : (...a) => console.log("[vendor-sync]", ...a);
   const warn = (...a) => console.warn("[vendor-sync] WARN:", ...a);
@@ -179,7 +203,7 @@ export async function syncVendorFiles({ silent = false } = {}) {
   const results = [];
 
   for (const entry of VENDOR_MANIFEST) {
-    const destPath = resolve(VENDOR_DIR, entry.name);
+    const destPath = resolve(outDir, entry.name);
 
     // ── 1. Try node_modules ──────────────────────────────────────────────────
     const localPath = resolveFromNodeModules(entry.specifier);
@@ -196,6 +220,11 @@ export async function syncVendorFiles({ silent = false } = {}) {
     }
 
     // ── 2. Try esm.sh (primary upstream) ────────────────────────────────────
+    if (!allowNetwork) {
+      warn(`Not in node_modules and network disabled: ${entry.name}`);
+      results.push({ name: entry.name, source: null });
+      continue;
+    }
     for (const url of [entry.upstream, entry.upstreamFallback]) {
       try {
         log(`↓ Downloading ${entry.name} from ${url} …`);
@@ -220,6 +249,108 @@ export async function syncVendorFiles({ silent = false } = {}) {
   return { ok, results };
 }
 
+// ── Freshness guard ───────────────────────────────────────────────────────────
+
+/**
+ * Compare the bytes a fresh resolution produced against a committed copy.
+ *
+ * Returns one record per manifest entry so a caller reports every drifted file
+ * at once instead of stopping at the first. `status` is one of:
+ *   'ok'       — committed bytes match the generator output
+ *   'missing'  — the committed file is absent
+ *   'differs'  — the committed file exists but the bytes differ
+ *   'unvended' — the generator could not resolve this entry offline, so there is
+ *                no expected output to compare against (never silently 'ok')
+ */
+export function compareVendorFiles({ builtDir, committedDir }) {
+  return VENDOR_MANIFEST.map((entry) => {
+    const committedPath = join(committedDir, entry.name);
+    let committed;
+    try {
+      committed = readFileSync(committedPath);
+    } catch {
+      return { name: entry.name, status: "missing", expectedBytes: 0, committedBytes: 0 };
+    }
+
+    let expected;
+    try {
+      expected = readFileSync(join(builtDir, entry.name));
+    } catch {
+      return {
+        name: entry.name,
+        status: "unvended",
+        expectedBytes: 0,
+        committedBytes: committed.length,
+      };
+    }
+
+    const status = committed.equals(expected) ? "ok" : "differs";
+    return {
+      name: entry.name,
+      status,
+      expectedBytes: expected.length,
+      committedBytes: committed.length,
+    };
+  });
+}
+
+/**
+ * Re-resolve the vendor manifest into a temporary directory and diff it against
+ * the committed copies without writing anything into `ui/vendor` or
+ * `site/ui/vendor`.
+ *
+ * Pass `committedDir` to check one of the two roots; omit it to check BOTH,
+ * which is what the CI guard needs — `site/ui/vendor` is a verbatim mirror
+ * written by tools/sync-demo-ui.mjs, so a partial regeneration that updates
+ * `ui/vendor` and leaves the mirror stale is exactly the skew that would
+ * otherwise go unnoticed.
+ */
+export async function checkVendorSyncFreshness({ committedDir } = {}) {
+  const roots = committedDir ? [committedDir] : [VENDOR_DIR, SITE_VENDOR_DIR];
+
+  const scratch = mkdtempSync(join(tmpdir(), "bosun-vendor-sync-check-"));
+  try {
+    const builtDir = join(scratch, "ui", "vendor");
+    const { results } = await syncVendorFiles({ silent: true, outDir: builtDir, allowNetwork: false });
+
+    // An entry the generator could not resolve offline has no expected bytes.
+    // Surface it as such rather than letting it read as fresh.
+    const unvended = new Set(results.filter((r) => r.source === null).map((r) => r.name));
+
+    return roots.flatMap((root) =>
+      compareVendorFiles({ builtDir, committedDir: root }).map((record) => ({
+        ...(unvended.has(record.name) ? { status: "unvended" } : record),
+        root: relative(ROOT, root).split(sep).join("/"),
+      })),
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+function reportDrift(records) {
+  const drifted = records.filter((r) => r.status !== "ok");
+  if (drifted.length === 0) {
+    console.log("[vendor-sync] Committed vendor files match the generator output ✓");
+    return;
+  }
+  for (const record of drifted) {
+    let detail;
+    if (record.status === "missing") {
+      detail = "not committed";
+    } else if (record.status === "unvended") {
+      detail = "not installed in node_modules — cannot verify offline";
+    } else {
+      detail = `${record.committedBytes} bytes committed vs ${record.expectedBytes} bytes generated`;
+    }
+    console.error(`  ✗ ${record.root}/${record.name} — ${detail}`);
+  }
+  console.error(
+    "\n[vendor-sync] Committed vendor files are out of date with tools/vendor-sync.mjs.\n" +
+      "[vendor-sync] Run `npm run build` and commit ALL of ui/vendor/ and site/ui/vendor/.",
+  );
+}
+
 // ── CLI entry ─────────────────────────────────────────────────────────────────
 
 const isMain = process.argv[1] && (
@@ -228,6 +359,12 @@ const isMain = process.argv[1] && (
 );
 
 if (isMain) {
+  if (process.argv.includes("--check")) {
+    const records = await checkVendorSyncFreshness();
+    reportDrift(records);
+    process.exit(records.every((r) => r.status === "ok") ? 0 : 1);
+  }
+
   const silent = process.argv.includes("--silent");
   console.log("[vendor-sync] Syncing vendor files to ui/vendor/ …");
   const { ok, results } = await syncVendorFiles({ silent });
