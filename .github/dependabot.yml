@@ -1,3 +1,30 @@
+# Pin Dependabot's target branch to `develop`.
+#
+# Why this exists
+# ---------------
+# Estate policy (standing rule 1) is that PRs target `develop` and that `main` is
+# human-only: `bin/safe-merge.py` merges tier-1 work onto `develop` and refuses to
+# merge to a protected branch, and the standing `develop` -> `main` PR is tier-2,
+# human-gated.
+#
+# Dependabot has no such policy. Absent a `target-branch`, it opens PRs against
+# the repository's DEFAULT branch, which is `main` on every estate repo
+# (`refs/remotes/origin/HEAD -> refs/remotes/origin/main`, verified). So every
+# Dependabot PR the estate receives is born unmergeable by policy, parks as a
+# dead open PR, and gets filed by `bin/check-dependabot-prs.py` as an "unowned
+# dependabot PR" card for a bot to re-land by hand.
+#
+# That is not hypothetical: 6 of the 7 open PRs on bosun are Dependabot PRs based
+# on `main` (#622-#627). This file previously had no `target-branch` at all:
+#
+#   git show origin/develop:.github/dependabot.yml | grep -c target-branch  -> 0
+#
+# The same defect existed in virtengine/virtengine.
+#
+# `target-branch` must be repeated on EVERY entry in the `updates:` list -- it is
+# a per-update-key field, not a global one, so setting it on the first entry alone
+# would leave `/desktop` (its own manifest and lockfile) still targeting `main`.
+# Both entries below therefore carry it.
 version: 2
 updates:
   # Root package (the published `bosun` npm package + CLI).
@@ -6,6 +33,8 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # PRs must target `develop`; `main` is human-only. See the file header.
+    target-branch: "develop"
     open-pull-requests-limit: 5
     groups:
       root-minor-patch:
@@ -20,6 +49,8 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # Repeated deliberately: `target-branch` is per-update-key, not global.
+    target-branch: "develop"
     open-pull-requests-limit: 5
     groups:
       desktop-minor-patch:
