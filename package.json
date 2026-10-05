@@ -585,7 +585,7 @@
     "@playwright/test": "^1.63.0",
     "esbuild": "^0.28.2",
     "playwright": "^1.58.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.3"
   },
   "engines": {
     "node": ">=22.13.0"
