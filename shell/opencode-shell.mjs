@@ -30,6 +30,7 @@ import {
 import { resolveOpencodeBinary, describeOpencodeBinary } from "./opencode-binary.mjs";
 import { warnOnOpencodeSdkMismatch } from "./opencode-sdk-compat.mjs";
 import { formatOpencodeResult } from "./opencode-result.mjs";
+import { getToolUsePreflightError } from "./opencode-model-capabilities.mjs";
 import { maybeCompressSessionItems } from "../workspace/context-cache.mjs";
 import { createShellSessionCompat } from "./shell-session-compat.mjs";
 
@@ -614,6 +615,20 @@ export async function execOpencodePrompt(userMessage, options = {}) {
   const executorOverrides = providerConfig
     ? { ...providerConfig, provider: provider || providerConfig.provider || null }
     : null;
+
+  // Preflight: refuse a model that is known to lack tool use BEFORE the first
+  // turn (no server start, no session, no wasted call). Covers both the
+  // executor providerConfig model and the OPENCODE_MODEL env fallback.
+  // Unknown models pass — the lists only encode verified observations,
+  // never a blocklist default.
+  const preflightModelCfg = resolveModelConfig(executorOverrides);
+  const preflightError = getToolUsePreflightError(
+    executorOverrides?.model || preflightModelCfg?.modelID || null,
+  );
+  if (preflightError) {
+    console.warn(`[opencode-shell] preflight refused model: ${executorOverrides?.model || preflightModelCfg?.modelID}`);
+    return { finalResponse: preflightError, items: [], usage: null };
+  }
 
   // Re-read config in case it changed hot
   agentSdk = resolveAgentSdkConfig({ reload: true });

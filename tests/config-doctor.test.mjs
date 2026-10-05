@@ -320,4 +320,100 @@ describe("config-doctor", () => {
       expect(hasModelError).toBe(false);
     });
   });
+
+  // ── OpenCode Model Tool-Use Capability ──────────────────────────────
+
+  describe("OpenCode model tool-use capability", () => {
+    /**
+     * Run the doctor against an isolated empty config dir so ambient
+     * machine state (a real ~/.bosun/bosun.config.json with executors) can
+     * never leak executor candidates into env-focused assertions.
+     */
+    function runWithCapabilityEnv(envOverrides) {
+      const dir = mkdtempSync(join(tmpdir(), "config-doctor-opencode-env-"));
+      const saved = {};
+      for (const [k, v] of Object.entries(envOverrides)) {
+        saved[k] = process.env[k];
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      try {
+        return runConfigDoctor({ repoRoot: dir, configDir: dir });
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("errors when OPENCODE_MODEL names a model without tool use", () => {
+      const result = runWithCapabilityEnv({
+        OPENCODE_MODEL: "opencode/space-bunny-free",
+      });
+      const issue = result.errors.find(
+        (e) => e.code === "OPENCODE_MODEL_TOOL_USE_UNSUPPORTED",
+      );
+      expect(issue).toBeDefined();
+      expect(issue.message).toContain("space-bunny-free");
+      expect(issue.message).toContain("No endpoints found that support tool use");
+      expect(issue.fix).toContain("nemotron-3-ultra-free");
+    });
+
+    it("does NOT flag agent-capable, unknown, or empty models", () => {
+      for (const model of [
+        "opencode/nemotron-3-ultra-free",
+        "opencode/ling-3.0-flash-fin-free",
+        "gpt-5.2-codex",
+        "",
+      ]) {
+        const result = runWithCapabilityEnv({ OPENCODE_MODEL: model });
+        expect(
+          result.errors.some(
+            (e) => e.code === "OPENCODE_MODEL_TOOL_USE_UNSUPPORTED",
+          ),
+        ).toBe(false);
+      }
+    });
+
+    it("flags a non-tool-use model from the config file executor providerConfig", () => {
+      const dir = mkdtempSync(join(tmpdir(), "config-doctor-opencode-capability-"));
+      writeFileSync(
+        join(dir, "bosun.config.json"),
+        JSON.stringify({
+          executors: [
+            {
+              name: "zen",
+              executor: "OPENCODE",
+              variant: "DEFAULT",
+              weight: 100,
+              role: "primary",
+              enabled: true,
+              provider: "opencode",
+              providerConfig: { model: "opencode/longcat-2.5-preview-free" },
+            },
+          ],
+        }),
+      );
+      const savedModel = process.env.OPENCODE_MODEL;
+      const savedModelId = process.env.OPENCODE_MODEL_ID;
+      delete process.env.OPENCODE_MODEL;
+      delete process.env.OPENCODE_MODEL_ID;
+      try {
+        const result = runConfigDoctor({ repoRoot: dir, configDir: dir });
+        const issue = result.errors.find(
+          (e) => e.code === "OPENCODE_MODEL_TOOL_USE_UNSUPPORTED",
+        );
+        expect(issue).toBeDefined();
+        expect(issue.message).toContain("longcat-2.5-preview-free");
+      } finally {
+        if (savedModel === undefined) delete process.env.OPENCODE_MODEL;
+        else process.env.OPENCODE_MODEL = savedModel;
+        if (savedModelId === undefined) delete process.env.OPENCODE_MODEL_ID;
+        else process.env.OPENCODE_MODEL_ID = savedModelId;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
