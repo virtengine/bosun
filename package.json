@@ -405,6 +405,7 @@
     "shell/mcp-registry.mjs",
     "shell/openai-native-adapter.mjs",
     "shell/opencode-binary.mjs",
+    "shell/opencode-model-capabilities.mjs",
     "shell/opencode-providers.mjs",
     "shell/opencode-result.mjs",
     "shell/opencode-sdk-compat.mjs",

@@ -692,6 +692,56 @@ describe("initOpencodeShell()", () => {
   });
 });
 
+describe("execOpencodePrompt() — tool-use preflight", () => {
+  afterEach(async () => {
+    await resetSession();
+    vi.clearAllMocks();
+    delete process.env.OPENCODE_MODEL;
+  });
+
+  it("refuses a known non-tool-use model before the first turn", async () => {
+    setupHappyPath();
+    const promptCallsBefore = mockSessionPrompt.mock.calls.length;
+
+    const result = await execOpencodePrompt("do work", {
+      sessionId: "preflight-refused",
+      provider: "opencode",
+      providerConfig: { model: "opencode/muse-spark-1.3-contributor-free" },
+    });
+
+    expect(result.finalResponse).toContain("does not support tool use");
+    expect(result.finalResponse).toContain("muse-spark-1.3-contributor-free");
+    expect(result.finalResponse).toContain("nemotron-3-ultra-free");
+    expect(result.items).toEqual([]);
+    // No turn was issued: the model is caught at config time, not on first turn.
+    expect(mockSessionPrompt.mock.calls.length).toBe(promptCallsBefore);
+  });
+
+  it("lets an agent-capable model through to a normal turn", async () => {
+    setupHappyPath();
+
+    const result = await execOpencodePrompt("do work", {
+      sessionId: "preflight-capable",
+      provider: "opencode",
+      providerConfig: { model: "opencode/nemotron-3-ultra-free" },
+    });
+
+    expect(result.finalResponse).toContain("done!");
+  });
+
+  it("lets unknown models through (verified lists only, never a blocklist default)", async () => {
+    setupHappyPath();
+
+    const result = await execOpencodePrompt("do work", {
+      sessionId: "preflight-unknown",
+      provider: "opencode",
+      providerConfig: { model: "opencode/some-future-model" },
+    });
+
+    expect(result.finalResponse).toContain("done!");
+  });
+});
+
 describe("discoverProviders()", () => {
   afterEach(() => {
     vi.clearAllMocks();

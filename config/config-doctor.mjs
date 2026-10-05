@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import { ensureTestRuntimeSandbox } from "../infra/test-runtime.mjs";
 import { getWorkflowContract } from "../workflow/workflow-contract.mjs";
 import { CONFIG_FILES } from "./config-file-names.mjs";
+import {
+  OPENCODE_AGENT_CAPABLE_FREE_MODELS,
+  describeOpencodeModelCapability,
+} from "../shell/opencode-model-capabilities.mjs";
 export {
   runWorkspaceHealthCheck,
   formatWorkspaceHealthReport,
@@ -235,6 +239,60 @@ function validateExecutors(raw, issues) {
         fix: "Use integer weights > 0",
       });
     }
+  }
+}
+
+function readExecutorModelsFromConfigFile(configFilePath) {
+  if (!configFilePath || !existsSync(configFilePath)) return [];
+  let data = null;
+  try {
+    data = JSON.parse(readFileSync(configFilePath, "utf8"));
+  } catch {
+    return [];
+  }
+  const executors = Array.isArray(data?.executors) ? data.executors : [];
+  const found = [];
+  for (const entry of executors) {
+    if (!entry || typeof entry !== "object") continue;
+    const label = String(entry.name || entry.executor || "executor").trim() || "executor";
+    const models = Array.isArray(entry.models) ? entry.models : [];
+    for (const model of models) {
+      const text = String(model || "").trim();
+      if (text) found.push({ model: text, source: `executor "${label}".models` });
+    }
+    const providerModel = String(entry.providerConfig?.model || "").trim();
+    if (providerModel) {
+      found.push({ model: providerModel, source: `executor "${label}".providerConfig.model` });
+    }
+  }
+  return found;
+}
+
+function validateOpencodeModelCapabilities({ effective, configFilePath, issues }) {
+  const candidates = [];
+  for (const varName of ["OPENCODE_MODEL", "OPENCODE_MODEL_ID"]) {
+    const value = String(effective[varName] || "").trim();
+    if (value) candidates.push({ model: value, source: varName });
+  }
+  for (const entry of readExecutorModelsFromConfigFile(configFilePath)) {
+    candidates.push(entry);
+  }
+
+  const seen = new Set();
+  for (const { model, source } of candidates) {
+    const described = describeOpencodeModelCapability(model);
+    if (described.capable !== false) continue;
+    const key = described.model;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const alternatives = OPENCODE_AGENT_CAPABLE_FREE_MODELS.map((id) => `opencode/${id}`).join(", ");
+    issues.errors.push({
+      code: "OPENCODE_MODEL_TOOL_USE_UNSUPPORTED",
+      message:
+        `Model "${model}" (from ${source}) does not support tool use: ` +
+        `every agent turn fails with "No endpoints found that support tool use".`,
+      fix: `Use an agent-capable model instead: ${alternatives}.`,
+    });
   }
 }
 
@@ -591,6 +649,13 @@ export function runConfigDoctor(options = {}) {
       });
     }
   }
+
+  // ── OpenCode Model Tool-Use Capability ──────────────────────────────
+  // "Free" and "agent-capable" are separate properties: some Zen free models
+  // answer plain prompts but have no tool-use endpoint, so every agent turn
+  // fails with "No endpoints found that support tool use". Catch that at
+  // config time instead of after a failed turn.
+  validateOpencodeModelCapabilities({ effective, configFilePath, issues });
 
   if (parseBool(effective.CONTAINER_ENABLED)) {
     const runtime = String(effective.CONTAINER_RUNTIME || "auto").toLowerCase();

@@ -549,6 +549,17 @@ describe("guard wiring", () => {
     }
   });
 
+  it("the demo-defaults gate rejects artifacts rewritten by earlier build lifecycle steps", () => {
+    const ci = readFileSync(resolve(REPO_ROOT, ".github", "workflows", "ci.yaml"), "utf8");
+    const step = ci.split(/(?=\n      - name: )/).find((chunk) => chunk.includes("node tools/generate-demo-defaults.mjs --check"));
+
+    // npm ci (prepare), npm run build, and npm test (pretest) can regenerate
+    // these files before/after a pure --check. Compare with the checked-out
+    // commit as well, so a stale committed artifact cannot be repaired in-place
+    // before the gate and thereby disappear from CI's verdict.
+    expect(step).toContain("git diff --exit-code HEAD -- ui/demo-defaults.js site/ui/demo-defaults.js");
+  });
+
   it("keeps the four gates as separate steps so one failure cannot mask another", () => {
     const ci = readFileSync(resolve(REPO_ROOT, ".github", "workflows", "ci.yaml"), "utf8");
     const runs = ["build-vendor-mui.mjs --check", "vendor-sync.mjs --check", "generate-demo-defaults.mjs --check", "sync-demo-ui.mjs --check"];
