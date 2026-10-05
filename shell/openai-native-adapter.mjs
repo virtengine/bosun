@@ -50,10 +50,16 @@ import { resolveMcpTools, createMcpToolOrchestrator } from "./mcp-client.mjs";
 import { discoverMcpServers } from "./mcp-registry.mjs";
 import { resolveCredentials } from "./auth-resolver.mjs";
 import { normalizeMessages } from "./provider-transform.mjs";
+import {
+  classifyTruncatedTurn,
+  logProviderTurn,
+  resolveFreeTierTimeoutMs,
+} from "../agent/free-model-policy.mjs";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_TOOL_ROUNDS = 16;
+const FREE_MODEL_IDLE_TIMEOUT_FLOOR_MS = 180_000;
 
 // ── Tier-1 helpers (BOSUN_NATIVE_HARNESS_GAP_PLAN §D.2 / §D.3 / §D.6) ───────
 
@@ -941,16 +947,33 @@ async function streamResponsesTurn(url, headers, body, execOptions) {
 
 /**
  * Stream a single Chat Completions call and collect the result.
- * Returns { text, toolCalls, stopReason, usage }
+ * Returns { text, toolCalls, stopReason, usage, reasoningText,
+ *   truncated, reasoningFallback, classification, latencyMs, model }
+ *
+ * Free-model hardening: OpenRouter free routes may stream the entire budget
+ * as reasoning (reasoning_content / reasoning deltas) and finish with
+ * finish_reason "length" and empty visible content. Those deltas are captured
+ * here so the turn is classified explicitly instead of surfacing as a silent
+ * empty success. Slow free-tier models also get an elevated idle timeout so
+ * 16s cold starts / 55s tool turns complete without an internal timeout.
  */
 async function streamChatTurn(url, headers, body, execOptions) {
   const onEvent = typeof execOptions?.onEvent === "function" ? execOptions.onEvent : null;
   const emitDelta = typeof execOptions?._emitDelta === "function" ? execOptions._emitDelta : null;
   const signal = execOptions?.abortController?.signal ?? null;
   const sessionId = toTrimmedString(execOptions?.sessionId || "");
-  const timeoutMs = Number(execOptions?.timeoutMs) || DEFAULT_IDLE_TIMEOUT_MS;
+  const model = toTrimmedString(body?.model || execOptions?.model || execOptions?.providerConfig?.model || "");
+  const requestedTimeout = Number(execOptions?.timeoutMs);
+  const freeTierTimeout = resolveFreeTierTimeoutMs({ model, timeoutMs: 0 });
+  const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+    ? (model.toLowerCase().includes(":free") || model.toLowerCase().includes("/free")
+      ? Math.max(requestedTimeout, Math.min(freeTierTimeout, FREE_MODEL_IDLE_TIMEOUT_FLOOR_MS))
+      : requestedTimeout)
+    : (freeTierTimeout || DEFAULT_IDLE_TIMEOUT_MS);
+  const startedAt = Date.now();
 
   let text = "";
+  let reasoningText = "";
   let usage = null;
   let stopReason = null;
   const pendingToolCalls = new Map(); // index → { id, name, argumentsRaw }
@@ -1007,6 +1030,23 @@ async function streamChatTurn(url, headers, body, execOptions) {
         }
       }
 
+      // Free-model reasoning capture: OpenRouter reasoning models stream
+      // reasoning_content / reasoning deltas (or message.reasoning_content on
+      // non-stream deltas). Without this the whole turn looks empty.
+      const reasoningDelta = typeof delta.reasoning_content === "string" && delta.reasoning_content
+        ? delta.reasoning_content
+        : (typeof delta.reasoning === "string" && delta.reasoning ? delta.reasoning : "");
+      if (reasoningDelta) reasoningText += reasoningDelta;
+      if (Array.isArray(delta.reasoning_details)) {
+        for (const detail of delta.reasoning_details) {
+          if (typeof detail?.text === "string" && detail.text) reasoningText += detail.text;
+        }
+      }
+      const messageReasoning = choice?.message?.reasoning_content || choice?.message?.reasoning;
+      if (typeof messageReasoning === "string" && messageReasoning && !reasoningText.includes(messageReasoning)) {
+        reasoningText += messageReasoning;
+      }
+
       if (Array.isArray(delta.tool_calls)) {
         for (const tcDelta of delta.tool_calls) {
           const idx = tcDelta.index ?? 0;
@@ -1029,11 +1069,22 @@ async function streamChatTurn(url, headers, body, execOptions) {
           total_tokens: parsed.usage.total_tokens,
           cached_tokens: parsed.usage.prompt_tokens_details?.cached_tokens,
         });
+        // Preserve reasoning token split for observability when present.
+        const reasoningTokens = Number(
+          parsed.usage.completion_tokens_details?.reasoning_tokens
+            ?? parsed.usage.output_tokens_details?.reasoning_tokens
+            ?? 0,
+        );
+        if (Number.isFinite(reasoningTokens) && reasoningTokens > 0 && usage) {
+          usage.reasoningTokens = reasoningTokens;
+        }
       }
     }
   } finally {
     clearTimeout(idleTimer);
   }
+
+  const latencyMs = Date.now() - startedAt;
 
   onEvent?.({ type: "session.stream.complete", sessionId, text, usage, stopReason });
 
@@ -1048,7 +1099,57 @@ async function streamChatTurn(url, headers, body, execOptions) {
       argumentsRaw: tc.argumentsRaw,
     }));
 
-  return { text, toolCalls: resolvedToolCalls, stopReason, usage };
+  // Classify the free-model failure modes explicitly. A length-truncated or
+  // reasoning-only turn is never a silent empty success: fall back to the
+  // reasoning text for visibility and flag it for the exec loop / callers.
+  const classification = classifyTruncatedTurn({
+    text,
+    reasoningText,
+    toolCalls: resolvedToolCalls,
+    finishReason: stopReason,
+    usage,
+  });
+  let reasoningFallback = false;
+  let effectiveText = text;
+  if (classification.retryable && classification.fallbackAvailable) {
+    effectiveText = reasoningText.trim();
+    reasoningFallback = true;
+    onEvent?.({
+      type: "session.turn.reasoning_fallback",
+      sessionId,
+      model,
+      finishReason: stopReason,
+      contentChars: classification.contentChars,
+      reasoningChars: classification.reasoningChars,
+      latencyMs,
+    });
+  }
+  logProviderTurn({ model, latencyMs, finishReason: stopReason, usage, classification });
+  onEvent?.({
+    type: "session.turn.diagnostics",
+    sessionId,
+    model,
+    latencyMs,
+    finishReason: stopReason,
+    usage,
+    classification: classification.kind,
+    contentChars: classification.contentChars,
+    reasoningChars: classification.reasoningChars,
+  });
+
+  return {
+    text: effectiveText,
+    rawText: text,
+    toolCalls: resolvedToolCalls,
+    stopReason,
+    usage,
+    reasoningText,
+    reasoningFallback,
+    truncated: classification.retryable,
+    classification,
+    latencyMs,
+    model,
+  };
 }
 
 // ── Summarisation API Call ───────────────────────────────────────────────────
@@ -1673,6 +1774,52 @@ export function createOpenAINativeAdapter(factoryOptions = {}) {
         }
 
         finalText = turnResult.text;
+
+        // Free-model retry with a lower reasoning budget: when a turn is
+        // truncated to reasoning-only output, retry once with the effort
+        // stepped down so visible content fits in the budget.
+        if (turnResult?.truncated && !turnResult?.toolCalls?.length && apiStyle === "chat-completions") {
+          const currentEffort = toTrimmedString(activePC.reasoningEffort || activeOpts?.reasoningEffort || "");
+          const { lowerReasoningBudget } = await import("../agent/free-model-policy.mjs");
+          const lowered = lowerReasoningBudget(currentEffort);
+          if (lowered !== currentEffort.toLowerCase()) {
+            onEvent?.({
+              type: "session.turn.retry",
+              sessionId: effectiveSessionId,
+              reason: turnResult?.classification?.kind || "truncated",
+              fromReasoningEffort: currentEffort || null,
+              toReasoningEffort: lowered,
+            });
+            try {
+              const retryBody = buildChatRequest(session.messages, activeTools, {
+                ...activeOpts,
+                reasoningEffort: lowered,
+                providerConfig: { ...activePC, model: activeModel, reasoningEffort: lowered },
+              });
+              const retryResult = await streamChatTurn(url, authHeaders, retryBody, { ...activeOpts, _emitDelta: emitDelta });
+              if (!retryResult?.truncated || String(retryResult?.text || "").trim()) {
+                turnResult = retryResult;
+                finalText = turnResult.text;
+              }
+            } catch {
+              // Keep the original truncated turn; it is surfaced explicitly below.
+            }
+          }
+        }
+
+        // A truncated/empty turn with no tool calls is an explicit soft
+        // failure, never a silent empty success. Surface the split and warn.
+        if (turnResult?.truncated && !String(finalText || "").trim() && !turnResult?.toolCalls?.length) {
+          onEvent?.({
+            type: "session.warn",
+            sessionId: effectiveSessionId,
+            warning: "free_model_truncated_empty",
+            finishReason: turnResult?.stopReason || null,
+            classification: turnResult?.classification?.kind || null,
+            contentChars: turnResult?.classification?.contentChars ?? 0,
+            reasoningChars: turnResult?.classification?.reasoningChars ?? 0,
+          });
+        }
 
         // Flush stream smoother after each LLM turn
         await flushSmoother();

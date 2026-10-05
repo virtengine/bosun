@@ -366,6 +366,9 @@ function normalizeProviderResult(result, context = {}) {
     reasoning: normalized.reasoning,
     reasoningText: normalized.reasoningText,
     finishReason: normalized.finishReason,
+    truncated: normalized.truncated === true,
+    reasoningOnly: normalized.reasoningOnly === true,
+    retryable: normalized.retryable === true,
     error: normalized.error,
     providerId: normalized.providerId || context.providerId || null,
     model: normalized.model || context.model || null,
@@ -527,7 +530,20 @@ export function createProviderSession(providerId = null, options = {}) {
           });
         }
       }
-      const turnTimeoutMs = Math.max(0, Number(turnOptions.timeoutMs ?? options.timeoutMs) || 0);
+      const requestedModel = toTrimmedString(
+        turnOptions.model || turnOptions.providerConfig?.model || options.model
+          || options.providerConfig?.model || activeModel || runtime.provider?.defaultModel || "",
+      );
+      // Slow-model-aware timeout: free-tier cold starts (~16s) and slow tool
+      // turns (~55s) must not hit a fixed internal timeout. An explicit
+      // caller timeout still wins; otherwise the free-tier budget applies.
+      const { resolveFreeTierTimeoutMs, classifyTruncatedTurn, logProviderTurn } = await import("./free-model-policy.mjs");
+      const explicitTimeout = Number(turnOptions.timeoutMs ?? options.timeoutMs);
+      const hasExplicitTimeout = Number.isFinite(explicitTimeout) && explicitTimeout > 0;
+      const turnTimeoutMs = hasExplicitTimeout
+        ? Math.trunc(explicitTimeout)
+        : resolveFreeTierTimeoutMs({ model: requestedModel, isFirstTurn: messageHistory.length === 0 });
+      const turnStartedAt = Date.now();
       const parentAbortController = turnOptions.abortController || options.abortController || null;
       const turnAbortController = createLinkedAbortController(parentAbortController);
       let turnTimeoutTimer = null;
@@ -708,9 +724,55 @@ export function createProviderSession(providerId = null, options = {}) {
           sessionId: lastPayload.sessionId,
           threadId: lastPayload.threadId,
         });
-        const finalError = normalized.error || (normalized.success === false
+        const aggregatedReasoningText = aggregatedReasoning.length > 0
+          ? aggregatedReasoning.map((entry) => toTrimmedString(entry?.text || entry?.content || "")).filter(Boolean).join("\n")
+          : normalized.reasoningText;
+        // Explicit free-model failure classification at the session layer:
+        // a reasoning-only / length-truncated turn with empty visible content
+        // is a retryable soft failure (or a reasoning-fallback success), never
+        // a silent empty success.
+        const classification = classifyTruncatedTurn({
+          text: normalized.finalResponse || normalized.output || "",
+          reasoningText: aggregatedReasoningText || normalized.reasoningText || "",
+          toolCalls: aggregatedToolCalls.length > 0 ? aggregatedToolCalls : normalized.toolCalls,
+          finishReason: normalized.finishReason,
+          usage: aggregatedUsage || normalized.usage,
+        });
+        const fallbackText = classification.fallbackAvailable
+          ? toTrimmedString(aggregatedReasoningText || normalized.reasoningText || "")
+          : "";
+        const effectiveOutput = classification.retryable && !classification.fallbackAvailable
+          ? ""
+          : (toTrimmedString(normalized.finalResponse || normalized.output || "") || fallbackText);
+        const turnLatencyMs = Date.now() - turnStartedAt;
+        logProviderTurn({
+          model: normalized.model || lastPayload.model || requestedModel,
+          latencyMs: turnLatencyMs,
+          finishReason: normalized.finishReason,
+          usage: aggregatedUsage || normalized.usage,
+          classification,
+        });
+        emitSessionEvent({
+          type: "provider:turn-diagnostics",
+          providerId: provider,
+          model: normalized.model || lastPayload.model || requestedModel || null,
+          sessionId: normalized.sessionId || lastPayload.sessionId || activeSessionId,
+          threadId: normalized.threadId || lastPayload.threadId || activeThreadId,
+          latencyMs: turnLatencyMs,
+          finishReason: normalized.finishReason || null,
+          classification: classification.kind,
+          retryable: classification.retryable,
+          contentChars: classification.contentChars,
+          reasoningChars: classification.reasoningChars,
+          usage: aggregatedUsage || normalized.usage || null,
+          timeoutMs: turnTimeoutMs,
+        });
+        let finalError = normalized.error || (normalized.success === false
           ? toTrimmedString(normalized.finalResponse || normalized.output || "provider_error") || "provider_error"
           : null);
+        if (!finalError && classification.retryable && !classification.fallbackAvailable) {
+          finalError = classification.detail || `free_model_truncated:${classification.kind}`;
+        }
         const finalSuccess = normalized.success !== false
           && !finalError
           && !["failed", "error"].includes(toTrimmedString(normalized.status).toLowerCase());
@@ -721,16 +783,20 @@ export function createProviderSession(providerId = null, options = {}) {
         activeThreadId = normalized.threadId || lastPayload.threadId || activeThreadId || activeSessionId;
         return {
           ...normalized,
-          success: finalSuccess,
+          success: classification.retryable && !classification.fallbackAvailable ? false : finalSuccess,
+          output: effectiveOutput,
+          finalResponse: effectiveOutput,
           items: aggregatedMessages.length > 0 ? aggregatedMessages : normalized.items,
           usage: aggregatedUsage || normalized.usage,
           toolCalls: aggregatedToolCalls.length > 0 ? aggregatedToolCalls : normalized.toolCalls,
           toolResults: aggregatedToolResults.length > 0 ? aggregatedToolResults : normalized.toolResults,
           reasoning: aggregatedReasoning.length > 0 ? aggregatedReasoning : normalized.reasoning,
-          reasoningText:
-            aggregatedReasoning.length > 0
-              ? aggregatedReasoning.map((entry) => toTrimmedString(entry?.text || entry?.content || "")).filter(Boolean).join("\n")
-              : normalized.reasoningText,
+          reasoningText: aggregatedReasoningText || normalized.reasoningText,
+          reasoningFallback: classification.fallbackAvailable,
+          truncated: classification.retryable,
+          truncationKind: classification.kind,
+          latencyMs: turnLatencyMs,
+          timeoutMs: turnTimeoutMs,
           error: finalError,
         };
       } finally {

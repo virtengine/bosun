@@ -59,6 +59,39 @@ export const OPENROUTER_PROVIDER = createProviderDriver({
       { id: "openai/gpt-5" },
       { id: "anthropic/claude-sonnet-4" },
       { id: "moonshotai/kimi-k2" },
+      // Free-tier routes with per-model capability metadata so routing can
+      // prefer models that actually complete tasks. Reliability reflects
+      // observed behavior: nemotron free truncates to reasoning-only output;
+      // Zen free models are compliant but slow (16s cold start, 55s turns).
+      {
+        id: "nvidia/nemotron-3.5-lightning:free",
+        family: "nemotron",
+        toolCalling: false,
+        reasoning: true,
+        streaming: true,
+        metadata: {
+          freeTier: true,
+          toolCallingReliability: "unreliable",
+          reasoningStyle: "reasoning-heavy",
+          truncatesToReasoning: true,
+          recommendedReasoningEffort: "low",
+        },
+      },
+      {
+        id: "openrouter/free",
+        family: "free-tier",
+        toolCalling: false,
+        reasoning: true,
+        streaming: true,
+        metadata: {
+          freeTier: true,
+          toolCallingReliability: "degraded",
+          reasoningStyle: "reasoning-heavy-possible",
+          slowStart: true,
+          firstTurnTimeoutMs: 120000,
+          toolTurnTimeoutMs: 180000,
+        },
+      },
     ],
   },
 });
