@@ -270,6 +270,7 @@
     "agent/autofix.mjs",
     "agent/bosun-skills.mjs",
     "agent/fleet-coordinator.mjs",
+    "agent/free-model-policy.mjs",
     "agent/hook-library.mjs",
     "agent/hook-profiles.mjs",
     "agent/primary-agent.mjs",
