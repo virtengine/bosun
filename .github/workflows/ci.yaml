@@ -76,12 +76,12 @@ jobs:
       - name: Vendor sync freshness
         run: node tools/vendor-sync.mjs --check
 
-      # demo-defaults.js is generated from workflow-templates/ and skill bodies,
-      # some of which are committed with CRLF. The generator normalises EOLs, so
-      # the artifact is a pure function of the committed sources and this gate
-      # cannot go red merely because a contributor has core.autocrlf set.
+      # npm install lifecycle hooks, `npm run build`, and `npm test` can regenerate
+      # these files before this check runs. The generator's --check is necessary
+      # but insufficient after an in-place sync; compare against the checked-out
+      # commit too, so a stale committed artifact cannot self-heal in CI.
       - name: Demo defaults freshness
-        run: node tools/generate-demo-defaults.mjs --check
+        run: node tools/generate-demo-defaults.mjs --check && git diff --exit-code HEAD -- ui/demo-defaults.js site/ui/demo-defaults.js
 
       # site/ui/ mirrors ui/ for every file sync-demo-ui.mjs copies (all of
       # ROOT_FILES + ROOT_DIRS). The three HTML pages and demo-defaults.js are
