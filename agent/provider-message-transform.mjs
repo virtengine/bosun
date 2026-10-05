@@ -518,6 +518,19 @@ export function normalizeProviderStreamEvent(event = {}, options = {}) {
 }
 
 export function normalizeProviderResultPayload(result, options = {}) {
+  // Collect reasoning from the widest set of shapes first: OpenRouter-style
+  // reasoning_content / reasoning_details on choices, plus Bosun-normalized
+  // reasoning blocks. Free models can return finish_reason=length with the
+  // whole budget consumed by reasoning, so this split must be explicit.
+  const rawReasoningCandidates = [
+    result?.reasoningText,
+    result?.reasoning_text,
+    result?.reasoning_content,
+    result?.choices?.[0]?.message?.reasoning_content,
+    result?.choices?.[0]?.message?.reasoning,
+    result?.choices?.[0]?.delta?.reasoning_content,
+    result?.choices?.[0]?.delta?.reasoning,
+  ].filter((entry) => typeof entry === "string" && toTrimmedString(entry));
   let messages = normalizeProviderMessages(
     result?.messages
       || result?.items
@@ -541,6 +554,8 @@ export function normalizeProviderResultPayload(result, options = {}) {
   const messageToolCalls = messages.flatMap((entry) => entry.toolCalls || []);
   const messageToolResults = messages.flatMap((entry) => entry.toolResults || []);
   const messageReasoning = messages.flatMap((entry) => entry.reasoning || []);
+  const rootReasoning = normalizeRootReasoning(result || {});
+  const reasoningSeed = messageReasoning.length + rootReasoning.length;
   const toolCalls = uniqueEntries(
     [
       ...messageToolCalls,
@@ -558,10 +573,30 @@ export function normalizeProviderResultPayload(result, options = {}) {
   const reasoning = uniqueEntries(
     [
       ...messageReasoning,
-      ...normalizeRootReasoning(result || {}),
+      ...rootReasoning,
+      ...rawReasoningCandidates.map((entry, index) => normalizeReasoningBlock(entry, reasoningSeed + index)).filter(Boolean),
     ],
     (entry) => `${entry.id || ""}:${entry.text || ""}`,
   );
+  const reasoningText = reasoning.map((entry) => entry.text).filter(Boolean).join("\n") || null;
+  const finishReason = toTrimmedString(
+    result?.finishReason
+      || result?.finish_reason
+      || result?.choices?.[0]?.finish_reason
+      || result?.stopReason
+      || result?.stop_reason
+      || "",
+  ) || null;
+  const normalizedFinish = String(finishReason || "").trim().toLowerCase();
+  const visibleChars = toTrimmedString(text).length;
+  const reasoningChars = toTrimmedString(reasoningText || "").length;
+  const isLengthTruncated = normalizedFinish === "length" || normalizedFinish === "max_tokens";
+  // Explicit free-model failure classification: length + empty visible
+  // content, or reasoning-only output, is a retryable soft failure with the
+  // reasoning-vs-content split surfaced — never a silent empty success.
+  const reasoningOnly = visibleChars === 0 && reasoningChars > 0 && toolCalls.length === 0;
+  const truncatedEmpty = isLengthTruncated && visibleChars === 0 && toolCalls.length === 0;
+  const truncated = truncatedEmpty || reasoningOnly;
   return {
     text,
     messages,
@@ -573,8 +608,15 @@ export function normalizeProviderResultPayload(result, options = {}) {
     toolCalls,
     toolResults,
     reasoning,
-    reasoningText: reasoning.map((entry) => entry.text).filter(Boolean).join("\n") || null,
-    finishReason: toTrimmedString(result?.finishReason || result?.finish_reason) || null,
+    reasoningText,
+    finishReason,
+    truncated,
+    reasoningOnly,
+    truncatedEmpty,
+    softFailure: truncated,
+    retryable: truncated,
+    reasoningChars,
+    contentChars: visibleChars,
     status: toTrimmedString(result?.status || "") || null,
     error: normalizeProviderError(result?.error, result?.success === false ? text || "provider_error" : null),
   };
