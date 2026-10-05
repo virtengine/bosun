@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-02T00:05:55Z",
+  "generatedAt": "2026-10-05T12:45:04Z",
   "source": "gh api \"/advisories?ecosystem=npm&affects=dompurify&per_page=100\"",
   "regenerateWith": "npm run refresh:dompurify-advisories",
   "advisories": [
@@ -340,6 +340,18 @@
         {
           "vulnerableVersionRange": "<= 3.4.11",
           "firstPatchedVersion": "3.4.12"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-jxrp-r7gx-q4j8",
+      "severity": "medium",
+      "publishedAt": "2026-07-24T15:33:01Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-jxrp-r7gx-q4j8",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.11",
+          "firstPatchedVersion": null
         }
       ]
     },
