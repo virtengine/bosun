@@ -86,9 +86,10 @@ jobs:
       # site/ui/ mirrors ui/ for every file sync-demo-ui.mjs copies (all of
       # ROOT_FILES + ROOT_DIRS). The three HTML pages and demo-defaults.js are
       # not mirrored and are owned by the gates above. Catches a half-run sync
-      # and an orphan left behind after a source deletion.
+      # and an orphan left behind after a source deletion. This gate also compares
+      # the mirror with HEAD because npm run build syncs it before CI reaches here.
       - name: Demo UI mirror freshness
-        run: node tools/sync-demo-ui.mjs --check
+        run: node tools/sync-demo-ui.mjs --check && git diff --exit-code HEAD -- site/ui
 
       - name: Audit conformity gate
         if: ${{ vars.BOSUN_AUDIT_CI == '1' }}
