@@ -560,6 +560,24 @@ describe("guard wiring", () => {
     expect(step).toContain("git diff --exit-code HEAD -- ui/demo-defaults.js site/ui/demo-defaults.js");
   });
 
+  it("the demo-ui mirror gate rejects tracked files rewritten by earlier build lifecycle steps", () => {
+    const ci = readFileSync(resolve(REPO_ROOT, ".github", "workflows", "ci.yaml"), "utf8");
+    const step = ci.split(/(?=\n      - name: )/).find((chunk) => chunk.includes("node tools/sync-demo-ui.mjs --check"));
+
+    // `npm run build` runs demo-ui:sync before this gate. A working-tree-only
+    // --check would pass after that sync repaired the committed site/ui mirror.
+    expect(step).toContain("git diff --exit-code HEAD -- site/ui");
+  });
+
+  it("documents why template-source coverage is sufficient for generated artifacts", () => {
+    const test = readFileSync(resolve(REPO_ROOT, "tests", "release-tag-discovery.test.mjs"), "utf8");
+
+    expect(test).toContain("ui/demo-defaults.js");
+    expect(test).toContain("site/ui/demo-defaults.js");
+    expect(test).toContain("Demo defaults freshness");
+    expect(test).toContain(".github/workflows/ci.yaml");
+  });
+
   it("keeps the four gates as separate steps so one failure cannot mask another", () => {
     const ci = readFileSync(resolve(REPO_ROOT, ".github", "workflows", "ci.yaml"), "utf8");
     const runs = ["build-vendor-mui.mjs --check", "vendor-sync.mjs --check", "generate-demo-defaults.mjs --check", "sync-demo-ui.mjs --check"];
