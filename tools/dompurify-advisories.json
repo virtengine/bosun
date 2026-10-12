@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-05T12:45:04Z",
+  "generatedAt": "2026-10-12T13:36:15Z",
   "source": "gh api \"/advisories?ecosystem=npm&affects=dompurify&per_page=100\"",
   "regenerateWith": "npm run refresh:dompurify-advisories",
   "advisories": [
@@ -375,6 +375,18 @@
       "ranges": [
         {
           "vulnerableVersionRange": ">= 3.4.13, <= 3.4.15",
+          "firstPatchedVersion": "3.4.16"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-6688-9rhm-gjv2",
+      "severity": "low",
+      "publishedAt": "2026-10-05T23:43:53Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-6688-9rhm-gjv2",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.15",
           "firstPatchedVersion": "3.4.16"
         }
       ]
