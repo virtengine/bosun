@@ -79,6 +79,9 @@ function resolveProviderConfigAliases(config = {}) {
     nebius: providers.nebius && typeof providers.nebius === "object"
       ? providers.nebius
       : {},
+    atlascloud: providers.atlascloud && typeof providers.atlascloud === "object"
+      ? providers.atlascloud
+      : {},
     gemini: providers.gemini && typeof providers.gemini === "object"
       ? providers.gemini
       : providers.geminiGenerateContent,
@@ -153,6 +156,9 @@ export function buildProviderKernelSettings(config = {}) {
   setProviderSetting(flattened, "BOSUN_PROVIDER_NEBIUS_ENABLED", providers.nebius?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_NEBIUS_MODEL", providers.nebius?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_NEBIUS_BASE_URL", providers.nebius?.baseUrl || providers.nebius?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_ATLASCLOUD_ENABLED", providers.atlascloud?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_ATLASCLOUD_MODEL", providers.atlascloud?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_ATLASCLOUD_BASE_URL", providers.atlascloud?.baseUrl || providers.atlascloud?.endpoint);
   setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_ENABLED", providers.gemini?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_MODEL", providers.gemini?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_GEMINI_BASE_URL", providers.gemini?.baseUrl || providers.gemini?.endpoint);
@@ -182,6 +188,7 @@ function resolveKernelProviderSettings(config = {}, providerId = "") {
     cerebras: providers.cerebras,
     sambanova: providers.sambanova,
     nebius: providers.nebius,
+    atlascloud: providers.atlascloud,
     "gemini-generate-content": providers.gemini,
   };
   const providerConfig = providerConfigById[normalizedProviderId];

@@ -55,6 +55,8 @@ const LEGACY_PROVIDER_MAP = Object.freeze({
   samba: "sambanova",
   nebius: "nebius",
   "nebius-ai": "nebius",
+  atlascloud: "atlascloud",
+  "atlas-cloud": "atlascloud",
   opencode: "openai-compatible",
   "opencode-sdk": "openai-compatible",
   "open-code": "openai-compatible",

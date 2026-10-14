@@ -1047,6 +1047,7 @@ const HARNESS_EXECUTOR_ENDPOINT_PROVIDER_IDS = new Set([
   "cerebras",
   "sambanova",
   "nebius",
+  "atlascloud",
   "gemini-generate-content",
 ]);
 
@@ -1065,6 +1066,7 @@ const HARNESS_EXECUTOR_CONFIGURABLE_API_STYLE_PROVIDER_IDS = new Set([
   "cerebras",
   "sambanova",
   "nebius",
+  "atlascloud",
 ]);
 
 function normalizeHarnessExecutorId(value, fallback = "harness-executor") {

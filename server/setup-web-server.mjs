@@ -1654,6 +1654,7 @@ function buildSetupHarnessProviderSummary(sourceEnv = process.env, settings = {}
     "cerebras",
     "sambanova",
     "nebius",
+    "atlascloud",
     "gemini-generate-content",
   ];
   const providers = providerIds.map((providerId) => normalizeProviderAuthState(providerId, {}, {
@@ -1677,6 +1678,7 @@ function buildSetupHarnessProviderSummary(sourceEnv = process.env, settings = {}
     || providers.find((entry) => entry.providerId === "cerebras" && entry.authenticated)
     || providers.find((entry) => entry.providerId === "sambanova" && entry.authenticated)
     || providers.find((entry) => entry.providerId === "nebius" && entry.authenticated)
+    || providers.find((entry) => entry.providerId === "atlascloud" && entry.authenticated)
     || providers.find((entry) => entry.providerId === "gemini-generate-content" && entry.authenticated)
     || null;
   return {

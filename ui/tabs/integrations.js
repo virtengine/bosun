@@ -179,6 +179,15 @@ const PROVIDER_LIFECYCLE_RULES = [
     missingAction: "Add a Nebius API key and optional base URL.",
   },
   {
+    id: "atlascloud",
+    name: "Atlas Cloud",
+    icon: "☁️",
+    enabledKeys: ["BOSUN_PROVIDER_ATLASCLOUD_ENABLED"],
+    settingKeys: ["ATLASCLOUD_API_KEY"],
+    templates: ["Authorization: Bearer", "OpenAI-compatible endpoint"],
+    missingAction: "Add a Atlas Cloud API key and optional base URL.",
+  },
+  {
     id: "voice-openai",
     name: "Voice OpenAI OAuth",
     icon: "🎙️",

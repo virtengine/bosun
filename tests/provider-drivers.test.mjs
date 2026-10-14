@@ -32,8 +32,9 @@ describe("provider driver modules", () => {
       "cerebras",
       "sambanova",
       "nebius",
+      "atlascloud",
     ]);
-    expect(listBuiltInProviderDrivers()).toHaveLength(20);
+    expect(listBuiltInProviderDrivers()).toHaveLength(21);
   });
 
   it("keeps auth adapter coverage aligned with the authoritative provider registry set", () => {
@@ -56,6 +57,7 @@ describe("provider driver modules", () => {
     expect(hasBuiltInProviderDriver("cerebras-ai")).toBe(true);
     expect(hasBuiltInProviderDriver("samba-nova")).toBe(true);
     expect(hasBuiltInProviderDriver("nebius-ai")).toBe(true);
+    expect(hasBuiltInProviderDriver("atlas-cloud")).toBe(true);
 
     const driver = getBuiltInProviderDriver("azure-openai");
     expect(driver).toMatchObject({

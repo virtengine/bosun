@@ -21,6 +21,7 @@ const HARNESS_PROVIDER_CONFIG_KEYS = Object.freeze({
   cerebras: "cerebras",
   sambanova: "sambanova",
   nebius: "nebius",
+  atlascloud: "atlascloud",
 });
 
 function ensureObject(value) {

@@ -9,6 +9,7 @@ import FIREWORKS_PROVIDER from "./fireworks.mjs";
 import GEMINI_GENERATE_CONTENT_PROVIDER from "./gemini-generate-content.mjs";
 import GROQ_PROVIDER from "./groq.mjs";
 import NEBIUS_PROVIDER from "./nebius.mjs";
+import ATLASCLOUD_PROVIDER from "./atlascloud.mjs";
 import OLLAMA_PROVIDER from "./ollama.mjs";
 import OPENAI_CODEX_SUBSCRIPTION_PROVIDER from "./openai-codex-subscription.mjs";
 import OPENAI_COMPATIBLE_PROVIDER from "./openai-compatible.mjs";
@@ -58,6 +59,7 @@ export {
   GEMINI_GENERATE_CONTENT_PROVIDER,
   GROQ_PROVIDER,
   NEBIUS_PROVIDER,
+  ATLASCLOUD_PROVIDER,
   OLLAMA_PROVIDER,
   OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
   OPENAI_COMPATIBLE_PROVIDER,
@@ -91,6 +93,7 @@ export const BUILTIN_PROVIDER_DRIVERS = Object.freeze([
   CEREBRAS_PROVIDER,
   SAMBANOVA_PROVIDER,
   NEBIUS_PROVIDER,
+  ATLASCLOUD_PROVIDER,
 ]);
 
 export const BUILTIN_PROVIDER_DEFINITIONS = BUILTIN_PROVIDER_DRIVERS;
@@ -133,6 +136,8 @@ const LEGACY_PROVIDER_ALIASES = Object.freeze({
   samba: "sambanova",
   nebius: "nebius",
   "nebius-ai": "nebius",
+  atlascloud: "atlascloud",
+  "atlas-cloud": "atlascloud",
   opencode: "openai-compatible",
   "opencode-sdk": "openai-compatible",
   "open-code": "openai-compatible",

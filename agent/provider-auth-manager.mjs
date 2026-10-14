@@ -163,6 +163,14 @@ const PROVIDER_CREDENTIAL_BLUEPRINTS = Object.freeze({
       templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
     },
   },
+  atlascloud: {
+    apiKey: {
+      label: "Atlas Cloud API Key",
+      envKeys: ["ATLASCLOUD_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
   "openai-codex-subscription": {
     oauth: {
       label: "OpenAI OAuth Session",

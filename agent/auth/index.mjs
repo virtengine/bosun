@@ -13,6 +13,7 @@ import { FIREWORKS_AUTH_ADAPTER } from "./fireworks.mjs";
 import { GEMINI_API_KEY_AUTH_ADAPTER } from "./gemini-api-key.mjs";
 import { GROQ_AUTH_ADAPTER } from "./groq.mjs";
 import { NEBIUS_AUTH_ADAPTER } from "./nebius.mjs";
+import { ATLASCLOUD_AUTH_ADAPTER } from "./atlascloud.mjs";
 import { OLLAMA_AUTH_ADAPTER } from "./ollama.mjs";
 import { OPENAI_API_KEY_AUTH_ADAPTER } from "./openai-api-key.mjs";
 import { OPENAI_COMPATIBLE_AUTH_ADAPTER } from "./openai-compatible.mjs";
@@ -35,6 +36,7 @@ export {
   GEMINI_API_KEY_AUTH_ADAPTER,
   GROQ_AUTH_ADAPTER,
   NEBIUS_AUTH_ADAPTER,
+  ATLASCLOUD_AUTH_ADAPTER,
   OLLAMA_AUTH_ADAPTER,
   OPENAI_API_KEY_AUTH_ADAPTER,
   OPENAI_COMPATIBLE_AUTH_ADAPTER,
@@ -67,6 +69,7 @@ const AUTH_ADAPTER_BY_PROVIDER_ID = Object.freeze({
   cerebras: CEREBRAS_AUTH_ADAPTER,
   sambanova: SAMBANOVA_AUTH_ADAPTER,
   nebius: NEBIUS_AUTH_ADAPTER,
+  atlascloud: ATLASCLOUD_AUTH_ADAPTER,
 });
 
 const BUILTIN_PROVIDER_AUTH_ADAPTERS = Object.freeze(

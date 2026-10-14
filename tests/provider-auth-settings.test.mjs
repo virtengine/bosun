@@ -243,7 +243,7 @@ describe("provider auth and model settings", () => {
     expect(catalog.models.some((entry) => entry.id === "llama-3.3-70b-versatile" && entry.default === true)).toBe(true);
   });
 
-  it("surfaces Fireworks and Nebius API-key settings through auth normalization", () => {
+  it("surfaces Fireworks, Nebius, and Atlas Cloud API-key settings through auth normalization", () => {
     const fireworksAuth = normalizeProviderAuthState("fireworks", {}, {
       implicitAuth: false,
       env: {
@@ -267,6 +267,18 @@ describe("provider auth and model settings", () => {
       },
     });
 
+    const atlascloudAuth = normalizeProviderAuthState("atlascloud", {}, {
+      implicitAuth: false,
+      env: {
+        ATLASCLOUD_API_KEY: "atlascloud-test-key",
+      },
+      settings: {
+        BOSUN_PROVIDER_ATLASCLOUD_ENABLED: "true",
+        BOSUN_PROVIDER_ATLASCLOUD_MODEL: "deepseek-ai/deepseek-v4-flash",
+        BOSUN_PROVIDER_ATLASCLOUD_BASE_URL: "https://atlascloud.example/v1",
+      },
+    });
+
     expect(fireworksAuth.settings).toEqual(expect.objectContaining({
       enabled: true,
       authMode: "apiKey",
@@ -278,6 +290,12 @@ describe("provider auth and model settings", () => {
       authMode: "apiKey",
       defaultModel: "meta-llama/Meta-Llama-3.1-70B-Instruct",
       baseUrl: "https://nebius.example/v1",
+    }));
+    expect(atlascloudAuth.settings).toEqual(expect.objectContaining({
+      enabled: true,
+      authMode: "apiKey",
+      defaultModel: "deepseek-ai/deepseek-v4-flash",
+      baseUrl: "https://atlascloud.example/v1",
     }));
   });
 
