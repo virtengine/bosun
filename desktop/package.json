@@ -19,11 +19,11 @@
     "dist": "electron-builder"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.8.11"
   },
   "devDependencies": {
     "electron": "^44.5.1",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.18.0"
   },
   "overrides": {
     "@electron/get": "5.1.0"
