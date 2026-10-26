@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-05T12:45:04Z",
+  "generatedAt": "2026-10-26T11:36:00Z",
   "source": "gh api \"/advisories?ecosystem=npm&affects=dompurify&per_page=100\"",
   "regenerateWith": "npm run refresh:dompurify-advisories",
   "advisories": [
@@ -376,6 +376,54 @@
         {
           "vulnerableVersionRange": ">= 3.4.13, <= 3.4.15",
           "firstPatchedVersion": "3.4.16"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-6688-9rhm-gjv2",
+      "severity": "low",
+      "publishedAt": "2026-10-05T23:43:53Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-6688-9rhm-gjv2",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.15",
+          "firstPatchedVersion": "3.4.16"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-c6gr-qvv4-5v3f",
+      "severity": "low",
+      "publishedAt": "2026-10-22T16:24:23Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-c6gr-qvv4-5v3f",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.16",
+          "firstPatchedVersion": "3.4.17"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-mrv2-3pqr-j5jr",
+      "severity": "high",
+      "publishedAt": "2026-10-22T16:24:52Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-mrv2-3pqr-j5jr",
+      "ranges": [
+        {
+          "vulnerableVersionRange": "<= 3.4.16",
+          "firstPatchedVersion": "3.4.17"
+        }
+      ]
+    },
+    {
+      "ghsaId": "GHSA-cg2g-xh64-v4q7",
+      "severity": "critical",
+      "publishedAt": "2026-10-22T16:25:31Z",
+      "htmlUrl": "https://github.com/advisories/GHSA-cg2g-xh64-v4q7",
+      "ranges": [
+        {
+          "vulnerableVersionRange": ">= 3.4.4, <= 3.4.16",
+          "firstPatchedVersion": "3.4.17"
         }
       ]
     }
