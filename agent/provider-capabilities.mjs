@@ -35,6 +35,8 @@ const LEGACY_PROVIDER_MAP = Object.freeze({
   "openrouter-api": "openrouter",
   requesty: "requesty",
   "requesty-api": "requesty",
+  cheaperinference: "cheaperinference",
+  "cheaperinference-api": "cheaperinference",
   perplexity: "perplexity",
   pplx: "perplexity",
   deepinfra: "deepinfra",

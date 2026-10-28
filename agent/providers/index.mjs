@@ -15,6 +15,7 @@ import OPENAI_COMPATIBLE_PROVIDER from "./openai-compatible.mjs";
 import OPENAI_RESPONSES_PROVIDER from "./openai-responses.mjs";
 import OPENROUTER_PROVIDER from "./openrouter.mjs";
 import REQUESTY_PROVIDER from "./requesty.mjs";
+import CHEAPERINFERENCE_PROVIDER from "./cheaperinference.mjs";
 import PERPLEXITY_PROVIDER from "./perplexity.mjs";
 import SAMBANOVA_PROVIDER from "./sambanova.mjs";
 import TOGETHER_PROVIDER from "./together.mjs";
@@ -64,6 +65,7 @@ export {
   OPENAI_RESPONSES_PROVIDER,
   OPENROUTER_PROVIDER,
   REQUESTY_PROVIDER,
+  CHEAPERINFERENCE_PROVIDER,
   PERPLEXITY_PROVIDER,
   SAMBANOVA_PROVIDER,
   TOGETHER_PROVIDER,
@@ -82,6 +84,7 @@ export const BUILTIN_PROVIDER_DRIVERS = Object.freeze([
   GEMINI_GENERATE_CONTENT_PROVIDER,
   OPENROUTER_PROVIDER,
   REQUESTY_PROVIDER,
+  CHEAPERINFERENCE_PROVIDER,
   PERPLEXITY_PROVIDER,
   DEEPINFRA_PROVIDER,
   GROQ_PROVIDER,
@@ -113,6 +116,8 @@ const LEGACY_PROVIDER_ALIASES = Object.freeze({
   "openrouter-api": "openrouter",
   requesty: "requesty",
   "requesty-api": "requesty",
+  cheaperinference: "cheaperinference",
+  "cheaperinference-api": "cheaperinference",
   perplexity: "perplexity",
   pplx: "perplexity",
   deepinfra: "deepinfra",
