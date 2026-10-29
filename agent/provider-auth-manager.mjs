@@ -91,6 +91,14 @@ const PROVIDER_CREDENTIAL_BLUEPRINTS = Object.freeze({
       templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
     },
   },
+  cheaperinference: {
+    apiKey: {
+      label: "Cheaper Inference API Key",
+      envKeys: ["CHEAPER_INFERENCE_API_KEY"],
+      validation: { minLength: 12 },
+      templates: { headers: { Authorization: "Bearer {{credential.value}}" } },
+    },
+  },
   perplexity: {
     apiKey: {
       label: "Perplexity API Key",

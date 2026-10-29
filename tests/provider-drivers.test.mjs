@@ -23,6 +23,7 @@ describe("provider driver modules", () => {
       "gemini-generate-content",
       "openrouter",
       "requesty",
+      "cheaperinference",
       "perplexity",
       "deepinfra",
       "groq",
@@ -33,7 +34,7 @@ describe("provider driver modules", () => {
       "sambanova",
       "nebius",
     ]);
-    expect(listBuiltInProviderDrivers()).toHaveLength(20);
+    expect(listBuiltInProviderDrivers()).toHaveLength(21);
   });
 
   it("keeps auth adapter coverage aligned with the authoritative provider registry set", () => {

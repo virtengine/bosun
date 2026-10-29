@@ -52,6 +52,9 @@ function resolveProviderConfigAliases(config = {}) {
     requesty: providers.requesty && typeof providers.requesty === "object"
       ? providers.requesty
       : {},
+    cheaperinference: providers.cheaperinference && typeof providers.cheaperinference === "object"
+      ? providers.cheaperinference
+      : {},
     perplexity: providers.perplexity && typeof providers.perplexity === "object"
       ? providers.perplexity
       : {},
@@ -126,6 +129,9 @@ export function buildProviderKernelSettings(config = {}) {
   setProviderSetting(flattened, "BOSUN_PROVIDER_REQUESTY_ENABLED", providers.requesty?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_REQUESTY_MODEL", providers.requesty?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_REQUESTY_BASE_URL", providers.requesty?.baseUrl || providers.requesty?.endpoint);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_CHEAPERINFERENCE_ENABLED", providers.cheaperinference?.enabled);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_CHEAPERINFERENCE_MODEL", providers.cheaperinference?.defaultModel);
+  setProviderSetting(flattened, "BOSUN_PROVIDER_CHEAPERINFERENCE_BASE_URL", providers.cheaperinference?.baseUrl || providers.cheaperinference?.endpoint);
   setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_ENABLED", providers.perplexity?.enabled);
   setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_MODEL", providers.perplexity?.defaultModel);
   setProviderSetting(flattened, "BOSUN_PROVIDER_PERPLEXITY_BASE_URL", providers.perplexity?.baseUrl || providers.perplexity?.endpoint);
@@ -173,6 +179,7 @@ function resolveKernelProviderSettings(config = {}, providerId = "") {
     "copilot-oauth": providers.copilot,
     openrouter: providers.openrouter,
     requesty: providers.requesty,
+    cheaperinference: providers.cheaperinference,
     perplexity: providers.perplexity,
     deepinfra: providers.deepinfra,
     groq: providers.groq,
